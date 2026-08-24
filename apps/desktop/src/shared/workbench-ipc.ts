@@ -1,0 +1,240 @@
+import { z } from 'zod'
+
+/**
+ * The workbench IPC surface — two audiences, deliberately separated.
+ *
+ * Preflight §4.1a settled that the shell must never hold the workbench's
+ * connection secret, and §4.1b settled that the workbench must never hold the
+ * shell's `ChorusApi`. Those are the same rule read from both ends, and the only
+ * way to keep both true is for the two sides to be handed different things by
+ * different preloads. The schemas are shared; the exposure is not.
+ *
+ * So this file is one module with two halves that never mix:
+ *
+ *  - `WORKBENCH_SHELL_CONTRACT` — what the shell may say. It names surfaces by
+ *    an opaque view id and carries no secret on any channel, which is what makes
+ *    a leaked id useless: every operation it names is mediated by main and
+ *    validated against the project main opened it for. The grant it redeems on
+ *    `workbench:open` is not a secret either in the sense §4.1a means — it is an
+ *    *authorisation*, and leaking one buys nothing, because main refuses it in
+ *    any window but the one it was minted for.
+ *  - `WORKBENCH_CONNECTION_CHANNEL` — what main tells one surface about itself.
+ *    Generated into the workbench preload only.
+ *
+ * These channels are deliberately *not* in `IPC_CONTRACT`. That map's registrar
+ * discards `event` by design, and preflight §4.1b rule 4 requires every workbench
+ * request to be resolved from `event.sender` rather than from anything the sender
+ * says about itself. Sharing the registrar would have meant weakening it.
+ */
+
+/** A rectangle in the shell's own layout coordinates, which main mirrors onto the view. */
+export const WorkbenchRect = z.object({
+  x: z.number().int(),
+  y: z.number().int(),
+  width: z.number().int().nonnegative(),
+  height: z.number().int().nonnegative(),
+})
+export type WorkbenchRect = z.infer<typeof WorkbenchRect>
+
+/**
+ * What a surface is told about itself, and the whole of it.
+ *
+ * **Step 2 is what widened this**, and the three fields it added are the reason
+ * the delivery mechanism was built the way it was rather than retrofitted around
+ * a secret. Preflight §5.3: compromise of the connection token is compromise of
+ * the machine — with it a caller can read and write any file the user can, spawn
+ * processes, and install and activate an arbitrary extension. So the token
+ * travels main → *this one surface* and nowhere else. It is never on a query
+ * string, never in the shell's React state, and never in the event log, which is
+ * `CLAUDE.md`'s "state is not history" applied exactly: a token read back a week
+ * later is worse than having none.
+ *
+ * `commit` and `quality` are here because both must match the server and they
+ * fail in two different ways. A `commit` mismatch is refused loudly in the
+ * WebSocket handshake — `Client refused: version mismatch`. A `quality` mismatch
+ * is never compared at all; it silently changes the `<quality>-<commit>` prefix
+ * every resource URL is fetched under, so the socket opens and the workbench
+ * 404-storms with nothing naming the cause.
+ *
+ * `projectRoot` is what distinguishes one surface from another, and the
+ * adversarial test in §4.1b is that a pull from surface A returns A's root while
+ * B is open.
+ */
+export const WorkbenchConnection = z.object({
+  projectRoot: z.string().min(1),
+  /** Host and port only, e.g. `127.0.0.1:50751` — never a scheme, never a path. */
+  remoteAuthority: z.string().min(1),
+  connectionToken: z.string().min(1),
+  commit: z.string().regex(/^[0-9a-f]{40}$/),
+  quality: z.string().min(1),
+  /**
+   * Present only when Workspace Trust is waived, and there is no value that says
+   * "enforced" — the absence is what says it.
+   *
+   * Workspace Trust earned its keep here and the observation is on the record:
+   * opening an unvouched-for root raises a **modal** prompt ("Do you trust the
+   * authors of the files in this folder?") which takes DOM focus, and while it is
+   * up `⌘P` opens nothing, a command runs nothing and Electron silently cancels
+   * `location.reload()`. That is correct for a person and fatal for a driver, and
+   * it is *timing*-dependent — one gate run had surface A finish its file open
+   * before the dialog arrived and surface B caught by it, and the next had both
+   * caught. So the waiver exists for the containment gate and for nothing else.
+   *
+   * A `z.literal('waived').optional()` rather than an enum with two arms, because
+   * the two shapes are not symmetric and should not look it. A descriptor that
+   * ships to a person **omits this field**; there is no `'enforced'` to write, so
+   * no path through main can emit a disabled-trust flag by getting a ternary the
+   * wrong way round, and a reader who forgets the field entirely gets the safe
+   * behaviour. Main sets it only when the app is unpackaged **and** the E2E root
+   * seed is in the environment — both, never either — and neither of those is
+   * reachable from a renderer.
+   */
+  workspaceTrust: z.literal('waived').optional(),
+})
+export type WorkbenchConnection = z.infer<typeof WorkbenchConnection>
+
+export const WORKBENCH_CONNECTION_CHANNEL = 'workbench:connection'
+
+/**
+ * The two channels that make a preference outlive the app — E5.
+ *
+ * The workbench partition is in-memory (`'chorus-workbench'`, no `persist:`) and
+ * stays that way, so everything the surface holds dies with the app. That was
+ * deliberate: the workbench's durable state belongs to **Chorus**, not to a
+ * Chromium profile, and an in-memory partition is one fewer place a connection
+ * token can survive a quit. So durability is not bought by flipping that word; it
+ * is bought here, by main holding the one file the user actually edits under the
+ * Chorus profile.
+ *
+ * **No path ever crosses this boundary**, in either direction. The read takes no
+ * argument and the write takes text, so a surface cannot name a file, and path
+ * traversal is absent by construction rather than filtered for.
+ */
+export const WORKBENCH_USER_SETTINGS_READ_CHANNEL = 'workbench:userSettings:read'
+export const WORKBENCH_USER_SETTINGS_WRITE_CHANNEL = 'workbench:userSettings:write'
+
+/**
+ * What the shell may name when it asks for a surface, and the whole point is
+ * that a path is not on the list.
+ *
+ * `realpathSync` canonicalises a path; it does not authorise one. Main used to
+ * take the shell's string, resolve it and open whatever existed there — so the
+ * admission rule was "the renderer named something that exists", which is every
+ * directory on the disk. In step 2 that same string becomes the REH's `--folder`,
+ * i.e. the root a server process is pointed at, so "well-formed" and "permitted"
+ * have to stop being the same test.
+ *
+ * Both arms are **references main can resolve without trusting the sender**:
+ *
+ *  - `grant` — a capability minted in main as the result of a user action in the
+ *    native chooser, bound to the `WebContents` that asked for it. Unguessable,
+ *    single-owner, and it dies with the document it was minted for.
+ *  - `projectId` — the same kind of value with a longer life: a name whose root
+ *    only main's project registry knows. **ProjectService does not exist yet**,
+ *    so nothing resolves an id today and every one of them is refused. The arm
+ *    is in the schema now rather than later because closing this channel against
+ *    paths is a security boundary; adding an admission form afterwards is a
+ *    change to that boundary, where filling in a lookup is not.
+ *
+ * `.strict()` on both, so `{ projectRoot: '/real/directory' }` is refused by the
+ * schema before any code has to decide what to do with it.
+ */
+export const WorkbenchTarget = z.union([
+  z.object({ grant: z.string().min(1) }).strict(),
+  z.object({ projectId: z.string().min(1) }).strict(),
+])
+export type WorkbenchTarget = z.infer<typeof WorkbenchTarget>
+
+/**
+ * The shell's half. No secret on any of it, and no generic command channel —
+ * the moment one exists the allowlist is decorative.
+ */
+export const WORKBENCH_SHELL_CONTRACT = {
+  /**
+   * Asks main to put the native folder chooser in front of the person, and mint
+   * a capability for whatever they pick.
+   *
+   * No arguments, deliberately: a `defaultPath` would be the renderer naming a
+   * directory again, one indirection further out. `chosen` is null when the
+   * dialog was cancelled — one nullable object rather than two nullable fields,
+   * so "a grant with no root" is not a state anyone has to handle.
+   */
+  'workbench:chooseProject': {
+    request: z.object({}).strict(),
+    response: z.object({
+      chosen: z.object({ grant: z.string().min(1), projectRoot: z.string().min(1) }).nullable(),
+    }),
+  },
+  'workbench:open': {
+    request: WorkbenchTarget,
+    response: z.object({ viewId: z.string().min(1) }),
+  },
+  'workbench:setBounds': {
+    request: z.object({ viewId: z.string().min(1), rect: WorkbenchRect }),
+    response: z.object({ ok: z.literal(true) }),
+  },
+  'workbench:close': {
+    request: z.object({ viewId: z.string().min(1) }),
+    response: z.object({ ok: z.literal(true) }),
+  },
+} as const
+
+export type WorkbenchShellContract = typeof WORKBENCH_SHELL_CONTRACT
+export type WorkbenchShellChannel = keyof WorkbenchShellContract
+export type WorkbenchShellRequest<C extends WorkbenchShellChannel> = z.infer<
+  WorkbenchShellContract[C]['request']
+>
+export type WorkbenchShellResponse<C extends WorkbenchShellChannel> = z.infer<
+  WorkbenchShellContract[C]['response']
+>
+
+export const WORKBENCH_SHELL_CHANNELS = Object.keys(
+  WORKBENCH_SHELL_CONTRACT
+) as WorkbenchShellChannel[]
+
+/** The four methods the shell's preload adds to `window.chorus`. */
+export interface WorkbenchShellApi {
+  /**
+   * Puts the native chooser in front of the person and returns what main minted
+   * for their answer — the only way a shell can come to hold an openable project.
+   */
+  readonly chooseWorkbenchProject: () => Promise<WorkbenchShellResponse<'workbench:chooseProject'>>
+  /**
+   * Asks main for a surface on a project it already authorised. Resolves to an
+   * opaque view id. The argument is a grant or a project id — never a path, and
+   * the schema is what enforces that rather than a check in main.
+   */
+  readonly openWorkbench: (
+    request: WorkbenchShellRequest<'workbench:open'>
+  ) => Promise<WorkbenchShellResponse<'workbench:open'>>
+  /** Reports where the placeholder element is, so main can composite the view over it. */
+  readonly setWorkbenchBounds: (
+    request: WorkbenchShellRequest<'workbench:setBounds'>
+  ) => Promise<{ ok: true }>
+  readonly closeWorkbench: (
+    request: WorkbenchShellRequest<'workbench:close'>
+  ) => Promise<{ ok: true }>
+}
+
+/**
+ * The three methods the workbench's own preload exposes, and there is no fourth.
+ *
+ * It was one until E5. The two that joined it carry **no path and no project** —
+ * the read takes nothing, the write takes text — so neither widens what a surface
+ * can name, which is the property the single method was protecting.
+ */
+export interface ChorusWorkbenchApi {
+  /**
+   * Resolves with the descriptor for THIS view's project. No arguments: the
+   * renderer cannot name a project, because main derives it from the sender.
+   */
+  readonly connection: () => Promise<WorkbenchConnection>
+  /**
+   * The user's own `settings.json` as main last stored it, or `null` when this
+   * profile has never had one — which is how a clean profile keeps Code-OSS's
+   * defaults rather than inheriting somebody's.
+   */
+  readonly readUserSettings: () => Promise<string | null>
+  /** Hands main the current text of the user's settings file, to store as-is. */
+  readonly writeUserSettings: (text: string) => Promise<void>
+}

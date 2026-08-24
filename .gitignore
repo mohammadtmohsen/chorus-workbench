@@ -44,3 +44,8 @@ pnpm-debug.log*
 # The sidecar carries that archive's version, so it is built and ignored with it.
 *.vsix
 *.vsix.version
+
+# The workbench REH download cache. A 76 MB checksum-addressed artifact fetched
+# from a VSCodium release, verified against apps/desktop/build/workbench-runtime.json
+# before it is unpacked — recoverable at any time, so it is never committed.
+.workbench-cache/

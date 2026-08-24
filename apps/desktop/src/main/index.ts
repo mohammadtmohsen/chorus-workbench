@@ -1,6 +1,7 @@
 import { mkdirSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { pathToFileURL } from 'node:url'
 import { app, BrowserWindow, session } from 'electron'
 import { IdeBridge } from './ide-bridge.js'
 import {
@@ -18,6 +19,7 @@ import {
   registerIpcHandlers,
 } from './ipc.js'
 import { createLogger } from './logging.js'
+import { createQuitGate } from './quit-gate.js'
 import { installMenu } from './menu.js'
 import { readSettings } from './settings.js'
 import { applyTheme } from './theme.js'
@@ -25,9 +27,14 @@ import { applyScale, currentScale } from './scale.js'
 import { reapOrphanedAgents } from './reap.js'
 import { ChorusRuntime } from './runtime.js'
 import { applyContentSecurityPolicy, lockDownNavigation } from './security.js'
+import { reapedOrphanedServers, stopWorkbenchHost } from './workbench-host.js'
+import { closeAllSurfaces, registerWorkbenchHandlers } from './workbench-surface.js'
 import { adoptShellPath } from './which.js'
 
 const devServerUrl = process.env['ELECTRON_RENDERER_URL']
+
+/** The shell's one document, named once so the load and the allowlist agree. */
+const SHELL_ENTRY_FILE = join(__dirname, '../renderer/index.html')
 
 function createWindow(): BrowserWindow {
   const window = new BrowserWindow({
@@ -70,7 +77,16 @@ function createWindow(): BrowserWindow {
     },
   })
 
-  lockDownNavigation(window, devServerUrl)
+  /*
+   * One value decides both what loads and what is allowed to load.
+   *
+   * The allowlist is exact rather than a `file://` prefix, so it has to name the
+   * shell's entry document precisely — and deriving it from the same constant the
+   * load below uses is what stops the two drifting into a window that navigates
+   * nowhere, or one that navigates anywhere.
+   */
+  const entry = devServerUrl ?? pathToFileURL(SHELL_ENTRY_FILE).href
+  lockDownNavigation(window.webContents, [entry])
 
   // Avoids a white flash before the renderer has painted.
   window.once('ready-to-show', () => {
@@ -89,7 +105,7 @@ function createWindow(): BrowserWindow {
   if (devServerUrl !== undefined) {
     void window.loadURL(devServerUrl)
   } else {
-    void window.loadFile(join(__dirname, '../renderer/index.html'))
+    void window.loadFile(SHELL_ENTRY_FILE)
   }
 
   return window
@@ -97,6 +113,15 @@ function createWindow(): BrowserWindow {
 
 let runtime: ChorusRuntime | null = null
 let ideBridge: IdeBridge | null = null
+/**
+ * Held at module scope so shutdown can say what it failed to stop.
+ *
+ * `before-quit` runs outside `whenReady`'s closure, so without this the workbench
+ * host's shutdown result — specifically the pids of any process group that
+ * outlived `SIGKILL` — had nowhere to go, and a function that reports survivors to
+ * nobody is a function that may as well claim success.
+ */
+let mainLog: ReturnType<typeof createLogger> | null = null
 
 void app.whenReady().then(async () => {
   applyContentSecurityPolicy(session.defaultSession, devServerUrl !== undefined)
@@ -114,6 +139,7 @@ void app.whenReady().then(async () => {
    * than guaranteed — see reap.ts.
    */
   const log = createLogger(app.getPath('userData'))
+  mainLog = log
   log.info('starting', { version: app.getVersion(), electron: process.versions.electron })
 
   void reapOrphanedAgents().then(({ killed, inspected, skipped }) => {
@@ -124,8 +150,76 @@ void app.whenReady().then(async () => {
     else if (killed > 0) log.warn('reaped orphaned agents', { killed, inspected })
   })
 
+  /*
+   * And the same backstop for the workbench server, which needs it more than the
+   * agents do.
+   *
+   * An agent is a stdio-connected child that dies when its pipes close; the remote
+   * extension host is spawned **detached**, so that shutdown can signal its whole
+   * process group, and that same property is what lets it survive a `SIGKILL` or a
+   * power cut with no handler to catch either. Every ordered exit now stops it —
+   * this is for the disordered ones.
+   *
+   * Identified by this profile's own `--server-data-dir` and by having been
+   * reparented to init, never by executable name: see the function's own note for
+   * why that distinction is the whole safety argument.
+   *
+   * **Started here and awaited in `start`.** This call is only to get it going
+   * early; it is not what makes it safe. Opening a project is a renderer request
+   * that can arrive in the same tick this window finishes loading, so the
+   * guarantee has to live where the server is spawned — `start` awaits the same
+   * memoised promise, and a `void` here would otherwise let a new host come up
+   * beside an orphan that still owns this profile's data directory and token.
+   */
+  void reapedOrphanedServers()
+    .then(({ killed, inspected, survivors, skipped }) => {
+      if (skipped === 'unsupported-platform') {
+        log.info('workbench server backstop unavailable on this platform')
+      } else if (skipped === 'sweep-failed') {
+        // Distinct from the line above on purpose: this one means projects will be
+        // refused until the app is restarted, which is a thing a person can act on.
+        log.error('the workbench server backstop could not read the process table')
+      } else if (killed > 0) {
+        log.warn('reaped orphaned workbench servers', { killed, inspected })
+      }
+      /*
+       * Survivors are the interesting line, not the kills. A server carrying this
+       * profile's data directory that is still alive after the sweep is why the
+       * next project open will be refused, and without this the person sees only
+       * the refusal — at the point they tried to open something, with no record of
+       * what was found at boot.
+       */
+      if (survivors.length > 0) {
+        log.warn('a workbench server from an earlier session is still running', {
+          survivors,
+          inspected,
+        })
+      }
+    })
+    .catch((error: unknown) => {
+      /*
+       * A sweep that threw is logged and **left rejected**, which is the
+       * fail-closed half. `start` awaits this same memoised promise, so the
+       * rejection reaches the project open as a refusal rather than being
+       * swallowed here into an app that spawns a server having never checked. An
+       * unhandled rejection would also be a main-process crash on some Electron
+       * configurations — this catch exists so the promise has a handler, not so
+       * the failure has no consequence.
+       */
+      log.error('the workbench server backstop failed', {
+        error: error instanceof Error ? error.message : String(error),
+      })
+    })
+
   runtime = ChorusRuntime.open(app.getPath('userData'), log)
   registerIpcHandlers(runtime)
+  /*
+   * Separate from `registerIpcHandlers` because these handlers need `event`.
+   * Registered even though no surface exists yet: opening one is a renderer
+   * request, and a channel that is not registered fails at `invoke` with a
+   * message about the channel rather than about the workbench.
+   */
+  registerWorkbenchHandlers(devServerUrl)
   forwardLimitsToRenderer(runtime)
   forwardContextUsageToRenderer(runtime)
   forwardTasksToRenderer(runtime)
@@ -262,10 +356,12 @@ app.on('window-all-closed', () => {
   app.quit()
 })
 
-// Close sessions and the database before exit, so agent child processes are not
-// orphaned and WAL is checkpointed cleanly.
-app.on('before-quit', (event) => {
-  if (runtime === null) return
+/**
+ * The shutdown itself. The *decision* about when a quit may proceed lives in
+ * `quit-gate.ts`, because that decision was wrong in a way reading it did not
+ * reveal and `index.ts` cannot be unit tested.
+ */
+async function shutDownEverything(): Promise<void> {
   const closing = runtime
   const bridge = ideBridge
   runtime = null
@@ -273,14 +369,128 @@ app.on('before-quit', (event) => {
   // Synchronous and first: a watch holds no resource worth draining, and one
   // still firing during shutdown would push at windows that are going away.
   stopWorkspaceWatches()
-  event.preventDefault()
+  // Same reasoning one level out: a surface left attached to a window that is
+  // going away is a `WebContents` nothing will ever close.
+  closeAllSurfaces()
+  /*
+   * And one level out again — `stopAll()` from preflight §5.4, the only
+   * unconditional kill in the workbench's lifecycle. Closing the last project
+   * deliberately does *not* stop the server, so without this a remote extension
+   * host outlives the app holding a port, a project root and a lock on its own
+   * extensions directory.
+   *
+   * **Started here and awaited below**, which is the shape the first version got
+   * wrong in both directions. It was synchronous, so it returned before the server
+   * had gone and the app exited out from under a process that was still alive —
+   * measured, twice. Simply awaiting it here instead would be the other mistake:
+   * the signal would not go out until the database had finished closing.
+   * Signalling first and collecting the result last gives the tree the whole of
+   * the rest of shutdown to die in, which is usually longer than it needs. It is
+   * also what makes a shutdown cut short by a forced quit (C-055) still have asked
+   * the server to go before it was interrupted.
+   *
+   * Called even when there is no runtime — a quit before `whenReady` finished has
+   * nothing to close but may still have a host starting, and `stopWorkbenchHost`
+   * is the thing that cancels it.
+   */
+  const workbenchStopped = stopWorkbenchHost()
+
+  /*
+   * Every step is allowed to fail and **none of them silently**.
+   *
+   * These were four bare `.catch(() => undefined)`s, which is how a shutdown that
+   * went wrong let Chorus exit with nothing written down anywhere: no survivor
+   * result, no log line, no trace. That is not a check that could not fail — it is
+   * a failure that could not be *seen*, and it was sitting inside the machinery
+   * built to expose exactly this class of lifecycle bug.
+   *
+   * Each failure is caught **here**, where there is enough context to say which
+   * step it was, and the step then resolves. That is also what makes the quit
+   * gate's own reporting fire exactly once: anything handled here never reaches
+   * it, and anything that escapes here reaches it and nothing else. The two paths
+   * are disjoint by construction rather than by being careful.
+   */
+  const step = async (work: Promise<unknown> | undefined, what: string): Promise<void> => {
+    try {
+      await work
+    } catch (error) {
+      mainLog?.error(what, { error: error instanceof Error ? error.message : String(error) })
+    }
+  }
+
   // The bridge closes first: it unlinks its socket and descriptor, and anything
   // waiting on a snapshot is settled rather than left hanging behind the
   // runtime's own shutdown.
-  void Promise.resolve(bridge?.close())
-    .catch(() => undefined)
-    .then(() => closing.close())
-    .finally(() => {
-      app.quit()
+  await step(Promise.resolve(bridge?.close()), 'the ide bridge did not close cleanly')
+  await step(Promise.resolve(closing?.close()), 'the event store did not close cleanly')
+
+  const result = await workbenchStopped.catch((error: unknown) => {
+    /*
+     * Logged **before** the `null`, which is the whole of this correction. The
+     * `null` is how the caller below knows there is no survivor list to report;
+     * without this line it was also how a failed workbench shutdown became
+     * indistinguishable from a clean one that had nothing to say.
+     */
+    mainLog?.error('the workbench server shutdown failed', {
+      error: error instanceof Error ? error.message : String(error),
     })
+    return null
+  })
+  // Said out loud, because "the server did not stop" is the one shutdown outcome
+  // a person can act on — and the one the previous design could not express.
+  if (result !== null && result.survivors.length > 0) {
+    mainLog?.warn('workbench server survived shutdown', { survivors: result.survivors })
+  }
+}
+
+const quitGate = createQuitGate(
+  shutDownEverything,
+  () => {
+    app.quit()
+  },
+  (error: unknown) => {
+    /*
+     * Only reached by something `shutDownEverything` did not handle itself, since
+     * every step in there catches and resolves. So this is the unexpected-throw
+     * arm rather than a second chance at the same failure — which is what keeps a
+     * cleanup failure reported once rather than twice.
+     */
+    mainLog?.error('shutdown threw before it could finish', {
+      error: error instanceof Error ? error.message : String(error),
+    })
+  }
+)
+
+// Close sessions and the database before exit, so agent child processes are not
+// orphaned and WAL is checkpointed cleanly.
+app.on('before-quit', (event) => {
+  quitGate.onBeforeQuit(event)
 })
+
+/*
+ * `SIGTERM` and `SIGINT` join the **same** shutdown rather than getting their own.
+ *
+ * Electron's default handling of both is to terminate, so `before-quit` never ran
+ * and none of the work above happened: no watch teardown, no surface teardown, no
+ * database close, and — the one that was measured — no workbench-server shutdown,
+ * leaving a 257 MB Node process holding a port after a `code=0` exit. A CI harness
+ * that stops the app with `SIGTERM`, a shell `⌃C`, and `⌘Q` are three ways of
+ * asking for the same thing, and answering them differently is how one of them
+ * ends up being the path nobody tested.
+ *
+ * `app.quit()` rather than a bespoke sequence, so there is exactly one shutdown to
+ * get right. It goes through `before-quit`, whose re-entrancy `quit-gate.ts` owns,
+ * and `stopWorkbenchHost` is memoised for the same reason: two signals in quick
+ * succession must not start two shutdowns.
+ *
+ * **What this does not cover, and it was measured rather than assumed.** One
+ * signal shuts down cleanly. A *second* one arriving mid-cleanup was observed to
+ * end the process with `signal=SIGTERM`, and nothing here prevented it. That is a
+ * forced-quit boundary rather than a second graceful request, and its recovery is
+ * the next launch's reaper — `BOARD.md` C-055.
+ */
+for (const signal of ['SIGTERM', 'SIGINT'] as const) {
+  process.on(signal, () => {
+    app.quit()
+  })
+}

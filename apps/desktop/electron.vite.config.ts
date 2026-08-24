@@ -1,6 +1,32 @@
 import { resolve } from 'node:path'
 import react from '@vitejs/plugin-react'
 import { defineConfig, externalizeDepsPlugin } from 'electron-vite'
+import type { Plugin } from 'vite'
+
+/**
+ * VS Code injects its own stylesheets, and Vite has to hand them over as text
+ * rather than inject them itself.
+ *
+ * `?inline` makes a CSS import resolve to a string, which is what the workbench's
+ * own style plumbing expects. Without it Vite appends the rules to whichever
+ * document it chooses and the workbench renders unstyled — which at a review gate
+ * is indistinguishable from not rendering at all.
+ *
+ * Narrowed to `@codingame/monaco-vscode*` deliberately. The library's own demo
+ * plugin also matches `monaco-editor`, and this repository ships real
+ * `monaco-editor` under the shell's `MonacoDiff`; nothing there asks for a
+ * string, so its CSS keeps Vite's ordinary handling.
+ */
+const vscodeCssAsString: Plugin = {
+  name: 'chorus:vscode-css-as-string',
+  enforce: 'pre',
+  async resolveId(source, importer, options) {
+    const resolved = await this.resolve(source, importer, options)
+    if (resolved === null) return undefined
+    if (!/node_modules\/@codingame\/monaco-vscode.*\.css$/.test(resolved.id)) return undefined
+    return { ...resolved, id: `${resolved.id}?inline` }
+  },
+}
 
 /**
  * electron-vite already knows the entry points (src/main, src/preload,
@@ -61,11 +87,130 @@ export default defineConfig({
   },
   preload: {
     // zod is bundled rather than externalized: a sandboxed preload cannot
-    // resolve from node_modules at runtime (plan §4.4).
+    // resolve from node_modules at runtime (plan §4.4). It applies to both
+    // entries below, which matters: the workbench preload validates too.
     plugins: [externalizeDepsPlugin({ exclude: ['zod'] })],
+    build: {
+      rollupOptions: {
+        /*
+         * Stated, not inherited, and it is not belt and braces.
+         *
+         * electron-vite externalizes `electron` through the `build.lib` config it
+         * writes for a preload; declaring `input` takes precedence over `lib` and
+         * that externalization goes with it. Rollup then resolves `electron` to
+         * `node_modules/electron/index.js` — the **dev helper whose
+         * `module.exports` is the path to the Electron binary** — and bundles it,
+         * so `contextBridge` reads off a string. Verified by reading the emitted
+         * chunk rather than inferred.
+         */
+        external: ['electron'],
+        /*
+         * Two preloads, because a workbench surface must never be handed
+         * `window.chorus` (preflight §4.1b).
+         *
+         * The trap is that declaring `input` **replaces** electron-vite's default
+         * `<root>/src/preload/{index|preload}.ts` rather than extending it. The
+         * existing entry has to be listed by name, under the key `index`, or
+         * `main/index.ts`'s `join(__dirname, '../preload/index.js')` resolves to
+         * a file the build no longer emits — a shell window with no
+         * `window.chorus` at all, from a change that looks like it was about the
+         * workbench. Output names follow input keys, which is what keeps that
+         * path correct.
+         */
+        input: {
+          index: resolve(__dirname, 'src/preload/index.ts'),
+          workbench: resolve(__dirname, 'src/preload/workbench.ts'),
+        },
+        /*
+         * And the output has to be restated too, which the preflight did not
+         * predict and which is worse than what it did.
+         *
+         * electron-vite builds a preload through `build.lib` — `formats: ['cjs']`
+         * and `entryFileNames: '[name].js'`. Declaring `input` takes precedence
+         * over `lib`, so the lib config stops applying and Rollup falls back to
+         * its own defaults: ESM, named `[name].mjs`. Observed, not reasoned —
+         * `out/preload/index.mjs` opened with
+         * `import { _ as require_electron } from "./chunks/…"`.
+         *
+         * Both halves are fatal and neither says so. `main/index.ts` loads
+         * `../preload/index.js`, which no longer exists, so the shell gets no
+         * `window.chorus` at all; and a sandboxed preload cannot be ESM anyway,
+         * so even the right path would not have run. This is the loud failure
+         * §4.3 warned about, arriving in a form that looks like a build detail.
+         */
+        output: {
+          format: 'cjs' as const,
+          entryFileNames: '[name].js',
+          chunkFileNames: 'chunks/[name]-[hash].js',
+          /*
+           * And no chunks at all, which is the part that has to be enforced
+           * rather than hoped for.
+           *
+           * A sandboxed preload can `require` only what Electron hands it —
+           * observed, from the app's own console: `Unable to load preload
+           * script: …/out/preload/index.js` / `Error: module not found:
+           * ./chunks/workbench-ipc-CCkEpa_4.js`, and a shell with no
+           * `window.chorus`. Rollup emits a shared chunk for any module two
+           * entries both reach, so with two preloads that is one accidental
+           * import away, permanently.
+           *
+           * `preload/workbench.ts` therefore imports nothing from our own source
+           * at runtime, and `electron` is external above — so the only module two
+           * entries reach is one Rollup does not emit. `chunkFileNames` is kept
+           * anyway, because the point of a name is to be recognisable in the
+           * output when someone adds the import that reintroduces it.
+           */
+        },
+      },
+    },
   },
   renderer: {
-    plugins: [react()],
+    plugins: [
+      react(),
+      /*
+       * VS Code injects its own stylesheets, and Vite must hand them over as
+       * text rather than inject them itself.
+       *
+       * `?inline` makes a CSS import resolve to a string, which is what the
+       * workbench's own style plumbing expects. Without it Vite appends the
+       * rules to whichever document it feels like and VS Code renders unstyled.
+       *
+       * Narrowed to `@codingame/monaco-vscode*` deliberately. The library's own
+       * demo also matches `monaco-editor`, and this repository ships real
+       * `monaco-editor` under the shell's `MonacoDiff` — whose CSS must keep
+       * Vite's ordinary handling, since nothing there asks for a string.
+       */
+      vscodeCssAsString,
+    ],
+    /*
+     * The workbench's own document, as a second HTML entry in the same build.
+     *
+     * Preflight §4.3 left it open whether a second input could work at all or
+     * whether the workbench needed its own build, because monaco-vscode-api
+     * documents an alias of `monaco-editor` to `@codingame/monaco-vscode-editor-api`
+     * and a `resolve.alias` is global to a Vite build — which would have swapped
+     * the Monaco under the shell's existing diff editor. Read out of the
+     * installed 36.1.1 rather than out of the docs: no `@codingame/*` **runtime**
+     * file imports a bare `monaco-editor` or a bare `vscode`; both names occur
+     * only in `.d.ts` files. So there is no alias here at all, the question does
+     * not arise, and one build serves both entries.
+     */
+    build: {
+      rollupOptions: {
+        input: {
+          index: resolve(__dirname, 'src/renderer/index.html'),
+          workbench: resolve(__dirname, 'src/renderer/workbench.html'),
+        },
+      },
+      // VS Code's ESM build uses top-level await and modern syntax throughout.
+      target: 'esnext',
+      // Spread rather than `: undefined`, which `exactOptionalPropertyTypes`
+      // refuses — and rightly, since an explicit undefined is not the same as an
+      // absent key to the code reading it.
+      ...(process.env['CHORUS_DEV_RENDERER'] === '1' ? { minify: false as const } : {}),
+    },
+    // The textmate and language-detection workers are ES modules.
+    worker: { format: 'es' as const },
     /*
      * A renderer built against React's **development** runtime.
      *
@@ -89,12 +234,14 @@ export default defineConfig({
      *
      * Off unless asked for, so nothing ships a development React by accident —
      * `pnpm --filter @chorus/desktop run build:dev` is the only way in.
+     *
+     * `minify` is set on the `build` object above rather than in a spread, which
+     * it used to be. A spread would replace the whole `build` key — including the
+     * two-entry `rollupOptions.input` — so the workbench's HTML entry would stop
+     * being emitted in exactly the build that exists to catch StrictMode bugs.
      */
     ...(process.env['CHORUS_DEV_RENDERER'] === '1'
-      ? {
-          define: { 'process.env.NODE_ENV': JSON.stringify('development') },
-          build: { minify: false as const },
-        }
+      ? { define: { 'process.env.NODE_ENV': JSON.stringify('development') } }
       : {}),
   },
 })

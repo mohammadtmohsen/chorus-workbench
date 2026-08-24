@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Chorus Workbench</title>
+    <!--
+      Not styled as Chorus, on purpose. No theming, no fonts, no i18n: this
+      document is the workbench's own, and anything of ours in it is one more
+      thing to disentangle when the question is whether the workbench renders.
+    -->
+    <style>
+      html,
+      body {
+        margin: 0;
+        height: 100%;
+        overflow: hidden;
+        background: #1f1f1f;
+      }
+      .workbench-root {
+        height: 100vh;
+      }
+      .workbench-failure {
+        margin: 0;
+        padding: 16px;
+        color: #f48771;
+        font:
+          12px/1.5 ui-monospace,
+          monospace;
+        white-space: pre-wrap;
+      }
+    </style>
+  </head>
+  <body>
+    <script type="module" src="/src/workbench/entry.ts"></script>
+  </body>
+</html>

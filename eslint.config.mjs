@@ -198,6 +198,11 @@ export default tseslint.config(
         process: 'readonly',
         URL: 'readonly',
         Buffer: 'readonly',
+        /* Node has had `fetch` global since 18 and this repo's engines are well
+           past that; `workbench-manifest.mjs` reads the VSCodium release API
+           with it. Listed here rather than switched to a globals package for the
+           reason the block above already gives. */
+        fetch: 'readonly',
       },
     },
     rules: {

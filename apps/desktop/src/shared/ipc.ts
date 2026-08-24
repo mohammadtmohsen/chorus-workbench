@@ -1,5 +1,6 @@
 import { z } from 'zod'
 import { WorkspaceSnapshot } from './workspace-layout.js'
+import type { WorkbenchShellApi } from './workbench-ipc.js'
 
 /**
  * The single source of truth for the IPC surface.
@@ -1779,7 +1780,12 @@ export function isIpcChannel(value: string): value is IpcChannel {
  * so the renderer never has to import a module that pulls in Electron — the
  * renderer is sandboxed and that import would typecheck but fail at runtime.
  */
-export interface ChorusApi {
+/**
+ * `WorkbenchShellApi` is mixed in rather than declared here, because its four
+ * channels are not in `IPC_CONTRACT` — they are answered by a registrar that
+ * validates `event.sender`. The shape belongs beside the channels it names.
+ */
+export interface ChorusApi extends WorkbenchShellApi {
   readonly getAppInfo: () => Promise<AppInfo>
   /** Asks; the answer arrives on `onLimits`. */
   readonly refreshLimits: () => Promise<{ ok: true }>

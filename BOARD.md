@@ -30,6 +30,983 @@ Nothing here can be finished by me alone.
 
 ## Open
 
+### C-062 · Git does not work — no SCM service override is registered
+
+**Observed in the running workbench**, in the Window output channel, on an
+ordinary project open:
+
+```
+[error] Unsupported: SCMService.registerSCMProvider is not supported.
+You are using a feature without registering the corresponding service override.
+```
+
+**Confirmed in the source, not inferred from the log.** There is no `scm` service
+override anywhere in `renderer/src/workbench/services.ts` — the file has no match
+for `scm`, `Scm` or `SCM` at all. The message is the library saying exactly that.
+
+**Why it matters.** Git is named in the plan's own acceptance criterion — "use
+Git … without opening the separate VS Code application" — and in Phase 4's gate.
+It is currently not merely unbuilt but unregistered, so the built-in Git extension
+loads and then fails to register its provider. That is worth knowing before Phase 4
+budgets for it as new work: the first step is a service override, not a feature.
+
+**Done means**: `@codingame/monaco-vscode-scm-service-override` in the service set,
+the source-control view populated for a real repository, and the error absent from
+a clean launch. **Not a Phase 1 blocker** — Phase 1 never claimed Git.
+
+### C-061 · No web worker is configured, so every worker-backed feature fails
+
+**Observed repeatedly in one session**, thrown three times inside two seconds:
+
+```
+[error] You must define a function MonacoEnvironment.getWorkerUrl or
+MonacoEnvironment.getWorker for the worker label: OutputLinkDetectionWorker
+```
+
+**Confirmed in the source.** `renderer/src/workbench/` contains no
+`MonacoEnvironment`, no `getWorkerUrl` and no `getWorker` — the configuration is
+absent rather than wrong.
+
+**Why it matters more than the feature it broke.** The label in the message is
+`OutputLinkDetectionWorker`, so what a person notices is that Output-panel links
+are dead — trivial. But the gap is global: **any** service that asks for a worker
+gets the same throw. That includes the editor worker behind diff computation,
+word-based suggestions and link detection in ordinary editors.
+
+**A possible connection to C-054, and it is a hypothesis rather than a finding.**
+C-054 is a file opening to a blank editor after `doCreateTextModel()` has already
+completed — a failure downstream of model creation, which is where worker-backed
+services sit. **This has not been tested and must not be written up as a cause.**
+The board has already paid once for reasoning ahead of the evidence on C-054.
+
+**Done means**: a `MonacoEnvironment` worker factory registered for the workbench,
+the error absent from a clean launch, and a note saying whether it moved C-054's
+reproduction rate — measured, not assumed.
+
+### C-060 · A loopback REH connection reported 23.5 s latency and an unresponsive extension host
+
+**Observed in one hand-driven session**, against a server on `127.0.0.1`:
+
+```
+11:36:48 [warning] Remote network connection appears to have high latency (23505.50ms last, 5877.88ms average)
+11:36:55 [info] Extension host (Remote) is unresponsive.
+11:37:45 [info] Extension host (Remote) is responsive.
+11:37:52 [info] Extension host (Remote) is unresponsive.
+11:37:54 [info] Extension host (Remote) is responsive.
+```
+
+**23.5 seconds on loopback is not a network number.** There is no network. Whatever
+this measures — the extension host blocking, the server's event loop stalled, a
+socket starved behind something else in the same process tree — it is a stall
+inside Chorus's own machinery, and it recovered and recurred within a minute.
+
+**Why it matters.** This is the closest thing C-054 has to a mechanism. C-054 is a
+file that opens, completes every traced boundary inside 92 ms, and then shows
+nothing for sixty seconds; an extension host that stops answering for tens of
+seconds is the right order of magnitude and the right shape. **It is still a
+hypothesis** — nobody has observed the two together in one session, and C-054's
+own record says an explanation resting on a single observation gets withdrawn.
+
+**Done means**: the latency reproduced with something recording what the server and
+the extension host were doing during the stall, so the number is attributed rather
+than noted. Then a decision on whether C-054 folds into it or stays separate.
+
+### C-059 · An unsaved change is invisible, and reverting it does nothing
+
+**An editing-safety defect, not cosmetic polish.** Found while proving E5, in the
+running workbench, and deliberately **not fixed there** — E5 was a persistence
+item and this is a data-safety signal that deserves its own change.
+
+Four facts, all observed in one run of `e2e/workbench-settings-persistence.mjs`
+with `files.autoSave` set to `off`:
+
+- **The editor holds unsaved content.** A marker typed into `notes.md` is in the
+  editor's own view lines.
+- **The file on disk does not have it**, sampled twenty times over eight seconds —
+  `samples 00000000000000000000` — and the same file, in the same run, minutes
+  earlier, had taken an edit to disk in 1,206 ms while auto-save was on. So the
+  editor and its save path both work; the change is simply pending.
+- **Nothing says so.** All three indicators are absent at once: no `dirty` class
+  on the active tab (`tab tab-actions-right sizing-fit active selected
+  tab-border-bottom tab-border-top`), no filled-circle close action
+  (`.codicon-circle-filled`), and no bullet in the window title.
+- **`File: Revert File` does not respond as expected.** The command was found and
+  run from the palette; the marker stayed in the buffer for the full 20 s the gate
+  waited. Consistent with the workbench believing there is nothing to revert.
+
+**Why it matters.** With auto-save on — the default, and what a reviewer meets —
+the window is about a second and the cost is low. Turn auto-save off, which E5 now
+makes durable, and the editor becomes one where you cannot tell what is unsaved
+and cannot discard it either. Closing a tab or quitting then has no visible
+warning attached to it. That is the ordinary shape of losing somebody's work.
+
+**Not diagnosed.** Whether the working copy is genuinely not dirty or only its
+decorations are missing has not been established, and the difference matters:
+the first would mean the save path does not know there is anything to save, the
+second would mean it does and says nothing. `getWorkingCopyServiceOverride` is in
+the service set; nothing beyond that has been checked, and guessing further here
+is what the trace work already showed to be expensive.
+
+**Done means**: an unsaved editor shows a dirty indicator; `File: Revert File`
+restores the file's contents on disk; and whichever of the two causes above it
+turns out to be is named in the fix rather than papered over. Queued as the
+**first stabilization fix after the UI review**.
+
+**First diagnostic attempt, 2026-08-24 — inconclusive, and recorded so nobody
+repeats it the same way.** The instrument is right and is worth keeping: Code-OSS
+ships `Developer: Log Working Copies`, and `developerActions.js:377` prints
+`${workingCopy.isDirty() ? "● " : ""}` before each URI, so one line of the Window
+output channel separates "not registered" from "registered and clean" from
+"registered and dirty" without adding a product-only debug API.
+
+**What the run produced**, driven by hand:
+
+```
+11:38:10.771 [info]  [Working Copies] vscode-remote://127.0.0.1:56338/…/og.mobile.demo/.env.production (typeId: <no typeId>)  [Backups] <none>
+```
+
+**Registered, no `●`, no backup — which looks decisive and is not.** The file's
+mtime on disk is **11:38:35**, twenty-five seconds *after* the snapshot. So the
+content reached disk, and the reading that fits every byte of this evidence is the
+boring one: the log was taken before the edit, or auto-save was on. **The gate's
+original observation is the one that cannot be explained away** — disk sampled
+twenty times over eight seconds with `files.autoSave` off, unchanged
+(`samples 00000000000000000000`), and no indicator anywhere. This run never
+reproduced that state.
+
+**What the next attempt must establish, in one session**: auto-save confirmed
+`off`; the file's mtime recorded *before* the edit; the edit typed and **no `⌘S`**;
+`Developer: Log Working Copies` run within seconds; and the mtime re-read
+afterwards and **still unchanged**. Only the `●`-or-not read against an mtime that
+did not move answers the question. Two runs cannot substitute for one, because the
+whole ambiguity is the ordering.
+
+**Second finding, 2026-08-24, and it is about this entry's own evidence: "all three
+indicators are absent at once" is one indicator and two checks that cannot come back
+true.** The sentence was the strongest thing this entry said, because three
+independent signals agreeing is hard to dismiss. Read against the source, two of the
+three could not have been anything but absent — on a healthy dirty editor exactly as
+much as on a broken one.
+
+| Signal the gate reads                                     | Verdict     | Why                                                                                                                                                                              |
+| --------------------------------------------------------- | ----------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `tab.className.includes('dirty')`                         | **valid**   | `multiEditorTabsControl.js:1378` adds the `dirty` class. This one is a real negative.                                                                                            |
+| `tab.querySelector('.codicon-circle-filled') !== null`    | **cannot succeed** | The dot is a `::before` pseudo-element — `multieditortabscontrol.css:462-467` sets `content: var(--vscode-icon-circle-filled-content)` on `.tab.dirty > .tab-actions .action-label`. **No element carries that class**, so `querySelector` returns null always. |
+| `document.title.includes('●')`                            | **cannot succeed** | `services.ts:271` sets `window.title` to `${rootName}`. Chorus removed the `${dirty}` segment itself. No dirty state can put a bullet there. |
+
+**And the second one is worse than merely broken — it was never independent.** Its
+CSS selector is predicated on `.tab.dirty`, the very class the first check reads. Even
+written correctly it would restate check 1 rather than corroborate it. The entry's
+comment records that `dirty` "is read from three places, because the first one was
+believed and was [wrong]" — both places added to shore it up are worthless, and one of
+them is the first place again.
+
+**What survives.** One valid indicator said not-dirty, and `File: Revert File` left the
+marker in the buffer. That is a real pair of observations and this entry stays open on
+them. What is withdrawn is the three-way agreement, which was the reason it read as
+settled.
+
+**Mohamad reports the workbench behaving correctly by hand across several sessions**,
+which does not disprove a defect but does shift where the doubt should sit. **Do not fix
+this until an ordered single-session observation confirms it** — a fix aimed at
+decorations would now be aimed at two checks rather than at the product.
+
+**And this is the seventh occurrence of the same pattern in this plan.** C-051 found six
+checks that could only come back true; these are two that could only come back false.
+The lesson has been paid for repeatedly and is worth stating as a rule: **a new
+indicator is not evidence until it has been seen in its positive state at least once.**
+
+**Id note**: this is C-059 and not C-058. C-058 was filed earlier in the same
+session for the startup reaper missing a real orphan, and the board's rule is the
+highest ever used plus one. C-057 stays retired — its withdrawn finding is cited
+in C-054 — and nothing is renumbered.
+
+### C-058 · The startup reaper missed a real orphan, and a person met the refusal
+
+**Seen in ordinary use rather than in a gate**, which is what makes it worth its
+own entry: Mohamad opened a project and got
+
+```
+Error invoking remote method 'workbench:open': A workbench server from an earlier
+session is still running (pid 58942) and owns this profile's data directory.
+```
+
+**The fail-closed guard did exactly what it should.** It refused to spawn a second
+server beside a survivor rather than starting one on a profile another process
+owned. That is E4 working, and it is why the failure was legible instead of a
+workbench that came up connected to nothing.
+
+**The startup reaper should have removed 58942 and did not.** Every condition it
+tests was satisfied: the process was **PPID 1**, it carried the same
+`@chorus/desktop-dev` profile's `--server-data-dir`, and it **died instantly on a
+plain `SIGTERM`** — so it was neither unkillable nor foreign, and neither of the
+two reasons the reaper deliberately leaves something alone applied. Five such
+orphans were killed by hand, **19–20 hours old**, left by old probe runs.
+
+**Why it matters more than one refusal.** The reaper is the recovery path for
+C-055 — a forced quit truncating shutdown — and E4 was closed on the strength of it
+working. A reaper that passes its gate and misses in the field means that recovery
+is weaker than the record says.
+
+**What would make it done.** Reproduce the miss against a real orphan rather than a
+faked process table: the unit tests drive a synthetic `ps` listing, so anything
+about the real one — output width and truncation, a command line longer than the
+buffer, a path that does not match the marker verbatim, a race between listing and
+signalling — is untested. Then fix, and add a check that runs against a genuinely
+orphaned server.
+
+**Root cause, found by inspection on 2026-08-24 — the reaper can only kill a
+process that is its own process-group leader, and it cannot tell that it failed.**
+
+**Two lines do it, `workbench-host.ts:594` and the `catch` under it:**
+
+```js
+try {
+  process.kill(-pid, 'SIGKILL')     // negative pid = the process GROUP
+  signalled.push(pid)
+} catch {
+  /* gone between the listing and the signal, which is the state we wanted */
+}
+```
+
+**`kill(-pid)` addresses the group whose id equals `pid`, which exists only if that
+process is the group leader.** An orphan that is *not* a leader has no group by that
+number, so the call throws `ESRCH` — and the `catch` asserts one interpretation of a
+throw that has at least two. The process is recorded as "gone", never enters
+`signalled`, is never waited on by the settle loop, and is still running.
+
+**Then `survivors` finds it anyway** (`:641` maps every candidate and filters by
+`processAlive`), so `start` refuses to spawn beside it. That is precisely the shape
+Mohamad met: **a refusal naming a pid the reaper had just decided was gone.**
+
+**Two facts in this entry corroborate it and are hard to explain otherwise.** The
+orphan **died instantly on a plain `SIGTERM`** — `kill 58942`, a *positive* pid,
+which reaches the process regardless of group membership, while the reaper's
+negative form could not. And the orphans were **19–20 hours old**, i.e. old enough
+to predate E4's fix, when Chorus still spawned `bin/codium-server`: bash became the
+group leader, node was a member, bash died, and node was left orphaned **with a PGID
+pointing at a dead leader**. Whether 58942 was specifically such a process cannot be
+recovered now, and the defect does not depend on it.
+
+**It is not a legacy-only fault, which is the part that matters.** Chorus now spawns
+the server directly and `detached`, so a healthy server *is* a group leader. But the
+server forks its own children — the remote extension host among them — and any of
+them outliving the leader inherits exactly the same shape: alive, PPID 1, carrying
+the marker, and unreachable by `kill(-pid)`. Codex's run on 2026-08-24 left **two
+Electron helpers** that had to be killed by hand, which is the same family of
+symptom.
+
+**And this is the same pattern as C-059's indicators, one level down.** A `catch` that
+names a single cause for a failure with several is a check that cannot report the case
+it was written to catch. E4's record already lists six of these; this is one more, in
+the machinery E4 built.
+
+**Proposed fix, not applied.** Treat a throw as unknown rather than as success: after
+`kill(-pid)` throws, ask `processAlive(pid)`, and if it is alive fall back to
+`process.kill(pid, 'SIGKILL')` on the process itself before deciding anything. Push to
+`signalled` in both paths so the settle loop actually waits. A `catch` here may record
+that it could not signal — it may not conclude the process is gone.
+
+**Done means**: the above, plus a unit test whose fake kernel throws `ESRCH` on the
+group form and succeeds on the process form — a test the current implementation fails
+— and a real-orphan check that does not use a synthetic `ps`.
+
+**Id note**: C-057 is not reused. It was assigned to a numeric-`logLevel` defect
+that turned out not to exist and was withdrawn before filing; ids never get reused,
+including ones that never became entries.
+
+### C-056 · A quick-open picker never focused its row, in a hidden surface
+
+**Split out of C-054, because different stages cannot share one failure count.**
+Observed once, in run 7 of the ten-run batch: surface A's quick open never offered
+the file at all, so the open failed _before_ any editor existed.
+
+```
+timed out waiting for surface A: the focused row to be the one asked for
+  (last: false) · offered: nothing
+surface: {"visibility":"hidden","hasFocus":false,
+          "activeElement":"DIV.editor-group-container.empty",
+          "dialogs":0,"toasts":"","quickInputPresent":true}
+```
+
+**Three observations, and the third is the one that matters most: it happened with
+exactly one workbench surface mounted.** One in the ten-run containment batch, one
+in the Step 0 console control, and one in session 2 of the single-surface gate.
+
+The second occurred in the first invocation of `workbench-console-control.mjs`: the
+query reached the quick-input box — the wait on the box's value had already
+passed — and no row with that label became focused within 60 s. That is this
+entry's shape. It was first reported as "the agent's harness, not the product",
+and **that is withdrawn**: no specific harness defect was identified, and asserting
+one is assuming the instrument's innocence rather than checking it — the same error
+this entry's original count made. Recorded as an observation until a defect is
+named with evidence.
+
+**One difference is worth stating and is not an excuse**: the control had
+`Runtime.enable` attached to the surface, which no containment run did. Whether
+that matters is unknown.
+
+**The third, in the single-surface gate**, is the same shape again and removes the
+two-surface confound: session 2 failed on the **first** open of the run, at
+`A/a-first.md: the focused row`, after 60 s. The query had reached the quick-input
+box — that wait passed — and no row with the file's label ever became focused. One
+surface was mounted and its project root verified at the moment it failed, so
+whatever this is, **it is not a consequence of two workbenches coexisting**.
+
+**A gap in that gate, named rather than left**: unlike the containment gate, it does
+not capture the picker's offered rows when this wait times out, so there is no
+record of what the list actually held. That is a defect in the instrument and it is
+why the third observation is thinner than it should be.
+
+**The containment observation: exactly one picker timeout among 40 open attempts.
+Only its _timeline_ is missing — not its detection.**
+
+An earlier version of this entry said "one seen, unknown number missed", and that
+overstated the uncertainty in the opposite direction from this project's usual
+error. `openByPath` writes no trace when the picker throws, so there is no sampled
+timeline — but it **returns a failure**, and the gate's claim for that open turns
+red. A picker timeout in any of the ten runs would therefore have shown up as a
+failed claim whether or not it produced a trace file. The reasoning that went wrong
+was inferring _undetectable_ from _untraced_, without checking whether a different
+mechanism already caught it. Same shape as the rest of this work: an unexamined
+assumption about what an instrument can see.
+
+So the count is firm. What is missing is the per-sample detail that would say
+**where** in the pick it stalled — the offered rows over time, the focus state,
+whether the list ever populated.
+
+**Not attributed.** `visibility: "hidden"` and `hasFocus: false` are recorded
+because they were in the snapshot, not because they explain anything — a surface
+that is not visible is the ordinary state of a `WebContentsView` the harness has
+not brought to front, and whether it is related is unknown. Nothing here says
+whether this shares a cause with C-054.
+
+**What would make it done.** A trace written for picker-stage failures too, so the
+detail exists next time one occurs; then an explanation. The containment count
+needs nothing — it is one in forty.
+
+### C-055 · A forced quit truncates shutdown, and the next launch is the recovery
+
+**Not a defect — a boundary, documented so nobody tries to close it again.** One
+`SIGTERM` or `SIGINT` shuts Chorus down cleanly: every ordered stop exits `code=0`
+with the workbench server's whole process tree reaped and its connection token
+removed. A **second** termination signal arriving while that cleanup is still
+running is a forced quit rather than a second polite request, and Chorus treats it
+as one.
+
+**What was observed, and only that.** With cleanup deliberately held open — the
+gate `SIGSTOP`s the server's process group, so `waitForTreeToDie` spends its full
+five-second grace — a second `SIGTERM` 200 ms in ended the Electron process with
+`code=null signal=SIGTERM`, against `code=0` for every ordered stop, and the
+server's group was left behind.
+
+**No mechanism is claimed, and an earlier version of this entry claimed one.** It
+said the termination happens "below the JS handler". That was an inference from
+two failed attempts, not a measurement, and it sits badly with Node's documented
+behaviour — a registered `SIGTERM` listener _removes_ the default exit
+(https://nodejs.org/api/process.html#signal-events) — while Electron only promises
+`preventDefault()` for its app-quit lifecycle
+(https://www.electronjs.org/docs/latest/api/app#event-before-quit). Where the exit
+actually comes from is **unestablished**. The observation stands; the explanation
+was withdrawn.
+
+**Two things were tried and neither helped**, recorded so they are not retried:
+vetoing in `before-quit` (that guard is right and is in, but it governs the quit
+lifecycle rather than the signal), and swallowing the repeat signal in the
+`process.on('SIGTERM')` handler.
+
+**The recovery is C-051's startup reaper**, and it is proved: the orphan is
+reparented to init, carries this profile's `--server-data-dir`, and is killed on
+the next launch — along with the token it left behind — before any project can
+open. So a forced quit costs one idle server until Chorus is next started, not
+forever.
+
+**Not asserted in the shutdown gate**, deliberately: a claim that a signal cannot
+kill a process is a claim that cannot be made. Repeated **in-app** quits are a
+different question and are proved in `quit-gate.test.ts`.
+
+### C-054 · A file can open to a blank editor — **critical tracked release defect**
+
+**Mohamad's decision, 2026-08-23: Chorus continues with `monaco-vscode-api` +
+VSCodium REH. The fork pivot is cancelled.** C-054 stops being an architecture gate
+and becomes a **critical tracked release defect**: it does not block building the
+rest of the product, and it is revisited during stabilization before Chorus is
+release-ready.
+
+**It may not be presented as fixed.** It is live, unexplained, and reproducible at
+roughly **two sightings in eleven single-surface sessions**. Anyone demonstrating
+Chorus should expect a file to open to a blank editor occasionally, and should call
+it this rather than a new defect.
+
+**The title changed with the evidence.** It read "model resolution intermittently
+does not complete within the observation window" until the boundary trace showed
+model resolution completing promptly — see below.
+
+**Phase 1 blocker. Ten containment runs, three reproduced** — runs 4 (21/24), 7
+(17/24) and 9 (20/24); runs 1, 2, 3, 5, 6, 8 and 10 clean. Codex's decision rule
+resolves without ambiguity: any failure keeps this a blocker.
+
+**Seven model-stage timeouts among 39 traced opens, clustered in three runs:**
+
+- **run 4** — 3 of 4 opens timed out
+- **run 7** — **3 of 3 traced opens timed out**, alongside the picker failure now
+  recorded as **C-056**; this is the worst-affected run
+- **run 9** — 1 of 4 opens timed out
+
+The picker-stage failure that used to be counted here is **C-056**; different
+stages cannot share a failure count.
+
+**Every `null` means "not resolved within 60 seconds" and nothing more.** That is
+the whole of what a finite budget supports. An earlier version of this entry called
+the defect _latency rather than a permanent stall_ on the strength of one 53-second
+success — **that is withdrawn.** One open resolving slowly does not establish that
+the seven timeouts would have resolved at all, and no window this gate could have
+used would establish otherwise: a longer wait moves the number, not the kind of
+claim.
+
+**What was observed about slowness, kept separate from the timeouts.** Of the 32
+successful traced opens, thirty resolved between 404 and 413 ms, one at 1 ms, and
+**one at 52,999 ms**. So resolution _can_ take two orders of magnitude longer than
+the healthy cluster. Whether that slow success and the seven timeouts are the same
+phenomenon is unknown.
+
+#### It reproduces with **one** surface mounted — the two-surface confound is gone
+
+**The single-surface gate reproduced it.** That gate mounts exactly one workbench
+at a time — A → destroy → B → destroy → A — and asserts the live surface count at
+every step boundary **and on every poll inside every open**, so the property is
+measured rather than arranged. The count is live CDP workbench targets, the same
+counter the containment gate routinely sees read `2`, so it can disagree.
+
+Session 3 of the batch, with `1 surface, root ok` asserted throughout:
+
+```
+A mounted, 1 surface, root ok
+A opened a-first.md   in 38,829 ms   ← 4 lines, but two orders of magnitude slow
+A opened a-second.txt in    434 ms
+A destroyed, 0 surfaces
+B mounted, 1 surface, root ok
+B/b-first.md: the model to resolve — timed out after 60,000 ms
+```
+
+**Two anomalies in one session**: a success at **38.8 s** where every healthy open
+in this gate took 316–434 ms, and then a 60-second timeout on the next project.
+The 38.8 s figure joins run 9's 52,999 ms as a second measured instance of
+resolution taking tens of seconds.
+
+**What this settles.** C-054 was only ever seen with two workbenches mounted at
+once, which the product-matched architecture does not do — so it was open whether
+the ten-run evidence described a configuration the product would never be in. It
+did not: **the defect survives the architecture change.** Nothing here says what
+the defect is; it removes one explanation for it.
+
+**Four valid single-surface sessions passed before it** — one clean session from
+the pre-capture run, one fresh diagnostic session, and two of the batch.
+
+**A gap in this gate, named**: it captures rich picker state on a picker timeout
+but only a plain timeout string on a **model** timeout, so this sighting has less
+detail than the containment batch's traces. The instrument was built for C-056's
+boundary and met C-054's.
+
+#### Step 7 — the resolve trace works, and the defect did not appear under it
+
+**The trace is built, proved, and caught nothing, because C-054 did not reproduce
+in the five instrumented sessions.**
+
+**How the call site was reached.** Two attempts to patch a resolved service
+instance recorded nothing. This one is a **build-time transform** in
+`electron.vite.config.ts` that rewrites `TextFileEditorModel`'s own `readStream`
+call site, armed only by `CHORUS_WORKBENCH_TRACE_RESOLVE=1` at build time. Chosen
+over `pnpm patch` because a patch file and a lockfile entry outlive the round, and
+a dependency patch nobody removes is worse than no patch. **Verified both ways: an
+ordinary build contains 0 injected references, an armed build contains 6.**
+
+Emitted fields are exhaustively: request id, resource, timestamp, boundary name,
+and for a rejection the error `name` and `code`. **No content, no byte counts, no
+error messages.**
+
+**The healthy shape, from 25 instrumented opens across five sessions:**
+
+```
+resolveFromFile-entry +0ms → readStream-before +0ms → readStream-return +5..54ms
+  → resolveFromContent-entry +0ms → doCreateTextModel +0ms
+```
+
+Read gaps: 5, 6, 7×2, 8×4, 9×2, 11×4, 12×2, 13×2, 14×2, 27, 34, 46, 54 ms.
+**After the read: 47 of 50 boundary gaps are 0 ms and the other three are 1 ms.**
+
+So in health, **essentially the whole of model resolution is inside `readStream`**,
+and everything after it is instantaneous. That is a real result about the healthy
+path and it says where to look if the defect is ever caught: a stall _after_
+boundary three would be a departure from every healthy open measured.
+
+**What it does not show.** C-054 did not occur, so no failing trace exists and **no
+causal correction is identified**. The instrument is not absent and not ambiguous —
+it is crisp and it worked on every open — it simply never met the defect.
+
+**The distinction that matters for the fork decision.** The rule "no bounded repair
+⇒ recommend the fork" is triggered here **by exhaustion of the session budget, not
+by diagnosis**. Nothing in this round points at Code-OSS; the round ended without
+the defect appearing. Those are different grounds for the same recommendation and
+should not be conflated when the decision is taken.
+
+**Removal.** The Vite plugin, its anchors and the harness sink must go before
+Phase 1 closes, with the rest of the diagnostic apparatus.
+
+#### Caught with the trace armed — the delay is **after** model creation
+
+**Session 1 of the final batch reproduced C-054 with every boundary recorded. The
+complete timeline, for `a-first.md`, one surface mounted and root verified:**
+
+```
+enter → first boundary        27 ms
+resolveFromFile-entry     +0 ms   (t+0)
+readStream-before         +0 ms   (t+0)
+readStream-return        +65 ms   (t+65)
+resolveFromContent-entry  +0 ms   (t+65)
+doCreateTextModel         +0 ms   (t+65)
+--------------------------------------------------
+harness waited for rendered content:  timed out at 60,000 ms
+```
+
+**Every boundary completed inside 92 ms of the keystroke, and the editor never
+rendered the file for the next sixty seconds.**
+
+- The **read is not slow**: 65 ms, against a healthy range of 5–54 ms across 25
+  instrumented opens. Marginally above, nowhere near a stall.
+- **Model resolution is not slow**: `resolveFromContent-entry` and
+  `doCreateTextModel` both land 0 ms after the read returns, exactly as in health.
+- **The text model was created.** `doCreateTextModel()` fired.
+
+So the question Step 7 was built to answer — _is the delay inside `readStream` or
+after it?_ — has a third answer neither option covered: **the delay is after
+`doCreateTextModel()`, downstream of everything this trace covers.** The file is
+read, the model exists, and the editor does not show it.
+
+**A correction to this entry's own instrument, and it matters.** `lineNumbers`
+(`.margin-view-overlays .line-numbers`) was introduced here as the _model-derived_
+signal that could disagree with the tab, and every earlier reading of
+`lineNumbers: 0` was written up as "no resolved model". That was wrong.
+`.margin-view-overlays` is produced by the **rendered editor**, so it cannot
+distinguish _no model_ from _a model the view never painted_ — and the trace now
+shows at least one instance was the second. The ten-run batch's seven "model-stage
+timeouts" should be read as **timeouts with no rendered content**, which is a
+weaker and different claim than the one recorded against them.
+
+**No repair is proposed.** The trace says where the defect is not; it does not
+identify a bounded correction, and nothing downstream of `doCreateTextModel()` was
+instrumented. No further hook was added and no code was changed.
+
+#### The raw rows, preserved rather than summarised
+
+`tabAt` / `linesAt` / `contentAt` in ms from the moment Enter was pressed in quick
+open. `linesAt` is `.margin-view-overlays .line-numbers`, one element per model
+line — the model-derived signal, which can disagree with the tab.
+
+```
+run   order surface                     resource              outcome  tabAt linesAt contentAt
+run1  1     surface A                   alpha-manifest.yaml   opened       3     405       407
+run1  2     surface B                   beta-manifest.yaml    opened       2     405       405
+run1  3     surface B after the close   beta-notes.md         opened       1     404       404
+run1  4     surface B after reopening   beta-manifest.yaml    opened       7     410       410
+run2  1     surface A                   alpha-manifest.yaml   opened       3     406       409
+run2  2     surface B                   beta-manifest.yaml    opened       1     404       412
+run2  3     surface B after the close   beta-notes.md         opened       1     404       405
+run2  4     surface B after reopening   beta-manifest.yaml    opened       1     404       404
+run3  1     surface A                   alpha-manifest.yaml   opened       5     407       408
+run3  2     surface B                   beta-manifest.yaml    opened       3     407       409
+run3  3     surface B after the close   beta-notes.md         opened       1     405       406
+run3  4     surface B after reopening   beta-manifest.yaml    opened       1     404       405
+run4  1     surface A                   alpha-manifest.yaml   TIMEOUT      1    null      null
+run4  2     surface B                   beta-manifest.yaml    TIMEOUT      1    null      null
+run4  3     surface B after the close   beta-notes.md         opened       8     412       416
+run4  4     surface B after reopening   beta-manifest.yaml    TIMEOUT      1    null      null
+run5  1     surface A                   alpha-manifest.yaml   opened       4     407       409
+run5  2     surface B                   beta-manifest.yaml    opened       2     407       408
+run5  3     surface B after the close   beta-notes.md         opened       2     404       405
+run5  4     surface B after reopening   beta-manifest.yaml    opened       2     406       407
+run6  1     surface A                   alpha-manifest.yaml   opened       4     407       412
+run6  2     surface B                   beta-manifest.yaml    opened       1     404       405
+run6  3     surface B after the close   beta-notes.md         opened       2     406       407
+run6  4     surface B after reopening   beta-manifest.yaml    opened       3     406       407
+run7  —     surface A                   alpha-manifest.yaml   picker failure — no trace written → C-056
+run7  1     surface B                   beta-manifest.yaml    TIMEOUT      1    null      null
+run7  2     surface B after the close   beta-notes.md         TIMEOUT      1    null      null
+run7  3     surface B after reopening   beta-manifest.yaml    TIMEOUT      1    null      null
+run8  1     surface A                   alpha-manifest.yaml   opened       6     413       417
+run8  2     surface B                   beta-manifest.yaml    opened       3     412       412
+run8  3     surface B after the close   beta-notes.md         opened       1     405       406
+run8  4     surface B after reopening   beta-manifest.yaml    opened       1       1         2
+run9  1     surface A                   alpha-manifest.yaml   opened       8     411       412
+run9  2     surface B                   beta-manifest.yaml    opened       2     405       405
+run9  3     surface B after the close   beta-notes.md         TIMEOUT      0    null      null
+run9  4     surface B after reopening   beta-manifest.yaml    opened       1   52999     53000
+run10 1     surface A                   alpha-manifest.yaml   opened       3     408       409
+run10 2     surface B                   beta-manifest.yaml    opened       7     409       410
+run10 3     surface B after the close   beta-notes.md         opened       2     406       407
+run10 4     surface B after reopening   beta-manifest.yaml    opened       2     405       406
+```
+
+#### What the timeouts looked like
+
+Tab in 0–8 ms; no model lines by 60 s. Throughout: `breadcrumbs` and `aria-label`
+set, `lineNumbers: 0`, `explorerRows: 3` — the `vscode-remote` provider answering
+`readdir` the whole time — no placeholder, no error, no toast, and a status bar
+carrying the remote authority but none of the language/EOL/encoding entries a
+resolved model produces.
+
+**No active progress indicator, in the failing opens or the healthy ones.** An
+earlier reading — that healthy opens begin with an active infinite progress bar, so
+the failure is that state stuck — came from a **global** selector matching
+unrelated startup activity. Scoped to the editor part and re-run, the indicator is
+empty in both. **Progress distinguishes nothing here**, and the harness comments
+have been corrected to say so.
+
+#### What is not supportable
+
+- **The YAML hypothesis.** `beta-notes.md` timed out in runs 7 and 9, so this is
+  not confined to YAML resources.
+- **Any layer assignment.** Two localisations were withdrawn, one because "it
+  survived a surface close and reopen" was treated as evidence about session
+  state — it is not, since the workbench partition is shared across surfaces and
+  the REH is leased per project, so a surface teardown resets neither. Still live
+  and unseparated: a transient `readFile` failure, ordering, shared-session state,
+  model-service state, a resolver race.
+- **A rate.** Three reproductions **clustered in three runs** — 3 of 4 opens in run
+  4, **3 of 3 traced opens in run 7**, 1 of 4 in run 9 — are not independent
+  trials. An earlier version of this entry described the clustering as "3 of 4 in
+  one run and 1 of 4 in another", which silently dropped the worst-affected run
+  from the record. An earlier
+  version of this entry quoted a binomial interval; that was the wrong instrument
+  twice over and is removed. The observation is the observation.
+- **Anything from the server or from Chorus.** Reproducing and clean runs show the
+  same server log — connections established, extension hosts launched, no refusal,
+  no error — and the server does not log file reads at `--log info`. `chorus.log`
+  never mentions the workbench.
+
+**No client-side log exists for any of the ten runs.** The workbench's log service
+writes to the renderer console, which the gate does not read. That is where the
+answer most likely is, and it is the whole point of the proposal below.
+
+**Artefacts**: `/tmp/c054/run{1..10}/` — per-open timelines, `workbench-server.log`,
+`chorus.log`, `app-output.log`, `run.json`. `/tmp` does not survive a reboot, which
+is why the rows above are in this file rather than referenced from it.
+
+#### Step 0 — the healthy control, run and failed
+
+**Authorized and run once. Both boundaries are absent from the renderer console, so
+the console-based batch is abandoned.** Not a containment pass and not reported as
+one: it ran a reduced scenario and asserted no containment claim.
+
+Constraints met as recorded — one fresh process; surfaces A and B created and
+rendered before anything attached; `Runtime.enable` and `Log.enable` attached only
+to surface B's already-mounted target; four unique, never-before-opened fixture
+files opened exactly once each; and nothing below the attach point that could
+create a renderer.
+
+**All four opens were healthy**, which is what makes it a control:
+
+```
+probe-alpha.md      resolved in 346ms, lines=4
+probe-bravo.yaml    resolved in 318ms, lines=3
+probe-charlie.txt   resolved in 314ms, lines=3
+probe-delta.json    resolved in 335ms, lines=5
+```
+
+**Three console messages in total, across four file opens** — the complete
+inventory, preserved because it is the justification for whatever replaces console
+capture:
+
+```
+1 × [warning] %cElectron Security Warning (Insecure Content-Security-Policy) …
+1 × [warning] Could not create web worker(s). Falling back to loading web worker
+              code in main thread…
+1 × [warning] You must define a function MonacoEnvironment.getWorkerUrl or
+              MonacoEnvironment.getWorker…
+```
+
+**Messages mentioning a resource — a `vscode-remote://` URI, a `file://` URI or any
+probe filename: zero.** All three are start-up warnings emitted once; none is
+per-open. Read start, read result, model-resolution start and model-resolution
+result: **all four absent.** Not "partially present".
+
+**What is _not_ established by this**, and an earlier report of mine claimed it: the
+log service's destination. Console silence proves the console is silent. The
+destination needed source evidence, which is below.
+
+#### Source inspection of the pinned client — read-only
+
+Answers to the four questions, with what would make each false.
+
+**1 · Remote `readFile` start/result — not logged anywhere, at any level.**
+
+- `DiskFileSystemProviderClient.readFile` (the `vscode-remote` provider) calls
+  `this.channel.call("readFile", …)` and returns. **Zero `logService` references in
+  the file.**
+- `FileService.readFile` / `doReadFile` / `doReadFileStream` contain no start or
+  result logging; the only `logService` calls in `fileService.js` are error traces.
+- `TextFileService.read` / `readStream` contain no logging.
+- `RemoteFileSystemProviderClient` logs two `error` cases, both during provider
+  registration.
+
+_False if_ any of those layers logged, or a decorator wrapped the file service. No
+such decorator exists in the pinned build.
+
+**2 · Model-resolution start/result — logged, URI-correlated, at `trace`.**
+`textFileEditorModel.js` routes every record through
+`trace(msg) → logService.trace('[text file model] ' + msg, this.resource.toString())`,
+so the resource is attached to each. The relevant call sites:
+
+```
+resolve() - enter                    start
+resolveFromFile()                    immediately before the read
+resolveFromContent() - enter         content in hand
+doCreateTextModel()                  model created — result
+```
+
+**3 · Logger, level and sink.**
+
+- `ILogService` is a `LogService` over a logger created with `id: windowLogId`,
+  `name: rendererLogLabel`, resource `environmentService.logFile`.
+- `ILoggerService` is `FileLoggerService(logLevel ?? getLogLevel(environmentService), logsPath, fileService)`
+  — the **sink is a file** written through `IFileService` under `logsPath`. Not the
+  console, which is consistent with Step 0's silence without having been proved by
+  it.
+- Chorus calls `getLogServiceOverride()` with **no argument**, so the level is
+  `getLogLevel(environmentService)`: `Trace` only if `environmentService.verbose`;
+  otherwise a **string** `logLevel` is parsed; otherwise `DEFAULT_LOG_LEVEL = Info`.
+  Chorus passes `developmentOptions: { logLevel: LogLevel.Info }` — a **number** —
+  so the string branch never matches and the result is `Info` by the default path.
+  **That setting is a no-op that happens to agree with the default**, which is worth
+  knowing before anyone changes it expecting an effect.
+- `canLog(Info = 3, Trace = 1)` is `3 <= 1` → **false**. Every record in (2) is
+  suppressed.
+
+**4 · Are those exact records in the rendered Output panel? No.**
+
+The plumbing exists: `logs.contribution.js` registers every non-hidden logger as an
+Output channel sourced from `logger.resource` with `log: true`, and the window
+logger is not hidden. **But the records themselves are never emitted**, so there is
+nothing for the panel to show. A channel that would carry them is not the same as
+records that exist.
+
+An action can raise the active channel to Trace —
+`workbench.action.output.activeOutputLogLevel.1` — but it is declared with a
+submenu entry and no `f1`, so it is **not in the command palette**; reaching it
+means the Output view's title gear, which is a coordinate click and the technique
+this project abandoned. **And even at Trace the read boundary would still be
+absent**, because no read-layer record exists at any level.
+
+#### The E2E-only hook — two interception points tried, both unobserved, investigation stopped
+
+**Codex's hard stop applies: the hook investigation is over and the question
+returns to the architecture decision. No third interception layer was tried and
+none is proposed.**
+
+**Attempt 1 — `IFileService.readFile` / `readFileStream`.** Installer ran, four
+files opened, zero read records.
+
+**Attempt 2 — `ITextFileService.read` / `readStream`**, the narrowest boundary the
+source path guarantees, since `TextFileEditorModel.resolveFromFile()` calls that
+injected service directly. The first hook was **removed rather than kept
+alongside**, so a silent record could not be ambiguous between "not called" and
+"shadowed". Installer ran — `[chorus-diag] text-read trace installed on
+ITextFileService read and readStream` is in the capture — four healthy opens
+(315–377 ms), 275 console messages, and **zero `[chorus-diag] read*` records for
+any URI**.
+
+Acceptance, against the actual lifecycle order:
+
+```
+1 resolveFromFile() entered      position 2   [text file model] resolveFromFile() vscode-remote://…/probe-alpha.md
+2 text read started              ABSENT
+3 text read returned/errored     ABSENT
+4 resolveFromContent() entered   position 3   [text file model] resolveFromContent() - enter …
+5 doCreateTextModel() occurred   position 4   [text file model] doCreateTextModel() …
+6 expected bytes rendered        yes — 4 model lines, 377 ms
+```
+
+**Four of six. The text-read boundary is not obtainable by patching a resolved
+service instance**, and why is not established. `resolveFromFile()` is recorded, so
+the model did call its text file service; the patched object is not the one that
+call reaches. That was true of both attempts, at two different layers, and chasing
+a third was ruled out before it could be started.
+
+**What this leaves.** C-054 keeps everything it had: three reproductions in ten
+containment runs, seven model-stage timeouts among 39 traced opens clustered in
+runs 4, 7 and 9, and the model boundary now demonstrably observable and
+URI-correlated. What is still missing is the read boundary — the one that would
+say whether the delay is in the read or after it.
+
+**The hook is now purposeless and its removal is due.** It was already an exit
+requirement; with the investigation stopped there is nothing waiting on it. It has
+been left in place rather than deleted unilaterally, because removing it is a
+decision about what happens next rather than tidying.
+
+#### C-057 was not filed, because the defect does not exist
+
+The numeric `logLevel` no-op I reported is **withdrawn**. `getLogLevel` parses only
+a string, which is true — but the browser environment service's getter returns
+`LogLevelToString(options.developmentOptions.logLevel)`, so a number becomes
+`"trace"` before `getLogLevel` sees it and `parseLogLevel` resolves it. The number
+works, and Chorus's existing `logLevel: LogLevel.Info` genuinely sets Info rather
+than coinciding with a default. The claim was wrong because it read the function
+that consumes the value and stopped, without checking the one that produces it —
+and it is recorded here rather than filed as an entry so that nobody fixes a
+defect that is not there.
+
+#### Removal is an exit requirement, recorded now
+
+**The `diagnostics` capability, `renderer/src/workbench/diagnostics.ts`, its
+descriptor field, its preload projection and its `CHORUS_WORKBENCH_DIAGNOSTICS`
+gate must all be removed before Phase 1 closes.** It is a diagnostic that exists
+because a boundary is missing from the pinned client, not a feature, and it is
+written down here now rather than left to be noticed.
+
+### C-053 · Workbench settings do not survive a quit
+
+**The workbench session partition is in-memory** — `WORKBENCH_PARTITION` is
+`'chorus-workbench'` with no `persist:` prefix, so the storage service's
+IndexedDB and every preference written through it lives for the life of the app
+and no longer. Change the theme, turn `files.autoSave` off, resize a panel,
+disable the minimap: it holds for the session and is gone next launch.
+
+**Why this is not a footnote.** It was first recorded as the small open half of
+C-052, and that was the wrong size. The plan's goal is that Chorus _replaces_ the
+editor a person already uses; an editor that forgets your settings every time you
+quit is not a replacement for one, whatever else it does. It also interacts badly
+with the decision C-052 records — auto-save is kept because it is Code-OSS's
+native behaviour, and a person who wants it off must be able to turn it off and
+have it stay off.
+
+**The partition is in-memory on purpose, so this is a trade rather than an
+oversight.** `workbench-surface.ts` says why: the workbench's durable state
+belongs to Chorus rather than to a Chromium profile, and an in-memory session is
+one fewer place for a connection token to survive a quit. Making it `persist:`
+would undo that in one word, which is exactly why this needs designing rather
+than flipping.
+
+**What would make it done.** A decision on where workbench state lives — a
+persisted partition with the token kept out of it, or a Chorus-owned store the
+configuration and storage service overrides are pointed at — plus a check that
+the connection token is still absent from disk after a quit, and a test that a
+preference set in one run is still set in the next. Recorded as Phase 1 exit item
+**E5**.
+
+### C-052 · ~~The workbench auto-saves~~ · **the gate was editing the repository** — closed
+
+**Reclassified, and the reclassification is the entry.** This was filed as
+"the workbench auto-saves to the person's real files, and nobody chose that". The
+auto-save half is wrong: **`files.autoSave = afterDelay` is Code-OSS's own web
+default and Chorus keeps it deliberately.** Mohamad decided it. Nobody reading
+this later should conclude auto-save was a bug, or go looking for the commit that
+turned it off — there is none, and forcing `off` in production configuration is
+specifically not wanted.
+
+**What the defect actually was: a test harness pointed a live editor at the
+source tree it was testing from.** The containment gate typed a marker into an
+open buffer to prove the surviving editor still took a keystroke, and the buffer
+was `apps/desktop/package.json`. The workbench saved it, correctly, and line 1 of
+a tracked file became `CHORUS-ALIVE{`. Repaired surgically — `git checkout` would
+have destroyed the branch's uncommitted dependency work — and the repaired diff is
+32 additions, 0 deletions.
+
+**Fixed.** The gate now creates **two disposable fixture projects** under
+`tmpdir()`, opens and edits only those, and removes them in its `finally`. Two
+consecutive passes confirm the checkout is untouched: `git grep CHORUS-ALIVE`
+finds nothing outside this file and the gate's own source, and
+`apps/desktop/package.json` is byte-intact.
+
+**And the fix made the proof stronger, which is the part worth carrying.** The
+failed assertion had been "the tab is dirty after typing" — an intermediate state
+that auto-save correctly ends about a second later, so the test was asking the
+system to be mid-flight when it was measured. Against a fixture the gate owns, it
+now asserts the whole write path: the editor took the edit, **the file changed on
+disk** within a bounded wait, the editor went **clean**, and the **saved bytes are
+exactly the marker followed by the original content**. That exercises the editor,
+the working-copy service, the save and the round trip out through the remote
+extension host to a real filesystem. The dirty check touched none of it.
+
+**One product fix travelled with it.** `services.ts` called `initUserConfiguration`
+with a fixed object on every start, which **overwrote the user's settings file** —
+so any preference a person changed was discarded next time a surface opened, and
+`files.autoSave` would have been un-turn-off-able while looking, from that file,
+like a setting nobody had touched. Chorus's own preferences now sit in
+`configurationDefaults`, the layer a user's settings override in the normal way.
+
+**What is not closed here, and it is not small: settings do not survive a quit.**
+That was written up in this entry as a footnote, which understated it — see
+**C-053**, which is now its own item.
+
+### C-051 · ~~The remote extension host outlives the app~~ — **closed**
+
+**Two faults stacked, and reading the launcher explained both.**
+`bin/codium-server` is a bash script whose last line runs
+`"$ROOT/node" "$ROOT/out/server-main.js" "$@"` — **without `exec`** — so bash
+stayed alive as the server's parent, Chorus's child was a _shell_, and
+`child.kill()` killed the shell while the 257 MB Node process it had started
+carried on holding the port. The same file is `.cmd` on Windows, which `spawn`
+cannot execute without a shell at all. And separately, Electron terminates on
+`SIGTERM` by default, so `before-quit` never ran and nothing was asked to stop.
+
+**Reopened four times, and every reopening found the same family of defect.** The
+first six were checks that could only come back true; the last was one step
+further along — a failure that could not be _seen_. Worth listing, because the
+pattern is more useful than any one fix:
+
+- a shutdown that signalled an `npx` wrapper and reported on the app;
+- a start-in-flight test that **supplied the port by hand**, so cancellation was
+  never exercised;
+- an exit emitted against a process group **nobody then re-examined**;
+- `reapTree` deleting its subject **before reading** whether it had died;
+- the startup reaper counting `SIGKILL`s **sent** as `killed`;
+- a `skipped` boolean that made "the platform has no strategy" and "the process
+  table could not be read" the same value, so `start` spawned on the strength of a
+  sweep that had never run;
+- and finally four bare `.catch(() => undefined)`s in shutdown itself, so a
+  workbench shutdown that **failed** let Chorus exit with no survivor result and no
+  log at all — the lifecycle failure this item exists to expose, hiding inside the
+  machinery built to expose it.
+
+**What it is now.** The server's own `node` runs `out/server-main.js` — shell-free,
+identical on every platform, direct child is the real server — spawned **detached**
+so shutdown signals the **group**. Shutdown is **asynchronous, idempotent and
+shared** by quit, `SIGTERM` and `SIGINT`. The in-flight start is **cancelled** by an
+`AbortController` reaching `fetch` and the port wait, then given a bounded moment to
+unwind rather than waited out. Force-kill follows a bounded grace; the token is
+removed only once the tree is **confirmed dead**; an unasked-for exit **reaps the
+group** and fails **closed**. The startup reaper is a **readiness barrier** `start`
+awaits, identifying by this profile's `--server-data-dir` **and PPID 1, never by
+executable name**; it reports **survivors** rather than signals sent, and `start`
+**refuses to spawn** when any survive or when the sweep could not run at all.
+
+**Every shutdown step now reports its own failure and then resolves**, and the quit
+gate reports anything that escapes. The two paths are disjoint by construction,
+which is what makes "a cleanup failure is reported exactly once" a property rather
+than a promise — asserted by count and by identity, against three quits arriving
+during one failing cleanup, so an implementation reporting per _quit_ fails it.
+
+**Verified — `e2e/workbench-shutdown.mjs`, 18/18.** Window-close, `SIGTERM` and
+`SIGINT` each exit `code=0` with every descendant gone and the token removed; then
+the force-quit path in full — the detached server survives `SIGKILL`, the orphan is
+reparented to init, the token is left behind, the next launch reaps both, and a
+project opened **immediately** on relaunch leaves exactly one server, which is not
+the orphan. Containment: **24/24**. Twenty-six unit tests; **seventeen defects
+reinstated one at a time**, each turning exactly the test named for it red — and
+one of those reinstatements found a _test_ that could not fail, which was rewritten
+to assert the consequence the guard actually buys.
+
+**Where the boundary is**: a _second_ termination signal mid-cleanup is a forced
+quit, not a second request — **C-055**, with the startup reaper as its recovery.
+
+**Windows is exempt and unverified.** No `win32-x64` artifact has been downloaded,
+so `node.exe` at the tree root is upstream's convention rather than an observation;
+`taskkill /T /F` — the only tree-kill Windows offers, with no graceful equivalent —
+has never been run; and the reaper reports `skipped: 'unsupported-platform'` there
+rather than pretending to a clean machine, which is also the one case `start` still
+proceeds on a sweep that did not happen. **Windows x64 needs its own proof on a
+real machine** and nothing here claims it.
+
 ### C-050 · Two Windows-only test failures, one older than the other
 
 `CI / Typecheck, lint, test (Windows)` is red on `main`. macOS and Linux are

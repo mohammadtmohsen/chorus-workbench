@@ -51,7 +51,7 @@
     "removeAgent": "Take {{agent}} out of this conversation",
     "nobodyHere": "Nobody is in this conversation. Add an agent to start again.",
     "changesLabel": "Changes",
-    "changesHint": "What this branch has changed, and the project's files (\u2318\u21e7G)",
+    "changesHint": "What this branch has changed, and the project's files (⌘⇧G)",
     "spinOff": "Start this as a side task",
     "spinOffHint": "Send this to a new session instead — it keeps this conversation's context, can make changes, and leaves this chat running",
     "restartLabel": "Start this session over, with nothing said in it",
@@ -608,5 +608,13 @@
     "hint": "Drag a session by its grip to reorder. Escape leaves Arrange.",
     "notWhileSearching": "Clear the search to arrange sessions",
     "moved": "{{title}} moved to position {{position}} of {{count}}"
+  },
+  "workbench": {
+    "probeTitle": "Workbench containment probe",
+    "probeHint": "Open two folders, then close one. The other must keep working.",
+    "chooseFolder": "Choose folder…",
+    "closeSurface": "Close this workbench",
+    "noFolder": "No folder yet",
+    "dismiss": "Dismiss"
   }
 }

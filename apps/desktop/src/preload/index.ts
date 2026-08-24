@@ -25,6 +25,11 @@ import {
   type IpcChannel,
   type IpcResponse,
 } from '../shared/ipc.js'
+import {
+  WORKBENCH_SHELL_CONTRACT,
+  type WorkbenchShellChannel,
+  type WorkbenchShellResponse,
+} from '../shared/workbench-ipc.js'
 
 /**
  * One method per IPC message, generated from the contract. `ipcRenderer` itself
@@ -44,8 +49,33 @@ function invoke<C extends IpcChannel>(channel: C) {
   }
 }
 
+/**
+ * The same generator over the workbench's shell-facing contract.
+ *
+ * A separate map rather than three more entries in `IPC_CONTRACT`, because the
+ * channels are answered by a registrar that reads `event.sender` and that map's
+ * registrar deliberately does not. What matters here is that these three carry no
+ * secret: an opaque view id and a rectangle. The channel that does carry one is
+ * `workbench:connection`, and it is generated into `preload/workbench.ts` only —
+ * this file has no method for it and no way to reach it.
+ */
+function invokeWorkbench<C extends WorkbenchShellChannel>(channel: C) {
+  return async (request: unknown): Promise<WorkbenchShellResponse<C>> => {
+    const raw: unknown = await ipcRenderer.invoke(channel, request)
+    const parsed = WORKBENCH_SHELL_CONTRACT[channel].response.safeParse(raw)
+    if (!parsed.success) {
+      throw new Error(`Malformed response on "${channel}": ${parsed.error.message}`)
+    }
+    return parsed.data as WorkbenchShellResponse<C>
+  }
+}
+
 const api: ChorusApi = {
   getAppInfo: invoke('app:getInfo'),
+  chooseWorkbenchProject: () => invokeWorkbench('workbench:chooseProject')({}),
+  openWorkbench: invokeWorkbench('workbench:open'),
+  setWorkbenchBounds: invokeWorkbench('workbench:setBounds'),
+  closeWorkbench: invokeWorkbench('workbench:close'),
   probeAgents: invoke('agents:probe'),
   startConversation: invoke('conversation:start'),
   sendMessage: invoke('conversation:send'),
