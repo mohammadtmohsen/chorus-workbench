@@ -1,6 +1,10 @@
 import { getService } from '@codingame/monaco-vscode-api'
 import { IEditorService } from '@codingame/monaco-vscode-api/vscode/vs/workbench/services/editor/common/editorService.service'
 import { ICodeEditorService } from '@codingame/monaco-vscode-api/vscode/vs/editor/browser/services/codeEditorService.service'
+import {
+  isCodeEditor,
+  type ICodeEditor,
+} from '@codingame/monaco-vscode-api/vscode/vs/editor/browser/editorBrowser'
 import { IWorkingCopyService } from '@codingame/monaco-vscode-api/vscode/vs/workbench/services/workingCopy/common/workingCopyService.service'
 import type { WorkbenchContext } from '../../../shared/workbench-ipc.js'
 
@@ -55,6 +59,33 @@ function relativeTo(root: string, uriPath: string): string | null {
  * time somebody is reading a file; watching only the second misses a file opened
  * and not yet touched.
  */
+
+/**
+ * The editor the person is working in — **active**, not focused.
+ *
+ * `ICodeEditorService.getFocusedCodeEditor()` was the first reading of this and
+ * it is wrong here in a way that only shows up in the product. The workbench is
+ * its own `WebContentsView`; the moment somebody clicks into the Chorus composer
+ * to type a message, the editor is not focused and never will be at the instant
+ * that matters. So the focused editor is `null` exactly when a snapshot is taken,
+ * the selection reads as nothing, and the agent is told no file is open — while
+ * a file sits open with lines highlighted.
+ *
+ * It broke the push as well as the pull, and the push failing is what hid the
+ * pull: with no selection reported the pill leaves `ready`, `ideAttached` goes
+ * false, and Send never asks for a snapshot at all. Two symptoms, one cause.
+ *
+ * `activeTextEditorControl` answers "which editor is showing" rather than "which
+ * has keyboard focus", which is the question both paths meant to ask. A diff
+ * editor is not a code editor and is filtered out rather than coerced: its model
+ * is a pair, and reading a selection off it would describe one side without
+ * saying which.
+ */
+function activeCodeEditor(editors: { activeTextEditorControl: unknown }): ICodeEditor | null {
+  const control = editors.activeTextEditorControl
+  return isCodeEditor(control) ? control : null
+}
+
 /**
  * What the editor is showing, right now, with the selected text.
  *
@@ -72,13 +103,12 @@ function relativeTo(root: string, uriPath: string): string | null {
 export async function readEditorSnapshot(
   projectRoot: string
 ): Promise<WorkbenchContext & { text: string }> {
-  const [editors, codeEditors, workingCopies] = await Promise.all([
+  const [editors, workingCopies] = await Promise.all([
     getService(IEditorService),
-    getService(ICodeEditorService),
     getService(IWorkingCopyService),
   ])
   const uri = editors.activeEditor?.resource
-  const editor = codeEditors.getFocusedCodeEditor()
+  const editor = activeCodeEditor(editors)
   const model = editor?.getModel() ?? null
   const selection = editor?.getSelection() ?? null
   const text =
@@ -116,7 +146,7 @@ export async function reportEditorContext(projectRoot: string): Promise<void> {
 
   const report = (): void => {
     const uri = editors.activeEditor?.resource
-    const editor = codeEditors.getFocusedCodeEditor()
+    const editor = activeCodeEditor(editors)
     const model = editor?.getModel() ?? null
     const selection = editor?.getSelection() ?? null
 

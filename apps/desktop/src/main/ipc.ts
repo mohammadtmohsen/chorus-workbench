@@ -697,6 +697,23 @@ export function buildHandlers(runtime: ChorusRuntime): Handlers {
        * selected **text**, which the push omits by design.
        */
       const embedded = await requestWorkbenchSnapshot(cwd)
+      /*
+       * Which source answered, and what it said. This path has now been wrong
+       * three times — no context at all, then a reference with no code, then a
+       * selection read off an editor that was never focused — and each time the
+       * app's own log said nothing, so the diagnosis came from reading source.
+       * One line ends that.
+       */
+      runtime.log.info('editor snapshot', {
+        source: embedded === undefined ? 'external-bridge' : 'workbench',
+        path: embedded?.relativePath ?? null,
+        lines:
+          embedded === null || embedded === undefined
+            ? null
+            : `${String(embedded.startLine)}-${String(embedded.endLine)}`,
+        bytes: embedded?.selectedBytes ?? 0,
+        modelVersion: embedded?.version ?? null,
+      })
       if (embedded !== undefined) {
         if (
           embedded?.relativePath == null ||
