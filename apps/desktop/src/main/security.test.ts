@@ -88,24 +88,46 @@ describe('the workbench content security policy', () => {
  */
 describe('the remote resource CORS exemption', () => {
   const authority = '127.0.0.1:51515'
-  const ok = (url: string) => isOwnRemoteResource(url, authority)
+  /* The real pair from `workbench-runtime.json`, so the path under test is the
+     path the client actually builds. */
+  const product = { quality: 'stable', commit: '987c9597516278c9fcf10d963a0592ce1384ab93' }
+  const segment = `${product.quality}-${product.commit}`
+  const ok = (url: string) => isOwnRemoteResource(url, authority, product)
 
   it('matches the resource endpoint on our own server', () => {
-    expect(ok(`http://${authority}/vscode-remote-resource?path=%2Ficon.svg`)).toBe(true)
+    expect(ok(`http://${authority}/${segment}/vscode-remote-resource?path=%2Ficon.svg`)).toBe(true)
+  })
+
+  /*
+   * The bug this predicate shipped with: it matched the unprefixed path, which
+   * the client never generates, so the header branch was unreachable and the
+   * screenshot stayed identical through two commits.
+   */
+  it('refuses the unprefixed path the client never builds', () => {
+    expect(ok(`http://${authority}/vscode-remote-resource`)).toBe(false)
+  })
+
+  it('refuses another build of the same server', () => {
+    expect(
+      ok(
+        `http://${authority}/stable-0000000000000000000000000000000000000000/vscode-remote-resource`
+      )
+    ).toBe(false)
+    expect(ok(`http://${authority}/insider-${product.commit}/vscode-remote-resource`)).toBe(false)
   })
 
   it('refuses another port, which is another server', () => {
-    expect(ok('http://127.0.0.1:9999/vscode-remote-resource')).toBe(false)
+    expect(ok('http://127.0.0.1:9999/' + segment + '/vscode-remote-resource')).toBe(false)
   })
 
   it('refuses another host on the same port', () => {
-    expect(ok('http://evil.example.com:51515/vscode-remote-resource')).toBe(false)
+    expect(ok('http://evil.example.com:51515/' + segment + '/vscode-remote-resource')).toBe(false)
   })
 
   /* A subtree would be a bypass for everything below it. */
   it('refuses a path that merely starts the same', () => {
-    expect(ok(`http://${authority}/vscode-remote-resource/../secrets`)).toBe(false)
-    expect(ok(`http://${authority}/vscode-remote-resourceX`)).toBe(false)
+    expect(ok(`http://${authority}/${segment}/vscode-remote-resource/../secrets`)).toBe(false)
+    expect(ok(`http://${authority}/${segment}/vscode-remote-resourceX`)).toBe(false)
   })
 
   it('refuses every other endpoint the server exposes', () => {
@@ -116,11 +138,13 @@ describe('the remote resource CORS exemption', () => {
   /* https is not what the workbench connects over, and matching it would be a
      second origin nobody decided to allow. */
   it('refuses a different scheme', () => {
-    expect(ok(`https://${authority}/vscode-remote-resource`)).toBe(false)
+    expect(ok(`https://${authority}/${segment}/vscode-remote-resource`)).toBe(false)
   })
 
   it('exempts nothing when there is no server', () => {
-    expect(isOwnRemoteResource(`http://${authority}/vscode-remote-resource`, null)).toBe(false)
+    expect(
+      isOwnRemoteResource(`http://${authority}/${segment}/vscode-remote-resource`, null, product)
+    ).toBe(false)
   })
 
   it('refuses something that is not a url at all', () => {

@@ -157,7 +157,18 @@ let configuredSession: Session | null = null
  * a relax-the-shell change gets proposed. The symmetric mistake is this one
  * uninstalled: a new partition inherits no CSP and no permission handler at all.
  */
-export function workbenchSession(isDev: boolean, remoteAuthority: string | null): Session {
+export function workbenchSession(
+  isDev: boolean,
+  remoteAuthority: string | null,
+  /**
+   * The server's identity, because its resource path is prefixed with it.
+   *
+   * Carried here for the same reason the authority is: the policy and the server
+   * must not be able to drift, and there is exactly one place either value is
+   * known.
+   */
+  product: { readonly quality: string; readonly commit: string } | null
+): Session {
   if (configuredSession !== null) return configuredSession
   const created = session.fromPartition(WORKBENCH_PARTITION)
   /*
@@ -167,7 +178,7 @@ export function workbenchSession(isDev: boolean, remoteAuthority: string | null)
    * only have carried a wildcard. One shared server means one authority for the
    * app's whole life, so "once" is not a limitation here.
    */
-  applyWorkbenchContentSecurityPolicy(created, isDev, remoteAuthority)
+  applyWorkbenchContentSecurityPolicy(created, isDev, remoteAuthority, product)
   configuredSession = created
   return created
 }
@@ -643,7 +654,7 @@ export async function openSurface(
   const view = new WebContentsView({
     webPreferences: {
       preload: join(__dirname, '../preload/workbench.js'),
-      session: workbenchSession(devServerUrl !== undefined, runtime.remoteAuthority),
+      session: workbenchSession(devServerUrl !== undefined, runtime.remoteAuthority, runtime),
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: true,

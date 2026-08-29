@@ -298,7 +298,11 @@ async function openAt(owner: FakeWebContents, root: string): Promise<string> {
 
 describe('the workbench session', () => {
   it('is not defaultSession, and carries its own CSP and permission handlers', () => {
-    const created = surface.workbenchSession(false, RUNTIME.remoteAuthority) as unknown as {
+    const created = surface.workbenchSession(
+      false,
+      RUNTIME.remoteAuthority,
+      RUNTIME
+    ) as unknown as {
       id: string
       webRequest: { onHeadersReceived: ReturnType<typeof vi.fn> }
       setPermissionRequestHandler: ReturnType<typeof vi.fn>
@@ -351,7 +355,7 @@ describe('the surface webPreferences', () => {
   it('puts the view on the workbench session object itself', async () => {
     await openAt(shell, ROOT_A)
     expect(constructed.at(-1)?.webPreferences['session']).toBe(
-      surface.workbenchSession(false, RUNTIME.remoteAuthority)
+      surface.workbenchSession(false, RUNTIME.remoteAuthority, RUNTIME)
     )
     expect(constructed.at(-1)?.webPreferences['session']).not.toBe(defaultSession)
   })

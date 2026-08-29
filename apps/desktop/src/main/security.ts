@@ -164,12 +164,26 @@ export function workbenchPolicy(isDev: boolean, remoteAuthority: string | null):
 /**
  * Is this the REH's own resource endpoint, on the server Chorus started.
  *
- * Exported for its test, because the whole safety of the header it guards rests
- * on being exact: an origin comparison rather than a prefix, and one path rather
- * than a subtree.
+ * **The path carries the product segment**, and a first version of this did not
+ * — so the branch it guards was unreachable and the fix it enabled did nothing
+ * at all, while the screenshot stayed identical. The client builds
+ * `/${quality}-${commit}/vscode-remote-resource`: `network.js`'s
+ * `getServerProductSegment` returns `${product.quality}-${product.commit}` and
+ * joins it in front. `workbench-ipc.ts` already documents that prefix, in the
+ * paragraph explaining why a `quality` mismatch 404-storms rather than failing
+ * loudly.
+ *
+ * Compared exactly rather than with `endsWith`, which is the point of threading
+ * the identity here at all: both values are already in `WorkbenchRuntime`, so
+ * there is no reason to accept a path that merely finishes the right way. This
+ * runs in a session that executes third-party extension code.
  */
-export function isOwnRemoteResource(url: string, remoteAuthority: string | null): boolean {
-  if (remoteAuthority === null) return false
+export function isOwnRemoteResource(
+  url: string,
+  remoteAuthority: string | null,
+  product: { readonly quality: string; readonly commit: string } | null
+): boolean {
+  if (remoteAuthority === null || product === null) return false
   let parsed: URL
   try {
     parsed = new URL(url)
@@ -177,14 +191,17 @@ export function isOwnRemoteResource(url: string, remoteAuthority: string | null)
     return false
   }
   return (
-    parsed.origin === `http://${remoteAuthority}` && parsed.pathname === '/vscode-remote-resource'
+    parsed.origin === `http://${remoteAuthority}` &&
+    parsed.pathname === `/${product.quality}-${product.commit}/vscode-remote-resource`
   )
 }
 
 export function applyWorkbenchContentSecurityPolicy(
   session: Session,
   isDev: boolean,
-  remoteAuthority: string | null
+  remoteAuthority: string | null,
+  /** The server's identity, which its resource path is prefixed with. */
+  product: { readonly quality: string; readonly commit: string } | null
 ): void {
   const policy = workbenchPolicy(isDev, remoteAuthority)
 
@@ -219,7 +236,7 @@ export function applyWorkbenchContentSecurityPolicy(
      * Existing spellings are dropped rather than appended to: two
      * `Access-Control-Allow-Origin` headers are treated as none.
      */
-    if (!isOwnRemoteResource(details.url, remoteAuthority)) {
+    if (!isOwnRemoteResource(details.url, remoteAuthority, product)) {
       callback({ responseHeaders })
       return
     }
