@@ -1033,6 +1033,22 @@ export function forwardWorkbenchContextToRenderer(runtime: ChorusRuntime): () =>
   setWorkbenchContextSink(({ projectRoot, context }) => {
     lastWorkbenchContext.set(projectRoot, context)
     const conversations = runtime.conversationsForRoot(projectRoot)
+    /*
+     * Debug, because it is per keystroke — but it is the line that separates the
+     * three ways this can fail, and three rounds were spent guessing between
+     * them: the surface never reporting, the root not matching a project, and a
+     * report arriving with no selection in it. `CHORUS_DEBUG=1` to see it.
+     */
+    runtime.log.debug('workbench context', {
+      projectRoot,
+      conversations: conversations.length,
+      path: context.relativePath,
+      lines:
+        context.startLine === null
+          ? null
+          : `${String(context.startLine)}-${String(context.endLine)}`,
+      version: context.version,
+    })
     if (conversations.length === 0) return
 
     /*
