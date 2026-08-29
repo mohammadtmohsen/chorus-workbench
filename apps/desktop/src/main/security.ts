@@ -92,7 +92,24 @@ export function applyContentSecurityPolicy(session: Session, isDev: boolean): vo
 const WORKBENCH_BASE_CSP = [
   "default-src 'none'",
   "style-src 'self' 'unsafe-inline'",
-  "img-src 'self' data: blob:",
+  /*
+   * `https://open-vsx.org` here and in `connect-src` — the one host this
+   * workbench may reach beyond its own server, and it is the gallery it is
+   * already configured to install from.
+   *
+   * Without it the Extensions view can search and install and cannot *show* what
+   * it is offering: the details pane renders "Failed to fetch" and every icon is
+   * blank, because installing happens on the REH while the README and the icons
+   * are fetched by this renderer. Reported as "failed to fetch" against an
+   * extension that had in fact installed.
+   *
+   * Narrowly, and the narrowness is the point the paragraph above makes: this
+   * renderer runs third-party extension code, so each origin added is one that
+   * code can reach. This one buys nothing new in practice — an extension already
+   * talks to Open VSX through the extension host — which is what makes it the
+   * only widening worth making.
+   */
+  "img-src 'self' data: blob: https://open-vsx.org",
   "font-src 'self' data:",
   "media-src 'self' data: blob:",
   "worker-src 'self' blob:",
@@ -120,14 +137,19 @@ function remoteConnectSources(remoteAuthority: string | null): string {
   return ` ws://${remoteAuthority} http://${remoteAuthority}`
 }
 
-function workbenchPolicy(isDev: boolean, remoteAuthority: string | null): string {
+/**
+ * Exported for its test, which is the point rather than a convenience: this
+ * string is a security boundary, and it now contains a deliberate widening. A
+ * test that names every origin is how the next widening has to be deliberate too.
+ */
+export function workbenchPolicy(isDev: boolean, remoteAuthority: string | null): string {
   const remote = remoteConnectSources(remoteAuthority)
   return [
     ...WORKBENCH_BASE_CSP,
     isDev
       ? "script-src 'self' 'unsafe-inline' 'unsafe-eval' blob:"
       : "script-src 'self' 'unsafe-eval' blob:",
-    `connect-src 'self' data: blob:${remote}${isDev ? ' ws://localhost:* http://localhost:*' : ''}`,
+    `connect-src 'self' data: blob: https://open-vsx.org${remote}${isDev ? ' ws://localhost:* http://localhost:*' : ''}`,
   ].join('; ')
 }
 
