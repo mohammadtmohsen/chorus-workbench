@@ -68,6 +68,32 @@ DMG is ~204 MB where it was 132.7 MB, which is the bundling cost a downloader
 pays. **Linux has never built** and is `C-064`; work stopped there deliberately
 rather than iterating a red job one line at a time.
 
+### R6, R7, R8 and R11 measured — the plan's oldest debt, paid
+
+`e2e/workbench-memory.mjs`, macOS arm64, 60 s idle per term, RSS summed across
+every Chorus process. `M0` 556.0 MB / 6 processes, `M1` 1048.3 MB / 10, `M2`
+1380.3 MB / 13.
+
+**R7 passes and it is the one that mattered.** The second project costs 332.0 MB
+where the first cost 492.3 MB — run three times, same direction every time, 26–37%
+margin. §2.4 chose one shared REH over a server per project on architecture and
+licence and said in as many words that "R7 still decides". It has now decided, in
+favour of the shape that was already built. R6 passes at 1048.3 MB against a
+1200 MB ceiling, though an earlier run of the same gate reached 1189.9 MB and that
+margin is thin. R8 passes at 0.51% idle CPU against 3%.
+
+**R11 fails on its inventory half, and that is a real defect.** Memory returns to
+within 5.4% of `M1`; two REH extension hosts survive ten open/close cycles. It is
+the second of the two candidates R11's own rationale names, and it is the reason
+R11 was redefined from a renderer heap to a process inventory — a heap would have
+shown this flat, and the memory half of the check did exactly that. Filed as
+`C-065`, undiagnosed: ten cycles left two, which reads more like a race or an
+impatient settle window than a missing teardown, and nobody has looked.
+
+**Two things the gate is not.** It measures **two** projects because R7 defines
+its terms that way; the product allows **four**, and four has never been measured.
+And it is one machine on one platform.
+
 **What none of this proves.** No installer has been installed. The product gates
 — cold start, one versus four workbenches, sidecar crash, extensions, terminal,
 debug, Git — are untouched, R7/R11 are still owed as numbers, and Phase 5's user

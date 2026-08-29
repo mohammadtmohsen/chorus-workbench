@@ -30,6 +30,48 @@ Nothing here can be finished by me alone.
 
 ## Open
 
+### C-065 · Two extension hosts survive ten open/close cycles — R11's inventory half fails
+
+**Measured 2026-08-29** by `pnpm --filter @chorus/desktop run gate:memory`, on
+macOS arm64. R11 has two halves and they disagree: memory returns to within
+**5.4%** of `M1`, comfortably inside the 15% the threshold allows, and the
+process **inventory does not** — 12 processes where one project had 10.
+
+**What survives, by name.** Two REH `node` processes:
+
+```
++2  …/workbench/1.121.03429-darwin-arm64/node
+```
+
+That is the second of the two candidates R11 names in its own rationale — "a
+forked extension host the REH never reaps" — and it is exactly why R11 was
+redefined to assert an inventory rather than a heap. A heap sampled in any one
+renderer would have shown this as flat, and the memory half of the check passed
+while it was happening.
+
+**Why it matters.** The REH forks an extension host per connection, and a
+connection belongs to a surface. If closing a project leaves its host behind,
+then "switch projects while agents or terminals continue" — plan §3's promise —
+costs a process every time, and the four-pane ceiling stops bounding anything. It
+is also the shape of leak that is invisible until a machine is short of memory,
+because each one is small.
+
+**What is not yet known, and must not be assumed.** Ten cycles left **two**, not
+ten. So most hosts are reaped and some are not — which reads more like a race or
+a timeout than a missing teardown, but nobody has looked. It is also possible
+they exit later than the 60 s settle window and the check is simply impatient.
+Both readings fit the evidence and they have different fixes.
+
+**Done means**: the cause is identified rather than inferred — a longer settle
+window that clears it makes this a threshold problem, and one that does not makes
+it a reaping bug — and `gate:memory` passes both halves of R11 on two independent
+runs.
+
+**Where to start.** `workbench-host.ts` owns the server and its lease;
+`reap.ts` owns orphan cleanup after a crash, which is a different path and is not
+this. The connection belongs to the surface's `WebContents`, so the question is
+what the REH does when that socket closes.
+
 ### C-064 · Linux installers do not build, and the job is red in every release run
 
 **Live as of 2026-08-29**, the moment Phase 7 added a `linux:` target and a

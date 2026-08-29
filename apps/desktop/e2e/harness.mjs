@@ -47,10 +47,16 @@ const DEBUGGER_TIMEOUT_MS = 30_000
  * @param options.executable A built `.app` binary to drive instead of `out/`.
  *   What the specs assert is the same either way; what differs is whether the
  *   code came from `electron-vite` or from the bundle a user actually installs.
+ * @param options.env Extra environment for the child, merged over the harness's
+ *   own. `CHORUS_WORKBENCH_E2E_ROOTS` is why this exists: the workbench chooser
+ *   is a native dialog CDP cannot click, and seeding it is the only way a gate
+ *   can open a project at all. Every gate that needed it used to spawn Electron
+ *   itself, which is three copies of the port-reading logic this function exists
+ *   to own.
  */
-export async function launch({ userData, keepData = false, executable } = {}) {
+export async function launch({ userData, keepData = false, executable, env: extra } = {}) {
   const dataPath = userData ?? mkdtemp()
-  const env = { ...process.env, CHORUS_USER_DATA: dataPath }
+  const env = { ...process.env, CHORUS_USER_DATA: dataPath, ...extra }
   // The VS Code extension host sets this, and it makes Electron boot as Node.
   delete env.ELECTRON_RUN_AS_NODE
 
@@ -148,6 +154,15 @@ export async function launch({ userData, keepData = false, executable } = {}) {
 
   return {
     dataPath,
+    /**
+     * The main process's pid, so a caller can find its descendants.
+     *
+     * Exposed for the memory gate: R7 and R11 are both defined as resident
+     * memory *summed across every Chorus process* — shell, each workbench
+     * `WebContents`, the REH and its forked extension hosts — and a renderer
+     * heap sampled through CDP cannot see any of them. Only the process tree can.
+     */
+    pid: child.pid,
     ...session,
     output: () => output,
     async quit() {

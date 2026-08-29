@@ -994,8 +994,42 @@ a retired label would hang rather than fail.
 
 **Where the phase actually stands.** macOS arm64, macOS x64 and Windows all
 build, verify at `bundle` scope and upload, proven on two dispatched runs.
-**Linux has never built** — `C-064`. The product gates below are untouched, and
-R7/R11 are still owed as numbers.
+**Linux has never built** — `C-064`.
+
+### R6, R7, R8 and R11 — measured, and R7 vindicates §2.4
+
+**The numbers this plan has owed since Phase 1 exist.** Measured by
+`pnpm --filter @chorus/desktop run gate:memory`, macOS arm64, 60 s idle per term,
+resident memory summed across every Chorus process:
+
+| Term                           |     Total | Processes |
+| ------------------------------ | --------: | --------: |
+| `M0` — no project open         |  556.0 MB |         6 |
+| `M1` — one project             | 1048.3 MB |        10 |
+| `M2` — two projects, two roots | 1380.3 MB |        13 |
+
+- **R7 passes.** The second project costs **332.0 MB** against the first's
+  **492.3 MB**. Run three times with the roots recreated each time, and the
+  inequality held every time with a 26–37% margin. **This is the measurement
+  §2.4 deferred**: it chose one shared REH over a server per project on
+  architecture and licence and said "R7 still decides". R7 has now decided, and
+  it decided in favour of the shape that was already built.
+- **R6 passes** — `M1` is 1048.3 MB against a 1200 MB ceiling. Not a wide margin,
+  and worth watching: an earlier run of the same gate came in at 1189.9 MB.
+- **R8 passes** — 0.51% idle CPU with two projects, against a 3% ceiling. The
+  file-watcher fear the row was written for does not materialise here.
+- **R11 half fails.** Memory returns to within 5.4% of `M1`, inside the 15%
+  allowed. The **process inventory does not**: two REH extension hosts survive
+  ten open/close cycles. That is the second candidate R11's own rationale names,
+  and it is `C-065`.
+
+**R9 is recorded, not gated**, as §8.3 chose: process count is 6 at `M0`, 10 at
+`M1`, 13 at `M2`.
+
+**What these numbers are not.** One machine, one platform, one afternoon. They
+say the inequality holds here; they say nothing about a smaller laptop, and
+nothing about **four** projects — the ceiling the product actually allows — which
+has still never been measured.
 
 Unless narrowed before implementation, cross-platform means macOS, Windows and Linux desktop.
 The first supported architecture set is:
