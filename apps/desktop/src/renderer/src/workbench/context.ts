@@ -55,6 +55,49 @@ function relativeTo(root: string, uriPath: string): string | null {
  * time somebody is reading a file; watching only the second misses a file opened
  * and not yet touched.
  */
+/**
+ * What the editor is showing, right now, with the selected text.
+ *
+ * **Shared with the push rather than a second reader.** The push reports
+ * everything here except `text`, and it fires on every keystroke — carrying the
+ * selection with it would put a copy of whatever is highlighted across a process
+ * boundary sixty times a second, which is why `selectedBytes` exists. The
+ * *snapshot* is asked for once, when a message is sent, and there the text is the
+ * whole point: for a dirty buffer the file on disk no longer says what the person
+ * is looking at, so a path and a line range name lines that do not exist yet.
+ *
+ * Two readers of one editor would drift — the range from one and the text from
+ * another is how a quote ends up describing different lines from its own header.
+ */
+export async function readEditorSnapshot(
+  projectRoot: string
+): Promise<WorkbenchContext & { text: string }> {
+  const [editors, codeEditors, workingCopies] = await Promise.all([
+    getService(IEditorService),
+    getService(ICodeEditorService),
+    getService(IWorkingCopyService),
+  ])
+  const uri = editors.activeEditor?.resource
+  const editor = codeEditors.getFocusedCodeEditor()
+  const model = editor?.getModel() ?? null
+  const selection = editor?.getSelection() ?? null
+  const text =
+    selection === null || model === null || selection.isEmpty()
+      ? ''
+      : model.getValueInRange(selection)
+  return {
+    relativePath: uri === undefined ? null : relativeTo(projectRoot, uri.path),
+    startLine: selection?.startLineNumber ?? null,
+    endLine: selection?.endLineNumber ?? null,
+    isEmpty: selection?.isEmpty() ?? true,
+    isDirty: uri === undefined ? false : workingCopies.isDirty(uri),
+    languageId: model?.getLanguageId() ?? '',
+    selectedBytes: new TextEncoder().encode(text).length,
+    version: model?.getVersionId() ?? null,
+    text,
+  }
+}
+
 export async function reportEditorContext(projectRoot: string): Promise<void> {
   const [editors, codeEditors, workingCopies] = await Promise.all([
     getService(IEditorService),

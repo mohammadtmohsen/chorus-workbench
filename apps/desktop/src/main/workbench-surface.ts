@@ -19,6 +19,8 @@ import {
   WORKBENCH_SHELL_CONTRACT,
   WORKBENCH_CONTEXT_CHANNEL,
   WORKBENCH_EDIT_CHANNEL,
+  WORKBENCH_SNAPSHOT_CHANNEL,
+  WORKBENCH_SNAPSHOT_RESULT_CHANNEL,
   WORKBENCH_EDIT_RESULT_CHANNEL,
   WorkbenchContext,
   WORKBENCH_USER_SETTINGS_READ_CHANNEL,
@@ -26,6 +28,7 @@ import {
   type WorkbenchConnection,
   type WorkbenchEditRequest,
   type WorkbenchEditResult,
+  type WorkbenchSnapshotResult,
   type WorkbenchRect,
   type WorkbenchShellResponse,
   type WorkbenchTarget,
@@ -947,6 +950,14 @@ export function registerWorkbenchHandlers(
    * after a timeout looks like, and there is nothing to do about it — the
    * request has already been answered.
    */
+  ipcMain.on(WORKBENCH_SNAPSHOT_RESULT_CHANNEL, (event, raw: unknown) => {
+    if (byContents.get(event.sender) === undefined) return
+    if (typeof raw !== 'object' || raw === null) return
+    const result = raw as WorkbenchSnapshotResult
+    if (typeof result.requestId !== 'string') return
+    pendingSnapshots.get(result.requestId)?.(result)
+  })
+
   ipcMain.on(WORKBENCH_EDIT_RESULT_CHANNEL, (event, raw: unknown) => {
     if (byContents.get(event.sender) === undefined) return
     if (typeof raw !== 'object' || raw === null) return
@@ -996,6 +1007,43 @@ const pendingEdits = new Map<string, (result: WorkbenchEditResult) => void>()
  * open, and mean because an edit nobody answers must not hang a turn for ever.
  */
 const EDIT_TIMEOUT_MS = 15_000
+
+/** Snapshot requests in flight, by id. Same correlation as the edits below. */
+const pendingSnapshots = new Map<string, (result: WorkbenchSnapshotResult) => void>()
+
+/**
+ * Asks the surface showing this project what its editor is showing.
+ *
+ * `null` for "this project has no surface", which is what tells `ide:snapshot`
+ * to fall back to the external bridge — distinct from a surface that answered
+ * with no file open, which is a real answer and must not be retried elsewhere.
+ */
+export async function requestWorkbenchSnapshot(
+  projectRoot: string
+): Promise<WorkbenchSnapshotResult['snapshot'] | undefined> {
+  const surface = [...byId.values()].find((s) => s.projectRoot === projectRoot)
+  if (surface === undefined || surface.view.webContents.isDestroyed()) return undefined
+
+  const requestId = randomUUID()
+  return new Promise((resolve) => {
+    const settle = (result: WorkbenchSnapshotResult): void => {
+      if (!pendingSnapshots.delete(requestId)) return
+      clearTimeout(timer)
+      resolve(result.snapshot)
+    }
+    /*
+     * Shorter than an edit's budget on purpose: this one sits between pressing
+     * Send and the message going, so a surface that is wedged must cost a moment
+     * and not the turn. Timing out answers `null`, and the message is sent
+     * without editor context rather than not at all.
+     */
+    const timer = setTimeout(() => {
+      settle({ requestId, snapshot: null })
+    }, 2_000)
+    pendingSnapshots.set(requestId, settle)
+    surface.view.webContents.send(WORKBENCH_SNAPSHOT_CHANNEL, { requestId })
+  })
+}
 
 /**
  * Asks the surface showing this project to apply an edit, and waits.

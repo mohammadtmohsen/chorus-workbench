@@ -1,7 +1,7 @@
 import { initialize } from '@codingame/monaco-vscode-api'
 import { prepareWorkbench } from './services.js'
 import { reportEditorContext } from './context.js'
-import { serveWorkbenchEdits } from './edit.js'
+import { serveWorkbenchEdits, serveWorkbenchSnapshot } from './edit.js'
 import { announceSharedExtensionScope } from './extension-scope.js'
 import { registerWorkbenchWorkers } from './workers.js'
 import { persistUserSettings, restoreUserSettings } from './user-settings.js'
@@ -96,6 +96,7 @@ async function main(): Promise<void> {
    * arrives early would simply have no listener.
    */
   serveWorkbenchEdits(connection.projectRoot)
+  serveWorkbenchSnapshot(connection.projectRoot)
 }
 
 /*

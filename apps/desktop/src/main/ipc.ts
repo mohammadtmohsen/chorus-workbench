@@ -29,7 +29,12 @@ import {
   type IpcResponse,
   type TranscriptEvent,
 } from '../shared/ipc.js'
-import { isInside, toDisplayRange, type EditorMetadata } from '@chorus/ide-protocol'
+import {
+  MAX_SELECTED_BYTES,
+  isInside,
+  toDisplayRange,
+  type EditorMetadata,
+} from '@chorus/ide-protocol'
 import { projectRelativePath, type CanonicalRoot } from '@chorus/workspace'
 import type { IdeBridge } from './ide-bridge.js'
 import {
@@ -50,7 +55,7 @@ import type { WorkspaceSnapshot } from '../shared/workspace-layout.js'
 import { readSettings, writeSettings, type Settings } from './settings.js'
 import { applyTheme } from './theme.js'
 import { previewFile, stashFile } from './stash.js'
-import { setWorkbenchContextSink } from './workbench-surface.js'
+import { requestWorkbenchSnapshot, setWorkbenchContextSink } from './workbench-surface.js'
 import type { WorkbenchContext } from '../shared/workbench-ipc.js'
 
 type Handlers = { [C in IpcChannel]: (request: never) => Promise<IpcResponse<C>> }
@@ -682,14 +687,31 @@ export function buildHandlers(runtime: ChorusRuntime): Handlers {
        * may not even be open would be the wrong way round. The external bridge
        * stays as the fallback until Phase 8 deletes it.
        */
-      const embedded = lastWorkbenchContext.get(cwd)
+      /*
+       * Asked of the surface, not read from the retained push.
+       *
+       * The push is debounced and drives the pill; the composer's own comment
+       * says sending what the pill said would attach the wrong lines, which is
+       * worse than attaching none. This is the same pull the external bridge
+       * does, one process over — and it is the only path that carries the
+       * selected **text**, which the push omits by design.
+       */
+      const embedded = await requestWorkbenchSnapshot(cwd)
       if (embedded !== undefined) {
         if (
-          embedded.relativePath === null ||
+          embedded?.relativePath == null ||
           embedded.startLine === null ||
           embedded.endLine === null
         ) {
           return { outcome: 'unavailable', reason: 'unmatched' } as const
+        }
+        /*
+         * The same cap the external bridge enforces, and enforced here rather
+         * than trusted from the surface: a truncated selection can mean
+         * something different from what it was cut out of.
+         */
+        if (embedded.selectedBytes > MAX_SELECTED_BYTES) {
+          return { outcome: 'tooLarge', selectedBytes: embedded.selectedBytes } as const
         }
         return {
           outcome: 'ok',
@@ -699,13 +721,7 @@ export function buildHandlers(runtime: ChorusRuntime): Handlers {
           isEmpty: embedded.isEmpty,
           isDirty: embedded.isDirty,
           languageId: embedded.languageId,
-          /*
-           * No text. The push carries a byte count and not the selection itself,
-           * deliberately — see `WorkbenchContext` — and inventing an empty string
-           * here would tell the agent the selection was empty rather than that it
-           * was not sent.
-           */
-          text: '',
+          text: embedded.text,
           ...(embedded.version === null ? {} : { modelVersion: embedded.version }),
           provenance: { kind: 'worktree' as const },
         } as const

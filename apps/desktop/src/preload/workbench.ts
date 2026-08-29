@@ -53,6 +53,8 @@ export const USER_SETTINGS_READ_CHANNEL = 'workbench:userSettings:read'
 export const USER_SETTINGS_WRITE_CHANNEL = 'workbench:userSettings:write'
 /* Phase 6 slice 6a, spelled out here for the same reason and under the same test. */
 export const CONTEXT_CHANNEL = 'workbench:context'
+export const SNAPSHOT_CHANNEL = 'workbench:snapshot'
+export const SNAPSHOT_RESULT_CHANNEL = 'workbench:snapshot:result'
 export const EDIT_CHANNEL = 'workbench:edit'
 export const EDIT_RESULT_CHANNEL = 'workbench:edit:result'
 
@@ -190,6 +192,24 @@ const api: ChorusWorkbenchApi = {
    * uishable from a hung surface, and main would sit on it until its timeout —
    * so the failure is converted into a result here rather than escaping.
    */
+  onSnapshotRequest: (handler) => {
+    ipcRenderer.on(SNAPSHOT_CHANNEL, (_event, request: unknown) => {
+      void (async () => {
+        const requestId =
+          typeof request === 'object' && request !== null && 'requestId' in request
+            ? String(request.requestId)
+            : ''
+        try {
+          ipcRenderer.send(SNAPSHOT_RESULT_CHANNEL, { requestId, snapshot: await handler() })
+        } catch {
+          // Answered regardless: main is waiting, and an unanswered request is
+          // indistinguishable from a hung surface until its timeout.
+          ipcRenderer.send(SNAPSHOT_RESULT_CHANNEL, { requestId, snapshot: null })
+        }
+      })()
+    })
+  },
+
   onEditRequest: (handler) => {
     ipcRenderer.on(EDIT_CHANNEL, (_event, request: unknown) => {
       void (async () => {

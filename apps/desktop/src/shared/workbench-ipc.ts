@@ -152,6 +152,28 @@ export const WORKBENCH_CONTEXT_CHANNEL = 'workbench:context'
  * Applying to the *model* means the edit joins their undo stack, shows in the
  * dirty indicator, and is theirs to reject with one keystroke.
  */
+/**
+ * What the editor is showing, asked for at the moment a message is sent.
+ *
+ * **A pull, not the retained push, and the composer already explains why**: the
+ * push is debounced, so it can be a few hundred milliseconds old, and "sending
+ * what the pill said would attach the wrong lines to the question, which is
+ * worse than attaching none". The push drives the pill; this answers Send.
+ *
+ * It also carries the selected **text**, which the push deliberately does not —
+ * the push fires per keystroke and reports a byte count instead. Here the text
+ * is the point: for a dirty buffer, the file on disk no longer says what the
+ * person is looking at, so a path and a line range name lines that do not exist.
+ */
+export const WORKBENCH_SNAPSHOT_CHANNEL = 'workbench:snapshot'
+export const WORKBENCH_SNAPSHOT_RESULT_CHANNEL = 'workbench:snapshot:result'
+
+export interface WorkbenchSnapshotResult {
+  readonly requestId: string
+  /** Null when the surface could not read an editor at all. */
+  readonly snapshot: (WorkbenchContext & { readonly text: string }) | null
+}
+
 export const WORKBENCH_EDIT_CHANNEL = 'workbench:edit'
 export const WORKBENCH_EDIT_RESULT_CHANNEL = 'workbench:edit:result'
 
@@ -445,6 +467,10 @@ export interface ChorusWorkbenchApi {
    * ten times. The handler is given the raw payload because it arrived from
    * outside this document and validating it is the handler's job.
    */
+  /** Answers main's request for what the editor is showing, with its text. */
+  readonly onSnapshotRequest: (
+    handler: () => Promise<(WorkbenchContext & { text: string }) | null>
+  ) => void
   readonly onEditRequest: (handler: (request: unknown) => Promise<WorkbenchEditResult>) => void
   /** Hands main the current text of the user's settings file, to store as-is. */
   readonly writeUserSettings: (text: string) => Promise<void>

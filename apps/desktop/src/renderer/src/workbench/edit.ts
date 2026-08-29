@@ -2,6 +2,7 @@ import { getService } from '@codingame/monaco-vscode-api'
 import { ITextModelService } from '@codingame/monaco-vscode-api/vscode/vs/editor/common/services/resolverService.service'
 import { IFileService } from '@codingame/monaco-vscode-api/vscode/vs/platform/files/common/files.service'
 import { URI } from '@codingame/monaco-vscode-api/vscode/vs/base/common/uri'
+import { readEditorSnapshot } from './context.js'
 import type { WorkbenchEditRequest, WorkbenchEditResult } from '../../../shared/workbench-ipc.js'
 
 /**
@@ -251,4 +252,15 @@ export function serveWorkbenchEdits(projectRoot: string): void {
     }
     return applyWorkbenchEdit(projectRoot, request)
   })
+}
+
+/**
+ * Answers main's snapshot request for the life of the document.
+ *
+ * Registered beside the edit handler because they are the same mechanism in the
+ * same direction — main asking this surface something — and splitting them
+ * across files would mean two places to look when a request goes unanswered.
+ */
+export function serveWorkbenchSnapshot(projectRoot: string): void {
+  window.chorusWorkbench.onSnapshotRequest(async () => readEditorSnapshot(projectRoot))
 }
