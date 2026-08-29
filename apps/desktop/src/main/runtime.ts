@@ -1251,7 +1251,7 @@ export class ChorusRuntime {
      * share a transaction if anything ever needs them to. Nothing does today, and
      * the point is that the option was not designed away.
      */
-    const projects = new ProjectService(new ProjectStore(db))
+    const projects = new ProjectService(new ProjectStore(db), db)
 
     return new ChorusRuntime(db, store, adapters ?? defaultAdapters(), log, userDataPath, projects)
   }
@@ -3410,22 +3410,49 @@ export class ChorusRuntime {
   }
 
   /**
-   * Forgets a project, unless one of its conversations is open.
+   * Deletes a project and everything it recorded, closing its open rooms first.
    *
-   * The guard lives here for the same reason the count does: `ProjectService`
-   * cannot see running conversations, so it would happily delete a record three
-   * open rooms are resolving their root through. They would not notice
-   * immediately — `cwd` is already resolved and cached on each one — which is
-   * exactly what makes it worth refusing. The failure would arrive later and
-   * somewhere else, as an agent that cannot start or a reopen that finds
-   * nothing, with no visible connection to the moment the project was removed.
+   * **This used to refuse while any conversation was open**, and the reasoning
+   * was sound: `ProjectService` cannot see running conversations, so it would
+   * happily delete a record three open rooms are resolving their root through.
+   * They would not notice immediately — `cwd` is already resolved and cached on
+   * each one — which is what made it worth refusing. The failure arrived later
+   * and somewhere else, as an agent that could not start, with no visible
+   * connection to the moment the project was removed.
+   *
+   * **What changed is the caller, not that reasoning.** Refusing was right while
+   * the only route here was a folder that had vanished, because such a project
+   * cannot have started a conversation and the guard fired only for someone
+   * removing a working project on purpose. Remove is now offered on any
+   * project's card, where having rooms open is the normal case rather than the
+   * odd one — so a refusal would be a button that errors on the projects people
+   * most want to remove.
+   *
+   * So the rooms are closed rather than the removal refused. That is the same
+   * end state the old message asked the person to produce by hand, and it keeps
+   * the invariant the guard was protecting: nothing is still resolving a root
+   * through a record that is about to stop existing.
+   *
+   * `relocateProject` keeps its refusal deliberately. Moving a project is a
+   * recovery whose whole point is that the work survives, so silently closing
+   * rooms to make it possible would be destroying the thing being recovered.
    */
-  forgetProject(projectId: string): { forgotten: boolean } {
-    const open = [...this.active.values()].filter((c) => c.projectId === projectId).length
-    if (open > 0) {
-      throw new Error(
-        `This project still has ${String(open)} open conversation${open === 1 ? '' : 's'}. Close them before removing it.`
-      )
+  async forgetProject(projectId: string): Promise<{ forgotten: boolean }> {
+    const open = [...this.active.values()].filter((c) => c.projectId === projectId)
+    /*
+     * Sequential, not `Promise.all`. Closing a conversation tears down agent
+     * processes and its workbench lease, and the settled order is what the
+     * supervisor's own logs are read against — a fan of parallel teardowns
+     * interleaves them into something nobody can follow when one fails.
+     */
+    for (const conversation of open) {
+      await this.closeConversation(conversation.conversationId)
+    }
+    if (open.length > 0) {
+      this.log.info('closed rooms before removing project', {
+        projectId,
+        closed: open.length,
+      })
     }
     return { forgotten: this.projects.forget(projectId) }
   }

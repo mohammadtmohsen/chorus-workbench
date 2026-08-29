@@ -531,7 +531,8 @@
     "noConversations": "No conversations in this project yet.",
     "folderMissing": "This folder is no longer there. It may have been renamed, moved, deleted, or it is on a drive that is not connected.",
     "locateFolder": "Locate folder…",
-    "removeProject": "Remove project"
+    "removeProject": "Remove project",
+    "removeProjectNote": "Deletes its conversations and history. This cannot be undone."
   },
   "workbench": {
     "probeTitle": "Workbench containment probe",

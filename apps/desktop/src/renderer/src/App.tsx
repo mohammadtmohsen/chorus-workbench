@@ -1025,12 +1025,30 @@ export function App(): React.JSX.Element {
       setError(null)
       try {
         await window.chorus.forgetProject({ projectId })
+        /*
+         * Main closed the project's rooms before deleting it, and their rows are
+         * gone. The shell has to be told, because nothing else will: a closed
+         * conversation reports through the pulse, but a *deleted* one has no
+         * record left to report against, so a session left in this array would
+         * be a tab whose transcript no longer exists anywhere.
+         *
+         * Ordered deliberately — sessions first, then the tab. `removeProject`
+         * closes the project's tab in every pane, and doing that while its
+         * conversations were still mounted would unmount them mid-teardown.
+         */
+        const gone = sessionsRef.current.filter((session) => session.projectId === projectId)
+        for (const session of gone) {
+          carries.current.delete(session.conversationId)
+          useWorkspaceStore.getState().removeSession(session.conversationId)
+        }
+        updateSessions((current) => current.filter((session) => session.projectId !== projectId))
+        useWorkspaceStore.getState().removeProject(projectId)
         await refreshProjects()
       } catch (error) {
         fail(setError)(error)
       }
     },
-    [refreshProjects]
+    [refreshProjects, updateSessions]
   )
 
   const toggleProjectAgent = useCallback(

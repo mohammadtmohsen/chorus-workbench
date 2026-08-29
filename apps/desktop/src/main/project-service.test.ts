@@ -26,7 +26,7 @@ beforeEach(() => {
   const db = openSqlite({ path: ':memory:' })
   migrate(db)
   clock = 1_000
-  service = new ProjectService(new ProjectStore(db, { caseSensitivePaths: true }), () => clock)
+  service = new ProjectService(new ProjectStore(db, { caseSensitivePaths: true }), db, () => clock)
 })
 
 describe('adopt', () => {

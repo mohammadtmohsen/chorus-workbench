@@ -3,6 +3,8 @@ import { basename } from 'node:path'
 import {
   DuplicateProjectRootError,
   UnknownProjectError,
+  purgeProject,
+  type Database,
   type Project,
   type ProjectStore,
 } from '@chorus/event-store'
@@ -81,6 +83,15 @@ function directoryExists(path: string): boolean {
 export class ProjectService {
   constructor(
     private readonly projects: ProjectStore,
+    /*
+     * The same handle `ProjectStore` holds, and it is here for exactly one
+     * method. `forget` has to delete a project's history and its registry row
+     * together or not at all, and those live on opposite sides of a separation
+     * this class did not invent and should not collapse — so it takes the handle
+     * and spends one transaction, rather than the registry growing a method
+     * about the log.
+     */
+    private readonly db: Database,
     private readonly clock: () => number = Date.now
   ) {}
 
@@ -249,10 +260,30 @@ export class ProjectService {
   }
 
   /**
-   * Drops a project from the rail. Its conversations and their events stay in the
-   * log — forgetting a project is not a claim that the work never happened.
+   * Deletes a project, its conversations, and every event they ever recorded.
+   *
+   * **This used to keep the history**, on the reasoning that forgetting a project
+   * is not a claim the work never happened — and that was the right default while
+   * the only way to reach it was a folder that had vanished from disk. Removing a
+   * project you still have is a different act with a different intent: it is not
+   * "this checkout is gone", it is "I am finished with this". Keeping transcripts
+   * for a project the person deliberately deleted is the surprising behaviour,
+   * not the safe one.
+   *
+   * **There is no undo, and no confirmation upstream either.** Re-adding the same
+   * folder afterwards makes a new, empty project. Both halves of that were asked
+   * for explicitly; neither is a default worth inferring, which is why this
+   * comment states them rather than the code implying them.
+   *
+   * One transaction over both stores. Nested inside `purgeProject`'s own — which
+   * SQLite handles as a savepoint — so history and registry commit together or
+   * neither does.
    */
   forget(projectId: string): boolean {
-    return this.projects.remove(projectId)
+    const run = this.db.transaction((): boolean => {
+      purgeProject(this.db, projectId)
+      return this.projects.remove(projectId)
+    })
+    return run()
   }
 }

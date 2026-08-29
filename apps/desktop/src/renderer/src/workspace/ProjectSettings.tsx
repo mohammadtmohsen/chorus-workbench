@@ -129,21 +129,6 @@ export function ProjectSettings(props: ProjectSettingsProps): React.JSX.Element 
             >
               {t('project.locateFolder')}
             </button>
-            {/*
-              Removing is offered beside relocating rather than buried, because
-              "that checkout is gone for good" is at least as common as "it
-              moved" — and without it the only way to clear a dead project was
-              to edit the database.
-            */}
-            <button
-              type="button"
-              className="btn btn--quiet"
-              onClick={() => {
-                void props.onForget()
-              }}
-            >
-              {t('project.removeProject')}
-            </button>
           </div>
         </div>
       )}
@@ -227,6 +212,33 @@ export function ProjectSettings(props: ProjectSettingsProps): React.JSX.Element 
       >
         {planning ? t('preview.planOn') : t('preview.planOff')}
       </button>
+
+      {/*
+        Last, and alone, because it is the only thing on this card that cannot be
+        undone. Everything above it — the profile, the cast, plan mode — is a
+        setting you can set back. This deletes the project, its conversations and
+        every event they recorded, and re-adding the folder afterwards gives you
+        a new empty project rather than this one.
+
+        **It does not confirm**, which was asked for explicitly and is worth
+        saying out loud here rather than leaving as an absence. The separation
+        and the wording are therefore the whole safety margin: it is the only
+        `--danger` control on the card, and it says what it removes rather than
+        the bare "Remove project" it used to say when it only ever appeared
+        beside a folder that had already vanished.
+      */}
+      <div className="session-settings-danger">
+        <button
+          type="button"
+          className="btn btn--danger"
+          onClick={() => {
+            void props.onForget()
+          }}
+        >
+          {t('project.removeProject')}
+        </button>
+        <p className="session-settings-danger-note">{t('project.removeProjectNote')}</p>
+      </div>
     </div>
   )
 }
