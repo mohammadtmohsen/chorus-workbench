@@ -118,11 +118,25 @@ nsis:
 # The REH is fetched per platform at runtime from the pinned manifest
 # (`build/workbench-runtime.json`), which already carries `darwin-x64`, so an
 # Intel build has a server to talk to without anything else changing here.
+# No `arch:` here, and its absence is the load-bearing part.
+#
+# It read `arch: [arm64, x64]`, and a per-target arch list in the config **wins
+# over the CLI flag** — so `pnpm package --arm64` built both architectures
+# anyway. Measured, not inferred: the run that produced the R3 numbers was asked
+# for arm64 and packaged `release/mac-arm64` and `release/mac` back to back.
+#
+# That made the release matrix's `packageArgs` inert. Every mac runner would
+# have built both and taken twice as long, and the claim in `release.yml` that
+# the flag prevents it was simply false.
+#
+# Omitted instead, so electron-builder targets the host architecture by default
+# and `--arm64` / `--x64` actually select one. Each release job then builds only
+# its own, on a runner of that architecture, which is what makes
+# `verify:package` a native launch rather than a translated one.
 mac:
   category: public.app-category.developer-tools
   target:
     - target: dmg
-      arch: [arm64, x64]
   # No identity to sign with. This makes electron-builder skip signing
   # altogether, which `afterPack` then puts right.
   identity: null

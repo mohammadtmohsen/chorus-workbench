@@ -90,15 +90,20 @@ jobs:
       matrix:
         # Each job builds exactly one architecture, and the runner matches it.
         #
-        # `packageArgs` is not an optimisation. `electron-builder.yml` lists both
-        # macOS architectures, so without it every mac runner would build both —
-        # and the Apple Silicon runner would then produce an x64 DMG it cannot
-        # verify, because GitHub's arm64 images do not ship Rosetta. An unverified
-        # artifact that uploads successfully is the failure that looks like a pass.
+        # `packageArgs` names the architecture rather than trusting the runner's.
+        #
+        # It was introduced with a false explanation, and the correction is worth
+        # keeping: `electron-builder.yml` used to carry `arch: [arm64, x64]` on
+        # the mac target, and **a per-target arch list in the config beats the CLI
+        # flag** — so `pnpm package --arm64` cheerfully built both. Found by
+        # running it, not by reading it. The `arch` list is gone now, so the flag
+        # decides and each job builds exactly one.
         #
         # Which is also why the Intel build runs on `macos-13`: it is the last
         # Intel image GitHub offers, and `verify:package` launches the app it just
-        # built. Cross-building x64 on arm64 would package fine and prove nothing.
+        # built. Cross-building x64 on arm64 would package fine and prove nothing,
+        # since GitHub's arm64 images do not ship Rosetta — an unverified artifact
+        # that uploads successfully is the failure that looks like a pass.
         include:
           - os: macos-latest
             label: macOS installer (Apple Silicon)
