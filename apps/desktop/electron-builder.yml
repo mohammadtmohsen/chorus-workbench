@@ -166,6 +166,41 @@ mac:
 # right-click → Open, no way through. Ad-hoc signing does not make Gatekeeper
 # happy, but it does make the refusal an honest one the user can override.
 # Ad-hoc signing is a macOS concept; the hook returns early on other platforms.
+# Linux: AppImage and deb, x64 only.
+#
+# **It must be built on Linux, and that is not a preference.** `node-pty`
+# publishes prebuilds for darwin and win32 and *none* for Linux — checked, not
+# assumed — so its install script falls through to `node-gyp rebuild`. With
+# `npmRebuild: false` set above, the binding that ships is whatever `pnpm
+# install` produced on the build host, so cross-building from macOS would
+# package a bundle with no PTY at all and no error saying so. The release
+# workflow therefore runs this on `ubuntu-latest`.
+#
+# That also disposes of the spawn-helper repair on this platform: `lib/utils.js`
+# prefers `build/Release`, where the linker sets the executable bit, so the
+# 0644 tarball bug is a prebuild problem and a compiled Linux build never has it.
+# `sign-adhoc.cjs` returns early off macOS.
+#
+# **arm64 is deliberately absent.** The plan's rule is "arm64 only if every
+# native and REH artifact exists"; the REH artifact does exist (`linux-arm64` is
+# in the manifest) but the native side would have to be compiled on an arm64
+# Linux runner, and a cross-built one could not be launched by `verify:package`.
+# It is a runner question, not an artifact question, and it is not answered here.
+#
+# AppImage because it runs without being installed, which is the closest Linux
+# has to the DMG's "download and open"; deb because that is what a Debian or
+# Ubuntu user expects to be offered beside it.
+linux:
+  target:
+    - target: AppImage
+      arch: [x64]
+    - target: deb
+      arch: [x64]
+  icon: build/icon.png
+  category: Development
+  synopsis: A development environment with coding agents in the same window
+  artifactName: Chorus-${version}-linux-${arch}.${ext}
+
 beforePack: build/stage-reh.cjs
 afterPack: build/sign-adhoc.cjs
 

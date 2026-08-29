@@ -120,6 +120,20 @@ jobs:
             packageArgs: --x64
             artifact: Chorus-${{ needs.gate.outputs.version }}-windows-x64-setup.exe
             verify: verify:package:windows
+          # Linux is built on Linux because it has to be, not for symmetry:
+          # `node-pty` publishes no Linux prebuild, so its install compiles from
+          # source on the build host. Cross-building from macOS would ship a
+          # bundle with no PTY and nothing saying so.
+          #
+          # Two artifacts from one build. `artifact` names the AppImage because
+          # the checksum and upload steps take a single name; the `.deb` is
+          # collected beside it by `extraArtifact`.
+          - os: ubuntu-latest
+            label: Linux installers
+            packageArgs: --x64
+            artifact: Chorus-${{ needs.gate.outputs.version }}-linux-x64.AppImage
+            extraArtifact: Chorus-${{ needs.gate.outputs.version }}-linux-x64.deb
+            verify: verify:package:linux
     steps:
       - uses: actions/checkout@v6
       - uses: pnpm/action-setup@v6
@@ -145,28 +159,44 @@ jobs:
       # authenticated agent no runner has — confirmed by running the macOS
       # verifier with the CLIs hidden and watching it fail identically on a
       # bundle known to be good. This gates; a red here is real.
+      #
+      # Electron needs a display and a CI runner has none, so the Linux job goes
+      # through `xvfb-run`. Without it the launch fails in a way that reads as a
+      # broken bundle rather than a missing X server.
       - name: Verify the packaged bundle
-        run: pnpm --filter @chorus/desktop run ${{ matrix.verify }}
+        run: |
+          if [ "${{ runner.os }}" = "Linux" ]; then
+            sudo apt-get update -qq && sudo apt-get install -y -qq xvfb
+            xvfb-run --auto-servernum pnpm --filter @chorus/desktop run ${{ matrix.verify }}
+          else
+            pnpm --filter @chorus/desktop run ${{ matrix.verify }}
+          fi
+        shell: bash
         env:
           CHORUS_VERIFY_SCOPE: bundle
 
-      # Named, never globbed. A glob that matches nothing succeeds, and an empty
-      # upload is the failure that looks like a pass.
+      # Every artifact this job produced, each checksummed. Still named rather
+      # than globbed — a glob that matches nothing succeeds, and an empty upload
+      # is the failure that looks like a pass — but a job may now name two, since
+      # one Linux build emits an AppImage and a .deb together.
       - name: Checksum
         shell: bash
         run: |
           cd apps/desktop/release
-          if [ ! -f "${{ matrix.artifact }}" ]; then
-            echo "::error::no artifact named ${{ matrix.artifact }}"
-            ls -la
-            exit 1
-          fi
-          if command -v sha256sum >/dev/null; then
-            sha256sum "${{ matrix.artifact }}" > "${{ matrix.artifact }}.sha256"
-          else
-            shasum -a 256 "${{ matrix.artifact }}" > "${{ matrix.artifact }}.sha256"
-          fi
-          cat "${{ matrix.artifact }}.sha256"
+          for name in "${{ matrix.artifact }}" "${{ matrix.extraArtifact }}"; do
+            [ -z "$name" ] && continue
+            if [ ! -f "$name" ]; then
+              echo "::error::no artifact named $name"
+              ls -la
+              exit 1
+            fi
+            if command -v sha256sum >/dev/null; then
+              sha256sum "$name" > "$name.sha256"
+            else
+              shasum -a 256 "$name" > "$name.sha256"
+            fi
+            cat "$name.sha256"
+          done
 
       - uses: actions/upload-artifact@v4
         with:
@@ -174,6 +204,18 @@ jobs:
           path: |
             apps/desktop/release/${{ matrix.artifact }}
             apps/desktop/release/${{ matrix.artifact }}.sha256
+          if-no-files-found: error
+          retention-days: 30
+
+      # A second upload rather than a wider path, so `if-no-files-found: error`
+      # keeps its meaning for both. Skipped by jobs that name only one.
+      - uses: actions/upload-artifact@v4
+        if: matrix.extraArtifact != ''
+        with:
+          name: ${{ matrix.extraArtifact }}
+          path: |
+            apps/desktop/release/${{ matrix.extraArtifact }}
+            apps/desktop/release/${{ matrix.extraArtifact }}.sha256
           if-no-files-found: error
           retention-days: 30
 
@@ -265,10 +307,12 @@ jobs:
           # Counted per extension rather than as one total. A single total of
           # three passes when two DMGs shipped and the Windows job failed, which
           # is exactly the case this step exists to catch.
-          DMG=$(gh release view "$TAG" --json assets --jq '[.assets[] | select(.name|endswith(".dmg"))] | length')
-          EXE=$(gh release view "$TAG" --json assets --jq '[.assets[] | select(.name|endswith(".exe"))] | length')
-          echo "found $DMG .dmg and $EXE .exe"
-          if [ "$DMG" -ne 2 ] || [ "$EXE" -ne 1 ]; then
-            echo "::error::expected 2 .dmg (arm64, x64) and 1 .exe, found $DMG and $EXE"
+          count() {
+            gh release view "$TAG" --json assets --jq "[.assets[] | select(.name|endswith(\"$1\"))] | length"
+          }
+          DMG=$(count .dmg); EXE=$(count .exe); APPIMAGE=$(count .AppImage); DEB=$(count .deb)
+          echo "found $DMG .dmg, $EXE .exe, $APPIMAGE .AppImage, $DEB .deb"
+          if [ "$DMG" -ne 2 ] || [ "$EXE" -ne 1 ] || [ "$APPIMAGE" -ne 1 ] || [ "$DEB" -ne 1 ]; then
+            echo "::error::expected 2 .dmg (arm64, x64), 1 .exe, 1 .AppImage and 1 .deb"
             exit 1
           fi

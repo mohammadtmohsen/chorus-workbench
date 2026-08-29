@@ -48,6 +48,7 @@ const BUILD = dirname(fileURLToPath(import.meta.url))
 const SVG = join(BUILD, '..', 'src', 'renderer', 'src', 'assets', 'chorus-mark.svg')
 const ICNS = join(BUILD, 'icon.icns')
 const ICO = join(BUILD, 'icon.ico')
+const PNG = join(BUILD, 'icon.png')
 
 /**
  * What Windows asks for, and it is a different list from macOS.
@@ -459,6 +460,23 @@ try {
   })
   writeFileSync(ICO, ico(ico_images))
   console.log(`icon.ico written — ${String(ICO_SIZES.length)} sizes at ${ICO_SIZES.join(', ')}px`)
+
+  /*
+   * Linux, and it is a plain PNG rather than a container.
+   *
+   * electron-builder can derive a Linux icon from the .icns, but only on a host
+   * with macOS's converters — and the Linux installers are built on a Linux
+   * runner, precisely because node-pty has no Linux prebuild and must compile
+   * there. So the PNG is a committed artifact like the other two, not something
+   * the build makes.
+   *
+   * 512 is what electron-builder wants as the single-file form; it rejects
+   * anything smaller than 256 outright.
+   */
+  const PNG_SIZE = 512
+  if (!cache.has(PNG_SIZE)) cache.set(PNG_SIZE, png(render(art, PNG_SIZE), PNG_SIZE))
+  writeFileSync(PNG, cache.get(PNG_SIZE))
+  console.log(`icon.png written — ${String(PNG_SIZE)}px, for the Linux targets`)
 
   execFileSync('iconutil', ['--convert', 'icns', iconset, '--output', ICNS])
   const sizes = [...cache.keys()].sort((a, b) => a - b).join(', ')
