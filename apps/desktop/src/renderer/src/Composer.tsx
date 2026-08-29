@@ -1059,42 +1059,6 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(
          */}
         <div className="composer-context">
           {/*
-           * The editor switch, and it is the only thing left on this side of the
-           * row.
-           *
-           * Two controls stood here and both are gone. The **pill** named the
-           * file and lines that would ride along with the message; the
-           * **Included chip** was the switch that decided whether they did. The
-           * switch went first — an editor open beside a conversation is context,
-           * and asking every time was a question with one sensible answer — and
-           * with nothing to decide, a read-only pill restating what is already
-           * on screen two inches to the left earned nothing.
-           *
-           * What replaces them is a control over the *editor* rather than over
-           * the message: it shows and hides the workbench in this pane. The
-           * label is unchanged and the icon is the one the provenance chip wore,
-           * which is deliberate — it sits where "Editor" always sat, and now it
-           * does the obvious thing when you press it.
-           *
-           * **Always rendered**, including when no file is open and when the
-           * bridge is unavailable. It is a layout control now, not a report
-           * about a selection, and a switch that vanishes when there is nothing
-           * selected is a switch you cannot find when you want the editor back.
-           */}
-          <button
-            type="button"
-            className="ide-source"
-            aria-pressed={props.workbenchShown}
-            title={props.workbenchShown ? t('ide.hideEditor') : t('ide.showEditor')}
-            onClick={props.onToggleWorkbench}
-          >
-            <svg className="ide-source-icon" viewBox="0 0 24 24" aria-hidden="true">
-              <path d="M17 3.5 9.5 11 5 7.5 3 9l4 3-4 3 2 1.5L9.5 13l7.5 7.5 4-2v-13l-4-2Zm0 4.2v8.6L12 12l5-4.3Z" />
-            </svg>
-            {t('ide.editorWorkbench')}
-          </button>
-
-          {/*
             What will ride along with the message — restored, with a new reason.
             
             The pill was deleted in Phase 9 as "a read-only pill restating what
@@ -1471,6 +1435,45 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(
               codex was deliberately removed would be offering to talk to an empty
               chair.
             */}
+            {/*
+             * The editor switch, on the same row as the cast.
+             *
+             * It sat above, on the context row, which is where the pill and the
+             * Included chip used to live — so it inherited a position chosen for
+             * two controls that no longer exist. Beside `@claude` and `@codex` it
+             * is among the other things you press while composing, which is what
+             * it now is: a control over the editor, not a report about a file.
+             *
+             * Two controls stood here and both are gone. The **pill** named the
+             * file and lines that would ride along with the message; the
+             * **Included chip** was the switch that decided whether they did. The
+             * switch went first — an editor open beside a conversation is context,
+             * and asking every time was a question with one sensible answer — and
+             * with nothing to decide, a read-only pill restating what is already
+             * on screen two inches to the left earned nothing.
+             *
+             * What replaces them is a control over the *editor* rather than over
+             * the message: it shows and hides the workbench in this pane. The
+             * label and icon are unchanged from the provenance chip it grew out
+             * of, so it stays recognisable even though it has moved.
+             *
+             * **Always rendered**, including when no file is open and when the
+             * bridge is unavailable. It is a layout control now, not a report
+             * about a selection, and a switch that vanishes when there is nothing
+             * selected is a switch you cannot find when you want the editor back.
+             */}
+            <button
+              type="button"
+              className="ide-source"
+              aria-pressed={props.workbenchShown}
+              title={props.workbenchShown ? t('ide.hideEditor') : t('ide.showEditor')}
+              onClick={props.onToggleWorkbench}
+            >
+              <svg className="ide-source-icon" viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M17 3.5 9.5 11 5 7.5 3 9l4 3-4 3 2 1.5L9.5 13l7.5 7.5 4-2v-13l-4-2Zm0 4.2v8.6L12 12l5-4.3Z" />
+              </svg>
+              {t('ide.editorWorkbench')}
+            </button>
             {participants.map((agent) => (
               <button
                 key={agent}
