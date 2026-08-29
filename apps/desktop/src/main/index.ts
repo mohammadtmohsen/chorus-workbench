@@ -26,7 +26,7 @@ import { applyScale, currentScale } from './scale.js'
 import { reapOrphanedAgents } from './reap.js'
 import { ChorusRuntime } from './runtime.js'
 import { applyContentSecurityPolicy, lockDownNavigation } from './security.js'
-import { reapedOrphanedServers, stopWorkbenchHost } from './workbench-host.js'
+import { reapedOrphanedServers, setWorkbenchHostLog, stopWorkbenchHost } from './workbench-host.js'
 import { closeAllSurfaces, registerWorkbenchHandlers } from './workbench-surface.js'
 import { adoptShellPath } from './which.js'
 
@@ -139,6 +139,13 @@ void app.whenReady().then(async () => {
    */
   const log = createLogger(app.getPath('userData'))
   mainLog = log
+  /*
+   * The workbench host is free functions with module state and no owner to hand
+   * it a logger, so main gives it one here. Before this it logged nothing at all,
+   * and the slowest operation in the app — download, unpack, spawn, port wait —
+   * was invisible in the file people are told to read.
+   */
+  setWorkbenchHostLog(log)
   log.info('starting', { version: app.getVersion(), electron: process.versions.electron })
 
   void reapOrphanedAgents().then(({ killed, inspected, skipped }) => {

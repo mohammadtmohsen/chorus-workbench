@@ -115,6 +115,32 @@ export function platformKey(): string {
   return `${process.platform}-${process.arch}`
 }
 
+/**
+ * Where this module says what it is doing, and it had nowhere before.
+ *
+ * The server's lifecycle is the slowest thing in the app — a 76 MB download, a
+ * checksum, a 257 MB extraction, a spawn, a port wait — and none of it appeared
+ * in the log. So "the editor is a black rectangle" was indistinguishable from
+ * "the editor was never asked for", and telling them apart meant reading process
+ * tables and stat-ing directories from outside the app.
+ *
+ * Injected rather than imported because this module is free functions with
+ * module state and no owner to hand it one; main sets it once at startup. The
+ * default is a no-op so the unit tests, which import these functions directly,
+ * neither need a logger nor write files.
+ */
+export interface WorkbenchHostLog {
+  info: (message: string, fields?: Record<string, unknown>) => void
+  warn: (message: string, fields?: Record<string, unknown>) => void
+}
+
+const SILENT: WorkbenchHostLog = { info: () => undefined, warn: () => undefined }
+let log: WorkbenchHostLog = SILENT
+
+export function setWorkbenchHostLog(next: WorkbenchHostLog): void {
+  log = next
+}
+
 function manifestPath(): string {
   return join(app.getAppPath(), 'build', 'workbench-runtime.json')
 }
@@ -691,13 +717,30 @@ async function start(): Promise<WorkbenchRuntime> {
   }
 
   const archive = join(cacheDir(), artifact.name)
-  if (!existsSync(archive) || statSync(archive).size !== artifact.size) {
+  const cached = existsSync(archive) && statSync(archive).size === artifact.size
+  /*
+   * Announced *before* the wait, not after it. A line that arrives when the
+   * download finishes cannot explain a blank region while it is still running,
+   * which is the only time anybody goes looking.
+   */
+  log.info('workbench server starting', {
+    release: manifest.server.release,
+    platform: key,
+    cached,
+    ...(cached ? {} : { willDownloadBytes: artifact.size }),
+  })
+  const startedAt = Date.now()
+  if (!cached) {
     await download(
       `https://github.com/VSCodium/vscodium/releases/download/${manifest.server.release}/${artifact.name}`,
       archive,
       artifact.size,
       abort.signal
     )
+    log.info('workbench server downloaded', {
+      bytes: artifact.size,
+      ms: Date.now() - startedAt,
+    })
   }
   if (cancelled()) throw abortedError()
 
@@ -717,6 +760,10 @@ async function start(): Promise<WorkbenchRuntime> {
       upstreamCommit: manifest.server.upstreamCommit,
     },
   })
+
+  // Extraction is the step most likely to be the one you are waiting on: the
+  // archive is usually cached and unpacking 257 MB is not quick.
+  log.info('workbench server unpacked', { dir, ms: Date.now() - startedAt })
 
   // Checked either side of the slow steps rather than only at the top: an abort
   // that arrives during a 257 MB extraction should not be discovered after a spawn.
@@ -988,6 +1035,17 @@ async function start(): Promise<WorkbenchRuntime> {
     quality: manifest.client.quality,
   }
   host = { child, runtime, tokenFile }
+  /*
+   * The line that says the wait is over, and the one worth having: everything
+   * after this is the surface's own boot rather than the server's. `pid` because
+   * `reap.ts` and every orphan question start from it, and no token or authority
+   * — the port is harmless, the token is the secret the shell may never hold.
+   */
+  log.info('workbench server ready', {
+    pid: child.pid ?? null,
+    port,
+    ms: Date.now() - startedAt,
+  })
   return runtime
 }
 

@@ -58,6 +58,26 @@ export class ProjectRootMissingError extends Error {
   }
 }
 
+/**
+ * Is that path a directory, right now.
+ *
+ * One implementation, used by both the refusal (`resolveRoot`) and the question
+ * (`rootPresent`), because two of these drift and the symptom would be a rail
+ * that shows a project as fine and a launch that says it is gone.
+ *
+ * Gone, unreadable, and on a volume that is not mounted are all the same answer
+ * to every caller, so they are not distinguished. `statSync` rather than
+ * `existsSync`: a *file* at the project's path is not a project root, and
+ * `existsSync` would call it present and fail later inside the extension host.
+ */
+function directoryExists(path: string): boolean {
+  try {
+    return statSync(path).isDirectory()
+  } catch {
+    return false
+  }
+}
+
 export class ProjectService {
   constructor(
     private readonly projects: ProjectStore,
@@ -160,20 +180,28 @@ export class ProjectService {
   resolveRoot(projectId: string): string {
     const project = this.projects.get(projectId)
     if (project === null) throw new UnknownProjectError(projectId)
-
-    // Declared without a value rather than seeded with `false`: both arms below
-    // assign it, so a seed is dead and reads as though one path might not.
-    let present: boolean
-    try {
-      present = statSync(project.canonicalRoot).isDirectory()
-    } catch {
-      // Gone, unreadable, or on a volume that is not mounted. All three are the
-      // same answer to the caller and none of them is the id's fault.
-      present = false
+    if (!directoryExists(project.canonicalRoot)) {
+      throw new ProjectRootMissingError(projectId, project.canonicalRoot)
     }
-    if (!present) throw new ProjectRootMissingError(projectId, project.canonicalRoot)
-
     return project.canonicalRoot
+  }
+
+  /**
+   * The same question as `resolveRoot`'s check, asked instead of enforced.
+   *
+   * `resolveRoot` throws because every one of its callers is about to *use* the
+   * directory, and handing back a path that is not there would fail later and
+   * further away. Listing is the opposite case: the rail has to be able to draw
+   * a project whose folder has gone — that is the only way a person finds out,
+   * and it is the screen the fix is offered from — and an exception is not a UI
+   * state.
+   *
+   * Both go through `directoryExists` so there is one answer to "is it there",
+   * rather than a listing that disagrees with a launch.
+   */
+  rootPresent(projectId: string): boolean {
+    const project = this.projects.get(projectId)
+    return project !== null && directoryExists(project.canonicalRoot)
   }
 
   rename(projectId: string, name: string): Project {

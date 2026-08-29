@@ -530,7 +530,13 @@
   "project": {
     "firstRun": "Add a project folder to begin. Chorus opens conversations inside a project, and everything an agent does happens there.",
     "renameTitle": "Rename this project",
-    "noConversations": "No conversations in this project yet."
+    "noConversations": "No conversations in this project yet.",
+    "folderMissing": "This folder is no longer there. It may have been renamed, moved, deleted, or it is on a drive that is not connected.",
+    "locateFolder": "Locate folder…",
+    "removeProject": "Remove project"
+  },
+  "workbench": {
+    "opening": "Starting the editor… the first run downloads and unpacks it, which takes a few minutes."
   },
   "dock": {
     "conversations": "Conversations in this project"

@@ -43,6 +43,9 @@ export function ProjectPreviewCard(props: {
   readonly onShowConversation: (conversationId: string) => void
   readonly onToggleAgent: (agentId: AgentId, present: boolean) => Promise<void>
   readonly onChooseProfile: (profileId: string) => Promise<void>
+  /** Both only reachable while the project's folder is missing — see `ProjectSettings`. */
+  readonly onRelocate: () => Promise<void>
+  readonly onForget: () => Promise<void>
 }): React.JSX.Element {
   const { t } = useTranslation()
   const [renaming, setRenaming] = useState(false)
@@ -194,6 +197,8 @@ export function ProjectPreviewCard(props: {
           installed={props.installed}
           onToggleAgent={props.onToggleAgent}
           onChooseProfile={props.onChooseProfile}
+          onRelocate={props.onRelocate}
+          onForget={props.onForget}
         />
       </div>
 

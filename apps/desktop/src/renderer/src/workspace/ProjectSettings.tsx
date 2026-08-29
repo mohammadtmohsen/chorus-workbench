@@ -38,6 +38,10 @@ export interface ProjectSettingsProps {
   readonly installed: readonly AgentId[]
   readonly onToggleAgent: (agentId: AgentId, present: boolean) => Promise<void>
   readonly onChooseProfile: (profileId: string) => Promise<void>
+  /** Opens the folder picker and points this project at what comes back. */
+  readonly onRelocate: () => Promise<void>
+  /** Drops the project from the registry. Its conversations stay in the log. */
+  readonly onForget: () => Promise<void>
 }
 
 export function ProjectSettings(props: ProjectSettingsProps): React.JSX.Element {
@@ -97,13 +101,52 @@ export function ProjectSettings(props: ProjectSettingsProps): React.JSX.Element 
         been: this is the project's own root. Moving it is `relocate`, one
         explicit operation that restarts everything running against the old
         path, and it does not belong behind a hover card.
+
+        **Unless the folder has gone**, which is the one case where the label has
+        to become a control. There is no other surface that can answer it: the
+        rail draws a tile, the tab strip draws conversations, and everything else
+        that touches a project root fails on it rather than offering to fix it.
+        So the two ways out live here, next to the path they are about.
       */}
       <p className="session-settings-label">{t('conversation.projectFolder')}</p>
-      <div className="session-settings-folder">
+      <div className="session-settings-folder" data-missing={props.project.missing}>
         <p className="path session-settings-path" title={props.project.root}>
           {shortenPath(props.project.root)}
         </p>
       </div>
+      {props.project.missing && (
+        <div className="session-settings-missing">
+          <p className="notice notice--bad" role="alert">
+            {t('project.folderMissing')}
+          </p>
+          <div className="session-settings-missing-actions">
+            <button
+              type="button"
+              className="btn btn--go"
+              onClick={() => {
+                void props.onRelocate()
+              }}
+            >
+              {t('project.locateFolder')}
+            </button>
+            {/*
+              Removing is offered beside relocating rather than buried, because
+              "that checkout is gone for good" is at least as common as "it
+              moved" — and without it the only way to clear a dead project was
+              to edit the database.
+            */}
+            <button
+              type="button"
+              className="btn btn--quiet"
+              onClick={() => {
+                void props.onForget()
+              }}
+            >
+              {t('project.removeProject')}
+            </button>
+          </div>
+        </div>
+      )}
 
       <p className="session-settings-label">{t('aside.profileLabel')}</p>
       <ul className="session-settings-profiles" role="listbox">

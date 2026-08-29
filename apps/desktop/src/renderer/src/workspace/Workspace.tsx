@@ -85,6 +85,9 @@ interface WorkspaceProps {
     present: boolean
   ) => Promise<void>
   readonly onChooseProjectProfile: (projectId: string, profileId: string) => Promise<void>
+  /** Both only offered on a project whose folder is missing. */
+  readonly onRelocateProject: (projectId: string) => Promise<void>
+  readonly onForgetProject: (projectId: string) => Promise<void>
   readonly onAddProject: () => Promise<void>
   /** Starts a conversation in a project. There is no other way to start one. */
   readonly onOpenProject: (projectId: string) => void
@@ -538,6 +541,8 @@ export function Workspace(props: WorkspaceProps): React.JSX.Element {
         onShowConversation={showConversation}
         onToggleAgent={props.onToggleProjectAgent}
         onChooseProfile={props.onChooseProjectProfile}
+        onRelocate={props.onRelocateProject}
+        onForget={props.onForgetProject}
       />
     </div>
   )
@@ -720,15 +725,74 @@ function Sash(props: {
   )
 }
 
+/**
+ * One project's workbench, mounted for **every** tab in the pane rather than
+ * only the active one.
+ *
+ * **This is the terminal rule, one level further out.** `WorkbenchFrame` already
+ * documents that unmounting it closes the surface — a whole `WebContents`
+ * destroyed, every open file lost, a reload on the way back — and that is why
+ * the Editor switch passes `hidden` instead of not rendering it. Switching
+ * project *tabs* had no such protection: the frame was rendered once for
+ * `pane.activeTabId` and keyed on it, so changing tabs changed the key and React
+ * tore the surface down and built a new one. Every switch paid a full workbench
+ * boot, which on a cold cache is a download, a 257 MB extraction and a server
+ * spawn. Reported as "the editor behaves like unmount and remount", which is
+ * exactly what it was.
+ *
+ * So the frames are keyed by project and all of them stay mounted; only the
+ * active one is visible, and switching is a compositing change. **The cost is
+ * real and is accepted rather than unnoticed**: one live `WebContentsView` per
+ * open project, on a memory ceiling the plan still owes as a number (R7/R11).
+ * Chosen for two or three open projects; if that grows into eight, this is the
+ * decision to revisit, and a bounded cache is the shape it would take.
+ *
+ * It is a component rather than a loop body because of the two hooks: the Editor
+ * switch is stored per project, and the failure message belongs to the project
+ * that failed. Holding the error here rather than in the pane also fixes a
+ * mislabelling the pane's own comment warned about — a background surface that
+ * refused used to write its message into whatever project happened to be on
+ * screen.
+ */
+function PaneWorkbench(props: {
+  readonly projectId: string
+  readonly active: boolean
+  readonly projectRoot: string
+}): React.JSX.Element {
+  const shown = useWorkbenchShown(props.projectId)
+  const [failure, setFailure] = useState<string | null>(null)
+  return (
+    /*
+     * `hidden` on the slot, not on the frame's own element. The attribute is what
+     * takes the inactive surfaces out of layout — without it every mounted frame
+     * would claim its share of the region and the visible one would be a
+     * fraction of the pane.
+     */
+    <div className="workspace-pane-workbench-slot" hidden={!props.active}>
+      <WorkbenchFrame
+        target={{ projectId: props.projectId }}
+        /* Displayed only, and any of the project's conversations answers it —
+           they all share one root, which is what a project is. */
+        projectRoot={props.projectRoot}
+        hidden={!props.active || !shown}
+        onFailed={setFailure}
+      />
+      {failure !== null && <p className="workspace-pane-workbench-error">{failure}</p>}
+    </div>
+  )
+}
+
 function EditorPane(props: LayoutViewProps & { readonly paneId: string }): React.JSX.Element {
   const { t } = useTranslation()
   const pane = usePane(props.paneId)
   /*
-   * Held per pane, not globally: one project failing to open a surface says
-   * nothing about the other three, and a shared message would blame whichever
-   * pane the reader happened to be looking at.
+   * The workbench failure message moved down into `PaneWorkbench`, which holds
+   * one per project. It was held here, per pane, on the reasoning that "one
+   * project failing to open a surface says nothing about the other three" — and
+   * that argument was right about panes and wrong about tabs, because a pane now
+   * has a surface per open project and a single slot could only ever name one of
+   * them.
    */
-  const [workbenchError, setWorkbenchError] = useState<string | null>(null)
   /*
    * A tab names a project; what gets rendered is one conversation inside it.
    *
@@ -832,19 +896,27 @@ function EditorPane(props: LayoutViewProps & { readonly paneId: string }): React
           takes the pane.
         */}
         {projectId !== null && (
+          /*
+            One slot per project open in this pane, keyed by project so a tab
+            switch moves which one is visible rather than destroying one surface
+            and building another. The region itself still leaves the layout when
+            the *active* project's Editor switch is off, which is what the
+            `hidden` here is for.
+          */
           <div className="workspace-pane-workbench" hidden={!workbenchShown}>
-            <WorkbenchFrame
-              key={projectId}
-              target={{ projectId }}
-              /* Displayed only, and any of the project's conversations answers
-                 it — they all share one root, which is what a project is. */
-              projectRoot={conversations[0]?.cwd ?? ''}
-              hidden={!workbenchShown}
-              onFailed={setWorkbenchError}
-            />
-            {workbenchError !== null && (
-              <p className="workspace-pane-workbench-error">{workbenchError}</p>
-            )}
+            {/* `pane` is non-null here: `projectId` is read off it, and the
+                guard above is what narrows both. */}
+            {pane.tabs.map((id) => (
+              <PaneWorkbench
+                key={id}
+                projectId={id}
+                active={id === projectId}
+                projectRoot={
+                  [...props.sessions.values()].find((session) => session.projectId === id)?.cwd ??
+                  ''
+                }
+              />
+            ))}
           </div>
         )}
         {projectId !== null && workbenchShown && (

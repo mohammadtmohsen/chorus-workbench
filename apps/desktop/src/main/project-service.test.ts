@@ -142,6 +142,59 @@ describe('resolveRoot', () => {
   })
 })
 
+/*
+ * The same question `resolveRoot` enforces, asked without an exception — the
+ * listing needs it, because a project whose folder has gone still has to be
+ * drawn. Until it existed the renderer found out by failing, and on launch the
+ * thing that failed was the auto-start, which replaced the whole app with an
+ * error screen offering no way back to the project it was complaining about.
+ */
+describe('rootPresent', () => {
+  it('is true while the folder is there', () => {
+    const { project } = service.adopt(dir('still-here'))
+    expect(service.rootPresent(project.id)).toBe(true)
+  })
+
+  it('is false once the folder has gone, and does not throw', () => {
+    const path = dir('went-away')
+    const { project } = service.adopt(path)
+    rmSync(path, { recursive: true, force: true })
+
+    expect(service.rootPresent(project.id)).toBe(false)
+    // The whole point: the listing must not need a try/catch around each row.
+    expect(() => service.rootPresent(project.id)).not.toThrow()
+  })
+
+  it('is false for an id nobody adopted, rather than throwing', () => {
+    expect(service.rootPresent('not-a-project')).toBe(false)
+  })
+
+  it('agrees with resolveRoot, so a listing cannot contradict a launch', () => {
+    const path = dir('agreeing')
+    const { project } = service.adopt(path)
+    expect(service.rootPresent(project.id)).toBe(true)
+    expect(() => service.resolveRoot(project.id)).not.toThrow()
+
+    rmSync(path, { recursive: true, force: true })
+    expect(service.rootPresent(project.id)).toBe(false)
+    expect(() => service.resolveRoot(project.id)).toThrow(ProjectRootMissingError)
+  })
+
+  /*
+   * A file where a directory should be. `existsSync` would call this present and
+   * the failure would surface much later, inside the extension host, as an error
+   * about a server rather than about a folder.
+   */
+  it('is false for a path that exists but is not a directory', () => {
+    const path = dir('becomes-a-file')
+    const { project } = service.adopt(path)
+    rmSync(path, { recursive: true, force: true })
+    writeFileSync(path, 'not a directory')
+
+    expect(service.rootPresent(project.id)).toBe(false)
+  })
+})
+
 describe('relocate', () => {
   it('moves a project to a directory that exists', () => {
     const { project } = service.adopt(dir('before-move'))

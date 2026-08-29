@@ -3264,6 +3264,7 @@ export class ChorusRuntime {
     openConversations: number
     profileId: string | null
     agentIds: AgentId[] | null
+    missing: boolean
   }[] {
     const open = new Map<string, number>()
     for (const conversation of this.active.values()) {
@@ -3288,6 +3289,16 @@ export class ChorusRuntime {
         project.agentIds === null
           ? null
           : project.agentIds.filter((id): id is AgentId => id === 'codex' || id === 'claude'),
+      /*
+       * Whether the folder is still on disk, answered here so the renderer never
+       * has to find out by failing.
+       *
+       * It is read at list time rather than cached on the row because it is a
+       * fact about the world, not about the project: the volume mounts, the
+       * checkout is restored, and the next refresh says so without anything
+       * having been written. A stat per project, and the list is short.
+       */
+      missing: !this.projects.rootPresent(project.id),
     }))
   }
 
@@ -3415,6 +3426,33 @@ export class ChorusRuntime {
       )
     }
     return { forgotten: this.projects.forget(projectId) }
+  }
+
+  /**
+   * Points a project at a different folder — the recovery for a root that moved.
+   *
+   * **Refused while conversations are open**, and that is the honest version of
+   * the caveat `ProjectService.relocate` states rather than solves: an agent
+   * session holds the working directory it was spawned with and a workbench
+   * surface holds the path it connected on, and neither of them notices a
+   * database write. Moving the row underneath them would leave two subsystems
+   * addressing a folder that is no longer the project's, which is worse than
+   * asking for the rooms to be closed. Same bargain `forgetProject` makes, for
+   * the same reason.
+   *
+   * **The case this exists for has none open anyway.** A project whose folder
+   * has vanished cannot start a conversation — that is how it came to need
+   * relocating — so the refusal above is a guard on the rarer path, where
+   * somebody moves a working project on purpose.
+   */
+  relocateProject(projectId: string, proposed: string): { root: string } {
+    const open = [...this.active.values()].filter((c) => c.projectId === projectId).length
+    if (open > 0) {
+      throw new Error(
+        `This project still has ${String(open)} open conversation${open === 1 ? '' : 's'}. Close them before moving it.`
+      )
+    }
+    return { root: this.projects.relocate(projectId, proposed).root }
   }
 
   /**

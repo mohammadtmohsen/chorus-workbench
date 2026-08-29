@@ -592,8 +592,22 @@ export function App(): React.JSX.Element {
    * than a fallback — silently adopting something would be inventing a project
    * the person did not choose.
    */
+  /*
+   * The most recent project **whose folder is still there**.
+   *
+   * Skipping the missing ones is what stops one stale project taking the app
+   * down with it. `startConversation` resolves the root in main and throws
+   * `ProjectRootMissingError` when it has gone; on launch that rejection reached
+   * `setError`, and because a boot error renders `Stuck` instead of the
+   * workspace, a renamed checkout meant the whole app was one error screen —
+   * with no route to the project card that could have fixed it.
+   *
+   * Restore already worked this way: `restoreOpenConversations` catches the same
+   * refusal per conversation and carries on. This is the same rule one level up,
+   * and the two now agree.
+   */
   const start = useCallback(() => {
-    const mostRecent = projects[0]
+    const mostRecent = projects.find((project) => !project.missing)
     if (mostRecent === undefined) return
     startIn(mostRecent.id)
   }, [projects, startIn])
@@ -939,6 +953,47 @@ export function App(): React.JSX.Element {
     [refreshProjects]
   )
 
+  /*
+   * The two ways out of a project whose folder has gone, and the only place
+   * either is offered.
+   *
+   * `setError(null)` first because the banner that is almost certainly on screen
+   * is the one describing this exact project — leaving it up through a successful
+   * relocate would say the folder is missing directly above a card showing its
+   * new path.
+   *
+   * Neither starts a conversation afterwards. The project reappears in the rail
+   * with its folder found, and opening a room in it is the person's next click
+   * rather than something recovery does on their behalf.
+   */
+  const relocateProject = useCallback(
+    async (projectId: string) => {
+      setError(null)
+      try {
+        const { root } = await window.chorus.relocateProject({ projectId })
+        // Cancelled the picker. Nothing changed and nothing is wrong.
+        if (root === null) return
+        await refreshProjects()
+      } catch (error) {
+        fail(setError)(error)
+      }
+    },
+    [refreshProjects]
+  )
+
+  const forgetProject = useCallback(
+    async (projectId: string) => {
+      setError(null)
+      try {
+        await window.chorus.forgetProject({ projectId })
+        await refreshProjects()
+      } catch (error) {
+        fail(setError)(error)
+      }
+    },
+    [refreshProjects]
+  )
+
   const toggleProjectAgent = useCallback(
     async (projectId: string, agentId: AgentId, present: boolean) => {
       /*
@@ -1086,8 +1141,23 @@ export function App(): React.JSX.Element {
    * rather than to a blank div. The rail is the way back in — clicking a project
    * starts a conversation in it — and hiding it because nothing is open is what
    * made the no-project case unrecoverable one branch above.
+   *
+   * **That paragraph described an intent the code did not have.** The condition
+   * was `sessions.length === 0` alone, so having projects and no open room
+   * returned `Stuck` — no rail, no project card, and therefore no route to the
+   * one control that could fix whatever had gone wrong. A project whose folder
+   * was renamed outside Chorus reached it on every launch: the auto-start threw
+   * `ProjectRootMissingError`, the error screen printed the message, and its two
+   * buttons were Try again, which threw again, and Settings.
+   *
+   * So `Stuck` is now only for the two cases that genuinely have nothing behind
+   * them — **no projects at all**, or **no agent CLI installed**, which is the
+   * screen it was written for and whose advice the stage does not carry. The
+   * error itself is not lost by falling through: the stage renders it as a
+   * dismissible `ErrorNotice`, which is the right weight for "one thing failed"
+   * rather than "the app did not start".
    */
-  if (sessions.length === 0) {
+  if (sessions.length === 0 && (projects.length === 0 || noAgentInstalled(probes))) {
     return (
       <>
         <Stuck
@@ -1160,6 +1230,8 @@ export function App(): React.JSX.Element {
         onRenameProject={renameProject}
         onToggleProjectAgent={toggleProjectAgent}
         onChooseProjectProfile={chooseProjectProfile}
+        onRelocateProject={relocateProject}
+        onForgetProject={forgetProject}
         projects={projects}
         onAddProject={addProject}
         onOpenProject={startIn}
@@ -1224,6 +1296,22 @@ export function App(): React.JSX.Element {
  * missing directory, a corrupt store — is unrelated, and offering "install the
  * CLI" for it would be worse than the raw message.
  */
+/**
+ * Whether the probe came back saying no agent CLI is on this machine.
+ *
+ * Exported and pure because it is now asked in two places — `Stuck` draws the
+ * install advice from it, and `App` uses it to decide whether `Stuck` is the
+ * right screen at all. Two copies of this condition would drift into a screen
+ * that offers install instructions and one that does not, for the same machine.
+ *
+ * `null` is "not probed yet" and is deliberately not "nothing installed": the
+ * probe is a round trip, and answering `true` while it is in flight would flash
+ * install instructions at everyone on every launch.
+ */
+export function noAgentInstalled(probes: AgentProbeResult[] | null): boolean {
+  return probes !== null && probes.length > 0 && probes.every((probe) => !probe.installed)
+}
+
 function Stuck(props: {
   error: string | null
   starting: boolean
@@ -1232,8 +1320,7 @@ function Stuck(props: {
   onSettings: () => void
 }): React.JSX.Element {
   const { t } = useTranslation()
-  const nothingInstalled =
-    props.probes !== null && props.probes.length > 0 && props.probes.every((p) => !p.installed)
+  const nothingInstalled = noAgentInstalled(props.probes)
   return (
     <div className="empty">
       <div className="empty-inner">

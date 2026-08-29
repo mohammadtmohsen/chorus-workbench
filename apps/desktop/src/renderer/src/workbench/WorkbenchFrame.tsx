@@ -1,6 +1,16 @@
 import { useEffect, useRef, useState } from 'react'
+import { useTranslation } from 'react-i18next'
 import type { WorkbenchRect } from '../../../shared/workbench-ipc.js'
 import { useWorkbenchStill } from '../workspace/overlay.js'
+
+/**
+ * How long the editor region may measure nothing before it is called a fault.
+ *
+ * Thirty frames is about half a second at 60Hz — long enough to outlast a first
+ * layout, a pane drag and a split animation, short enough that a person staring
+ * at a black rectangle is told why before they start reading logs.
+ */
+const ZERO_AREA_GRACE_FRAMES = 30
 
 /**
  * The shell's handle on one surface — and it contains nothing.
@@ -55,6 +65,7 @@ export function WorkbenchFrame({
   readonly hidden?: boolean
   readonly onFailed: (message: string) => void
 }): React.JSX.Element {
+  const { t } = useTranslation()
   const host = useRef<HTMLDivElement>(null)
   const [viewId, setViewId] = useState<string | null>(null)
   const still = useWorkbenchStill(viewId)
@@ -220,6 +231,27 @@ export function WorkbenchFrame({
      * conversion, not a tracking failure, and it is recorded as such.
      */
     let last: WorkbenchRect | null = null
+    /*
+     * A visible surface with no area is never legitimate, and saying so is what
+     * turns a black rectangle into a bug report.
+     *
+     * This is a defect that has happened: a sizing rule was moved onto a new
+     * wrapper as `flex: 1 1 auto`, its parent is not a flex container so the
+     * shorthand was inert, and the placeholder collapsed to zero height. Main
+     * positioned the view at zero height and did exactly as asked. The server was
+     * running, the surface had opened, the view existed — and the region was
+     * black with nothing anywhere saying why.
+     *
+     * **Persistent rather than instantaneous, and the grace is the whole design.**
+     * A zero rectangle is ordinary for a frame or two: before first layout, while
+     * a pane is mid-drag, while a split animates. Reporting the first one would
+     * be a false alarm on every mount — which is not a guess, it is what the
+     * first version of this did to two tests that had no quarrel with geometry.
+     * Half a second of *continuously* nothing is not a transient.
+     */
+    let zeroFrames = 0
+    /** So it is said once per mount, not sixty times a second. */
+    let zeroReported = false
 
     const report = (): void => {
       const rect = element.getBoundingClientRect()
@@ -228,6 +260,20 @@ export function WorkbenchFrame({
         y: Math.round(rect.y),
         width: Math.round(rect.width),
         height: Math.round(rect.height),
+      }
+      /*
+       * Counted before the unchanged-rectangle bail below, because a region stuck
+       * at zero never changes and would otherwise be measured once and never
+       * looked at again — the exact case this is for.
+       */
+      if (next.width === 0 || next.height === 0) zeroFrames += 1
+      else zeroFrames = 0
+      if (!zeroReported && zeroFrames > ZERO_AREA_GRACE_FRAMES) {
+        zeroReported = true
+        onFailed(
+          `The editor region has no size (${String(next.width)}×${String(next.height)}). ` +
+            'The workbench is running but cannot be seen — this is a layout fault in Chorus, not the editor.'
+        )
       }
       if (
         last !== null &&
@@ -284,6 +330,30 @@ export function WorkbenchFrame({
     <div className="workbench-surface" ref={host} data-workbench-surface={projectRoot}>
       {still !== null && (
         <img className="workbench-still" src={still} alt="" aria-hidden="true" draggable={false} />
+      )}
+      {/*
+        Something to look at while the surface opens, and it is not decoration.
+
+        Until the view exists this element is the whole of what the region draws,
+        and what it drew was nothing — so the editor was a black rectangle for as
+        long as the open took. On a first run that is a 76 MB download, a
+        checksum over it, a 257 MB extraction, a server spawn and the workbench's
+        own boot, and none of it is quick. Reported as "the editor did not
+        appear", which is exactly what an empty region says.
+
+        It is deliberately underneath the still rather than replacing it: an
+        overlay opening mid-open must keep showing the frozen frame, not swap it
+        for a spinner.
+
+        No progress figure, because there is honestly none to give — main reports
+        no stages, and a fake bar that sits at 90% is worse than a sentence that
+        admits it does not know. If the stages ever are reported, this is where
+        they land.
+      */}
+      {viewId === null && (
+        <p className="workbench-pending" role="status">
+          {t('workbench.opening')}
+        </p>
       )}
     </div>
   )

@@ -118,6 +118,15 @@ export interface ProjectInfo {
   readonly profileId: string | null
   /** Null is "never asked"; `[]` is a project deliberately emptied. Not the same. */
   readonly agentIds: readonly AgentId[] | null
+  /**
+   * The folder is not on disk right now. Read fresh from main on every listing,
+   * so remounting a volume clears it without anything being written.
+   *
+   * Carried this far because the card is where it is *acted on*: a missing root
+   * is the one project state whose fix — point it somewhere else, or remove it —
+   * has nowhere else to live.
+   */
+  readonly missing: boolean
 }
 
 /**

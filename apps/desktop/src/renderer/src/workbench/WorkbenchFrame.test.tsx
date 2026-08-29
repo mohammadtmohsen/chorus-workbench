@@ -375,3 +375,125 @@ describe('WorkbenchFrame bounds tracking', () => {
     expect(failures).toEqual([])
   })
 })
+
+/**
+ * The region has a rectangle, and a zero one is a fault worth naming.
+ *
+ * Written after shipping exactly this bug: a sizing rule was moved onto a new
+ * wrapper element as `flex: 1 1 auto`, the wrapper's parent is not a flex
+ * container so the shorthand was inert, and the placeholder collapsed to zero
+ * height. Main positioned the native view at zero height and the editor region
+ * was black — with a healthy server, an opened surface and nothing anywhere
+ * reporting a problem.
+ *
+ * **This is a guard, not a reproduction of the CSS fault.** jsdom performs no
+ * layout, so no test here can catch a rule that fails to apply; the rectangles
+ * in this file are stubbed. What the guard buys is that the *consequence* stops
+ * being silent — the next time any layout change collapses the region, the pane
+ * says so instead of going black. Catching the CSS itself needs a real browser
+ * and belongs in the e2e suite.
+ */
+describe('WorkbenchFrame zero-area reporting', () => {
+  function bridge(sent: WorkbenchRect[]): Bridge {
+    return {
+      openWorkbench: () => Promise.resolve({ viewId: VIEW }),
+      closeWorkbench: () => Promise.resolve({ ok: true }),
+      setWorkbenchBounds: ({ rect }) => {
+        sent.push(rect)
+        return Promise.resolve({ ok: true })
+      },
+      setWorkbenchVisible: () => Promise.resolve({ ok: true, stills: [] }),
+    }
+  }
+
+  const mount = async (
+    rect: WorkbenchRect
+  ): Promise<{ failures: string[]; sent: WorkbenchRect[] }> => {
+    const failures: string[] = []
+    const sent: WorkbenchRect[] = []
+    install(bridge(sent))
+    const { container } = render(
+      <WorkbenchFrame
+        target={{ grant: 'grant-1' }}
+        projectRoot="/tmp/project"
+        onFailed={(message) => {
+          failures.push(message)
+        }}
+      />
+    )
+    measures(surfaceOf(container), () => rect)
+    await settle()
+    /*
+     * Past the grace window on purpose. The guard requires the region to measure
+     * nothing *continuously* — a single zero frame is ordinary before first
+     * layout — so a test that only settled would prove the opposite of what it
+     * claims and pass for the wrong reason.
+     */
+    for (let pass = 0; pass < 40; pass += 1) drawFrame()
+    return { failures, sent }
+  }
+
+  it('reports a region with no height, naming the size it measured', async () => {
+    const { failures } = await mount({ x: 12, y: 40, width: 800, height: 0 })
+    expect(failures).toHaveLength(1)
+    expect(failures[0]).toContain('800\u00d70')
+    /*
+     * It must blame Chorus rather than the editor. The whole cost of the
+     * original bug was hours spent looking at the server, the extraction and the
+     * surface, none of which was wrong.
+     */
+    expect(failures[0]).toContain('layout fault in Chorus')
+  })
+
+  it('reports a region with no width too', async () => {
+    const { failures } = await mount({ x: 12, y: 40, width: 0, height: 600 })
+    expect(failures).toHaveLength(1)
+  })
+
+  it('says nothing at all about a region that has area', async () => {
+    const { failures, sent } = await mount({ x: 12, y: 40, width: 800, height: 600 })
+    expect(failures).toEqual([])
+    // The control: silence must mean "measured and fine", not "never measured".
+    expect(sent).toHaveLength(1)
+  })
+
+  it('reports once per mount rather than once per frame', async () => {
+    const { failures } = await mount({ x: 0, y: 0, width: 0, height: 0 })
+    // `mount` has already run well past the grace; these are the frames that
+    // would turn one report into sixty a second if it were not latched.
+    for (let pass = 0; pass < 40; pass += 1) drawFrame()
+    expect(failures).toHaveLength(1)
+  })
+
+  /*
+   * The control the three above need. Without it "a zero region is reported"
+   * is consistent with a guard that fires on the first frame — which is what the
+   * first version did, and it broke two unrelated tests in this file that had no
+   * rectangle stubbed and no quarrel with geometry.
+   */
+  it('says nothing about a region that is briefly zero and then laid out', async () => {
+    let rect: WorkbenchRect = { x: 0, y: 0, width: 0, height: 0 }
+    const failures: string[] = []
+    const sent: WorkbenchRect[] = []
+    install(bridge(sent))
+    const { container } = render(
+      <WorkbenchFrame
+        target={{ grant: 'grant-1' }}
+        projectRoot="/tmp/project"
+        onFailed={(message) => {
+          failures.push(message)
+        }}
+      />
+    )
+    measures(surfaceOf(container), () => rect)
+    await settle()
+
+    // A handful of zero frames, as a real first layout produces.
+    for (let pass = 0; pass < 3; pass += 1) drawFrame()
+    rect = { x: 12, y: 40, width: 800, height: 600 }
+    for (let pass = 0; pass < 40; pass += 1) drawFrame()
+
+    expect(failures).toEqual([])
+    expect(sent.at(-1)).toEqual({ x: 12, y: 40, width: 800, height: 600 })
+  })
+})

@@ -860,6 +860,22 @@ export const IPC_CONTRACT = {
            * differently or the second one silently regains its agents.
            */
           agentIds: z.array(z.enum(['codex', 'claude'])).nullable(),
+          /**
+           * The folder is not on disk right now — renamed, deleted, or on a
+           * volume that is not mounted.
+           *
+           * Carried on the listing so the renderer can *draw* the state instead
+           * of discovering it by failing. Before this existed, the first thing
+           * that touched a vanished root threw `ProjectRootMissingError`, and on
+           * launch that thing was the auto-start — so one stale project replaced
+           * the whole app with an error screen that had no way back to the
+           * project it was complaining about.
+           *
+           * Read fresh on every list rather than stored: it is a fact about the
+           * world and not about the project, so remounting the volume makes it
+           * false again with nothing written.
+           */
+          missing: z.boolean(),
         })
       ),
     }),
@@ -911,6 +927,27 @@ export const IPC_CONTRACT = {
   'project:forget': {
     request: z.object({ projectId: z.string() }),
     response: z.object({ forgotten: z.boolean() }),
+  },
+
+  /**
+   * Points a project at a different folder, after the old one moved or went.
+   *
+   * **The recovery `ProjectRootMissingError` was always written for** — its own
+   * comment says the product's answer is Relocate rather than an error dialog —
+   * and until now nothing exposed it, so a project whose checkout was renamed
+   * became a launch that failed with no way forward from the screen it failed on.
+   *
+   * Takes no path. Main opens the picker, for the same reason `project:adopt`
+   * does: a root the renderer could name is a root the renderer chose, and this
+   * one is the person's to choose. `root: null` means they cancelled, which is
+   * an answer rather than an error.
+   *
+   * Refused while the project has open conversations — an agent already running
+   * holds the directory it was spawned in and would not notice the move.
+   */
+  'project:relocate': {
+    request: z.object({ projectId: z.string() }),
+    response: z.object({ root: z.string().nullable() }),
   },
 
   /*
@@ -1705,6 +1742,9 @@ export interface ChorusApi extends WorkbenchShellApi {
   readonly forgetProject: (
     request: IpcRequest<'project:forget'>
   ) => Promise<IpcResponse<'project:forget'>>
+  readonly relocateProject: (
+    request: IpcRequest<'project:relocate'>
+  ) => Promise<IpcResponse<'project:relocate'>>
   readonly setProjectProfile: (
     request: IpcRequest<'project:setProfile'>
   ) => Promise<IpcResponse<'project:setProfile'>>

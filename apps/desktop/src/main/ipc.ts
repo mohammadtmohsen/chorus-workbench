@@ -386,6 +386,32 @@ export function buildHandlers(runtime: ChorusRuntime): Handlers {
     'project:forget': (request: { projectId: string }) =>
       Promise.resolve(runtime.forgetProject(request.projectId)),
 
+    /*
+     * Find a project whose folder moved. The picker is opened here rather than
+     * a path being accepted from the renderer, for the reason `project:adopt`
+     * above does the same: a directory the shell could name is a directory the
+     * shell chose, and choosing a project root is the person's decision.
+     *
+     * Cancelling returns `root: null` rather than throwing — a person backing
+     * out of a file dialog is not an error, and the caller has nothing to
+     * report.
+     */
+    'project:relocate': async (request: { projectId: string }) => {
+      const window = BrowserWindow.getFocusedWindow() ?? BrowserWindow.getAllWindows()[0]
+      const options: OpenDialogOptions = {
+        properties: ['openDirectory'],
+        buttonLabel: 'Use this folder',
+      }
+      const result = await (window === undefined
+        ? dialog.showOpenDialog(options)
+        : dialog.showOpenDialog(window, options))
+
+      const chosen = result.canceled ? undefined : result.filePaths[0]
+      if (chosen === undefined) return { root: null }
+
+      return { root: runtime.relocateProject(request.projectId, chosen).root }
+    },
+
     'project:setProfile': (request: { projectId: string; profileId: string }) =>
       Promise.resolve(runtime.setProjectProfile(request.projectId, request.profileId)),
 

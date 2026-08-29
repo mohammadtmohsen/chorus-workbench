@@ -163,6 +163,9 @@ export function ProjectPreviewHost(props: {
   readonly onShowConversation: (projectId: string, conversationId: string) => void
   readonly onToggleAgent: (projectId: string, agentId: AgentId, present: boolean) => Promise<void>
   readonly onChooseProfile: (projectId: string, profileId: string) => Promise<void>
+  /** Reachable only from a project whose folder has gone. */
+  readonly onRelocate: (projectId: string) => Promise<void>
+  readonly onForget: (projectId: string) => Promise<void>
 }): React.JSX.Element | null {
   const target = useSignal(props.controller.target)
   const project = props.projects.find((candidate) => candidate.id === target?.projectId)
@@ -197,6 +200,14 @@ export function ProjectPreviewHost(props: {
       }}
       onChooseProfile={async (profileId) => {
         await props.onChooseProfile(project.id, profileId)
+      }}
+      onRelocate={async () => {
+        props.controller.dismiss()
+        await props.onRelocate(project.id)
+      }}
+      onForget={async () => {
+        props.controller.dismiss()
+        await props.onForget(project.id)
       }}
     />
   )

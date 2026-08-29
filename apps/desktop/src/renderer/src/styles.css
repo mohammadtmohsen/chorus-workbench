@@ -8588,6 +8588,33 @@ input::placeholder {
   font-style: italic;
 }
 
+/*
+ * A project whose folder has gone. The path is struck through rather than
+ * hidden: it is the single most useful thing on the card at that moment, because
+ * it is what the person has to recognise before they can say where it went.
+ */
+.session-settings-folder[data-missing='true'] .session-settings-path {
+  color: var(--text-muted);
+  text-decoration: line-through;
+}
+
+.session-settings-missing {
+  display: flex;
+  flex-direction: column;
+  gap: var(--step);
+  padding-inline: calc(var(--step) * 2);
+  padding-block-start: var(--step);
+}
+
+.session-settings-missing-actions {
+  display: flex;
+  gap: var(--step);
+}
+
+.session-settings-missing-actions .btn {
+  flex: 1 1 0;
+}
+
 .session-settings-clear {
   display: grid;
   place-items: center;
@@ -9284,6 +9311,29 @@ input::placeholder {
 }
 
 /*
+ * What the region says while the surface is opening.
+ *
+ * Centred and quiet: it is a state, not a message to act on, and the workbench
+ * paints over it the moment there is one. `pointer-events: none` because the
+ * native view is composited above this anyway — a label that could take a click
+ * would only ever take one in the gap before the editor arrives.
+ */
+.workbench-pending {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin: 0;
+  padding-inline: calc(var(--step) * 6);
+  color: var(--text-muted);
+  font-size: 12px;
+  text-align: center;
+  text-wrap: balance;
+  pointer-events: none;
+}
+
+/*
  * The Chorus dock: a project's conversations, and which one the pane is on.
  *
  * Above the conversation rather than beside it, because the pane is already
@@ -9576,7 +9626,43 @@ input::placeholder {
   padding: 3px 8px 3px 3px;
 }
 
-.workspace-pane-workbench > .workbench-surface {
+/*
+ * A slot per project open in the pane, all mounted, one visible.
+ *
+ * `hidden` on the inactive ones is load-bearing rather than cosmetic: without it
+ * every mounted surface would take a share of the flex region and the editor you
+ * are looking at would be a fraction of the pane. The `[hidden]` override is
+ * there because this rule sets `display: flex`, and a bare `display` would beat
+ * the attribute's own `display: none` and put every project on screen at once.
+ */
+/*
+ * Sized explicitly, and this is the line that matters.
+ *
+ * It was `flex: 1 1 auto`, which does nothing here: `.workspace-pane-workbench`
+ * is a block container, so the slot is not a flex item and the shorthand is
+ * inert. The slot's height resolved to `auto` over a child that has no intrinsic
+ * height, so it measured **zero** — and because the native view is positioned
+ * from this element's rectangle, main dutifully placed a zero-height workbench
+ * and the region went black. The editor was running the whole time.
+ *
+ * `width`/`height` rather than a flex rule, because that is exactly what the
+ * previous direct-child rule did before the slot was inserted between them, and
+ * that arrangement was known to work.
+ */
+.workspace-pane-workbench-slot {
+  position: relative;
+  display: flex;
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+}
+
+.workspace-pane-workbench-slot[hidden] {
+  display: none;
+}
+
+.workspace-pane-workbench-slot > .workbench-surface {
   width: 100%;
   height: 100%;
 }
