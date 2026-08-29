@@ -20,6 +20,16 @@ describe('the workbench content security policy', () => {
     expect(directive('img-src')).toContain('https://open-vsx.org')
   })
 
+  /*
+   * The CDN the gallery redirects to. Allowing only `open-vsx.org` left the
+   * details pane failing identically, because every asset URL 302s to Eclipse's
+   * content host and a CSP governs the redirect target.
+   */
+  it('reaches the CDN those assets actually redirect to', () => {
+    expect(directive('connect-src')).toContain('https://openvsx.eclipsecontent.org')
+    expect(directive('img-src')).toContain('https://openvsx.eclipsecontent.org')
+  })
+
   it('reaches its own server as two exact origins', () => {
     expect(directive('connect-src')).toContain('ws://127.0.0.1:51515')
     expect(directive('connect-src')).toContain('http://127.0.0.1:51515')
@@ -51,6 +61,8 @@ describe('the workbench content security policy', () => {
       'http://127.0.0.1:51515',
       'https://open-vsx.org',
       'https://open-vsx.org',
+      'https://openvsx.eclipsecontent.org',
+      'https://openvsx.eclipsecontent.org',
       'ws://127.0.0.1:51515',
     ])
   })

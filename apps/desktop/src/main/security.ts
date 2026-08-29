@@ -103,13 +103,21 @@ const WORKBENCH_BASE_CSP = [
    * are fetched by this renderer. Reported as "failed to fetch" against an
    * extension that had in fact installed.
    *
+   * **Two hosts, and the second is not optional.** Every asset URL Open VSX
+   * returns — README, licence, icon — is on `open-vsx.org/api/...` and
+   * **302-redirects to `openvsx.eclipsecontent.org`**, Eclipse's content CDN. A
+   * CSP applies to the redirect target, so allowing only the first host leaves
+   * the pane failing exactly as it did before, which is what happened: the
+   * gallery origin was added, the error did not change, and the redirect was
+   * only visible by following the request rather than reading the config.
+   *
    * Narrowly, and the narrowness is the point the paragraph above makes: this
    * renderer runs third-party extension code, so each origin added is one that
-   * code can reach. This one buys nothing new in practice — an extension already
-   * talks to Open VSX through the extension host — which is what makes it the
+   * code can reach. These two buy nothing new in practice — an extension already
+   * talks to Open VSX through the extension host — which is what makes them the
    * only widening worth making.
    */
-  "img-src 'self' data: blob: https://open-vsx.org",
+  "img-src 'self' data: blob: https://open-vsx.org https://openvsx.eclipsecontent.org",
   "font-src 'self' data:",
   "media-src 'self' data: blob:",
   "worker-src 'self' blob:",
@@ -149,7 +157,7 @@ export function workbenchPolicy(isDev: boolean, remoteAuthority: string | null):
     isDev
       ? "script-src 'self' 'unsafe-inline' 'unsafe-eval' blob:"
       : "script-src 'self' 'unsafe-eval' blob:",
-    `connect-src 'self' data: blob: https://open-vsx.org${remote}${isDev ? ' ws://localhost:* http://localhost:*' : ''}`,
+    `connect-src 'self' data: blob: https://open-vsx.org https://openvsx.eclipsecontent.org${remote}${isDev ? ' ws://localhost:* http://localhost:*' : ''}`,
   ].join('; ')
 }
 
