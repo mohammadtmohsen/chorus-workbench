@@ -151,6 +151,37 @@ export function QuickRail(props: QuickRailProps): React.JSX.Element {
       */}
 
       {/*
+        Add Project, above the list rather than below it.
+
+        It sat under the projects, on the reasoning that "a tile that is not a
+        project should not scroll away with them" — which is right about the
+        scrolling and wrong about the position. Below a scrolling list its
+        distance from the top grows with every project added, so the one control
+        that is always in the same place moves further down the more the rail is
+        used. Above it, it is where the pointer already is on an empty rail and
+        stays put on a full one.
+
+        Still outside `quick-rail-sessions`, which is what keeps it from
+        scrolling away — that half of the original reasoning is unchanged.
+      */}
+      <ul className="quick-rail-group">
+        <li>
+          <button
+            type="button"
+            className="rail-item"
+            data-rail-add-project
+            aria-label={t('rail.addProject')}
+            title={t('rail.addProject')}
+            onClick={() => {
+              void props.onAddProject()
+            }}
+          >
+            <FolderIcon />
+          </button>
+        </li>
+      </ul>
+
+      {/*
         Projects, and **only** projects.
 
         The rail used to list every conversation as its own tile, which put four
@@ -203,28 +234,6 @@ export function QuickRail(props: QuickRailProps): React.JSX.Element {
           ))}
         </ul>
       </div>
-
-      {/*
-        Add Project sits below the list rather than in it: it is the way out of
-        the empty state, and a tile that is not a project should not scroll away
-        with them.
-      */}
-      <ul className="quick-rail-group">
-        <li>
-          <button
-            type="button"
-            className="rail-item"
-            data-rail-add-project
-            aria-label={t('rail.addProject')}
-            title={t('rail.addProject')}
-            onClick={() => {
-              void props.onAddProject()
-            }}
-          >
-            <FolderIcon />
-          </button>
-        </li>
-      </ul>
 
       {/*
         The order the approved composition puts them in: what the account has
