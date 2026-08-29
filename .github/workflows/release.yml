@@ -99,18 +99,23 @@ jobs:
         # running it, not by reading it. The `arch` list is gone now, so the flag
         # decides and each job builds exactly one.
         #
-        # Which is also why the Intel build runs on `macos-13`: it is the last
-        # Intel image GitHub offers, and `verify:package` launches the app it just
-        # built. Cross-building x64 on arm64 would package fine and prove nothing,
-        # since GitHub's arm64 images do not ship Rosetta — an unverified artifact
-        # that uploads successfully is the failure that looks like a pass.
+        # The Intel build needs an Intel runner because `verify:package` launches
+        # the app it just built, and GitHub's arm64 images ship no Rosetta —
+        # cross-building x64 on arm64 would package fine and prove nothing, and an
+        # unverified artifact that uploads successfully is the failure that looks
+        # like a pass.
+        #
+        # `macos-15-intel`, not `macos-13`. The first run sat queued for
+        # twenty-four minutes with no runner ever assigned: the macOS 13 image has
+        # been retired, and a label GitHub no longer offers does not fail, it
+        # simply never starts.
         include:
           - os: macos-latest
             label: macOS installer (Apple Silicon)
             packageArgs: --arm64
             artifact: Chorus-${{ needs.gate.outputs.version }}-arm64.dmg
             verify: verify:package
-          - os: macos-13
+          - os: macos-15-intel
             label: macOS installer (Intel)
             packageArgs: --x64
             artifact: Chorus-${{ needs.gate.outputs.version }}-x64.dmg
