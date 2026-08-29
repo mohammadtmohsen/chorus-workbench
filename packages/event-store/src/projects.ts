@@ -169,7 +169,9 @@ function parseAgentIds(raw: string | null): readonly string[] | null {
   try {
     const parsed: unknown = JSON.parse(raw)
     if (!Array.isArray(parsed)) return null
-    return parsed.every((id) => typeof id === 'string') ? (parsed as string[]) : null
+    // No assertion needed: `every` with a `typeof` test narrows the array through
+    // its inferred type predicate, so `parsed` is already `string[]` here.
+    return parsed.every((id) => typeof id === 'string') ? parsed : null
   } catch {
     return null
   }

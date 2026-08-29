@@ -977,7 +977,10 @@ function ChorusSash({
     const sash = event.currentTarget
     const pane = sash.closest('[data-pane-content]')
     const chorus = pane?.querySelector('.workspace-pane-chorus')
-    if (pane === null || pane === undefined || chorus === null || chorus === undefined) return
+    // `closest` returns `Element | null` and never `undefined`, so only `chorus`
+    // — which is `undefined` when the optional chain above short-circuits —
+    // needs both arms.
+    if (pane === null || chorus === null || chorus === undefined) return
 
     const right = pane.getBoundingClientRect().right
     const startWidth = chorus.getBoundingClientRect().width

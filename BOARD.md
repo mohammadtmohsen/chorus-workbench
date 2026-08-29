@@ -52,8 +52,8 @@ can activate an extension inside project B, which was never trusted, without
 anything being shown in B.
 
 **Predicted by the plan, and now real.** §2.4 lists it among the hazards created
-by choosing a shared REH: *whether one REH serving two roots isolates them well
-enough when its extensions directory and global storage are per-server*. It was
+by choosing a shared REH: _whether one REH serving two roots isolates them well
+enough when its extensions directory and global storage are per-server_. It was
 hypothetical while nothing could be installed.
 
 **Decided 2026-08-24 — accept the shared scope, and say so.** The alternative was
@@ -86,7 +86,7 @@ for itself no matter what another project trusted.
 
 **Global install with per-workspace activation gating is VS Code's own model**,
 not something the shared REH broke — and Chorus inherits it. Sharing an extensions
-directory shares what is *installed*; it does not share what is *activated*.
+directory shares what is _installed_; it does not share what is _activated_.
 
 **Kept rather than deleted, because the error is the useful part.** This was a
 defect asserted from a plausible shape without checking, which is the same failure
@@ -259,7 +259,7 @@ with `files.autoSave` set to `off`:
   editor and its save path both work; the change is simply pending.
 - **Nothing says so.** All three indicators are absent at once: no `dirty` class
   on the active tab (`tab tab-actions-right sizing-fit active selected
-  tab-border-bottom tab-border-top`), no filled-circle close action
+tab-border-bottom tab-border-top`), no filled-circle close action
   (`.codicon-circle-filled`), and no bullet in the window title.
 - **`File: Revert File` does not respond as expected.** The command was found and
   run from the palette; the marker stayed in the buffer for the full 20 s the gate
@@ -297,7 +297,7 @@ output channel separates "not registered" from "registered and clean" from
 ```
 
 **Registered, no `●`, no backup — which looks decisive and is not.** The file's
-mtime on disk is **11:38:35**, twenty-five seconds *after* the snapshot. So the
+mtime on disk is **11:38:35**, twenty-five seconds _after_ the snapshot. So the
 content reached disk, and the reading that fits every byte of this evidence is the
 boring one: the log was taken before the edit, or auto-save was on. **The gate's
 original observation is the one that cannot be explained away** — disk sampled
@@ -306,7 +306,7 @@ twenty times over eight seconds with `files.autoSave` off, unchanged
 reproduced that state.
 
 **What the next attempt must establish, in one session**: auto-save confirmed
-`off`; the file's mtime recorded *before* the edit; the edit typed and **no `⌘S`**;
+`off`; the file's mtime recorded _before_ the edit; the edit typed and **no `⌘S`**;
 `Developer: Log Working Copies` run within seconds; and the mtime re-read
 afterwards and **still unchanged**. Only the `●`-or-not read against an mtime that
 did not move answers the question. Two runs cannot substitute for one, because the
@@ -319,11 +319,11 @@ independent signals agreeing is hard to dismiss. Read against the source, two of
 three could not have been anything but absent — on a healthy dirty editor exactly as
 much as on a broken one.
 
-| Signal the gate reads                                     | Verdict     | Why                                                                                                                                                                              |
-| --------------------------------------------------------- | ----------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `tab.className.includes('dirty')`                         | **valid**   | `multiEditorTabsControl.js:1378` adds the `dirty` class. This one is a real negative.                                                                                            |
-| `tab.querySelector('.codicon-circle-filled') !== null`    | **cannot succeed** | The dot is a `::before` pseudo-element — `multieditortabscontrol.css:462-467` sets `content: var(--vscode-icon-circle-filled-content)` on `.tab.dirty > .tab-actions .action-label`. **No element carries that class**, so `querySelector` returns null always. |
-| `document.title.includes('●')`                            | **cannot succeed** | `services.ts:271` sets `window.title` to `${rootName}`. Chorus removed the `${dirty}` segment itself. No dirty state can put a bullet there. |
+| Signal the gate reads                                  | Verdict            | Why                                                                                                                                                                                                                                                             |
+| ------------------------------------------------------ | ------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `tab.className.includes('dirty')`                      | **valid**          | `multiEditorTabsControl.js:1378` adds the `dirty` class. This one is a real negative.                                                                                                                                                                           |
+| `tab.querySelector('.codicon-circle-filled') !== null` | **cannot succeed** | The dot is a `::before` pseudo-element — `multieditortabscontrol.css:462-467` sets `content: var(--vscode-icon-circle-filled-content)` on `.tab.dirty > .tab-actions .action-label`. **No element carries that class**, so `querySelector` returns null always. |
+| `document.title.includes('●')`                         | **cannot succeed** | `services.ts:271` sets `window.title` to `${rootName}`. Chorus removed the `${dirty}` segment itself. No dirty state can put a bullet there.                                                                                                                    |
 
 **And the second one is worse than merely broken — it was never independent.** Its
 CSS selector is predicated on `.tab.dirty`, the very class the first check reads. Even
@@ -393,7 +393,7 @@ process that is its own process-group leader, and it cannot tell that it failed.
 
 ```js
 try {
-  process.kill(-pid, 'SIGKILL')     // negative pid = the process GROUP
+  process.kill(-pid, 'SIGKILL') // negative pid = the process GROUP
   signalled.push(pid)
 } catch {
   /* gone between the listing and the signal, which is the state we wanted */
@@ -401,7 +401,7 @@ try {
 ```
 
 **`kill(-pid)` addresses the group whose id equals `pid`, which exists only if that
-process is the group leader.** An orphan that is *not* a leader has no group by that
+process is the group leader.** An orphan that is _not_ a leader has no group by that
 number, so the call throws `ESRCH` — and the `catch` asserts one interpretation of a
 throw that has at least two. The process is recorded as "gone", never enters
 `signalled`, is never waited on by the settle loop, and is still running.
@@ -411,7 +411,7 @@ throw that has at least two. The process is recorded as "gone", never enters
 Mohamad met: **a refusal naming a pid the reaper had just decided was gone.**
 
 **Two facts in this entry corroborate it and are hard to explain otherwise.** The
-orphan **died instantly on a plain `SIGTERM`** — `kill 58942`, a *positive* pid,
+orphan **died instantly on a plain `SIGTERM`** — `kill 58942`, a _positive_ pid,
 which reaches the process regardless of group membership, while the reaper's
 negative form could not. And the orphans were **19–20 hours old**, i.e. old enough
 to predate E4's fix, when Chorus still spawned `bin/codium-server`: bash became the
@@ -420,7 +420,7 @@ pointing at a dead leader**. Whether 58942 was specifically such a process canno
 recovered now, and the defect does not depend on it.
 
 **It is not a legacy-only fault, which is the part that matters.** Chorus now spawns
-the server directly and `detached`, so a healthy server *is* a group leader. But the
+the server directly and `detached`, so a healthy server _is_ a group leader. But the
 server forks its own children — the remote extension host among them — and any of
 them outliving the leader inherits exactly the same shape: alive, PPID 1, carrying
 the marker, and unreachable by `kill(-pid)`. Codex's run on 2026-08-24 left **two

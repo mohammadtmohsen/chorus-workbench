@@ -690,8 +690,15 @@ export function reconcileConversationGroups(
   if (conversationIds.length === 0) return null
   const live = new Set(conversationIds)
 
+  /*
+   * `== null` rather than `=== null`, and it is the one place in this file that
+   * wants loose equality: it has to catch both "no saved arrangement at all"
+   * and "saved, but with no layout", which is exactly the pair `== null` means.
+   * Writing `?.layout === null` instead would silently take the *else* branch
+   * for an absent `saved` and read `panes` off nothing.
+   */
   const seed: ConversationArrangement =
-    saved === undefined || saved.layout === null
+    saved?.layout == null
       ? emptyArrangement()
       : {
           layout: saved.layout,

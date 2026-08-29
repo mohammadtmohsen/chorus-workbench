@@ -94,8 +94,21 @@ describe('ide:openFile', () => {
  * is the operation Phase 2 removed: a Conversation belongs to exactly one
  * Project, and moving a project moves every conversation in it at once.
  *
- * What replaces them tests the two halves of that: the start path adopts, and
- * the channels that could move a room no longer exist.
+ * What replaces them tests the two halves of that: a conversation starts inside
+ * a project it is given, and the channels that could move a room no longer
+ * exist.
+ *
+ * **These three used to assert the opposite, and were left behind by Phase 9.**
+ * They required `conversation:start` to route through `startConversationIn` and
+ * carry a `cwd`, adopting the directory on the way past — with a comment calling
+ * the projectId route "the bug this routing exists to prevent". That was true
+ * while a conversation was the thing a person created first. Phase 9 made the
+ * Project the unit: `project:adopt` above turns a folder into a project, and a
+ * conversation is then started *inside* one and can no longer name a directory
+ * at all. So the old assertion had inverted into a test demanding the behaviour
+ * the architecture forbids — and because the fake runtime only carried the
+ * method the test expected, it failed as `startConversation is not a function`
+ * rather than as a disagreement about the contract.
  */
 describe('conversation:start', () => {
   const started = {
@@ -107,36 +120,39 @@ describe('conversation:start', () => {
   }
 
   const startWith = async (request: unknown) => {
-    const startConversationIn = vi.fn((_options: Record<string, unknown>) =>
-      Promise.resolve(started)
-    )
-    const runtime = { startConversationIn } as unknown as ChorusRuntime
+    const startConversation = vi.fn((_options: Record<string, unknown>) => Promise.resolve(started))
+    const runtime = { startConversation } as unknown as ChorusRuntime
     await (buildHandlers(runtime)['conversation:start'] as (r: unknown) => Promise<unknown>)(
       request
     )
-    return startConversationIn
+    return startConversation
   }
 
-  it('goes through the adopting entry point, not the project-id one', async () => {
-    // `startConversationIn` turns the directory into a project on the way past.
-    // Calling `startConversation` here instead would need an id the renderer has
-    // no way to produce, which is the bug this routing exists to prevent.
-    const startConversationIn = await startWith({ agents: ['claude'], cwd: '/tmp/repo' })
-    expect(startConversationIn).toHaveBeenCalledWith({ agents: ['claude'], cwd: '/tmp/repo' })
+  it('starts inside the project it was given, and passes no directory', async () => {
+    /*
+     * The Phase 9 invariant at the IPC boundary. `project:adopt` is the only
+     * thing that turns a folder into a project, so by the time this channel is
+     * reached the id exists and the room is being placed inside it. A `cwd`
+     * arriving here would mean a conversation choosing its own directory, which
+     * is precisely what the Project-as-unit hierarchy removes.
+     */
+    const startConversation = await startWith({ agents: ['claude'], projectId: 'p1' })
+    expect(startConversation).toHaveBeenCalledWith({ agents: ['claude'], projectId: 'p1' })
+    expect(Object.keys(startConversation.mock.calls[0]?.[0] ?? {})).not.toContain('cwd')
   })
 
   it('omits an absent profile rather than passing undefined through', async () => {
-    const startConversationIn = await startWith({ agents: ['claude'], cwd: '/tmp/repo' })
-    expect(Object.keys(startConversationIn.mock.calls[0]?.[0] ?? {})).not.toContain('profileId')
+    const startConversation = await startWith({ agents: ['claude'], projectId: 'p1' })
+    expect(Object.keys(startConversation.mock.calls[0]?.[0] ?? {})).not.toContain('profileId')
   })
 
   it('passes a profile when one is given', async () => {
-    const startConversationIn = await startWith({
+    const startConversation = await startWith({
       agents: ['claude'],
-      cwd: '/tmp/repo',
+      projectId: 'p1',
       profileId: 'trusted',
     })
-    expect(startConversationIn).toHaveBeenCalledWith(
+    expect(startConversation).toHaveBeenCalledWith(
       expect.objectContaining({ profileId: 'trusted' })
     )
   })

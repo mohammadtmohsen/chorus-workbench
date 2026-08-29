@@ -121,11 +121,23 @@ describe('listConversations', () => {
     })
   })
 
-  it('falls back to the directory it was created in when no agent recorded one', () => {
-    // `project_id` holds the cwd a conversation was created with, so a room
-    // nobody ever started an agent in can still say where it was.
+  it('reports no directory when no agent ever ran, and names the project instead', () => {
+    /*
+     * This used to assert `cwd === 'p1'`, on the reasoning that "`project_id`
+     * holds the cwd a conversation was created with". It does not: `p1` is a
+     * project *id*, and reading it as a directory is exactly the conflation the
+     * Project-as-unit hierarchy removed. `ConversationSummary` now says so in
+     * its own types — `cwd` is "the last root an agent actually ran in, or empty
+     * if none ever did", and `projectId` carries "resolve this for the root, not
+     * `cwd`".
+     *
+     * So empty is the answer, and it is a better one than a plausible-looking
+     * id: a caller that treated `'p1'` as a path would have built a filesystem
+     * operation out of a database key and only found out at the syscall.
+     */
     const [only] = store.listConversations()
-    expect(only?.cwd).toBe('p1')
+    expect(only?.cwd).toBe('')
+    expect(only?.projectId).toBe('p1')
   })
 
   it('lists every agent that was ever in it, not only the last', () => {

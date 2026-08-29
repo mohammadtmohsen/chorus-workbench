@@ -108,17 +108,26 @@ function surfaceOf(container: HTMLElement): Element {
 }
 
 /**
- * The three methods this component reaches for, and there is no fourth.
+ * The four methods this component reaches for, and there is no fifth.
  *
  * `window.chorus` is `readonly` because the preload injects it and the renderer
  * may not, which is exactly the shape being honoured here: `defineProperty` is
  * the way in rather than an assignment that would need the type widened, and
  * `configurable` so each test installs its own bridge over the last one.
+ *
+ * **It said "three" and there was a fourth.** Phase 9's Editor switch added
+ * `setWorkbenchVisible`, and this stub did not gain it — so the mount effect
+ * threw `setWorkbenchVisible is not a function` before it ever reported bounds,
+ * and all four tests in this file failed for a reason none of them was about.
+ * A hand-written bridge is a second copy of an interface, and it drifts; this
+ * one is spelled against `WorkbenchShellApi` so at least the *shapes* stay
+ * honest, but nothing makes it complete except noticing.
  */
 interface Bridge {
   readonly openWorkbench: WorkbenchShellApi['openWorkbench']
   readonly closeWorkbench: WorkbenchShellApi['closeWorkbench']
   readonly setWorkbenchBounds: WorkbenchShellApi['setWorkbenchBounds']
+  readonly setWorkbenchVisible: WorkbenchShellApi['setWorkbenchVisible']
 }
 
 function install(bridge: Bridge): void {
@@ -187,6 +196,10 @@ describe('WorkbenchFrame bounds reporting', () => {
         reported.push(viewId)
         return Promise.reject(new Error(REFUSAL))
       },
+      // `stills` is required: hiding views hands back a JPEG of each so the
+      // region does not go black. Nothing here reads them, and returning none
+      // is the honest answer for a bridge that never hides anything.
+      setWorkbenchVisible: () => Promise.resolve({ ok: true, stills: [] }),
     })
 
     render(
@@ -218,6 +231,10 @@ describe('WorkbenchFrame bounds reporting', () => {
         reported.push(viewId)
         return call.promise
       },
+      // `stills` is required: hiding views hands back a JPEG of each so the
+      // region does not go black. Nothing here reads them, and returning none
+      // is the honest answer for a bridge that never hides anything.
+      setWorkbenchVisible: () => Promise.resolve({ ok: true, stills: [] }),
     })
 
     const { unmount } = render(
@@ -264,6 +281,10 @@ describe('WorkbenchFrame bounds tracking', () => {
         sent.push(rect)
         return Promise.resolve({ ok: true })
       },
+      // `stills` is required: hiding views hands back a JPEG of each so the
+      // region does not go black. Nothing here reads them, and returning none
+      // is the honest answer for a bridge that never hides anything.
+      setWorkbenchVisible: () => Promise.resolve({ ok: true, stills: [] }),
     }
   }
 

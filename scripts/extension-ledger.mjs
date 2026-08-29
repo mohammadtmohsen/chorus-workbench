@@ -38,12 +38,7 @@ const runtime = JSON.parse(
  */
 
 const EXTENSIONS_DIR = join(homedir(), '.vscode', 'extensions')
-const OUT = join(
-  'docs',
-  'plans',
-  'chorus-project-workbench-2026-08-22',
-  'extension-ledger.md'
-)
+const OUT = join('docs', 'plans', 'chorus-project-workbench-2026-08-22', 'extension-ledger.md')
 
 /**
  * Which extension host a manifest lands in, by §4's corrected rule.
@@ -122,7 +117,10 @@ async function openVsx(id) {
       by: by === 'open-vsx' ? '**bot**' : by,
     }
   } catch (error) {
-    return { vsx: `unreachable (${error instanceof Error ? error.message : String(error)})`, by: '' }
+    return {
+      vsx: `unreachable (${error instanceof Error ? error.message : String(error)})`,
+      by: '',
+    }
   }
 }
 
@@ -159,7 +157,16 @@ for (const entry of listed) {
   const platform = match === undefined ? '' : match.slice(prefix.length).replace(/^-/, '')
 
   if (manifestPath === '' || !existsSync(manifestPath)) {
-    rows.push({ id, version, licence: '?', host: '?', klass: '?', vsx: 'manifest not found', by: '', platform: '' })
+    rows.push({
+      id,
+      version,
+      licence: '?',
+      host: '?',
+      klass: '?',
+      vsx: 'manifest not found',
+      by: '',
+      platform: '',
+    })
     continue
   }
   const manifest = JSON.parse(readFileSync(manifestPath, 'utf8'))
@@ -248,4 +255,6 @@ const summary = `
 `
 
 writeFileSync(OUT, header + table + summary)
-process.stdout.write(`${OUT}: ${String(rows.length)} rows, ${String(absent)} absent from Open VSX\n`)
+process.stdout.write(
+  `${OUT}: ${String(rows.length)} rows, ${String(absent)} absent from Open VSX\n`
+)

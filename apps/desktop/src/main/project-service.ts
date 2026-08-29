@@ -161,7 +161,9 @@ export class ProjectService {
     const project = this.projects.get(projectId)
     if (project === null) throw new UnknownProjectError(projectId)
 
-    let present = false
+    // Declared without a value rather than seeded with `false`: both arms below
+    // assign it, so a seed is dead and reads as though one path might not.
+    let present: boolean
     try {
       present = statSync(project.canonicalRoot).isDirectory()
     } catch {

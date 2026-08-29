@@ -57,7 +57,22 @@ describe('open project persistence', () => {
         ...workspace,
         sidebarWidth: SIDEBAR_WIDTH.default,
         terminals: {},
-        changes: {},
+        /*
+         * The Phase 9 slice of this list, and the reason it is spelled out
+         * rather than spread from a helper: this test's whole job is to fail
+         * when the schema gains or loses a field, so each one is named here on
+         * purpose. `changes` left with the Changes panel; the three below
+         * arrived with project-level layout — the conversation `PaneTree` per
+         * project, the Chorus/editor divider position, and the Editor switch.
+         *
+         * `workbenchHidden` is keyed by what is *hidden* rather than what is
+         * shown, so the empty object means every editor is on. Defaulting it
+         * the other way would open a restored workspace with every workbench
+         * dark and nothing saying why.
+         */
+        conversationGroups: {},
+        chorusWidths: {},
+        workbenchHidden: {},
         globalTerminal: { open: false, height: TERMINAL_HEIGHT.default, tabs: [], activeId: null },
       },
     })

@@ -27,9 +27,7 @@ const manifest = JSON.parse(readFileSync(join(here, 'package.json'), 'utf8'))
  * itself on a rebuild, and anything a package manager left behind.
  */
 const SKIP = new Set(['node_modules', 'package.mjs'])
-const files = readdirSync(here).filter(
-  (name) => !SKIP.has(name) && !name.endsWith('.vsix')
-)
+const files = readdirSync(here).filter((name) => !SKIP.has(name) && !name.endsWith('.vsix'))
 
 const contentTypes = `<?xml version="1.0" encoding="utf-8"?>
 <Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">

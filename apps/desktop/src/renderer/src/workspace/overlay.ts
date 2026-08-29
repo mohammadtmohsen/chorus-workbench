@@ -63,7 +63,13 @@ function hide(): void {
    * fail to open because of that. Fired and forgotten rather than awaited for
    * the same reason: the overlay is already on screen.
    */
+  // Disabled rather than removed: the rule is reading the *declaration*, which
+  // says `window.chorus` is always there, and the paragraph above is the reason
+  // that declaration is a convenience rather than the truth. Deleting the `?.`
+  // to satisfy the type would make a dialog throw in both the places it is
+  // actually absent.
   void window.chorus
+    // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition
     ?.setWorkbenchVisible({ visible: false })
     .then((result) => {
       /*
@@ -83,7 +89,12 @@ function hide(): void {
 
 function show(): void {
   stills.set({})
-  void window.chorus?.setWorkbenchVisible({ visible: true }).catch(() => {})
+  // Same reason as `hide()` above: the optional chain is load-bearing wherever
+  // `window.chorus` is not injected.
+  // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition
+  void window.chorus?.setWorkbenchVisible({ visible: true }).catch(() => {
+    /* nothing to undo; the views are already being asked to come back */
+  })
 }
 
 /**

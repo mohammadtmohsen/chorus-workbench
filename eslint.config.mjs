@@ -187,6 +187,20 @@ export default tseslint.config(
       'apps/vscode-extension/esbuild.mjs',
       'apps/vscode-extension/package.mjs',
       'apps/vscode-extension/zip.mjs',
+      /*
+       * The workbench fixture, and it belongs here for a stronger reason than
+       * the build scripts above: it is deliberately plain CommonJS with no
+       * TypeScript, no bundler and no dependencies, because every layer between
+       * its source and the extension host is another suspect when the proof
+       * fails. Adding a tsconfig to satisfy the linter would undo the thing it
+       * exists to demonstrate.
+       *
+       * Until it was listed, both files failed to parse at all — "not found by
+       * the project service" — which is two errors that look like lint findings
+       * and are actually the linter never having read the file.
+       */
+      'apps/workbench-fixture/extension.js',
+      'apps/workbench-fixture/package.mjs',
       'scripts/**/*.mjs',
     ],
     languageOptions: {
@@ -198,6 +212,10 @@ export default tseslint.config(
         process: 'readonly',
         URL: 'readonly',
         Buffer: 'readonly',
+        /* The fixture is CommonJS — the only file here that is. */
+        require: 'readonly',
+        module: 'writable',
+        exports: 'writable',
         /* Node has had `fetch` global since 18 and this repo's engines are well
            past that; `workbench-manifest.mjs` reads the VSCodium release API
            with it. Listed here rather than switched to a globals package for the
@@ -208,6 +226,27 @@ export default tseslint.config(
     rules: {
       ...tseslint.configs.disableTypeChecked.rules,
       'no-console': 'off',
+    },
+  },
+
+  {
+    /*
+     * The fixture extension, once it was finally being parsed, turned out to
+     * break two rules by *being what it is* rather than by needing a fix.
+     *
+     * `require` is not a style choice here: a VS Code extension host loads
+     * `main` as CommonJS, and the fixture has no build step to convert anything
+     * — which is the property that makes it a usable proof, since a failure has
+     * to name one suspect and a bundler is another one.
+     *
+     * `deactivate` is empty because the extension holds nothing to release. The
+     * VS Code API asks for the export, so deleting it to satisfy the linter
+     * would change the contract to quiet a warning about a body.
+     */
+    files: ['apps/workbench-fixture/extension.js'],
+    rules: {
+      '@typescript-eslint/no-require-imports': 'off',
+      '@typescript-eslint/no-empty-function': 'off',
     },
   },
 

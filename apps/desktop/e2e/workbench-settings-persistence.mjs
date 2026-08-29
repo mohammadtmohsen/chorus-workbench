@@ -233,7 +233,11 @@ const diagnose = async (surface) =>
 async function pickInQuickInput(surface, query, matches, what) {
   await focus(surface)
   await press(surface, KEY_P, { modifiers: ACCEL })
-  await until(`${what}: the quick input to open`, async () => (await quickInput(surface)).open, 30_000)
+  await until(
+    `${what}: the quick input to open`,
+    async () => (await quickInput(surface)).open,
+    30_000
+  )
 
   await press(surface, KEY_A, { modifiers: ACCEL, commands: ['selectAll'] })
   await surface.send('Input.insertText', { text: query })
@@ -580,8 +584,7 @@ async function run() {
     writeFileSync(filePath, `# settings fixture ${stamp}\n\n`)
   }
 
-  const settingsFile = (profile) =>
-    join(profile, 'workbench', 'user-data', 'User', 'settings.json')
+  const settingsFile = (profile) => join(profile, 'workbench', 'user-data', 'User', 'settings.json')
 
   let app = null
   try {

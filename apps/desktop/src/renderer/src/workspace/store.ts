@@ -860,10 +860,16 @@ export const useWorkspaceStore = create<WorkspaceStore>()(
       },
       toggleWorkbench: (projectId) => {
         set((state) => {
-          const next = { ...state.workbenchHidden }
-          if (next[projectId] === true) delete next[projectId]
-          else next[projectId] = true
-          return { workbenchHidden: next }
+          /*
+           * Omitted by rest-destructuring rather than `delete`, and the record
+           * stays keyed by what is *hidden* — so absent means the editor is on
+           * and a project that was never toggled needs no entry at all.
+           */
+          if (state.workbenchHidden[projectId] === true) {
+            const { [projectId]: _shown, ...rest } = state.workbenchHidden
+            return { workbenchHidden: rest }
+          }
+          return { workbenchHidden: { ...state.workbenchHidden, [projectId]: true } }
         })
       },
       ingestEvents: (events) => {

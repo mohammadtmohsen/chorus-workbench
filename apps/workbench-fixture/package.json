@@ -9,9 +9,15 @@
   "engines": {
     "vscode": "^1.94.0"
   },
-  "extensionKind": ["workspace"],
-  "categories": ["Other"],
-  "activationEvents": ["onStartupFinished"],
+  "extensionKind": [
+    "workspace"
+  ],
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
   "main": "./extension.js",
   "contributes": {
     "commands": [

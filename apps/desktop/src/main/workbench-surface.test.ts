@@ -85,9 +85,35 @@ class FakeWebContentsView {
   setBounds(rect: unknown): void {
     this.bounds = rect
   }
+  /**
+   * Recorded rather than swallowed, because hiding a view is product behaviour
+   * and not bookkeeping: it is how the Editor switch turns a workbench off and
+   * how `workspace/overlay.ts` keeps a native view from being drawn over a
+   * dialog. A `vi.fn()` would have satisfied the call and thrown the value away.
+   */
+  visible: boolean | null = null
+  setVisible(next: boolean): void {
+    this.visible = next
+  }
 }
 
 const handlers = new Map<string, (event: unknown, request?: unknown) => unknown>()
+
+/**
+ * `ipcMain.on` listeners, kept in their own map because `on` and `handle` are
+ * different mechanisms rather than two spellings of one: `handle` answers an
+ * `invoke` and returns a value, `on` receives a `send` and returns nothing.
+ *
+ * It exists because the context channel — a surface reporting the file and
+ * selection it is showing — is one-way, and the mock only had `handle`. The
+ * result was not a failing assertion but `TypeError: ipcMain.on is not a
+ * function` thrown while `registerWorkbenchHandlers` was still being called,
+ * which took the entire file down: vitest reported `(0 test)`, so a suite of
+ * around forty checks was reported as neither passing nor failing. A mock that
+ * is missing a method the production code calls is a suite that silently stops
+ * covering anything, which is worth more comment than the two lines below.
+ */
+const pushes = new Map<string, (event: unknown, payload?: unknown) => void>()
 
 /**
  * Unpackaged by default, which is what makes the gate's seeded chooser reachable
@@ -114,6 +140,9 @@ vi.mock('electron', () => ({
   ipcMain: {
     handle: vi.fn((channel: string, handler: (event: unknown, request?: unknown) => unknown) => {
       handlers.set(channel, handler)
+    }),
+    on: vi.fn((channel: string, listener: (event: unknown, payload?: unknown) => void) => {
+      pushes.set(channel, listener)
     }),
   },
   session: {

@@ -55,7 +55,11 @@ async function build() {
    * the optional chaining is not defensive style — it is the test.
    */
   const nodeVersion = typeof process === 'undefined' ? undefined : process.versions?.node
-  check('node host', nodeVersion !== undefined, nodeVersion ?? 'no process global — web worker host')
+  check(
+    'node host',
+    nodeVersion !== undefined,
+    nodeVersion ?? 'no process global — web worker host'
+  )
   check(
     'remote',
     vscode.env.remoteName !== undefined,
