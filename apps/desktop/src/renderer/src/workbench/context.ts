@@ -3,6 +3,7 @@ import { IEditorService } from '@codingame/monaco-vscode-api/vscode/vs/workbench
 import { ICodeEditorService } from '@codingame/monaco-vscode-api/vscode/vs/editor/browser/services/codeEditorService.service'
 import {
   isCodeEditor,
+  isDiffEditor,
   type ICodeEditor,
 } from '@codingame/monaco-vscode-api/vscode/vs/editor/browser/editorBrowser'
 import { IWorkingCopyService } from '@codingame/monaco-vscode-api/vscode/vs/workbench/services/workingCopy/common/workingCopyService.service'
@@ -76,14 +77,26 @@ function relativeTo(root: string, uriPath: string): string | null {
  * false, and Send never asks for a snapshot at all. Two symptoms, one cause.
  *
  * `activeTextEditorControl` answers "which editor is showing" rather than "which
- * has keyboard focus", which is the question both paths meant to ask. A diff
- * editor is not a code editor and is filtered out rather than coerced: its model
- * is a pair, and reading a selection off it would describe one side without
- * saying which.
+ * has keyboard focus", which is the question both paths meant to ask.
+ *
+ * **A diff editor is unwrapped to its modified side, not skipped.** It was
+ * skipped, on the reasoning that its model is a pair and reading a selection off
+ * it would describe one side without saying which. That is true and it made the
+ * common case report nothing: opening a file from Source Control gives a
+ * `(Working Tree)` diff, and a person selecting lines in one and asking about
+ * them got "nothing came through with your message".
+ *
+ * The modified side *is* the working tree — the same file the path names and the
+ * same content on disk — so reporting it is honest rather than a coercion. What
+ * is genuinely lost is a selection made on the **original** side, which reports
+ * the modified editor's own selection instead. That is a real limitation and the
+ * alternative was reporting nothing at all.
  */
 function activeCodeEditor(editors: { activeTextEditorControl: unknown }): ICodeEditor | null {
   const control = editors.activeTextEditorControl
-  return isCodeEditor(control) ? control : null
+  if (isCodeEditor(control)) return control
+  if (isDiffEditor(control)) return control.getModifiedEditor()
+  return null
 }
 
 /**
@@ -107,9 +120,17 @@ export async function readEditorSnapshot(
     getService(IEditorService),
     getService(IWorkingCopyService),
   ])
-  const uri = editors.activeEditor?.resource
   const editor = activeCodeEditor(editors)
   const model = editor?.getModel() ?? null
+  /*
+   * The path comes from the model we are reading, not from `activeEditor`.
+   *
+   * They can disagree, and a diff is where they do: the active editor's resource
+   * describes the *pair*, while the selection belongs to one side of it. Taking
+   * both from the same model is what stops a report naming one document and
+   * quoting another.
+   */
+  const uri = model?.uri ?? editors.activeEditor?.resource
   const selection = editor?.getSelection() ?? null
   const text =
     selection === null || model === null || selection.isEmpty()
@@ -145,9 +166,10 @@ export async function reportEditorContext(projectRoot: string): Promise<void> {
   let last = ''
 
   const report = (): void => {
-    const uri = editors.activeEditor?.resource
     const editor = activeCodeEditor(editors)
     const model = editor?.getModel() ?? null
+    // Same model for the path as for the selection — see `readEditorSnapshot`.
+    const uri = model?.uri ?? editors.activeEditor?.resource
     const selection = editor?.getSelection() ?? null
 
     /*
