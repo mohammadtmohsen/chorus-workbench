@@ -1,7 +1,7 @@
 import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { launch } from './harness.mjs'
+import { ensureBuilt, launch } from './harness.mjs'
 
 /**
  * Why the agent is never told what the editor is showing — a probe, not a gate.
@@ -53,6 +53,13 @@ function contextLines(dataPath) {
 }
 
 async function main() {
+  /*
+   * Built first, and its absence is why the first three runs of this probe said
+   * nothing: `launch` runs `electron .` against `out/`, so without this it drives
+   * whatever was last compiled. Every conclusion drawn from those runs was drawn
+   * from a bundle that predated the code under test.
+   */
+  ensureBuilt()
   const root = scratchRepo()
   const app = await launch({
     keepData: true,
@@ -129,23 +136,29 @@ async function main() {
       `  monaco services present:    ${await evaluate('typeof window.MonacoEnvironment')}`
     )
 
-    // Open a file the way a person would, then let the editor settle.
-    await evaluate(
-      `(async () => {
-         const { getService } = await import('@codingame/monaco-vscode-api')
-         return 'imported'
-       })().catch(e => 'import failed: ' + e.message)`
-    )
-    console.log('  opening a file in the surface…')
-    await evaluate(
-      `document.querySelector('.monaco-workbench') ? 'workbench mounted' : 'NO WORKBENCH DOM'`
-    ).then((r) => {
-      console.log(`  ${r}`)
-    })
-    await wait(3_000)
+    /*
+     * The whole point of the probe: open a file and select lines, then read what
+     * main logged. Anything short of this proves nothing — a surface with no
+     * editor open reports nothing, correctly, and looks identical to one that is
+     * broken.
+     */
+    console.log(`  gate handle: ${await evaluate('typeof window.__chorusGate')}`)
+    console.log(`  open sample.ts: ${await evaluate("window.__chorusGate.open('src/sample.ts')")}`)
+    await wait(2_000)
+    console.log(`  select 1-3:     ${await evaluate('window.__chorusGate.select(1, 3)')}`)
+    await wait(2_000)
 
-    console.log('\n  — log after touching the surface —')
-    for (const line of contextLines(app.dataPath).slice(-8)) console.log(`  ${line}`)
+    console.log('\n  — log after opening and selecting —')
+    const after = contextLines(app.dataPath)
+    if (after.length === 0) console.log('  (still nothing)')
+    for (const line of after.slice(-8)) console.log(`  ${line}`)
+
+    const routed = after.filter(
+      (l) => l.includes('workbench context') && !l.includes('"conversations":0')
+    )
+    console.log(
+      `\n  VERDICT: reports=${String(after.filter((l) => l.includes('workbench context')).length)} routed=${String(routed.length)}`
+    )
     ws.close()
   } finally {
     await app.quit()

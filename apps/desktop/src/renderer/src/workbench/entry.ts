@@ -2,6 +2,7 @@ import { initialize } from '@codingame/monaco-vscode-api'
 import { prepareWorkbench } from './services.js'
 import { reportEditorContext } from './context.js'
 import { serveWorkbenchEdits, serveWorkbenchSnapshot } from './edit.js'
+import { installGateHandle } from './gate-handle.js'
 import { announceSharedExtensionScope } from './extension-scope.js'
 import { registerWorkbenchWorkers } from './workers.js'
 import { persistUserSettings, restoreUserSettings } from './user-settings.js'
@@ -97,6 +98,26 @@ async function main(): Promise<void> {
    */
   serveWorkbenchEdits(connection.projectRoot)
   serveWorkbenchSnapshot(connection.projectRoot)
+
+  /*
+   * A driver's handle on this editor, and **only** under the gate's own
+   * condition.
+   *
+   * `workspaceTrust: 'waived'` is set by main solely when the app is unpackaged
+   * *and* the E2E root seed is in the environment — both, never either, and
+   * neither reachable from a renderer. It is the flag the trust waiver already
+   * rides on, so this adds no new way in; a packaged app has no `workspaceTrust`
+   * field at all and this branch cannot run.
+   *
+   * It exists because the editor-context chain could not be proved end to end
+   * without opening a file, and every other route into this document — clicking
+   * a measured rectangle in the explorer, driving quick open by keystroke — is
+   * either refused on review or so indirect that a failure says nothing about
+   * the thing under test.
+   */
+  if (connection.workspaceTrust === 'waived') {
+    await installGateHandle(connection.projectRoot)
+  }
 }
 
 /*

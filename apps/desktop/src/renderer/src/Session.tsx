@@ -1285,7 +1285,27 @@ export function Session(props: {
    * line range. No source text is here and none has crossed yet — that happens
    * once, when Send is pressed.
    */
-  const [ide, setIde] = useState<IdeContextPush | null>(null)
+  /*
+   * Both sources, kept apart — and keeping them apart is the fix.
+   *
+   * Two forwarders write to this one channel: the embedded workbench, and the
+   * external VS Code bridge. They were folded into a single `ide` state, so
+   * whichever pushed last won — and the external one pushes for *every* open
+   * conversation on every runtime event, reporting `unavailable` when no VS Code
+   * is connected, which is almost always. So a workbench `ready` was overwritten
+   * within milliseconds, the composer's `ideAttached` went false, and Send never
+   * asked for a snapshot. Four rounds of fixes downstream of this never ran.
+   *
+   * The workbench wins whenever it has said anything at all, including
+   * `unmatched`: it is the editor in this window, and "the embedded editor has
+   * no file open" is a better answer than "an editor that may not be running is
+   * unavailable".
+   */
+  const [ideByEditor, setIdeByEditor] = useState<{
+    workbench: IdeContextPush | null
+    external: IdeContextPush | null
+  }>({ workbench: null, external: null })
+  const ide = ideByEditor.workbench ?? ideByEditor.external
 
   /*
    * What must survive the pane being unmounted.
@@ -1414,7 +1434,12 @@ export function Session(props: {
       // Main scopes this per conversation already; the pane checks anyway,
       // because a pane showing another project's file is the one failure this
       // feature must never have.
-      if (payload.conversationId === conversationId) setIde(payload)
+      if (payload.conversationId !== conversationId) return
+      setIdeByEditor((current) =>
+        payload.editor === 'workbench'
+          ? { ...current, workbench: payload }
+          : { ...current, external: payload }
+      )
     })
   }, [conversationId])
 

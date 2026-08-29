@@ -1030,8 +1030,13 @@ export function forwardTerminalToRenderer(runtime: ChorusRuntime): () => void {
 const lastWorkbenchContext = new Map<string, WorkbenchContext>()
 
 export function forwardWorkbenchContextToRenderer(runtime: ChorusRuntime): () => void {
-  setWorkbenchContextSink(({ projectRoot, context }) => {
-    lastWorkbenchContext.set(projectRoot, context)
+  const send = ({
+    projectRoot,
+    context,
+  }: {
+    projectRoot: string
+    context: WorkbenchContext
+  }): void => {
     const conversations = runtime.conversationsForRoot(projectRoot)
     /*
      * Debug, because it is per keystroke — but it is the line that separates the
@@ -1090,9 +1095,31 @@ export function forwardWorkbenchContextToRenderer(runtime: ChorusRuntime): () =>
         })
       }
     }
+  }
+
+  setWorkbenchContextSink((report) => {
+    lastWorkbenchContext.set(report.projectRoot, report.context)
+    send(report)
   })
 
+  /*
+   * Replayed when the runtime changes — a conversation opening, a project
+   * moving. The external forwarder has done this from the start
+   * (`runtime.subscribe(push)`, "a conversation that opens or moves needs its
+   * first push without waiting for the editor to change") and this one did not,
+   * so a room opened after the last editor event was never told anything.
+   *
+   * `lastWorkbenchContext` existed and was only ever written. This is the reader
+   * it was retained for.
+   */
+  const replay = (): void => {
+    for (const [projectRoot, context] of lastWorkbenchContext) send({ projectRoot, context })
+  }
+  const unsubscribe = runtime.subscribe(replay)
+  replay()
+
   return () => {
+    unsubscribe()
     setWorkbenchContextSink(null)
   }
 }
