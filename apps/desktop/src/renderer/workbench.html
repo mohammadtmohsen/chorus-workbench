@@ -20,6 +20,28 @@
       .workbench-root {
         height: 100vh;
       }
+      /*
+        The remote indicator, hidden — the one piece of Chorus styling in this
+        document, and it is here rather than in a theme because it is a fact
+        about *this* product rather than about a colour scheme.
+
+        VS Code shows it whenever a window is remote, and every Chorus editor is:
+        one shared VSCodium extension host serves every project, so the block
+        appears in all of them reading `127.0.0.1:<port>`. It is accurate and it
+        is useless — nobody chose a remote, there is only ever one, and the port
+        is ephemeral, so the number changes every launch and means nothing to the
+        person reading it.
+
+        `#status\.host` is its id, and `remote-kind` its class; both were read
+        off a running workbench rather than guessed, because neither string
+        appears anywhere in `monaco-vscode-api`'s sources to grep for. If a
+        future version renames it this rule silently stops applying, which is the
+        honest failure mode: the indicator comes back, and nothing else breaks.
+      */
+      #status\.host {
+        display: none !important;
+      }
+
       .workbench-failure {
         margin: 0;
         padding: 16px;
