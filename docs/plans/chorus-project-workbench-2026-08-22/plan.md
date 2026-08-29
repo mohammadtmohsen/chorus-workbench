@@ -24,9 +24,9 @@ old database so “clean” never has to mean “irreversibly deleted”.
 | 1 · Prove the embedded workbench and extension host | ✅ Built, driven, UI approved 08-24 | 1–2 weeks | Cross-platform kill gate passes before the product shell is rebuilt                |
 | 2 · Make Project the top-level domain               | ✅ Built — typechecks, untested     | 1–2 weeks | Projects own roots; conversations cannot own or change cwd                         |
 | 3 · Replace the shell with project tabs             | ✅ Built, driven 08-24 — untested   | 2–3 weeks | Project rail, project tabs/splits and nested conversations work                    |
-| 4 · Ship the complete Code-OSS workbench            | 🟡 Core surfaces live, driven 08-24 | 4–8 weeks | Explorer/editor/search/SCM/terminal/tasks/debug/settings work from real projects   |
+| 4 · Ship the complete Code-OSS workbench            | 🟡 Languages + icons added 08-29    | 4–8 weeks | Explorer/editor/search/SCM/terminal/tasks/debug/settings work from real projects   |
 | 5 · Make extensions a supported subsystem           | 🟡 5a–5g built 08-28, gate unmet    | 4–8 weeks | Every installed extension has a proven result or an explicit replacement/exception |
-| 6 · Join agents to the live workbench               | 🟡 6a–6c, 6f built; 6d/6e rewritten | 3–6 weeks | Agents observe and edit the same unsaved models with approval and undo             |
+| 6 · Join agents to the live workbench               | 🟡 6a–6f built for Claude 08-29     | 3–6 weeks | Agents observe and edit the same unsaved models with approval and undo             |
 | 7 · Cross-platform product cutover                  | 🟡 macOS + Windows build; Linux red | 3–6 weeks | The daily-development journey passes in packaged macOS, Windows and Linux builds   |
 | 8 · Remove the old product                          | ⬜ Not started                      | 1–2 weeks | No core path launches, installs or depends on external VS Code                     |
 | **9 · The product-first correction**                | 🟡 Built 08-28–29, untested         |         — | One place to do each thing; the editor owns git; settings belong to the project    |
@@ -909,6 +909,19 @@ compatibility results and activation failures before agents are joined to the wo
 - External tool writes cause file-service invalidation and a visible conflict if a dirty model
   exists.
 
+**Built for Claude on 2026-08-29, and the observation half had never worked.**
+6a–6c shipped and were never delivered to an agent: six defects sat between the
+editor and the message, two of them found by Codex, and the decisive one was that
+the embedded workbench and the external bridge wrote to a single channel where the
+last writer won. STATUS has the list. What that says about _this_ phase is that
+"built" and "reaches an agent" were treated as the same claim, and they were four
+weeks apart.
+
+**Codex's three proofs are unmet** — the probe cannot select through a returned
+editor pane, cannot start a conversation without an authenticated CLI, and the
+Composer's composition is untested. Everything working today was confirmed by a
+person driving it.
+
 **What changed under 6d and 6e.** Both were written when Chorus had its own diff surfaces, and
 they leaned on them: “approval shows … diff” meant `FileDiff` inside Chorus's own Changes panel,
 and “a visible conflict” meant that panel refreshing. Phase 9 deleted the Changes panel and the
@@ -1051,6 +1064,14 @@ artifact or if Chorus takes the Code-OSS REH build branch, which produces `win32
   `linux:` electron-builder target belongs here, not to Phase 1** — Phase 1 needs a Linux machine
   to run a dev build on, which is provisioning rather than packaging (preflight §9 D2).
 - Bundle or acquire the exact platform REH and built-ins with checksums and licence inventory.
+
+**Correction, 2026-08-29: the REH does not carry the language basics.** §5.2 and
+`services.ts` both said the server ships "the built-ins — Git, the language
+basics, the JS debugger". It ships Git, the debugger, and the language _servers_;
+the extensions that declare a language and carry its TextMate grammar are
+client-side. Until they were added every file in every project opened as Plain
+Text, which is a Phase 4 acceptance failure that no phase had noticed.
+
 - **Evaluate the installed-size threshold, pre-registered in preflight §8.5 as R3: ≤ 3× the
   installed baseline, installed measured against installed on the same machine, with the baseline
   build's identity recorded beside its number.** It arrives here rather than at the Phase 1 gate

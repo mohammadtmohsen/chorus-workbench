@@ -1,5 +1,116 @@
 # Status — Chorus becomes the development environment
 
+## 2026-08-29 · Phase 6 built, and eleven rounds of finding out why it did not work
+
+**Phase 6d and 6e are built for Claude, and the editor context they depend on took
+eleven attempts.** The feature was written in three commits. The remaining
+twenty-five were spent discovering why a selection never reached an agent, and the
+record of _that_ is worth more than the feature.
+
+### What was built
+
+- **6d — an agent edits the live model, not the file.** `editor_edit` applies
+  through `pushEditOperations` with `pushStackElement` either side, so the change
+  is exactly one undo step and `⌘Z` reverses it precisely. The file goes dirty
+  rather than saved. A `baseVersion` mismatch refuses as a conflict and returns the
+  current version; `oldText` is compared against the range before anything moves,
+  which catches the right-version-wrong-range edit a version alone cannot.
+- **6e — offered as an in-process MCP tool.** `createSdkMcpServer`, so no server,
+  no port, no credential. `strictMcpConfig` is never set: it would make the SDK
+  ignore the user's own `.mcp.json`, settings and plugins in order to add one tool
+  of ours. `mcpToolCall` is already never auto-decidable, so every edit is asked.
+- **The approval shows the change.** `editorEdit` is its own kind carrying path,
+  version, range and a unified diff rendered by the transcript's own `ToolPatch`.
+  Widening `ApprovalKind` broke four exhaustive switches, which is the design
+  working; the one that mattered was `subjectOf`, where returning no paths would
+  have exempted this kind from every path-scoped deny in the profile.
+
+### Six defects between the editor and the agent
+
+The observation half of Phase 6 had shipped and never worked. In order of
+discovery, with the ones found by **Codex** marked:
+
+1. `getFocusedCodeEditor()` — the workbench is its own `WebContentsView`, so the
+   editor is never focused at the moment a message is sent.
+2. The reporter subscribed only to _changes_, so a restored editor reported nothing
+   until the cursor moved.
+3. **(Codex)** Two forwarders wrote to one channel. The external VS Code bridge
+   pushes `unavailable` for every conversation on every runtime event, and `Session`
+   folded both sources into one state — so a workbench `ready` was overwritten
+   within milliseconds. **This was the cause the first five fixes sat downstream of.**
+4. **(Codex)** The context was component state in a tab that unmounts. Only the
+   active tab of each group is mounted, so switching away lost it and no replay put
+   it back — `CLAUDE.md`'s own rule about `SessionCarry`, unapplied.
+5. The snapshot returned the reference and no text for a clean worktree file — a
+   rule written for the external bridge, where the agent can open the file itself,
+   and wrong for the editor in the person's own window.
+6. Diff editors were skipped, so a file opened from Source Control reported nothing.
+
+**The pattern is the lesson.** Three fixes were shipped before any cause was
+established, each aimed one link further downstream than the break. The probe
+written to settle it spent three runs driving a **stale bundle**, because it never
+called `ensureBuilt` — the port-9800 trap wearing different clothes. What ended the
+guessing was logging: one line at the snapshot, one at the push.
+
+### Phase 4 was not finished either, and the plan says otherwise
+
+Chasing why an attached selection rendered as PLAINTEXT found that **the editor had
+no language support at all**. Every file opened as Plain Text.
+
+`services.ts` says the REH "ships the built-ins — Git, the language basics, the JS
+debugger". Git and the debugger are there. **The language basics are not** — the
+server carries `typescript-language-features`, the language _server_, while the
+extension that declares `.tsx` as `typescriptreact` and carries its grammar is
+client-side. That sentence is why nobody looked, and it is corrected in place.
+
+Forty-five language packs and the Seti icon theme added, measured at each step:
+
+| Bundle                       |    none |    nine |         all |
+| ---------------------------- | ------: | ------: | ----------: |
+| workbench frame (R2 ≤ 40 MB) | 31.4 MB | 32.9 MB | **35.1 MB** |
+| shell chunk (R1, +0.5 MB)    |       — |       — |   unchanged |
+
+R2 passes and is not re-registered. **Headroom is now 12% where it was 21%**, which
+the next person adding to that bundle needs to know. Registering the icon theme was
+not enough either — nothing selected it until `workbench.iconTheme` was seeded.
+
+### Three security findings, one of them pre-existing
+
+- **Connection-URL passwords were redacted by nothing.** `postgres://user:pw@host`,
+  `mongodb+srv://`, `redis://`, an HTTPS remote with a token — all went into the
+  append-only log intact. That module is the only thing between hook output,
+  notices and diffs and a credential written down forever. Found by testing it
+  against a real `.env.local`; it is not about editor context and predates it.
+- **An installed theme could not load its own resources.** VS Code's server sends
+  CORS headers only when the origin matches `product.webEndpointUrlTemplate`, and
+  VSCodium's product defines none. The workbench session now adds one for exactly
+  the origin Chorus spawned and the one resource path — and **(Codex)** that path
+  carries a `${quality}-${commit}` prefix the first implementation missed, so the
+  fix was correct and unreachable for a commit.
+- **The Extensions view could install but not show.** Two public hosts added to the
+  CSP, the second because every asset 302s to Eclipse's CDN — visible only by
+  following the request.
+
+### Guards left behind, because each class had none
+
+`e2e/workbench-memory.mjs` pays R6/R7/R8/R11 — **R7 passes**, settling the
+shared-REH topology §2.4 chose without it, and R11's inventory half fails
+(`C-065`). A translation-key test that found a second key already shipping as its
+own name. Ten exactness tests on the CORS predicate. Three on editor-context
+precedence, proved failing without the fix. And `C-048` closed by reading:
+`updateSessions` passes its argument to `setSessions` as an **updater**, which React
+runs during render — so "it is inside a promise" did not mean "it is not inside
+render".
+
+### What none of this proves
+
+No installer has been installed. Codex's three formal proofs are unmet: the probe
+cannot select through a returned pane, cannot start a conversation without an
+authenticated CLI, and the Composer composition is untested. Everything above was
+confirmed by the person driving it, which is evidence and is not a gate.
+
+---
+
 ## 2026-08-29 · Phase 7 opened, and the gate was red the whole time
 
 **The first thing found was that `pnpm check` did not pass.** Ten lint errors and
