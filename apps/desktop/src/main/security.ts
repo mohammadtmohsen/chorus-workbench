@@ -85,6 +85,10 @@ export function applyContentSecurityPolicy(session: Session, isDev: boolean): vo
  *    extension code. The narrow form is possible only because main reads the port
  *    back out of the child it started, which is the same fact that makes
  *    "never attach to a port Chorus did not open" enforceable.
+ *  - `img-src` and `font-src` with that same `http://<authority>`, because an
+ *    installed *icon* theme's images are served by that host: a policy that lets
+ *    the renderer `fetch()` the theme's JSON but not load the images it names
+ *    applies the theme and paints nothing.
  *  - `frame-ancestors 'none'` — nothing frames the workbench either. A workbench
  *    document that permitted framing is one an extension webview could try to
  *    frame.
@@ -92,33 +96,6 @@ export function applyContentSecurityPolicy(session: Session, isDev: boolean): vo
 const WORKBENCH_BASE_CSP = [
   "default-src 'none'",
   "style-src 'self' 'unsafe-inline'",
-  /*
-   * `https://open-vsx.org` here and in `connect-src` — the one host this
-   * workbench may reach beyond its own server, and it is the gallery it is
-   * already configured to install from.
-   *
-   * Without it the Extensions view can search and install and cannot *show* what
-   * it is offering: the details pane renders "Failed to fetch" and every icon is
-   * blank, because installing happens on the REH while the README and the icons
-   * are fetched by this renderer. Reported as "failed to fetch" against an
-   * extension that had in fact installed.
-   *
-   * **Two hosts, and the second is not optional.** Every asset URL Open VSX
-   * returns — README, licence, icon — is on `open-vsx.org/api/...` and
-   * **302-redirects to `openvsx.eclipsecontent.org`**, Eclipse's content CDN. A
-   * CSP applies to the redirect target, so allowing only the first host leaves
-   * the pane failing exactly as it did before, which is what happened: the
-   * gallery origin was added, the error did not change, and the redirect was
-   * only visible by following the request rather than reading the config.
-   *
-   * Narrowly, and the narrowness is the point the paragraph above makes: this
-   * renderer runs third-party extension code, so each origin added is one that
-   * code can reach. These two buy nothing new in practice — an extension already
-   * talks to Open VSX through the extension host — which is what makes them the
-   * only widening worth making.
-   */
-  "img-src 'self' data: blob: https://open-vsx.org https://openvsx.eclipsecontent.org",
-  "font-src 'self' data:",
   "media-src 'self' data: blob:",
   "worker-src 'self' blob:",
   "child-src 'self' blob:",
@@ -129,20 +106,60 @@ const WORKBENCH_BASE_CSP = [
 ]
 
 /**
- * The one remote extension host this session may reach, as two origins.
+ * The one remote extension host this session may reach, validated once.
  *
  * Built from the authority main read out of the child's own stdout, so the
  * policy and the server cannot drift: there is no second place the port is
  * written down. An authority that is not `host:port` is refused rather than
  * interpolated, because a policy assembled from an unvalidated string is a policy
  * whose meaning depends on what was in the string.
+ *
+ * Validated here rather than inside each directive's helper: three directives now
+ * name this authority, and a check written out three times is a check that can
+ * come to disagree with itself.
  */
-function remoteConnectSources(remoteAuthority: string | null): string {
-  if (remoteAuthority === null) return ''
+function remoteAuthorityOrNull(remoteAuthority: string | null): string | null {
+  if (remoteAuthority === null) return null
   if (!/^[A-Za-z0-9.\-[\]:]+:\d+$/.test(remoteAuthority)) {
     throw new Error(`Not a usable workbench remote authority: ${remoteAuthority}`)
   }
-  return ` ws://${remoteAuthority} http://${remoteAuthority}`
+  return remoteAuthority
+}
+
+/** The REH as the two origins a *connection* may be opened to. */
+function remoteConnectSources(remoteAuthority: string | null): string {
+  const authority = remoteAuthorityOrNull(remoteAuthority)
+  return authority === null ? '' : ` ws://${authority} http://${authority}`
+}
+
+/**
+ * The REH as the one origin *content* is fetched from — `http://` only, since
+ * `ws://` is meaningless to `img-src` and naming an origin a directive can never
+ * use only makes the policy harder to read.
+ *
+ * **This is the second half of a chain whose first half was already fixed.**
+ * `STATUS.md` records making an installed theme able to load its own resources,
+ * and that was proved with a *colour* theme — which loads no images, so
+ * `connect-src` plus the CORS exemption below was sufficient and the rest of the
+ * gap stayed invisible. An icon theme is the case that finds it: it emits one
+ * `background-image` per definition — 1251 of them for Material Icon Theme — each
+ * pointing at `http://<authority>/…/vscode-remote-resource`, and every one is
+ * governed by `img-src` rather than `connect-src`. The theme scanned, listed,
+ * applied, persisted, injected its stylesheet, and painted nothing at all.
+ *
+ * `font-src` is the same failure one step over: an icon theme may ship a webfont
+ * instead of SVGs, and seti — the built-in — is exactly that shape, so the class
+ * is real rather than hypothetical.
+ *
+ * **What this widens, stated plainly.** The renderer may now load images and
+ * fonts from the REH's own origin. That origin is a server Chorus spawned and
+ * already trusts in `connect-src`, and an extension can already fetch any byte of
+ * it from there — so this grants no reach that was not already granted, and
+ * changes only which directive governs it.
+ */
+function remoteContentSource(remoteAuthority: string | null): string {
+  const authority = remoteAuthorityOrNull(remoteAuthority)
+  return authority === null ? '' : ` http://${authority}`
 }
 
 /**
@@ -152,11 +169,42 @@ function remoteConnectSources(remoteAuthority: string | null): string {
  */
 export function workbenchPolicy(isDev: boolean, remoteAuthority: string | null): string {
   const remote = remoteConnectSources(remoteAuthority)
+  const content = remoteContentSource(remoteAuthority)
   return [
     ...WORKBENCH_BASE_CSP,
     isDev
       ? "script-src 'self' 'unsafe-inline' 'unsafe-eval' blob:"
       : "script-src 'self' 'unsafe-eval' blob:",
+    /*
+     * `https://open-vsx.org` here and in `connect-src` — the one host this
+     * workbench may reach beyond its own server, and it is the gallery it is
+     * already configured to install from.
+     *
+     * Without it the Extensions view can search and install and cannot *show* what
+     * it is offering: the details pane renders "Failed to fetch" and every icon is
+     * blank, because installing happens on the REH while the README and the icons
+     * are fetched by this renderer. Reported as "failed to fetch" against an
+     * extension that had in fact installed.
+     *
+     * **Two hosts, and the second is not optional.** Every asset URL Open VSX
+     * returns — README, licence, icon — is on `open-vsx.org/api/...` and
+     * **302-redirects to `openvsx.eclipsecontent.org`**, Eclipse's content CDN. A
+     * CSP applies to the redirect target, so allowing only the first host leaves
+     * the pane failing exactly as it did before, which is what happened: the
+     * gallery origin was added, the error did not change, and the redirect was
+     * only visible by following the request rather than reading the config.
+     *
+     * Narrowly, and the narrowness is the point the paragraph above makes: this
+     * renderer runs third-party extension code, so each origin added is one that
+     * code can reach. These two buy nothing new in practice — an extension already
+     * talks to Open VSX through the extension host — which is what makes them the
+     * only widening worth making.
+     *
+     * These two directives live here rather than in `WORKBENCH_BASE_CSP` because
+     * they now name the REH as well, and the authority is only known here.
+     */
+    `img-src 'self' data: blob: https://open-vsx.org https://openvsx.eclipsecontent.org${content}`,
+    `font-src 'self' data:${content}`,
     `connect-src 'self' data: blob: https://open-vsx.org https://openvsx.eclipsecontent.org${remote}${isDev ? ' ws://localhost:* http://localhost:*' : ''}`,
   ].join('; ')
 }

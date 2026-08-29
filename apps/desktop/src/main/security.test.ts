@@ -5,10 +5,12 @@ import { isOwnRemoteResource, workbenchPolicy } from './security.js'
  * What the workbench renderer may reach, named exactly.
  *
  * This document runs third-party extension code, so its policy is the boundary
- * between an extension and the machine — and it now contains one deliberate
- * widening, `https://open-vsx.org`, added so the Extensions view can show a
- * README instead of "Failed to fetch". A test that lists every origin is what
- * makes the *next* widening a decision rather than a diff nobody reads.
+ * between an extension and the machine — and it now contains two deliberate
+ * widenings: `https://open-vsx.org`, so the Extensions view can show a README
+ * instead of "Failed to fetch", and the REH's own `http://<authority>` in
+ * `img-src`/`font-src`, so an installed icon theme can load the images it draws
+ * with. A test that lists every origin is what makes the *next* widening a
+ * decision rather than a diff nobody reads.
  */
 describe('the workbench content security policy', () => {
   const policy = workbenchPolicy(false, '127.0.0.1:51515')
@@ -36,6 +38,24 @@ describe('the workbench content security policy', () => {
   })
 
   /*
+   * The directive an installed icon theme actually needs, and the one the colour
+   * theme that proved the CORS fix never exercised. Material Icon Theme emits one
+   * `background-image: url(http://<authority>/…/vscode-remote-resource…)` per
+   * definition; with the origin only in `connect-src` the JSON loads, the theme
+   * applies, and all 1251 images are blocked.
+   *
+   * `ws://` is asserted absent rather than merely unlisted: a helper that reused
+   * `remoteConnectSources` here would pass every other assertion in this file
+   * while putting a scheme in `img-src` that can never serve an image.
+   */
+  it('loads an installed theme’s own images and fonts from that server', () => {
+    expect(directive('img-src')).toContain('http://127.0.0.1:51515')
+    expect(directive('font-src')).toContain('http://127.0.0.1:51515')
+    expect(directive('img-src')).not.toContain('ws://')
+    expect(directive('font-src')).not.toContain('ws://')
+  })
+
+  /*
    * The rule the file's own comment is emphatic about: the port is ephemeral, so
    * a wildcard is the tempting shortcut, and it would let any local server be
    * reached from a renderer running third-party code.
@@ -58,6 +78,9 @@ describe('the workbench content security policy', () => {
   it('allows no host beyond the gallery and its own server', () => {
     const hosts = [...policy.matchAll(/\b(?:https?|wss?):\/\/[^\s;]+/g)].map((m) => m[0]).sort()
     expect(hosts).toEqual([
+      // connect-src, img-src, font-src — the same one server, three directives.
+      'http://127.0.0.1:51515',
+      'http://127.0.0.1:51515',
       'http://127.0.0.1:51515',
       'https://open-vsx.org',
       'https://open-vsx.org',
