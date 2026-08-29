@@ -117,3 +117,38 @@ describe('highlight', () => {
     expect(grammarFor(null)).toBeNull()
   })
 })
+
+/**
+ * The editor's own language ids, which are not the names people type.
+ *
+ * A selection attached from the workbench carries `model.getLanguageId()`, and
+ * VS Code calls a `.tsx` file `typescriptreact`. That name was not in the alias
+ * table, so it fell through to plaintext — and the fallback is silent, so a
+ * selection from `Composer.tsx` arrived in the transcript labelled PLAINTEXT and
+ * uncoloured with nothing saying why.
+ *
+ * Asserted against `grammarFor` rather than through a rendered block: the
+ * question is whether the name resolves to a grammar, and going through the
+ * renderer would make a failure ambiguous between the table and the markup.
+ */
+describe('editor language ids resolve', () => {
+  const cases: [string, string][] = [
+    ['typescriptreact', 'tsx'],
+    ['javascriptreact', 'jsx'],
+    ['shellscript', 'bash'],
+    ['typescript', 'ts'],
+    ['python', 'py'],
+  ]
+
+  for (const [editorId, written] of cases) {
+    it(`${editorId} highlights as ${written} does`, () => {
+      expect(grammarFor(editorId)).toBe(grammarFor(written))
+      expect(grammarFor(editorId)).not.toBeNull()
+    })
+  }
+
+  /* The control: an unknown name must still fall back rather than throw. */
+  it('leaves an unknown language alone', () => {
+    expect(grammarFor('klingon')).toBeNull()
+  })
+})

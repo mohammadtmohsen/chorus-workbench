@@ -109,7 +109,21 @@ const GRAMMARS: Record<Grammar, readonly Rule[]> = {
   generic: [rule('comment', String.raw`//[^\n]*|#[^\n]*|/\*[\s\S]*?\*/`), ...STRINGS, NUMBER],
 }
 
-/** Names agents actually write on a fence. */
+/**
+ * Names a fence can carry, from either of the two sources that write one.
+ *
+ * It began as "names agents actually write", and that was the whole of it until
+ * the editor started attaching selections. A fence now also carries the *editor's*
+ * language id, and VS Code's ids are not the names people type: a `.tsx` file
+ * reports `typescriptreact`, not `tsx`. Unknown names fall back to plaintext, so
+ * the failure is silent — a selection from `Composer.tsx` arrived in the
+ * transcript labelled PLAINTEXT and uncoloured, with nothing anywhere saying why.
+ *
+ * The editor ids are listed beside the written ones rather than translated at the
+ * call site, because this table is the one place that already answers "what does
+ * this name mean", and a second mapping elsewhere is a second thing to keep in
+ * step.
+ */
 const ALIASES: Record<string, Grammar | 'diff'> = {
   sh: 'shell',
   bash: 'shell',
@@ -123,10 +137,16 @@ const ALIASES: Record<string, Grammar | 'diff'> = {
   ts: 'script',
   tsx: 'script',
   typescript: 'script',
+  // VS Code's own ids for the same two languages.
+  typescriptreact: 'script',
+  javascriptreact: 'script',
   json: 'json',
   jsonc: 'json',
   py: 'python',
   python: 'python',
+  // More of VS Code's ids, for the languages this highlighter already knows.
+  shellscript: 'shell',
+  jsonl: 'json',
   diff: 'diff',
   patch: 'diff',
 }
