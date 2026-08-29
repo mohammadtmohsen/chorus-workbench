@@ -89,7 +89,14 @@ interface WorkspaceProps {
   readonly onRelocateProject: (projectId: string) => Promise<void>
   readonly onForgetProject: (projectId: string) => Promise<void>
   readonly onAddProject: () => Promise<void>
-  /** Starts a conversation in a project. There is no other way to start one. */
+  /**
+   * Switches to a project — the rail's tiles.
+   *
+   * It started a conversation once, which made a tile impossible to press
+   * meaning "show me that project": clicking the one you were already in gave
+   * you a second room. Starting one is `onStartInProject`, which the strip's `+`
+   * calls and which names what it does.
+   */
   readonly onOpenProject: (projectId: string) => void
   readonly home: string
   readonly onChooseProfile: (conversationId: string, profileId: string) => Promise<void>

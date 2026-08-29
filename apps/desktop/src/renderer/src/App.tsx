@@ -666,6 +666,22 @@ export function App(): React.JSX.Element {
     startIn(mostRecent.id)
   }, [projects, startIn])
 
+  /*
+   * A rail tile switches to a project. It does not start a conversation.
+   *
+   * It used to call `startIn`, so every click on a project opened a *new* room —
+   * clicking the project you were already in gave you a second one, and there is
+   * no way to click a tile meaning "show me that project" without also creating
+   * something. Switching is what the gesture reads as.
+   *
+   * A project with nothing open lands on an empty column, which is the honest
+   * result and not a dead end: the strip's `+` starts a conversation there, and
+   * that is the one control whose whole job is to say so.
+   */
+  const showProject = useCallback((projectId: string) => {
+    useWorkspaceStore.getState().openProject(projectId)
+  }, [])
+
   const addProject = useCallback(async () => {
     setError(null)
     try {
@@ -1288,7 +1304,7 @@ export function App(): React.JSX.Element {
         onForgetProject={forgetProject}
         projects={projects}
         onAddProject={addProject}
-        onOpenProject={startIn}
+        onOpenProject={showProject}
         home={home}
         onChooseProfile={applyProfile}
         renderSession={(session, focused, paneId) => (

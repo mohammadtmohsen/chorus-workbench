@@ -42,6 +42,7 @@ export interface QuickRailProps {
     event: ReactPointerEvent<HTMLElement>
   ) => void
   readonly onAddProject: () => Promise<void>
+  /** Switches to the project. Deliberately does not start a conversation. */
   readonly onOpenProject: (projectId: string) => void
   readonly onOpenSettings: () => void
   /**
