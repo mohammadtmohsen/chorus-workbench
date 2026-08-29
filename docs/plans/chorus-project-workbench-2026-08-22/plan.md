@@ -27,7 +27,7 @@ old database so “clean” never has to mean “irreversibly deleted”.
 | 4 · Ship the complete Code-OSS workbench            | 🟡 Core surfaces live, driven 08-24 | 4–8 weeks | Explorer/editor/search/SCM/terminal/tasks/debug/settings work from real projects   |
 | 5 · Make extensions a supported subsystem           | 🟡 5a–5g built 08-28, gate unmet    | 4–8 weeks | Every installed extension has a proven result or an explicit replacement/exception |
 | 6 · Join agents to the live workbench               | 🟡 6a–6c, 6f built; 6d/6e rewritten | 3–6 weeks | Agents observe and edit the same unsaved models with approval and undo             |
-| 7 · Cross-platform product cutover                  | ⬜ Not started                      | 3–6 weeks | The daily-development journey passes in packaged macOS, Windows and Linux builds   |
+| 7 · Cross-platform product cutover                  | 🟡 macOS + Windows build; Linux red | 3–6 weeks | The daily-development journey passes in packaged macOS, Windows and Linux builds   |
 | 8 · Remove the old product                          | ⬜ Not started                      | 1–2 weeks | No core path launches, installs or depends on external VS Code                     |
 | **9 · The product-first correction**                | 🟡 Built 08-28–29, untested         |         — | One place to do each thing; the editor owns git; settings belong to the project    |
 
@@ -944,9 +944,58 @@ and undo a real agent edit. Do not proceed to product cutover until he approves 
 
 ---
 
-## Phase 7 · Cross-platform product cutover
+## Phase 7 · Cross-platform product cutover — 🟡 macOS and Windows ship, Linux does not
 
 **Goal.** Make “cross-platform” a shipped property, not a TypeScript property.
+
+### What 2026-08-29 settled, and where this section was wrong
+
+**Three of this phase's premises were corrected by running things.** Each of
+them read plausibly and each was false, which is the argument for the packaging
+work happening against real runners rather than a local `pnpm check`.
+
+**R3 is evaluated, and it cannot decide what this section says it decides.**
+Measured installed-`.app` against installed-`.app`, arm64, on one machine:
+
+| Build                                                        | Installed | vs baseline |
+| ------------------------------------------------------------ | --------: | ----------: |
+| Baseline — `bf9c054` `chore(release): 0.20.0`, pre-workbench |  316.5 MB |       1.00× |
+| Candidate — REH downloaded at runtime                        |  339.9 MB |       1.07× |
+| Candidate — REH bundled                                      |  419.9 MB |       1.32× |
+| **R3 ceiling (3×)**                                          |  949.6 MB |       3.00× |
+
+The embedded workbench costs **23.4 MB installed**; the `@codingame` client is
+JavaScript that bundles into the asar and the bulk of every figure is Electron.
+Both options clear the ceiling with 2.3× headroom, so the sentence above — that
+R3 is “decided here anyway, alongside the bundle-versus-runtime-download choice
+it depends on” — is wrong in its causality. **R3 does not constrain the choice**;
+it only says neither option is extravagant. The decision was made on product
+grounds: **bundled**, so a first launch needs no network. The bundled figure is
+measured rather than projected — arithmetic from the archive's own size said
+412.6 MB and was 7.3 MB out.
+
+**The Linux architecture rule is stated on a premise that does not hold.** The
+table below says “x64; arm64 only if every native and REH artifact exists”. The
+REH artifacts exist for both. The **native** artifacts exist for neither:
+`node-pty` publishes prebuilds for `darwin-arm64`, `darwin-x64`, `win32-arm64`
+and `win32-x64` and none at all for Linux. Its install is
+`node scripts/prebuild.js || node-gyp rebuild`, so on Linux it compiles, and with
+`npmRebuild: false` the binding that ships is whatever the build host produced.
+So the real rule is **Linux must be built on Linux** — cross-building from macOS
+packages a bundle with no PTY and nothing says so — and arm64 is a question about
+runner availability rather than about artifacts.
+
+**A retired runner label does not fail, it hangs.** The Intel job was first put
+on `macos-13`, which GitHub has since removed. It sat queued for twenty-four
+minutes and was never assigned a runner while every other job completed — no
+error, no red, nothing to read. `macos-15-intel` is the replacement and is proven
+working. Worth recording because the failure mode is invisible: a release cut on
+a retired label would hang rather than fail.
+
+**Where the phase actually stands.** macOS arm64, macOS x64 and Windows all
+build, verify at `bundle` scope and upload, proven on two dispatched runs.
+**Linux has never built** — `C-064`. The product gates below are untouched, and
+R7/R11 are still owed as numbers.
 
 Unless narrowed before implementation, cross-platform means macOS, Windows and Linux desktop.
 The first supported architecture set is:

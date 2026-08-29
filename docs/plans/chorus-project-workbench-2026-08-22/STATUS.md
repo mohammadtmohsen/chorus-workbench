@@ -1,5 +1,78 @@
 # Status — Chorus becomes the development environment
 
+## 2026-08-29 · Phase 7 opened, and the gate was red the whole time
+
+**The first thing found was that `pnpm check` did not pass.** Ten lint errors and
+nine test failures, on `main`, before anything of this session was written. The
+release workflow's first job runs lint and test, so **no release could have been
+cut at all** — Phase 7's goal was blocked at step zero and nothing said so. This
+file's previous entry reported "18/18 including tests"; that is `turbo typecheck`
+counting tasks, and it was read as the suite passing. Fixed in `3b484b9`.
+
+Three of those failures were tests asserting the **opposite** of Phase 9's
+architecture — `conversation:start` was required to carry a `cwd` and route
+through the adopting entry point, with a comment calling the projectId route "the
+bug this routing exists to prevent". And `workbench-surface.test.ts` was
+reporting `(0 test)`: its electron mock had no `ipcMain.on`, so registration threw
+at import and took the file with it. That file is 34 passing tests now; it had
+been covering nothing while looking like a file that existed.
+
+**Two product defects were found by driving the app, not by testing it.**
+
+- **A missing project folder wedged the whole app.** The launch auto-start called
+  `startConversation` on `projects[0]` unconditionally, which throws
+  `ProjectRootMissingError` when the folder has gone, which set the boot error and
+  replaced the app with `Stuck`. Restore already handled it correctly, so the two
+  disagreed. `Stuck` also had no way out, and its own comment claimed otherwise.
+  `ProjectRootMissingError` has always said "the product's answer to it is
+  Relocate rather than an error dialog" and `ProjectService.relocate` has always
+  existed — **nothing exposed it**. Now wired end to end.
+- **Switching project tabs destroyed the editor.** One `WorkbenchFrame` keyed on
+  `pane.activeTabId`, so changing tabs changed the key and React tore the surface
+  down — a whole `WebContents` and a full workbench boot every switch.
+  `WorkbenchFrame` documents this exact hazard and the Editor switch avoids it
+  with `hidden`; tab switching had no such protection. One frame per project now,
+  all mounted, only the active one visible.
+
+**And one defect was introduced and then found the same way.** Moving a sizing
+rule onto a new wrapper as `flex: 1 1 auto`, in a container that is not a flex
+box, made the shorthand inert and the placeholder measure zero height. Main
+positioned the workbench at zero height and did exactly as asked; the region was
+black with a healthy server behind it. There is now a guard that reports a
+visible surface with no area, requiring the region to measure nothing
+_continuously_ — the instantaneous version broke two tests that had no quarrel
+with geometry.
+
+### Phase 7 · R3 measured, bundling wired, and three premises corrected
+
+**R3 is evaluated and it cannot decide what the plan says it decides.** Installed
+against installed, arm64: baseline `bf9c054` **316.5 MB**, runtime download
+**339.9 MB** (1.07×), bundled **419.9 MB** (1.32×), ceiling **949.6 MB**. Both
+clear it with 2.3× headroom, so the choice was made on product grounds —
+bundled, so a first launch needs no network. The bundled figure is measured;
+arithmetic said 412.6 MB and was 7.3 MB out.
+
+**What the runners proved, and it is the point of having run them.** Every one of
+these passed a local `pnpm check` and would have shipped broken:
+
+| Believed                                       | Actually                                                                          |
+| ---------------------------------------------- | --------------------------------------------------------------------------------- |
+| `pnpm package --arm64` builds one architecture | A per-target `arch` list in the config beats the CLI flag; it built both          |
+| `beforePack` gets `electronPlatformName`       | It does not — `afterPack` does. Read as `undefined`, the build failed             |
+| Linux has native prebuilds                     | `node-pty` publishes none for Linux at all; it compiles, so Linux builds on Linux |
+| `macos-13` is an Intel runner                  | Retired. The job queued 24 minutes, was never assigned one, and never failed      |
+
+**Where it stands.** macOS arm64, macOS x64 and Windows build, verify at `bundle`
+scope and upload — two dispatched runs, artifacts confirmed through the API. The
+DMG is ~204 MB where it was 132.7 MB, which is the bundling cost a downloader
+pays. **Linux has never built** and is `C-064`; work stopped there deliberately
+rather than iterating a red job one line at a time.
+
+**What none of this proves.** No installer has been installed. The product gates
+— cold start, one versus four workbenches, sidecar crash, extensions, terminal,
+debug, Git — are untouched, R7/R11 are still owed as numbers, and Phase 5's user
+review gate is still unmet and still gates Phase 6.
+
 ## 2026-08-29 · Phase 9, and the plan corrected to match the code
 
 **Nothing in this entry has been run.** Everything below typechecks — 18/18 including tests — and

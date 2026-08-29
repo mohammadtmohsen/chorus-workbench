@@ -30,6 +30,46 @@ Nothing here can be finished by me alone.
 
 ## Open
 
+### C-064 · Linux installers do not build, and the job is red in every release run
+
+**Live as of 2026-08-29**, the moment Phase 7 added a `linux:` target and a
+release job. Two dispatched runs, two failures, both at `Package` and both
+before anything was verified.
+
+**What it is.** The Linux job on `ubuntu-latest` has never produced an artifact.
+The first run failed on `executableName contains characters that cannot be
+safely used in file paths: @chorusdesktop` — electron-builder derives the Linux
+executable from the package name when none is set, and this package is scoped.
+Fixed. The second failed on `Please specify project homepage`, which the `deb`
+target requires for its control file. Not fixed: work stopped here deliberately
+rather than iterating a red job one line at a time.
+
+**Why it matters.** Every other platform now works — macOS arm64, macOS x64 and
+Windows all build, verify and upload — so this is the single thing standing
+between the pipeline and a green release. And a red job in the matrix is not
+free: `fail-fast: false` means the others still finish, but the run is red, and
+a red run is one nobody can distinguish from a real regression at a glance.
+
+**The two things that are already known and must not be re-derived.** Linux
+**must** be built on a Linux runner: `node-pty` publishes prebuilds for darwin
+and win32 and none at all for Linux, so its install compiles from source and
+`npmRebuild: false` means the binding that ships is the build host's.
+Cross-building from macOS would package a bundle with no PTY and nothing saying
+so. And **arm64 is out of scope** until an arm64 Linux runner is decided on —
+the REH artifact exists, the native side would have to compile there, and a
+cross-built one could not be launched by its own verifier.
+
+**Done means**: a dispatched Release run produces `Chorus-<version>-linux-x64.AppImage`
+and `.deb`, `verify:package:linux` passes under `xvfb-run` — including its check
+that _a_ pty binding shipped, which is the one that matters — and the published
+asset check finds all five files. Failing that, the honest alternative is
+removing the Linux job from the matrix so the workflow can be green, keeping the
+target config for whoever picks this up.
+
+**Next cause to clear** is the `homepage` field. It is one line, and there is no
+reason to believe it is the last one — each run so far has revealed exactly one
+more.
+
 ### C-063 · An extension installs into every project at once, and nothing says so
 
 **Live as of 2026-08-24**, the moment Phase 5 slice 5a made extensions
