@@ -134,6 +134,37 @@ import getRemoteAgentServiceOverride from '@codingame/monaco-vscode-remote-agent
 // which the workbench renders in unstyled defaults and "it looks broken" and "it
 // is broken" become indistinguishable at the review gate.
 import '@codingame/monaco-vscode-theme-defaults-default-extension'
+/*
+ * The language basics, and their absence is why every file opened as Plain Text.
+ *
+ * The comment above says the REH "ships the built-ins — Git, the language
+ * basics, the JS debugger". Git and the debugger are there; **the language
+ * basics are not**, and that sentence is why nobody looked. What the server
+ * ships is `typescript-language-features` and `json-language-features` — the
+ * language *servers*. The extensions that declare a language at all (`.tsx` is
+ * `typescriptreact`) and carry its TextMate grammar are client-side in VS Code,
+ * and here that means these packages.
+ *
+ * Without them the editor identifies nothing, so nothing tokenizes, the status
+ * bar reads Plain Text for every file, and `getLanguageId()` answers
+ * `plaintext` — which then rides out on the fence of every selection an agent is
+ * sent, uncoloured in the transcript for the same reason it was uncoloured in
+ * the editor.
+ *
+ * Side-effect imports, like the theme: each registers a contribution at load.
+ * The list is the languages actually worked in here rather than everything VS
+ * Code bundles, because each one is bundle weight against R2 and an unused
+ * grammar is weight for nothing.
+ */
+import '@codingame/monaco-vscode-typescript-basics-default-extension'
+import '@codingame/monaco-vscode-javascript-default-extension'
+import '@codingame/monaco-vscode-json-default-extension'
+import '@codingame/monaco-vscode-css-default-extension'
+import '@codingame/monaco-vscode-html-default-extension'
+import '@codingame/monaco-vscode-markdown-basics-default-extension'
+import '@codingame/monaco-vscode-yaml-default-extension'
+import '@codingame/monaco-vscode-shellscript-default-extension'
+import '@codingame/monaco-vscode-python-default-extension'
 // Registers the local extension host. Nothing in this slice activates an
 // extension, but the extension service resolves a host at startup either way.
 import '@codingame/monaco-vscode-extension-api/localExtensionHost'
