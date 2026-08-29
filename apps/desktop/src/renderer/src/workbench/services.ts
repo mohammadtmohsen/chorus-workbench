@@ -61,6 +61,65 @@ import getStatusBarServiceOverride from '@codingame/monaco-vscode-view-status-ba
 import getTitleBarServiceOverride from '@codingame/monaco-vscode-view-title-bar-service-override'
 import getWorkingCopyServiceOverride from '@codingame/monaco-vscode-working-copy-service-override'
 import getSecretStorageServiceOverride from '@codingame/monaco-vscode-secret-storage-service-override'
+/*
+ * Git — `BOARD.md` C-062, and it was unregistered rather than unbuilt.
+ *
+ * Without this the built-in Git extension loads from the REH, tries to register
+ * its provider and is refused by the library with `Unsupported:
+ * SCMService.registerSCMProvider is not supported`. So the product had no source
+ * control at all, and the message said why in a channel nobody reads.
+ *
+ * Git is named in the plan's acceptance criterion and is a Phase 4 surface, so
+ * this only opens the door: the source-control view has to be reached, and a
+ * real repository has to appear in it, before C-062 is closed.
+ */
+import getScmServiceOverride from '@codingame/monaco-vscode-scm-service-override'
+/*
+ * Terminals in the workbench — Phase 4 slice 4d.
+ *
+ * **Called with no backend, deliberately.** `getServiceOverride(backend?)`
+ * registers a local backend only when one is passed; omitted, the terminal
+ * service resolves a backend by *remote authority* instead, which is the REH.
+ * So a terminal opened here is a process on the server that already owns the
+ * project's filesystem, rather than a second shell running somewhere else with
+ * its own idea of where the project is.
+ *
+ * **This does not retire Chorus's own terminals.** The global terminal stays a
+ * real PTY in main — `CLAUDE.md` states that as a rule, and it belongs to no
+ * project, so a per-project workbench has nowhere to put it. What this replaces
+ * is the per-session panel.
+ */
+import getTerminalServiceOverride from '@codingame/monaco-vscode-terminal-service-override'
+/*
+ * Debugging — Phase 4 slice 4f, and the workbench told us it was missing.
+ *
+ * A running surface logged `[ms-vscode.js-debug]: View container 'debug' does
+ * not exist and all views registered to it will be added to 'Explorer'`. So the
+ * JavaScript debugger was already there, shipped by the REH and activating
+ * normally; what it had nowhere to go. Registering the debug service is what
+ * creates the container its views are written against.
+ *
+ * No argument, because there is no adapter to supply: `js-debug` is the adapter
+ * and it lives on the server, which is also where the processes it attaches to
+ * run. The plan puts JS/TS first for that reason — it is the one debugger that
+ * needs nothing installed.
+ */
+import getDebugServiceOverride from '@codingame/monaco-vscode-debug-service-override'
+/*
+ * Extensions you can actually install — Phase 5 slice 5a.
+ *
+ * `extensions-service-override` registers the **host** side only: the extension
+ * service, the scanners, manifest properties. So the workbench ran exactly the
+ * extensions the REH shipped with and offered no way to add one. This is the
+ * management half — gallery, workbench extensions service, enablement,
+ * recommendations, and `IExtensionManagementServerService`, which is what knows
+ * to install a workspace extension on the **server** rather than in the browser.
+ *
+ * `webOnly` is left false: there is a server, and forcing web-only would refuse
+ * exactly the Node workspace extensions §4 lists as the largest class — ESLint,
+ * Docker, Tailwind and the rest.
+ */
+import getExtensionGalleryServiceOverride from '@codingame/monaco-vscode-extension-gallery-service-override'
 import getAccessibilityServiceOverride from '@codingame/monaco-vscode-accessibility-service-override'
 /*
  * The one that makes the files real.
@@ -227,6 +286,10 @@ export function prepareWorkbench(connection: WorkbenchConnection): WorkbenchSetu
     ...getWorkspaceTrustOverride(),
     ...getWorkingCopyServiceOverride(),
     ...getExplorerServiceOverride(),
+    ...getScmServiceOverride(),
+    ...getTerminalServiceOverride(),
+    ...getDebugServiceOverride(),
+    ...getExtensionGalleryServiceOverride(),
     ...getRemoteAgentServiceOverride({ scanRemoteExtensions: true }),
     ...getWorkbenchServiceOverride(),
     ...getQuickAccessServiceOverride(),
@@ -268,6 +331,92 @@ export function prepareWorkbench(connection: WorkbenchConnection): WorkbenchSetu
       open: () => Promise.resolve(false),
     },
     configurationDefaults: {
+      /*
+       * One agent product, not two competing sidebars — Phase 4 slice 4g.
+       *
+       * The pinned client ships `contrib/chat`, `contrib/inlineChat` and
+       * `contrib/inlineCompletions`, so the workbench has a whole conversational
+       * AI surface of its own. Chorus **is** the agent product; a second chat
+       * panel inside the editor would be a different assistant, with different
+       * permissions, no share of the transcript and no idea the other exists.
+       *
+       * `chat.disableAIFeatures` is the master switch rather than a list of
+       * views to hide: `ChatEntitlementContext` watches it and updates the
+       * context keys the chat UI's `when` clauses are written against, so the
+       * entrypoints never register instead of registering and being hidden.
+       * Read out of `chat/common/constants.js` and its consumer, not guessed.
+       *
+       * A **default**, not a forced value. It sits in the defaults layer like
+       * everything else here, so a person who deliberately wants VS Code's chat
+       * can still turn it on in Settings and keep it — the same rule
+       * `files.autoSave` follows.
+       */
+      'chat.disableAIFeatures': true,
+      /*
+       * Extensions do not update themselves — Phase 5 slice 5e.
+       *
+       * VS Code defaults `extensions.autoUpdate` to every extension, which is
+       * right for one window on one machine and wrong here for three reasons
+       * that compound:
+       *
+       *  - **The extensions directory is shared** (`BOARD.md` C-063). One REH
+       *    serves every project, so an update fired while you are in one project
+       *    silently changes every other one — including projects that are open,
+       *    mid-session, with agents running against them.
+       *  - **It defeats pinning.** Slice 5f pins the built-in language, Git and
+       *    debug extensions to the server's own version; an auto-update walks
+       *    one of them past the REH and produces exactly the client/server drift
+       *    the pin exists to prevent.
+       *  - **It invalidates the ledger.** `extension-ledger.md` records a result
+       *    against a version — `bradlc.vscode-tailwindcss` at 0.16.0. An
+       *    overnight update makes every proved row a statement about something
+       *    that is no longer installed, with nothing to say it happened.
+       *
+       * Slice 5g wants updates to be **atomic** — client packages, REH,
+       * built-ins and compatibility metadata moving together or not at all — and
+       * per-extension background updates are the opposite of that.
+       *
+       * A default, not a forced value: `Extensions: Enable Auto Update` is still
+       * there for anyone who wants it, and `Check for Extension Updates` still
+       * works on demand.
+       */
+      'extensions.autoUpdate': false,
+      /*
+       * The server's own extensions may not be replaced from a registry —
+       * Phase 5 slice 5f.
+       *
+       * The REH ships 33 built-ins and **three of them carry marketplace ids
+       * that Open VSX also serves**: `ms-vscode.js-debug`, its companion, and
+       * the JS profile table. The other thirty are `vscode.*` — Git, the
+       * language basics — and that namespace is not on Open VSX, so nothing can
+       * shadow them. These three can be, and one of them is the debugger.
+       *
+       * Installing `ms-vscode.js-debug` from Open VSX would put a registry copy
+       * beside the server's, at a version chosen by neither: the built-in is
+       * versioned with the REH (`1.121.03429`) and Open VSX carries `1.117.0`.
+       * A debugger from one build talking to an extension host from another is
+       * the client/server drift §2.3 refuses everywhere else, arriving through
+       * the one door left open.
+       *
+       * `"*": true` keeps everything else installable — this is a pin on three
+       * ids, not an allowlist regime. Checked against the evaluator rather than
+       * assumed: `allowedExtensionsService.js:82` treats a boolean value as
+       * allow/deny directly, and the key is lowercased before lookup.
+       */
+      'extensions.allowed': {
+        '*': true,
+        'ms-vscode.js-debug': false,
+        'ms-vscode.js-debug-companion': false,
+        'ms-vscode.vscode-js-profile-table': false,
+      },
+      'extensions.autoCheckUpdates': true,
+      /*
+       * Inline completions are the other entrypoint and are not covered by the
+       * switch above: they are an editor feature rather than a chat view, and
+       * they would be a second model writing into the same buffer an agent is
+       * editing.
+       */
+      'editor.inlineSuggest.enabled': false,
       'window.title': '${rootName}',
       'workbench.colorTheme': 'Default Dark Modern',
       'editor.minimap.enabled': false,
@@ -289,6 +438,36 @@ export function prepareWorkbench(connection: WorkbenchConnection): WorkbenchSetu
     productConfiguration: {
       nameShort: 'Chorus',
       nameLong: 'Chorus Workbench',
+      /*
+       * Open VSX, and it is a licence decision before it is a product one.
+       *
+       * The Microsoft Marketplace's terms permit its use only from Microsoft's
+       * own products, which Chorus is not — the same reason §3.1 refuses to ship
+       * Microsoft's REH. Open VSX is the registry VSCodium uses.
+       *
+       * **Copied from the server's own `product.json`, not composed here.** The
+       * unpacked REH already carries a gallery configuration, because VSCodium
+       * ships one, and client and server must agree about where an extension came
+       * from — a workspace extension is downloaded and installed by the *server*,
+       * so a client pointing somewhere else would list one registry and install
+       * from another.
+       *
+       * A first draft of this guessed `resourceUrlTemplate` and an
+       * `extensionUrlTemplate` from memory. The server sets neither: it has
+       * `itemUrl` and `latestUrlTemplate` instead. `resourceUrlTemplate` is left
+       * empty rather than invented — it is the web host's asset path, only
+       * Draw.io among the surveyed extensions lands in the web host (§4), and an
+       * asserted URL that is wrong fails as a network error rather than as
+       * configuration.
+       */
+      extensionsGallery: {
+        serviceUrl: 'https://open-vsx.org/vscode/gallery',
+        controlUrl:
+          'https://raw.githubusercontent.com/EclipseFdn/publish-extensions/refs/heads/master/extension-control/extensions.json',
+        extensionUrlTemplate: 'https://open-vsx.org/vscode/gallery/{publisher}/{name}/latest',
+        resourceUrlTemplate: '',
+        nlsBaseUrl: '',
+      },
       /*
        * `commit` and `quality` are deliberately absent — see
        * `assertClientMatchesServer`. Setting them is the only way this client can

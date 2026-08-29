@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { createRequire } from 'node:module'
-import { readFileSync, writeFileSync } from 'node:fs'
+import { existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -40,7 +40,14 @@ const HERE = dirname(fileURLToPath(import.meta.url))
 const REPO = resolve(HERE, '..')
 const OUT = join(REPO, 'apps/desktop/build/workbench-runtime.json')
 
-const RELEASE = process.argv[2] ?? '1.121.03429'
+/*
+ * The release tag is the first positional, and flags are filtered out first.
+ * `--check` was being read as a tag and fetched as a git ref, which fails as a
+ * 404 against VSCodium rather than as a usage error.
+ */
+const ARGS = process.argv.slice(2).filter((arg) => !arg.startsWith('--'))
+const CHECK = process.argv.includes('--check')
+const RELEASE = ARGS[0] ?? '1.121.03429'
 
 /** The targets Phase 1 names. `win32-arm64` is absent because the artifact is. */
 const TARGETS = ['darwin-arm64', 'darwin-x64', 'linux-x64', 'linux-arm64', 'win32-x64']
@@ -168,7 +175,42 @@ async function main() {
     },
   }
 
-  writeFileSync(OUT, `${JSON.stringify(manifest, null, 2)}\n`)
+  const rendered = `${JSON.stringify(manifest, null, 2)}\n`
+
+  /*
+   * `--check` is Phase 5 slice 5g's half of "move together or not at all".
+   *
+   * The manifest binds the four things that must not drift apart: the client
+   * packages, the REH artifacts and their checksums, the built-ins that ride
+   * inside those artifacts, and the commit both halves must agree on. Generating
+   * it was never the weak point — **nothing verified the checked-in copy still
+   * matched the installed tree.** Bump `@codingame/monaco-vscode-api` without
+   * regenerating and the file goes stale in silence.
+   *
+   * `assertClientMatchesServer` does catch it, but at the wrong time and on the
+   * wrong machine: at the moment a person opens a project, one surface at a
+   * time, on whoever's laptop happens to run it. This fails in the gate, on the
+   * change that caused it.
+   *
+   * Compared by rendered text rather than field by field, deliberately. A
+   * field-wise comparison has to be extended every time the manifest grows a
+   * key, and the one that gets forgotten is the one that then drifts unwatched.
+   */
+  if (CHECK) {
+    const existing = existsSync(OUT) ? readFileSync(OUT, 'utf8') : ''
+    if (existing === rendered) {
+      process.stderr.write(`${OUT} is up to date\n`)
+      return
+    }
+    process.stderr.write(
+      `${OUT} is stale — the installed workbench packages no longer match it.\n` +
+        `Run: node scripts/workbench-manifest.mjs\n`
+    )
+    process.exitCode = 1
+    return
+  }
+
+  writeFileSync(OUT, rendered)
   process.stderr.write(`\nwrote ${OUT}\n`)
 }
 

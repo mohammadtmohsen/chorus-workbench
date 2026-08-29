@@ -52,6 +52,9 @@ export interface TranscriptState {
 export interface ConversationSummary {
   readonly conversationId: string
   readonly title: string
+  /** The project it belongs to. Resolve this for the root, not `cwd`. */
+  readonly projectId: string
+  /** The last root an agent actually ran in, or empty if none ever did. */
   readonly cwd: string
   /** Every agent that ever had a session in it, not only the last ones. */
   readonly agents: readonly string[]
@@ -432,9 +435,18 @@ export class EventStore {
     return (rows as ConversationRow[]).map((row) => ({
       conversationId: row.id,
       title: row.title,
-      // `project_id` holds the directory a conversation was created in, so it is
-      // the honest fallback when no agent ever started and recorded its own.
-      cwd: row.cwd ?? row.projectId,
+      projectId: row.projectId,
+      /*
+       * Empty when no agent ever started and recorded one, and the caller
+       * resolves the real root from `projectId`.
+       *
+       * This used to fall back to `project_id` itself, which was honest while
+       * that column held the directory a conversation was created in. It holds a
+       * project **id** now, so the old fallback would have put a UUID in a field
+       * every caller treats as a path — and `describeDirectory` would have
+       * reported that the folder does not exist.
+       */
+      cwd: row.cwd ?? '',
       agents: row.agents === null || row.agents === '' ? [] : row.agents.split(','),
       updatedAt: row.updatedAt,
       messages: row.messages,

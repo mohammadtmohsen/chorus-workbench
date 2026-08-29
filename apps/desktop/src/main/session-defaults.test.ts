@@ -7,7 +7,7 @@ import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { ChorusRuntime } from './runtime.js'
 import { DEFAULT_SETTINGS, writeSettings } from './settings.js'
-import { writeOpenSessions, type OpenSession } from './open-sessions.js'
+import { writeOpenProjects, type OpenConversation } from './open-projects.js'
 
 /**
  * Which model each agent is started with, on each of the three paths.
@@ -26,6 +26,14 @@ let runtime: ChorusRuntime
 let claude: FakeAdapter
 let codex: FakeAdapter
 let dataPath: string
+/**
+ * A real project, adopted from a real directory.
+ *
+ * Restore resolves a conversation's root through the registry now, so a made-up
+ * id would be refused and every test here would skip its conversation and pass
+ * for the wrong reason — no agent started, and therefore no wrong model either.
+ */
+let projectId: string
 
 /** The options each adapter was actually started or resumed with. */
 const startedWith = (adapter: FakeAdapter): (string | undefined)[] =>
@@ -43,7 +51,13 @@ beforeEach(() => {
       ['codex', codex],
     ])
   )
+  projectId = runtime.projects.adopt(CWD).project.id
 })
+
+/** Writes the reopen list as one project holding the given conversations. */
+const openWith = (...conversations: OpenConversation[]): void => {
+  writeOpenProjects(dataPath, { projects: [{ projectId, conversations }], workspace: null })
+}
 
 afterEach(async () => {
   await runtime.close()
@@ -54,20 +68,20 @@ describe('a new conversation', () => {
     // The sheet says "New sessions start with". This path never called
     // `sessionOptsFor` at all, so it started with nothing.
     writeSettings(dataPath, { ...DEFAULT_SETTINGS, model: 'sonnet' })
-    await runtime.startConversation({ agents: ['claude'], cwd: CWD })
+    await runtime.startConversation({ agents: ['claude'], projectId })
     expect(startedWith(claude)).toEqual(['sonnet'])
   })
 
   it('does not hand Claude’s model to Codex', async () => {
     // A value from one provider's catalogue reaching another's API.
     writeSettings(dataPath, { ...DEFAULT_SETTINGS, model: 'sonnet' })
-    await runtime.startConversation({ agents: ['claude', 'codex'], cwd: CWD })
+    await runtime.startConversation({ agents: ['claude', 'codex'], projectId })
     expect(startedWith(claude)).toEqual(['sonnet'])
     expect(startedWith(codex)).toEqual([undefined])
   })
 
   it('passes no model when none is chosen', async () => {
-    await runtime.startConversation({ agents: ['claude'], cwd: CWD })
+    await runtime.startConversation({ agents: ['claude'], projectId })
     expect(startedWith(claude)).toEqual([undefined])
   })
 })
@@ -75,14 +89,14 @@ describe('a new conversation', () => {
 describe('adding an agent to a conversation', () => {
   it('gives it a genuinely new session, so the default applies', async () => {
     writeSettings(dataPath, { ...DEFAULT_SETTINGS, model: 'sonnet' })
-    const { conversationId } = await runtime.startConversation({ agents: ['codex'], cwd: CWD })
+    const { conversationId } = await runtime.startConversation({ agents: ['codex'], projectId })
     await runtime.addParticipant(conversationId, 'claude')
     expect(startedWith(claude)).toEqual(['sonnet'])
   })
 
   it('still gives Codex nothing', async () => {
     writeSettings(dataPath, { ...DEFAULT_SETTINGS, model: 'sonnet' })
-    const { conversationId } = await runtime.startConversation({ agents: ['claude'], cwd: CWD })
+    const { conversationId } = await runtime.startConversation({ agents: ['claude'], projectId })
     await runtime.addParticipant(conversationId, 'codex')
     expect(startedWith(codex)).toEqual([undefined])
   })
@@ -91,7 +105,7 @@ describe('adding an agent to a conversation', () => {
 describe('effort', () => {
   it('is applied to Claude, whose list it came from', async () => {
     writeSettings(dataPath, { ...DEFAULT_SETTINGS, effortLevel: 'high' })
-    await runtime.startConversation({ agents: ['claude'], cwd: CWD })
+    await runtime.startConversation({ agents: ['claude'], projectId })
     expect(claude.sessions[0]?.efforts).toEqual(['high'])
   })
 
@@ -100,7 +114,7 @@ describe('effort', () => {
     // not others, so the two providers' lists are not interchangeable even where
     // they overlap.
     writeSettings(dataPath, { ...DEFAULT_SETTINGS, effortLevel: 'high' })
-    await runtime.startConversation({ agents: ['codex'], cwd: CWD })
+    await runtime.startConversation({ agents: ['codex'], projectId })
     expect(codex.sessions[0]?.efforts).toEqual([])
   })
 })
@@ -157,7 +171,7 @@ describe('the model catalogue’s state', () => {
   it('tells an empty answer apart from a failed one', async () => {
     // These were one silence: an empty result was discarded and a failure
     // swallowed, so a sheet could not say which had happened.
-    await runtime.startConversation({ agents: ['claude'], cwd: CWD })
+    await runtime.startConversation({ agents: ['claude'], projectId })
     await new Promise((resolve) => setTimeout(resolve, 10))
     const claudeRow = runtime.knownModels().find((a) => a.agentId === 'claude')
     expect(claudeRow?.status).toBe('ready')
@@ -178,10 +192,9 @@ describe('reopening the app', () => {
    * from here got no model at all — including the two cases below, which are
    * not resumes in any sense.
    */
-  const saved = (over: Partial<OpenSession> = {}): OpenSession => ({
+  const saved = (over: Partial<OpenConversation> = {}): OpenConversation => ({
     conversationId: 'conv-1',
     agents: ['claude'],
-    cwd: CWD,
     profileId: 'read-only',
     title: 'a conversation',
     sessionRefs: { claude: 'thread-1' },
@@ -193,7 +206,7 @@ describe('reopening the app', () => {
   it('does not re-point a thread it is genuinely resuming', () => {
     // The behaviour the strip exists for, and which must survive the fix.
     writeSettings(dataPath, { ...DEFAULT_SETTINGS, model: 'sonnet' })
-    writeOpenSessions(dataPath, { sessions: [saved()], workspace: null })
+    openWith(saved())
     return runtime.restoreOpenConversations().then(() => {
       expect(startedWith(claude)).toEqual([undefined])
     })
@@ -204,10 +217,7 @@ describe('reopening the app', () => {
     // joined and never spoke is written down with `""` — a fresh start, not a
     // resume, and it should begin where the sheet says.
     writeSettings(dataPath, { ...DEFAULT_SETTINGS, model: 'sonnet' })
-    writeOpenSessions(dataPath, {
-      sessions: [saved({ sessionRefs: { claude: '' } })],
-      workspace: null,
-    })
+    openWith(saved({ sessionRefs: { claude: '' } }))
     await runtime.restoreOpenConversations()
     expect(startedWith(claude)).toEqual(['sonnet'])
   })
@@ -217,7 +227,7 @@ describe('reopening the app', () => {
     // away. The fallback is a new session and starts like one.
     writeSettings(dataPath, { ...DEFAULT_SETTINGS, model: 'sonnet' })
     claude.failResume = true
-    writeOpenSessions(dataPath, { sessions: [saved()], workspace: null })
+    openWith(saved())
     await runtime.restoreOpenConversations()
     expect(startedWith(claude)).toEqual(['sonnet'])
   })
@@ -238,7 +248,7 @@ describe('reopening the app', () => {
   it('falls back to a fresh session when the thread is refused on the stream', async () => {
     writeSettings(dataPath, { ...DEFAULT_SETTINGS, model: 'sonnet' })
     claude.refuseResumeOnStream = true
-    writeOpenSessions(dataPath, { sessions: [saved()], workspace: null })
+    openWith(saved())
 
     await runtime.restoreOpenConversations()
 
@@ -272,7 +282,7 @@ describe('reopening the app', () => {
    */
   it('starts one set of agents when two restores overlap', async () => {
     writeSettings(dataPath, { ...DEFAULT_SETTINGS, model: 'sonnet' })
-    writeOpenSessions(dataPath, { sessions: [saved()], workspace: null })
+    openWith(saved())
 
     const [first, second] = await Promise.all([
       runtime.restoreOpenConversations(),
@@ -288,7 +298,7 @@ describe('reopening the app', () => {
   /* The guard is per-call, not permanent: a later restore is a real request. */
   it('lets a restore that comes afterwards run for real', async () => {
     writeSettings(dataPath, { ...DEFAULT_SETTINGS, model: 'sonnet' })
-    writeOpenSessions(dataPath, { sessions: [saved()], workspace: null })
+    openWith(saved())
 
     await runtime.restoreOpenConversations()
     const again = await runtime.restoreOpenConversations()
@@ -300,10 +310,7 @@ describe('reopening the app', () => {
 
   it('still keeps the two agents apart', async () => {
     writeSettings(dataPath, { ...DEFAULT_SETTINGS, model: 'sonnet' })
-    writeOpenSessions(dataPath, {
-      sessions: [saved({ agents: ['claude', 'codex'], sessionRefs: { claude: '', codex: '' } })],
-      workspace: null,
-    })
+    openWith(saved({ agents: ['claude', 'codex'], sessionRefs: { claude: '', codex: '' } }))
     await runtime.restoreOpenConversations()
     expect(startedWith(claude)).toEqual(['sonnet'])
     expect(startedWith(codex)).toEqual([undefined])
@@ -324,7 +331,12 @@ describe('a catalogue that fails', () => {
       new Map<AgentId, AgentAdapter>([['claude', broken]])
     )
     try {
-      await other.startConversation({ agents: ['claude'], cwd: CWD })
+      // Its own registry, in its own temp profile: the id adopted above belongs
+      // to the other database and would be refused here.
+      await other.startConversation({
+        agents: ['claude'],
+        projectId: other.projects.adopt(CWD).project.id,
+      })
       await new Promise((resolve) => setTimeout(resolve, 10))
       expect(other.knownModels().find((a) => a.agentId === 'claude')?.status).toBe('failed')
     } finally {

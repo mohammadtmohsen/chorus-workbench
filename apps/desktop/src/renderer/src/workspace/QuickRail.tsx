@@ -4,16 +4,12 @@ import type { PointerEvent as ReactPointerEvent } from 'react'
 import { useTranslation } from 'react-i18next'
 import { resetMoment } from '../format.js'
 import type { SessionInfo } from '../Session.js'
-import {
-  useActiveConversationId,
-  useOpenConversationKey,
-  useSessionRowState,
-  useWorkspaceActions,
-} from './hooks.js'
+import { useActiveProjectId, useOpenProjectKey, useProjectRowState } from './hooks.js'
 import { countRender } from './render-count.js'
-import { projectRow, monogramsFor, stepSlot, type SessionPlacement } from './session-row.js'
+import { projectTile, monogramsForNames, type SessionPlacement } from './session-row.js'
 import { previewTriggerProps, type PreviewController } from './SessionPreview.js'
 import { StateMark } from './SessionRow.js'
+import { useShellOverlay } from './overlay.js'
 import { useUsage, type UsageReading } from './useUsage.js'
 
 /**
@@ -34,6 +30,19 @@ export interface QuickRailProps {
   readonly starting: boolean
   readonly preview: PreviewController
   readonly onNewSession: () => void
+  readonly projects: readonly {
+    readonly id: string
+    readonly name: string
+    readonly root: string
+    readonly openConversations: number
+  }[]
+  readonly onProjectPointerDown: (
+    projectId: string,
+    name: string,
+    event: ReactPointerEvent<HTMLElement>
+  ) => void
+  readonly onAddProject: () => Promise<void>
+  readonly onOpenProject: (projectId: string) => void
   readonly onOpenSettings: () => void
   /**
    * Opens the list of every conversation the log holds, not only the open ones.
@@ -51,20 +60,20 @@ export interface QuickRailProps {
   readonly onReorderSessions: (conversationId: string, slot: number) => void
   /** The card currently being dragged, so it can dim while it is in flight. */
   readonly draggingId: string | null
-  readonly onSessionPointerDown: (
-    conversationId: string,
-    title: string,
-    event: ReactPointerEvent<HTMLElement>
-  ) => void
   readonly consumeSuppressedClick: () => boolean
 }
 
 export function QuickRail(props: QuickRailProps): React.JSX.Element {
   const { t } = useTranslation()
   countRender('QuickRail')
-  const activeId = useActiveConversationId()
-  const openKey = useOpenConversationKey()
-  const { openSession } = useWorkspaceActions()
+  /*
+   * The rail marks the session whose *project* is on screen in the focused
+   * pane. A pane shows one conversation of one project, so "active" for a tile
+   * is: my project is the one being looked at, and I am the conversation it is
+   * showing.
+   */
+  const activeProjectId = useActiveProjectId()
+  const openKey = useOpenProjectKey()
   /*
    * One tab stop for the whole list.
    *
@@ -73,114 +82,148 @@ export function QuickRail(props: QuickRailProps): React.JSX.Element {
    * leaves it — the roving pattern every toolbar uses.
    */
   /*
-   * Held as a conversation id, not as an index.
+   * Held as a project id, not as an index.
    *
-   * Reordering moves the cards under the roving pointer: an index would leave
-   * `tabIndex=0` on whatever card happened to land in that position, so tabbing
-   * into the rail after a move would focus a different session than the one you
+   * Reordering moves the tiles under the roving pointer: an index would leave
+   * `tabIndex=0` on whatever tile happened to land in that position, so tabbing
+   * into the rail after a move would focus a different project than the one you
    * moved.
    */
   const [roving, setRoving] = useState<string | null>(null)
   const scroller = useRef<HTMLDivElement | null>(null)
 
   const open = useMemo(() => new Set(openKey.split('\n')), [openKey])
-  const monograms = useMemo(() => monogramsFor(props.sessions), [props.sessions])
+  const monograms = useMemo(
+    () => monogramsForNames(props.projects.map((p) => ({ id: p.id, name: p.name }))),
+    [props.projects]
+  )
+
+  /*
+   * Which conversations belong to each project, built once for the whole rail.
+   *
+   * Each tile needs its project's conversation ids to fold their pulses into one
+   * badge, and building that per tile would be one pass over every session per
+   * project — quadratic in the thing most likely to grow.
+   */
+  const byProject = useMemo(() => {
+    const grouped = new Map<string, string[]>()
+    for (const session of props.sessions) {
+      const list = grouped.get(session.projectId)
+      if (list === undefined) grouped.set(session.projectId, [session.conversationId])
+      else list.push(session.conversationId)
+    }
+    return grouped
+  }, [props.sessions])
 
   const focusAt = (index: number): void => {
-    const count = props.sessions.length
+    const count = props.projects.length
     if (count === 0) return
     const next = (index + count) % count
-    const id = props.sessions[next]?.conversationId
+    const id = props.projects[next]?.id
     if (id === undefined) return
     setRoving(id)
-    scroller.current?.querySelector<HTMLElement>(`[data-rail-session="${id}"]`)?.focus()
+    scroller.current?.querySelector<HTMLElement>(`[data-rail-project="${id}"]`)?.focus()
   }
 
   /*
-   * Moving a card without a pointer.
+   * There is no keyboard reorder here, and that is deliberate rather than
+   * pending.
    *
-   * `⌘⌥⇧↑/↓`, which is the convention the panes already use for `⌘⌥⇧←/→` moving
-   * a tab within its strip — the same gesture, one axis round.
+   * `⌘⌥⇧↑/↓` moved a *conversation* in the old rail, and the list it moved
+   * within was one the app kept. The rail lists projects now, and their order is
+   * `last_opened_at DESC` — computed by main, not stored as an arrangement. A
+   * keyboard move would have nowhere to write, so it would either be lost on the
+   * next `project:list` or need a `sort_order` column nobody has asked for.
+   * `onMove` was already dead code on the old tile: it was declared, passed, and
+   * never called by the key handler.
    */
-  const moveBy = (conversationId: string, direction: 'up' | 'down'): void => {
-    const order = props.sessions.map((session) => session.conversationId)
-    const slot = stepSlot(order, conversationId, direction)
-    if (slot === null) return
-    props.onReorderSessions(conversationId, slot)
-    setRoving(conversationId)
-    requestAnimationFrame(() => {
-      scroller.current
-        ?.querySelector<HTMLElement>(`[data-rail-session="${conversationId}"]`)
-        ?.focus()
-    })
-  }
 
   return (
     <nav className="quick-rail" aria-label={t('rail.label')}>
-      <ul className="quick-rail-group">
-        <li>
-          <button
-            type="button"
-            className="rail-item"
-            data-rail-new
-            disabled={props.starting}
-            aria-label={t('conversation.newSession')}
-            title={t('conversation.newSession')}
-            onClick={props.onNewSession}
-          >
-            <PlusIcon />
-          </button>
-        </li>
-      </ul>
+      {/*
+        No `+` here any more, and its absence is the point.
+
+        It meant "another conversation in the most recent project", which was
+        the only thing a rail of projects could express — it could not say which
+        project, let alone which group inside one. The button moved into the
+        conversation strip, where pressing it names both by where it is.
+      */}
 
       {/*
-        The middle scrolls on its own, so twenty sessions cannot push the
-        terminal, the account windows or settings off the bottom of the column.
+        Projects, and **only** projects.
+
+        The rail used to list every conversation as its own tile, which put four
+        tiles on screen for one directory and made the column a list of rooms
+        rather than a list of places. A Project owns the development environment
+        and a Conversation belongs to exactly one Project, so the rail shows the
+        thing that owns something and the conversations live inside the project's
+        own pane.
+
+        It scrolls on its own, so twenty projects cannot push the terminal, the
+        account windows or settings off the bottom of the column.
       */}
       <div className="quick-rail-sessions" data-rail-scroll ref={scroller}>
-        <ul className="quick-rail-group" aria-label={t('workspace.sessions')}>
-          {props.sessions.map((session, index) => (
-            <RailShortcut
-              key={session.conversationId}
-              session={session}
-              monogram={monograms.get(session.conversationId) ?? ''}
+        <ul className="quick-rail-group" aria-label={t('rail.projects')}>
+          {props.projects.map((project, index) => (
+            <RailProject
+              key={project.id}
+              project={project}
+              conversationIds={byProject.get(project.id) ?? NO_CONVERSATIONS}
+              monogram={monograms.get(project.id) ?? ''}
               placement={
-                session.conversationId === activeId
+                project.id === activeProjectId
                   ? 'active'
-                  : open.has(session.conversationId)
+                  : open.has(project.id)
                     ? 'open'
                     : 'offscreen'
               }
-              tabIndex={
-                (roving ?? props.sessions[0]?.conversationId) === session.conversationId ? 0 : -1
-              }
-              dragging={props.draggingId === session.conversationId}
-              onMove={(direction) => {
-                moveBy(session.conversationId, direction)
-              }}
+              tabIndex={(roving ?? props.projects[0]?.id) === project.id ? 0 : -1}
+              dragging={props.draggingId === project.id}
               preview={props.preview}
               onFocusIndex={() => {
-                setRoving(session.conversationId)
+                setRoving(project.id)
               }}
               onStep={(delta) => {
                 focusAt(index + delta)
               }}
               onJump={(to) => {
-                focusAt(to === 'first' ? 0 : props.sessions.length - 1)
+                focusAt(to === 'first' ? 0 : props.projects.length - 1)
               }}
               onOpen={() => {
                 if (props.consumeSuppressedClick()) return
                 props.preview.dismiss()
-                openSession(session.conversationId)
+                props.onOpenProject(project.id)
               }}
               onPointerDown={(event) => {
                 props.preview.dismiss()
-                props.onSessionPointerDown(session.conversationId, session.title, event)
+                props.onProjectPointerDown(project.id, project.name, event)
               }}
             />
           ))}
         </ul>
       </div>
+
+      {/*
+        Add Project sits below the list rather than in it: it is the way out of
+        the empty state, and a tile that is not a project should not scroll away
+        with them.
+      */}
+      <ul className="quick-rail-group">
+        <li>
+          <button
+            type="button"
+            className="rail-item"
+            data-rail-add-project
+            aria-label={t('rail.addProject')}
+            title={t('rail.addProject')}
+            onClick={() => {
+              void props.onAddProject()
+            }}
+          >
+            <FolderIcon />
+          </button>
+        </li>
+      </ul>
 
       {/*
         The order the approved composition puts them in: what the account has
@@ -235,13 +278,17 @@ export function QuickRail(props: QuickRailProps): React.JSX.Element {
   )
 }
 
-function RailShortcut(props: {
-  readonly session: SessionInfo
+/** Stable identity, so a project with no conversations does not re-fold every render. */
+const NO_CONVERSATIONS: readonly string[] = []
+
+function RailProject(props: {
+  readonly project: { readonly id: string; readonly name: string; readonly root: string }
+  /** Every conversation in this project, folded into the tile's one badge. */
+  readonly conversationIds: readonly string[]
   readonly monogram: string
   readonly placement: SessionPlacement
   /** In flight: the tile dims while its ghost follows the pointer. */
   readonly dragging: boolean
-  readonly onMove: (direction: 'up' | 'down') => void
   readonly tabIndex: number
   readonly preview: PreviewController
   readonly onFocusIndex: () => void
@@ -251,21 +298,26 @@ function RailShortcut(props: {
   readonly onPointerDown: (event: ReactPointerEvent<HTMLElement>) => void
 }): React.JSX.Element {
   const { t } = useTranslation()
-  countRender('RailShortcut')
-  const row = useSessionRowState(props.session.conversationId)
-  const facts = projectRow(props.session, row, props.placement, props.monogram)
-  const triggers = previewTriggerProps(props.preview, props.session.conversationId)
+  countRender('RailProject')
+  const row = useProjectRowState(props.conversationIds)
+  const facts = projectTile(row)
+  const triggers = previewTriggerProps(props.preview, props.project.id)
 
   /*
    * The monogram is two letters; the name is the whole sentence.
    *
-   * Everything the shortcut cannot show at 44px — which session this is, what
-   * state it is in, how many things are waiting, whether it is the one on
-   * screen — is here, because at this width the accessible name is not a
+   * Everything the tile cannot show at 44px — which project this is, what state
+   * its conversations are in, how many things are waiting, whether it is the one
+   * on screen — is here, because at this width the accessible name is not a
    * caption for the visual, it is the visual's only complete form.
+   *
+   * "Working" is announced separately from the state rather than folded into it,
+   * because at project scope the two are not exclusive: one conversation blocked
+   * on an approval while another is mid-turn is the ordinary case, and a reader
+   * who only hears "approval" is told the project has stopped when it has not.
    */
   const name = [
-    props.session.title,
+    props.project.name,
     t(`state.${facts.state}`),
     /* The count is named by the state it belongs to: "2 to approve" is an
        instruction, "2 waiting" was a number and a shrug. */
@@ -276,6 +328,7 @@ function RailShortcut(props: {
           ? t('workspace.questions', { count: facts.count })
           : t('workspace.unread', { count: facts.count })
       : null,
+    facts.state !== 'working' && facts.working.length > 0 ? t('state.working') : null,
     props.placement === 'active' ? t('state.active') : null,
   ]
     .filter((part) => part !== null)
@@ -285,19 +338,28 @@ function RailShortcut(props: {
     <li>
       <button
         type="button"
-        className="rail-item rail-session"
-        data-rail-session={props.session.conversationId}
-        data-reorder-id={props.session.conversationId}
+        className="rail-item rail-session rail-project"
+        data-rail-project={props.project.id}
+        /*
+         * No `data-reorder-id`, and its absence is load-bearing.
+         *
+         * `useTabDrag` treats a drop over an element carrying that attribute as a
+         * *reorder within the rail*, and reorder writes through
+         * `onReorderSessions` — a list of conversation ids the app keeps. The
+         * rail lists projects now, whose order is `last_opened_at DESC` computed
+         * by main, so a reorder has nowhere to be written. Left in place the
+         * attribute did something worse than nothing: it claimed the drop, so a
+         * project dragged across the rail was silently swallowed instead of
+         * reaching a pane.
+         */
         data-dragging={props.dragging ? 'true' : undefined}
         data-state={facts.state}
-        {...(facts.state === 'working' && facts.voice !== null
-          ? { 'data-voice': facts.voice }
-          : {})}
-        data-placement={facts.placement}
+        {...(facts.voice !== null ? { 'data-voice': facts.voice } : {})}
+        data-placement={props.placement}
         tabIndex={props.tabIndex}
         aria-label={name}
         aria-current={props.placement === 'active' ? 'true' : undefined}
-        title={props.session.title}
+        title={`${props.project.name} — ${props.project.root}`}
         onPointerDown={props.onPointerDown}
         onClick={props.onOpen}
         onFocus={(event) => {
@@ -326,7 +388,12 @@ function RailShortcut(props: {
         <span className="rail-session-monogram" aria-hidden="true">
           {props.monogram}
         </span>
-        <StateMark state={facts.state} voice={facts.voice} />
+        {/*
+          Driven by `working` and not by `state`, which is the one place this
+          tile differs from a conversation row. A project can be waiting on you
+          *and* running something, and the dot is the half that says so.
+        */}
+        <StateMark state={facts.working.length > 0 ? 'working' : facts.state} voice={facts.voice} />
         {facts.count > 0 && (
           <span className="rail-badge" data-state={facts.state} aria-hidden="true">
             {facts.count}
@@ -360,6 +427,11 @@ function RailUsage(): React.JSX.Element {
   const [refreshing, setRefreshing] = useState(false)
   const anchor = useRef<HTMLButtonElement>(null)
   const [detail, setDetail] = useState<{ top: number; left: number } | null>(null)
+
+  /* The tip opens to the right of a 60px rail, which is to say directly over the
+     workbench — and a native view is composited above the DOM, so it was drawn
+     over the tip entirely. See `workspace/overlay.ts`. */
+  useShellOverlay(detail !== null)
 
   /*
    * The same four readings, grouped for the two rotated account labels. Grouped
@@ -755,10 +827,10 @@ function RailUsage(): React.JSX.Element {
  * be. A double chevron says which way the panel goes and turns round when it
  * has gone that way.
  */
-function PlusIcon(): React.JSX.Element {
+function FolderIcon(): React.JSX.Element {
   return (
     <svg className="rail-icon" viewBox="0 0 24 24" aria-hidden="true">
-      <path d="M12 5v14M5 12h14" />
+      <path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" />
     </svg>
   )
 }

@@ -191,7 +191,7 @@ describe('WorkbenchFrame bounds reporting', () => {
 
     render(
       <WorkbenchFrame
-        grant="grant-1"
+        target={{ grant: 'grant-1' }}
         projectRoot="/tmp/project"
         onFailed={(message) => {
           failures.push(message)
@@ -222,7 +222,7 @@ describe('WorkbenchFrame bounds reporting', () => {
 
     const { unmount } = render(
       <WorkbenchFrame
-        grant="grant-1"
+        target={{ grant: 'grant-1' }}
         projectRoot="/tmp/project"
         onFailed={(message) => {
           failures.push(message)
@@ -276,7 +276,7 @@ describe('WorkbenchFrame bounds tracking', () => {
 
     const { container } = render(
       <WorkbenchFrame
-        grant="grant-1"
+        target={{ grant: 'grant-1' }}
         projectRoot="/tmp/project"
         onFailed={(message) => {
           failures.push(message)
@@ -331,7 +331,7 @@ describe('WorkbenchFrame bounds tracking', () => {
 
     const { container } = render(
       <WorkbenchFrame
-        grant="grant-1"
+        target={{ grant: 'grant-1' }}
         projectRoot="/tmp/project"
         onFailed={(message) => {
           failures.push(message)

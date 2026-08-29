@@ -70,7 +70,7 @@ describe('read-only profiling mode', () => {
     open()
 
     await expect(
-      runtime.startConversation({ agents: ['claude', 'codex'], cwd: CWD })
+      runtime.startConversationIn({ agents: ['claude', 'codex'], cwd: CWD })
     ).rejects.toThrow(/CHORUS_PROFILE_READONLY/)
     expect(claude.startedOpts).toHaveLength(0)
     expect(codex.startedOpts).toHaveLength(0)
@@ -85,21 +85,21 @@ describe('read-only profiling mode', () => {
     process.env[FLAG] = 'true'
     open()
 
-    const { conversationId } = await runtime.startConversation({ agents: ['claude'], cwd: CWD })
+    const { conversationId } = await runtime.startConversationIn({ agents: ['claude'], cwd: CWD })
     expect(conversationId).toBeTruthy()
     expect(claude.startedOpts).toHaveLength(1)
   })
 
   it('is the control: the same call starts an agent with the flag absent', async () => {
     open()
-    await runtime.startConversation({ agents: ['claude'], cwd: CWD })
+    await runtime.startConversationIn({ agents: ['claude'], cwd: CWD })
     expect(claude.startedOpts).toHaveLength(1)
     expect(claude.healthCalls).toBeGreaterThan(0)
   })
 
   it('refuses to add an agent to an existing conversation', async () => {
     open()
-    const { conversationId } = await runtime.startConversation({ agents: ['claude'], cwd: CWD })
+    const { conversationId } = await runtime.startConversationIn({ agents: ['claude'], cwd: CWD })
 
     process.env[FLAG] = '1'
     await expect(runtime.addParticipant(conversationId, 'codex')).rejects.toThrow(
@@ -115,7 +115,7 @@ describe('read-only profiling mode', () => {
 
     process.env[FLAG] = '1'
     await runtime.restoreOpenConversations()
-    await runtime.startConversation({ agents: ['claude'], cwd: CWD }).catch(() => null)
+    await runtime.startConversationIn({ agents: ['claude'], cwd: CWD }).catch(() => null)
 
     /*
      * The measurement runs against a copy of a real database, and a run that

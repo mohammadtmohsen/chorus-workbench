@@ -20,8 +20,7 @@ import { useDialog } from '../useDialog.js'
  * session, and the second one stops being read.
  */
 export interface ConfirmSessionActionProps {
-  readonly kind: 'restart' | 'end'
-  /** Whether an agent is mid-turn, which is what makes either action lossy. */
+  /** Whether an agent is mid-turn, which is what makes the action lossy. */
   readonly working: boolean
   readonly onConfirm: () => void
   readonly onCancel: () => void
@@ -30,24 +29,19 @@ export interface ConfirmSessionActionProps {
 export function ConfirmSessionAction(props: ConfirmSessionActionProps): React.JSX.Element {
   const { t } = useTranslation()
   const dialog = useDialog<HTMLElement>(props.onCancel)
-  const end = props.kind === 'end'
 
   /*
    * The body says what is actually at stake, and it changes when something is.
    *
-   * "Are you sure?" is not information. What a person needs is which of the two
-   * irreversible things happens — the turn, or the session — and those differ
-   * between Restart and End, and again depending on whether an agent is
+   * "Are you sure?" is not information. What a person needs is what the
+   * irreversible thing costs, and that differs depending on whether an agent is
    * mid-sentence.
+   *
+   * It asked for Restart too until restart was removed from the app. One `kind`
+   * for one action is a discriminator with a single arm, so it went with it.
    */
-  const title = end ? t('workspace.confirmEndTitle') : t('workspace.confirmRestartTitle')
-  const body = end
-    ? props.working
-      ? t('workspace.confirmEndBodyWorking')
-      : t('workspace.confirmEndBody')
-    : props.working
-      ? t('workspace.confirmRestartBodyWorking')
-      : t('workspace.confirmRestartBody')
+  const title = t('workspace.confirmEndTitle')
+  const body = props.working ? t('workspace.confirmEndBodyWorking') : t('workspace.confirmEndBody')
 
   return (
     <div className="sheet-backdrop" role="presentation">
@@ -69,12 +63,8 @@ export function ConfirmSessionAction(props: ConfirmSessionActionProps): React.JS
           <button type="button" onClick={props.onCancel}>
             {t('workspace.confirmCancel')}
           </button>
-          <button
-            type="button"
-            className={end ? 'confirm-go confirm-go--danger' : 'confirm-go'}
-            onClick={props.onConfirm}
-          >
-            {end ? t('workspace.end') : t('workspace.restart')}
+          <button type="button" className="confirm-go confirm-go--danger" onClick={props.onConfirm}>
+            {t('workspace.end')}
           </button>
         </div>
       </section>

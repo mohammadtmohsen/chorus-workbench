@@ -1,7 +1,7 @@
 import type { TranscriptState } from '@chorus/event-store'
 import { writeFileSync } from 'node:fs'
 import { join, resolve } from 'node:path'
-import { buildDiagnostics, type Logger } from '@chorus/shared'
+import { buildDiagnostics } from '@chorus/shared'
 import { homedir } from 'node:os'
 import {
   app,
@@ -22,7 +22,6 @@ import {
   TERMINAL_PUSH_CHANNEL,
   LIMITS_PUSH_CHANNEL,
   SETTINGS_PUSH_CHANNEL,
-  WORKSPACE_PUSH_CHANNEL,
   IPC_CONTRACT,
   type IdeContextPush,
   type IpcChannel,
@@ -31,7 +30,7 @@ import {
   type TranscriptEvent,
 } from '../shared/ipc.js'
 import { isInside, toDisplayRange, type EditorMetadata } from '@chorus/ide-protocol'
-import { projectRelativePath, readDirectory, type CanonicalRoot } from '@chorus/workspace'
+import { projectRelativePath, type CanonicalRoot } from '@chorus/workspace'
 import type { IdeBridge } from './ide-bridge.js'
 import {
   defaultDeps,
@@ -51,8 +50,7 @@ import type { WorkspaceSnapshot } from '../shared/workspace-layout.js'
 import { readSettings, writeSettings, type Settings } from './settings.js'
 import { applyTheme } from './theme.js'
 import { previewFile, stashFile } from './stash.js'
-import { readFileVersions } from './file-versions.js'
-import { WorkspaceWatchers } from './workspace-watch.js'
+import { setWorkbenchContextSink } from './workbench-surface.js'
 
 type Handlers = { [C in IpcChannel]: (request: never) => Promise<IpcResponse<C>> }
 
@@ -64,30 +62,6 @@ const OK = { ok: true } as const
  * work identically whether or not VS Code is involved.
  */
 let ideBridge: IdeBridge | null = null
-
-/**
- * Repository watches, one per conversation anyone has reviewed.
- *
- * Module-level for the same reason `ideBridge` is: `buildHandlers` runs long
- * before any conversation exists, and the first `workspace:read` is what decides
- * a repository is worth watching. Null until `forwardWorkspaceChangesToRenderer`
- * runs, so a `workspace:read` in a test or a headless run watches nothing rather
- * than throwing.
- */
-let workspaceWatchers: WorkspaceWatchers | null = null
-
-/**
- * Run a read-only git command without the repository watcher hearing about it.
- *
- * Every one of them takes `.git/index.lock` and most rewrite `.git/index`, so
- * without this the panel's own read is indistinguishable from someone staging a
- * file — which is the loop `workspace-watch.ts` documents. Falls through to a
- * plain call when nothing is watching yet, because `ensure` is lazy and the
- * very first read happens before there is a watch to quieten.
- */
-function quietly<T>(conversationId: string, fn: () => Promise<T>): Promise<T> {
-  return workspaceWatchers?.suppress(conversationId, fn) ?? fn()
-}
 
 export function attachIdeBridge(bridge: IdeBridge | null): void {
   ideBridge = bridge
@@ -239,14 +213,33 @@ export function buildHandlers(runtime: ChorusRuntime): Handlers {
       return Promise.resolve(OK)
     },
 
+    'project:adopt': async () => {
+      const window = BrowserWindow.getFocusedWindow() ?? BrowserWindow.getAllWindows()[0]
+      const options: OpenDialogOptions = {
+        // `createDirectory` lets a project be started from the dialog itself,
+        // which is otherwise a trip to Finder and back.
+        properties: ['openDirectory', 'createDirectory'],
+        buttonLabel: 'Add project',
+      }
+      const result = await (window === undefined
+        ? dialog.showOpenDialog(options)
+        : dialog.showOpenDialog(window, options))
+
+      const chosen = result.canceled ? undefined : result.filePaths[0]
+      if (chosen === undefined) return { project: null }
+
+      const { project, created } = runtime.projects.adopt(chosen)
+      return { project: { id: project.id, name: project.name, root: project.root, created } }
+    },
+
     'conversation:start': (request: {
       agents: ('codex' | 'claude')[]
-      cwd: string
+      projectId: string
       profileId?: string
     }) =>
       runtime.startConversation({
         agents: request.agents,
-        cwd: request.cwd,
+        projectId: request.projectId,
         ...(request.profileId === undefined ? {} : { profileId: request.profileId }),
       }),
 
@@ -350,9 +343,6 @@ export function buildHandlers(runtime: ChorusRuntime): Handlers {
       return Promise.resolve(OK)
     },
 
-    'conversation:restart': (request: { conversationId: string }) =>
-      runtime.restartConversation(request.conversationId),
-
     'files:stash': (request: { name: string; base64: string }) =>
       Promise.resolve({
         path: stashFile(app.getPath('userData'), request.name, request.base64),
@@ -388,46 +378,24 @@ export function buildHandlers(runtime: ChorusRuntime): Handlers {
     'conversation:rename': (request: { conversationId: string; title: string }) =>
       Promise.resolve(runtime.renameConversation(request.conversationId, request.title)),
 
-    'conversation:chooseCwd': async (request: { conversationId: string }) => {
-      const current = runtime.projectDirectory(request.conversationId)
-      const window = BrowserWindow.getFocusedWindow() ?? BrowserWindow.getAllWindows()[0]
-      const options: OpenDialogOptions = {
-        // `createDirectory` lets a new project be started from the panel itself,
-        // which is otherwise a trip to Finder and back.
-        properties: ['openDirectory', 'createDirectory'],
-        defaultPath: current,
-        buttonLabel: 'Use this folder',
-      }
+    'project:list': () => Promise.resolve({ projects: runtime.listProjects() }),
 
-      // Attached to the window when there is one, so it arrives as a sheet
-      // rather than a panel floating loose over the desktop.
-      const result = await (window === undefined
-        ? dialog.showOpenDialog(options)
-        : dialog.showOpenDialog(window, options))
+    'project:rename': (request: { projectId: string; name: string }) =>
+      Promise.resolve(runtime.renameProject(request.projectId, request.name)),
 
-      const chosen = result.canceled ? undefined : result.filePaths[0]
-      if (chosen === undefined) {
-        return {
-          cwd: current,
-          title: runtime.conversationTitle(request.conversationId),
-          changed: false,
-        }
-      }
+    'project:forget': (request: { projectId: string }) =>
+      Promise.resolve(runtime.forgetProject(request.projectId)),
 
-      // Through the runtime, so the change is validated and recorded exactly as
-      // a typed one is.
-      const { cwd, title } = runtime.setProjectDirectory(request.conversationId, chosen)
-      return { cwd, title, changed: cwd !== current }
-    },
+    'project:setProfile': (request: { projectId: string; profileId: string }) =>
+      Promise.resolve(runtime.setProjectProfile(request.projectId, request.profileId)),
 
-    'conversation:setCwd': (request: { conversationId: string; cwd: string }) =>
-      Promise.resolve(runtime.setProjectDirectory(request.conversationId, request.cwd)),
+    'project:setAgents': (request: { projectId: string; agentIds: ('codex' | 'claude')[] }) =>
+      runtime.setProjectAgents(request.projectId, request.agentIds),
 
     'conversation:close': async (request: { conversationId: string }) => {
       // Before the close, while the conversation still resolves: a watcher held
       // past the session's end keeps a recursive FSEvents subscription alive for
       // a repository nothing is looking at.
-      workspaceWatchers?.release(request.conversationId)
       await runtime.closeConversation(request.conversationId)
       return OK
     },
@@ -707,130 +675,6 @@ export function buildHandlers(runtime: ChorusRuntime): Handlers {
       } as const
     },
 
-    'workspace:read': async (request: {
-      conversationId: string
-      base?: string | undefined
-      committedOnly?: boolean | undefined
-      hunks?: boolean | undefined
-    }) => {
-      /*
-       * Watching starts here rather than when the conversation opens: this is
-       * the first evidence that anyone wants to know when the tree moves, and
-       * most sessions never ask.
-       */
-      workspaceWatchers?.ensure(
-        request.conversationId,
-        runtime.projectDirectory(request.conversationId)
-      )
-      /*
-       * Read under suppression, because this read is what the watcher reacts
-       * to. `git status` rewrites `.git/index`, the watcher called that news,
-       * and the panel read again — see `workspace-watch.ts`. Every read-only
-       * git handler below is wrapped for the same reason; a new one that is
-       * not will quietly restore the loop.
-       */
-      const { status, diff, problem, comparison } = await quietly(request.conversationId, () =>
-        runtime.readWorkspace(request.conversationId, {
-          base: request.base,
-          committedOnly: request.committedOnly,
-          hunks: request.hunks,
-        })
-      )
-      // Copied out of the readonly domain types; the IPC boundary is plain JSON.
-      return {
-        problem,
-        comparison,
-        status: {
-          branch: status.branch,
-          upstream: status.upstream,
-          ahead: status.ahead,
-          behind: status.behind,
-          clean: status.clean,
-          files: status.files.map((f) => ({
-            path: f.path,
-            ...(f.from === undefined ? {} : { from: f.from }),
-            state: f.state,
-            staged: f.staged,
-            unstaged: f.unstaged,
-          })),
-        },
-        diff: diff.map((f) => ({
-          path: f.path,
-          oldPath: f.oldPath,
-          added: f.added,
-          removed: f.removed,
-          binary: f.binary,
-          status: f.status,
-          hunks: f.hunks.map((h) => ({
-            header: h.header,
-            lines: h.lines.map((l) => ({
-              kind: l.kind,
-              text: l.text,
-              ...(l.before === undefined ? {} : { before: l.before }),
-              ...(l.after === undefined ? {} : { after: l.after }),
-            })),
-          })),
-        })),
-      }
-    },
-
-    'workspace:branches': async (request: { conversationId: string }) =>
-      quietly(request.conversationId, () => runtime.readBranches(request.conversationId)),
-
-    'workspace:tree': async (request: { conversationId: string; path: string }) => {
-      // `git check-ignore` per expansion, so this takes the index lock too.
-      const result = await quietly(request.conversationId, () =>
-        readDirectory({
-          cwd: runtime.projectDirectory(request.conversationId),
-          path: request.path,
-        })
-      )
-      return result.ok
-        ? { entries: [...result.value], problem: null }
-        : { entries: [], problem: result.error.message }
-    },
-
-    'workspace:fileVersions': async (request: {
-      conversationId: string
-      path: string
-      base?: string | undefined
-      committedOnly?: boolean | undefined
-    }) =>
-      quietly(request.conversationId, () =>
-        readFileVersions({
-          cwd: runtime.projectDirectory(request.conversationId),
-          path: request.path,
-          base: request.base,
-          committedOnly: request.committedOnly,
-        })
-      ),
-
-    'workspace:write': async (request: {
-      conversationId: string
-      path: string
-      content: string
-      expectedSha: string | null
-      force?: boolean | undefined
-    }) =>
-      runtime.writeUserFile(
-        request.conversationId,
-        request.path,
-        request.content,
-        request.expectedSha,
-        request.force
-      ),
-
-    'workspace:git': async (request: {
-      conversationId: string
-      action: 'stage' | 'unstage' | 'discard' | 'commit' | 'push'
-      paths: string[]
-      message?: string | undefined
-      setUpstream?: boolean | undefined
-    }) => runtime.runGitAction(request),
-
-    'workspace:fetch': async (request: { conversationId: string; remote?: string | undefined }) =>
-      runtime.fetchRemote(request.conversationId, request.remote),
-
     'handoff:prepare': (request: {
       conversationId: string
       from: 'codex' | 'claude'
@@ -884,9 +728,6 @@ export function buildHandlers(runtime: ChorusRuntime): Handlers {
       await runtime.askAside(request.asideId, request.question)
       return { ok: true as const }
     },
-
-    'conversation:spinOff': (request: IpcRequest<'conversation:spinOff'>) =>
-      runtime.spinOffTask(request),
 
     'aside:restate': async (request: IpcRequest<'aside:restate'>) => {
       await runtime.restateAside(request.asideId, request.purpose)
@@ -1000,29 +841,6 @@ export function registerIpcHandlers(runtime: ChorusRuntime): void {
  * always fall back to `conversation:history` — the log is authoritative, so a
  * dropped push is a recoverable gap rather than lost data.
  */
-/**
- * Tells every window that a conversation's repository moved.
- *
- * Set up once, beside the other push forwarders, and holds the watchers for the
- * life of the process. The registry is module-level for the same reason
- * `ideBridge` is: `buildHandlers` runs before any conversation exists, and the
- * first `workspace:read` is what decides a repository is worth watching.
- */
-export function forwardWorkspaceChangesToRenderer(log?: Logger): void {
-  workspaceWatchers = new WorkspaceWatchers((conversationId) => {
-    for (const window of BrowserWindow.getAllWindows()) {
-      if (!window.isDestroyed()) window.webContents.send(WORKSPACE_PUSH_CHANNEL, { conversationId })
-    }
-  }, log)
-}
-
-/** Drops every repository watch. For shutdown; the app is going anyway. */
-export function stopWorkspaceWatches(): void {
-  workspaceWatchers?.closeAll()
-  workspaceWatchers = null
-}
-
-/** Sends account usage windows to every window as providers report them. */
 export function forwardLimitsToRenderer(runtime: ChorusRuntime): void {
   runtime.onLimitsReported((push) => {
     for (const window of BrowserWindow.getAllWindows()) {
@@ -1079,6 +897,76 @@ export function forwardTerminalToRenderer(runtime: ChorusRuntime): () => void {
 }
 
 /**
+ * The embedded workbench's editor state, routed to that project's conversations
+ * — Phase 6 slice 6c.
+ *
+ * **Project-first, which is the whole rule.** A surface reports; main resolves
+ * the root it opened that surface for into a project, and delivers only to
+ * conversations carrying that project's id. A conversation in another project
+ * cannot receive this no matter what the surface said, because the surface never
+ * said which project it was.
+ *
+ * The payload is the same `IdeContextPush` the external bridge produces, so the
+ * renderer, the composer pill and the disclosure controls need no second shape —
+ * §5.2's "rework, not rewrite" in one line. `provenance` is `worktree` because an
+ * embedded editor is looking at the working tree by construction; the external
+ * bridge could be looking at a ref or a review, and this cannot.
+ *
+ * **Held, never logged.** No `ChorusEventPayload` exists for any of this and none
+ * may be added: a cursor position read back a week later is worse than none.
+ */
+export function forwardWorkbenchContextToRenderer(runtime: ChorusRuntime): () => void {
+  setWorkbenchContextSink(({ projectRoot, context }) => {
+    const conversations = runtime.conversationsForRoot(projectRoot)
+    if (conversations.length === 0) return
+
+    /*
+     * A report with no file is `unmatched`, not `ready`. The external bridge
+     * makes the same correction a few lines below, and for the same reason: a
+     * status claiming readiness beside an absent file is the one combination a
+     * consumer cannot render honestly.
+     */
+    const file =
+      context.relativePath === null || context.startLine === null || context.endLine === null
+        ? null
+        : {
+            relativePath: context.relativePath,
+            startLine: context.startLine,
+            endLine: context.endLine,
+            isEmpty: context.isEmpty,
+            isDirty: context.isDirty,
+            languageId: context.languageId,
+            selectedBytes: context.selectedBytes,
+            provenance: { kind: 'worktree' as const },
+            /*
+             * Always `current`. The external bridge can be reporting a selection
+             * it remembered from before the editor lost focus; this fires from
+             * the editor's own events, so there is nothing cached to report and
+             * claiming otherwise would make the pill say `cached` about a live
+             * cursor.
+             */
+            source: 'current' as const,
+          }
+
+    for (const window of BrowserWindow.getAllWindows()) {
+      if (window.isDestroyed()) continue
+      for (const conversationId of conversations) {
+        window.webContents.send(IDE_PUSH_CHANNEL, {
+          conversationId,
+          editor: 'workbench' as const,
+          status: file === null ? ('unmatched' as const) : ('ready' as const),
+          file,
+        })
+      }
+    }
+  })
+
+  return () => {
+    setWorkbenchContextSink(null)
+  }
+}
+
+/**
  * Push each open conversation's editor context to the renderer.
  *
  * Scoped per conversation on this side of the boundary: a pane is sent its own
@@ -1096,7 +984,7 @@ export function forwardIdeContextToRenderer(runtime: ChorusRuntime, bridge: IdeB
         // A file that fails the relative-path check is not this project's, so the
         // status must not claim otherwise.
         const status = context.status === 'ready' && file === null ? 'unmatched' : context.status
-        return { conversationId, status, file }
+        return { conversationId, editor: 'external' as const, status, file }
       })
 
     for (const window of BrowserWindow.getAllWindows()) {

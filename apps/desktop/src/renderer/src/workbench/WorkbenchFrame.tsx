@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import type { WorkbenchRect } from '../../../shared/workbench-ipc.js'
+import { useWorkbenchStill } from '../workspace/overlay.js'
 
 /**
  * The shell's handle on one surface — and it contains nothing.
@@ -10,32 +11,53 @@ import type { WorkbenchRect } from '../../../shared/workbench-ipc.js'
  * accepted when it chose the view over a frame, and it is why every layout bug
  * here is a two-process bug.
  *
- * This file imports nothing but React and a type on purpose. The outer bundle
- * must never pull in a `@codingame/*` module — R1's 0.5 MB threshold is a leak
- * detector for exactly that, not a budget. An `import type` is erased before the
- * bundler sees it, so it costs nothing and is not the thing that rule guards.
+ * This file must never pull a `@codingame/*` module into the outer bundle —
+ * R1's 0.5 MB threshold is a leak detector for exactly that, not a budget. An
+ * `import type` is erased before the bundler sees it, so it costs nothing and is
+ * not the thing that rule guards; `workspace/overlay.ts` is forty lines of
+ * React and imports nothing itself, which is the bar any future import here has
+ * to clear. It used to say "nothing but React and a type", which read as a
+ * stronger rule than the one that matters.
  *
  * It never sees a descriptor. It holds an opaque view id, which is useless if it
  * leaks because every operation it names is mediated by main and validated
  * against the project main opened it for.
  *
- * What it opens with is a **grant**, not a path: main mints one from the native
- * chooser and binds it to this window, so a root this component invented — or one
- * a compromised renderer named — is not something `workbench:open` has a shape
- * for. `projectRoot` is here to be *displayed*, and nothing else reads it.
+ * What it opens with is **never a path** — it is one of `WorkbenchTarget`'s two
+ * arms, and both are things main can refuse. A **grant** is minted from the
+ * native chooser and bound to this window, which is what a folder being adopted
+ * for the first time produces. A **project id** names something already in the
+ * registry, and `ProjectService.resolveRoot` refuses one nobody adopted; that arm
+ * is what a project pane uses, because requiring a grant there would mean
+ * re-choosing every project on every launch.
+ *
+ * `projectRoot` is here to be *displayed*, and nothing else reads it.
  */
 export function WorkbenchFrame({
-  grant,
+  target,
   projectRoot,
+  hidden = false,
   onFailed,
 }: {
-  readonly grant: string
+  readonly target: { readonly grant: string } | { readonly projectId: string }
   /** For the placeholder's label and its test hook. Never sent to main. */
   readonly projectRoot: string
+  /**
+   * The Editor switch is off for this project.
+   *
+   * **Not an unmount**, which is why this is a prop rather than the caller
+   * simply not rendering the frame: unmounting runs the cleanup below, and that
+   * closes the surface — a whole `WebContents` destroyed, every open file lost,
+   * and a reload on the way back. Hidden instead means main makes the view
+   * invisible and this stops reporting bounds, so the surface keeps its
+   * rectangle and nothing inside it reflows.
+   */
+  readonly hidden?: boolean
   readonly onFailed: (message: string) => void
 }): React.JSX.Element {
   const host = useRef<HTMLDivElement>(null)
   const [viewId, setViewId] = useState<string | null>(null)
+  const still = useWorkbenchStill(viewId)
 
   useEffect(() => {
     /*
@@ -69,7 +91,7 @@ export function WorkbenchFrame({
     }
 
     window.chorus
-      .openWorkbench({ grant })
+      .openWorkbench(target)
       .then(({ viewId: id }) => {
         opened = id
         if (!live) {
@@ -86,11 +108,59 @@ export function WorkbenchFrame({
       live = false
       if (opened !== null) closeQuietly(opened)
     }
-  }, [grant, onFailed])
+    /*
+     * Keyed on the target's own value, not the object. A parent that rebuilds
+     * `{ projectId }` inline every render would otherwise close and reopen a
+     * whole `WebContents` on each paint — and the surface is the single most
+     * expensive thing this app creates.
+     */
+  }, ['grant' in target ? target.grant : target.projectId, onFailed])
+
+  /*
+   * Told once per change, and never as part of the bounds loop.
+   *
+   * Visibility is a state with two values and bounds are a stream, so folding
+   * this into `report` would send a redundant call on every rectangle change and
+   * — worse — make "is the editor off" depend on a loop this effect stops when
+   * it is off. It is its own effect for the same reason it is its own channel.
+   *
+   * No cleanup that shows it again: the surface is closed on unmount by the
+   * effect above, and asking main to reveal a view that is about to be destroyed
+   * is a race with no winner.
+   */
+  useEffect(() => {
+    if (viewId === null) return undefined
+    /*
+     * Reported, not swallowed — and the swallow is why the first version of this
+     * took three attempts to diagnose.
+     *
+     * A rejected call here means the switch did nothing: the region leaves the
+     * layout, Chorus grows into it, and the view goes on painting over the top
+     * with no error anywhere. That is indistinguishable from a CSS bug from the
+     * outside, which is exactly where the time went. The **lifecycle** decides
+     * whether it matters, on the same rule the bounds effect below follows: after
+     * cleanup the surface is closing and a lost race says nothing, but on a frame
+     * that is still mounted the refusal is a defect and belongs on screen.
+     */
+    let live = true
+    window.chorus.setWorkbenchVisible({ visible: !hidden, viewId }).catch((error: unknown) => {
+      if (live) onFailed(error instanceof Error ? error.message : String(error))
+    })
+    return () => {
+      live = false
+    }
+  }, [viewId, hidden, onFailed])
 
   useEffect(() => {
     const element = host.current
-    if (viewId === null || element === null) return undefined
+    /*
+     * Nothing reported while the editor is off, and that is what keeps it from
+     * reflowing. The region is `hidden`, so its rectangle is 0×0 — reporting
+     * that would resize the view to nothing and the workbench would re-lay-out
+     * to zero columns, losing scroll position and the editor group's layout on
+     * the way back.
+     */
+    if (viewId === null || element === null || hidden) return undefined
 
     /*
      * The same race `closeQuietly` loses, and deliberately **not** the same
@@ -197,7 +267,24 @@ export function WorkbenchFrame({
       live = false
       window.cancelAnimationFrame(frame)
     }
-  }, [viewId, onFailed])
+  }, [viewId, hidden, onFailed])
 
-  return <div className="workbench-surface" ref={host} data-workbench-surface={projectRoot} />
+  /*
+   * The one thing this placeholder ever draws, and only while an overlay is up.
+   *
+   * The view is hidden for the life of that overlay so the shell's DOM can be
+   * seen; this is the frame it was showing when it went down, so the region
+   * still looks like an editor rather than a hole. See `workspace/overlay.ts`.
+   *
+   * `alt=""` and `aria-hidden`: it is a picture of something the person can
+   * already see, and announcing it would put a second copy of the editor into
+   * the reading order of a dialog whose whole job is to be the only thing there.
+   */
+  return (
+    <div className="workbench-surface" ref={host} data-workbench-surface={projectRoot}>
+      {still !== null && (
+        <img className="workbench-still" src={still} alt="" aria-hidden="true" draggable={false} />
+      )}
+    </div>
+  )
 }

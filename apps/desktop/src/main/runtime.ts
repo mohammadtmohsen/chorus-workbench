@@ -1,4 +1,4 @@
-import { existsSync, renameSync, rmSync, statSync } from 'node:fs'
+import { existsSync, renameSync, rmSync } from 'node:fs'
 import { TRANSCRIPT_TYPES } from '../shared/transcript-events.js'
 import { homedir } from 'node:os'
 import { basename, join } from 'node:path'
@@ -19,6 +19,7 @@ import type {
 import {
   EventStore,
   openSqlite,
+  ProjectStore,
   type AsideSummary,
   type ConversationSummary,
   type SqliteHandle,
@@ -42,36 +43,20 @@ import {
   type PermissionProfile,
 } from '@chorus/orchestrator'
 import { newConversationId, newHandoffId, type AgentId, type Logger } from '@chorus/shared'
-import {
-  fetchRef,
-  readBranches,
-  readWorkspace,
-  relativeWithin,
-  readStatus,
-  stage,
-  unstage,
-  discard,
-  commit,
-  push,
-  type BranchRef,
-  type WorkspaceRead,
-} from '@chorus/workspace'
+import { relativeWithin } from '@chorus/workspace'
 import type { ActivityPush, ContextUsagePush, TasksPush } from '../shared/ipc.js'
 import { UNREAD_EVENT_TYPES } from '../shared/unread.js'
-import { readOpenSessions, writeOpenSessions, type OpenSession } from './open-sessions.js'
+import {
+  openConversations,
+  readOpenProjects,
+  writeOpenProjects,
+  type OpenConversation,
+} from './open-projects.js'
+import { ProjectService } from './project-service.js'
 import { containsPassage } from '../shared/plain-text.js'
 import { questionSetText } from '../shared/question-text.js'
 import { readRemembered, writeRemembered } from './remembered.js'
-import { writeProjectFile, type WriteResult } from './file-write.js'
 
-/** What each source-control action is called once it has happened, for the log. */
-const PAST_TENSE = {
-  stage: 'staged',
-  unstage: 'unstaged',
-  discard: 'discarded',
-  commit: 'committed',
-  push: 'pushed',
-} as const
 import { readSettings } from './settings.js'
 import {
   TerminalService,
@@ -100,8 +85,17 @@ import { resolveCommand } from './which.js'
 
 export interface StartConversationOptions {
   readonly agents: readonly AgentId[]
-  readonly cwd: string
-  readonly projectId?: string
+  /**
+   * Which project the conversation belongs to — an id from the registry, and the
+   * only way to say where a conversation is.
+   *
+   * This used to be a `cwd` string with `projectId` as an optional companion that
+   * defaulted to the path when absent, so "the project" was whatever directory
+   * the caller happened to name. A conversation could therefore be started
+   * anywhere, and two rooms on one folder were two projects that merely looked
+   * alike. The root is now resolved from this id and cannot be passed in.
+   */
+  readonly projectId: string
   readonly title?: string
   /** Defaults to read-only. Permissive defaults ship by accident, not on purpose. */
   readonly profileId?: string
@@ -153,6 +147,7 @@ export interface PromotedConversation {
   readonly conversationId: string
   readonly participants: AgentId[]
   readonly profileId: string
+  readonly projectId: string
   readonly cwd: string
   readonly title: string
   readonly unread: number
@@ -164,7 +159,19 @@ interface ActiveConversation {
   /** Shared, so a grant given to one agent is not re-asked for the next to join. */
   readonly grants: SessionGrants
   profile: PermissionProfile
-  cwd: string
+  /** Which project this room belongs to. Fixed for the life of the conversation. */
+  readonly projectId: string
+  /**
+   * The project's root, resolved once when the conversation was opened.
+   *
+   * **Readonly, and that single word is most of Phase 2's invariant.** It used to
+   * be assignable and `setProjectDirectory` assigned it, so a conversation could
+   * walk to another directory while its agents kept the one they were spawned
+   * with — two answers to "where is this" inside one room. The path is now a
+   * cached read of the project's root; moving a project is `ProjectService`'s job
+   * and moves every conversation under it at once.
+   */
+  readonly cwd: string
   title: string
   /** Who the user last addressed, so an unaddressed follow-up stays with them. */
   lastAddressed: AgentId | undefined
@@ -1095,6 +1102,7 @@ interface RestoredConversations {
     conversationId: string
     participants: AgentId[]
     profileId: string
+    projectId: string
     cwd: string
     title: string
     unread: number
@@ -1200,7 +1208,12 @@ export class ChorusRuntime {
     private readonly adapters: Map<AgentId, AgentAdapter>,
     readonly log: Logger,
     /** Where the note about what was open is kept, next to the log and the db. */
-    private readonly userDataPath: string
+    private readonly userDataPath: string,
+    /**
+     * The project registry — Phase 2's domain, and the thing that turns a project
+     * id into a root without putting a dialog in front of somebody.
+     */
+    readonly projects: ProjectService
   ) {}
 
   static open(
@@ -1208,7 +1221,7 @@ export class ChorusRuntime {
     log: Logger,
     adapters?: Map<AgentId, AgentAdapter>
   ): ChorusRuntime {
-    const path = join(userDataPath, 'chorus.db')
+    const path = join(userDataPath, DATABASE_FILE)
     const { db, store, recovered } = openOrRecover(path, userDataPath)
     if (recovered !== null) log.warn('database was unreadable and was moved aside', { recovered })
 
@@ -1231,7 +1244,14 @@ export class ChorusRuntime {
     if (closed > 0) log.warn('closed sessions orphaned by a crash', { closed })
     log.info('runtime ready', { events: store.lastSeq() })
 
-    return new ChorusRuntime(db, store, adapters ?? defaultAdapters(), log, userDataPath)
+    /*
+     * Built over the same handle as the log, so a project write and an append can
+     * share a transaction if anything ever needs them to. Nothing does today, and
+     * the point is that the option was not designed away.
+     */
+    const projects = new ProjectService(new ProjectStore(db))
+
+    return new ChorusRuntime(db, store, adapters ?? defaultAdapters(), log, userDataPath, projects)
   }
 
   /**
@@ -1316,34 +1336,92 @@ export class ChorusRuntime {
     return first?.service.sessionGrants() ?? []
   }
 
+  /**
+   * Starts a conversation in a directory, adopting that directory as a project
+   * if it is not one already.
+   *
+   * The bridge between a world where somebody picks a folder and one where every
+   * conversation belongs to a project. `adopt` is idempotent on the canonical
+   * root, so picking the same folder twice — or picking it through a symlink —
+   * yields **one** project with two conversations in it rather than two projects
+   * that merely look alike. That is the invariant arriving by the front door: it
+   * is not enforced on the renderer, it is simply no longer expressible.
+   *
+   * An empty directory still means "start at home", because that behaviour
+   * belongs to the person choosing rather than to the domain, and removing it
+   * here would break the first-launch path before there is a projects rail to
+   * replace it with.
+   */
+  async startConversationIn(options: {
+    readonly agents: readonly AgentId[]
+    readonly cwd: string
+    readonly title?: string
+    readonly profileId?: string
+  }): Promise<{
+    conversationId: string
+    participants: AgentId[]
+    profileId: string
+    projectId: string
+    cwd: string
+    title: string
+  }> {
+    const { project } = this.projects.adopt(
+      options.cwd.trim() === '' ? homedir() : options.cwd.trim()
+    )
+
+    /*
+     * The project's answers win over this call's defaults, and lose to an
+     * explicit argument.
+     *
+     * The order is the point of moving these settings up: a second conversation
+     * in a directory whose profile is already Trusted should open Trusted, not
+     * ask again. An explicit `profileId` still overrides, because a caller that
+     * named one — restart, promotion, a side task inheriting its parent's — is
+     * stating a fact rather than accepting a default.
+     *
+     * `agentIds` is read with `??` and not a truthiness check: **an empty cast is
+     * a real answer** and must not fall back to the caller's list. Null is the
+     * only value that means "this project has never been asked".
+     */
+    const agents = project.agentIds === null ? options.agents : (project.agentIds as AgentId[])
+    const profileId = options.profileId ?? project.profileId ?? undefined
+
+    // Spread rather than assigned: under `exactOptionalPropertyTypes` an
+    // explicit `undefined` is not the same as an absent optional field.
+    return this.startConversation({
+      agents,
+      projectId: project.id,
+      ...(options.title === undefined ? {} : { title: options.title }),
+      ...(profileId === undefined ? {} : { profileId }),
+    })
+  }
+
   async startConversation(options: StartConversationOptions): Promise<{
     conversationId: string
     participants: AgentId[]
     profileId: string
+    projectId: string
     cwd: string
     title: string
   }> {
     if (options.agents.length === 0) throw new Error('A conversation needs at least one agent')
 
     /*
-     * Check the directory before spawning anything.
+     * The root comes from the registry, and the check comes with it.
      *
-     * A missing cwd makes the spawn fail with ENOENT, and the Claude SDK
-     * reports that as "the native binary failed to launch — this usually means
-     * the binary does not match this system's libc". That message sent a real
-     * user hunting a nonexistent architecture problem, and the supervisor then
-     * retried it six times. Say what is actually wrong instead.
-     */
-    /*
-     * An empty directory is allowed and means "start at home".
+     * This used to normalise a caller's string and then `describeDirectory` it.
+     * `resolveRoot` does the same job from the other end — it refuses an id
+     * nobody adopted, and refuses an adopted id whose folder has gone — so the
+     * directory is still verified before anything is spawned, which is what the
+     * old check was for: a missing cwd makes the spawn fail with ENOENT, and the
+     * Claude SDK reports that as "the native binary failed to launch", which once
+     * sent a real user hunting a nonexistent architecture problem.
      *
-     * The filesystem is not scoped to a project (§4.4), so a directory is a
-     * starting point rather than a boundary — and requiring one up front asks
-     * the user to decide something they can just tell the agent later.
+     * What is gone is "an empty directory means start at home". A conversation
+     * now belongs to a project, and there is no project that means "nowhere in
+     * particular" — whoever adopts the folder decides that, before we get here.
      */
-    const cwd = options.cwd.trim() === '' ? homedir() : options.cwd
-    const problem = describeDirectory(cwd)
-    if (problem !== null) throw new Error(problem)
+    const cwd = this.projects.resolveRoot(options.projectId)
 
     /*
      * Refused here rather than at `startParticipant`, and the difference is a
@@ -1366,7 +1444,14 @@ export class ChorusRuntime {
       actor: 'user',
       payload: {
         type: 'conversation.created',
-        projectId: options.projectId ?? cwd,
+        /*
+         * A real project id at last. This read `options.projectId ?? cwd`, so
+         * every conversation ever started without one recorded its *path* in the
+         * field named for the project — which is why the `projects` table could
+         * sit empty since migration 1 while every row in `conversations` claimed
+         * to have a project.
+         */
+        projectId: options.projectId,
         // The folder is what a conversation is about until you say otherwise,
         // and it is a better answer than "Untitled" for one you never rename.
         title: options.title ?? folderName(cwd),
@@ -1407,6 +1492,7 @@ export class ChorusRuntime {
       participants: new Map(),
       grants,
       profile,
+      projectId: options.projectId,
       cwd,
       title: options.title ?? folderName(cwd),
       lastAddressed: undefined,
@@ -1454,6 +1540,7 @@ export class ChorusRuntime {
       conversationId,
       participants: [...conversation.participants.keys()],
       profileId: profile.id,
+      projectId: options.projectId,
       cwd,
       title: conversation.title,
     }
@@ -2184,6 +2271,7 @@ export class ChorusRuntime {
       participants: new Map([[agentId, participant]]),
       grants,
       profile,
+      projectId: parent.projectId,
       cwd: parent.cwd,
       title: aside.excerpt.slice(0, 80),
       lastAddressed: agentId,
@@ -2198,6 +2286,7 @@ export class ChorusRuntime {
       conversationId: asideId,
       participants: [agentId],
       profileId: profile.id,
+      projectId: conversation.projectId,
       cwd: conversation.cwd,
       title: conversation.title,
       unread: 0,
@@ -2228,148 +2317,6 @@ export class ChorusRuntime {
    * branch this one is not descended from — so without this the room would not
    * know the question it was opened to continue.
    */
-  /**
-   * A side task, branched off the conversation you are in, without touching it.
-   *
-   * The gap this closes: you are mid-flow with an agent, you notice something
-   * that needs a quick fix, and every existing route is wrong. Typing it into
-   * the composer redirects the turn you are in. **New session** starts an agent
-   * that knows nothing about what you have both been looking at. And the aside
-   * is read-only by construction — asking it to act was never possible, so
-   * "open an aside, then promote it" was a way of obtaining a room rather than
-   * a way of asking a question, which is a workaround and reads like one.
-   *
-   * So this is `runPromotion` with the aside taken out of the middle. It forks
-   * the same way promotion does — from the parent's own `sessionRef`, which is
-   * what carries the context you would otherwise have to re-describe — opens a
-   * persistent conversation under a profile chosen here, and sends the brief.
-   *
-   * **The parent is not touched at all.** No message is appended to it, its
-   * agent is not interrupted, and its watermark does not move. That is the
-   * whole requirement: the flow you were in is still exactly where you left it.
-   *
-   * Forking from disk means the branch sees the session *as persisted*, so it
-   * cannot see a turn still in flight — the same constraint `openAside` carries
-   * and for the same reason. `stillAnswering` is what refuses rather than
-   * letting it silently branch from a stale point.
-   */
-  async spinOffTask(request: {
-    conversationId: string
-    agentId: AgentId
-    brief: string
-    profileId: string
-  }): Promise<PromotedConversation> {
-    const parent = this.active.get(request.conversationId)
-    if (parent === undefined) throw new Error('That conversation is not open')
-    const source = parent.participants.get(request.agentId)
-    if (source === undefined) {
-      throw new Error(`${request.agentId} is no longer in this conversation`)
-    }
-    if (source.session.sessionRef === '') {
-      throw new Error(`${request.agentId} has not started a session yet`)
-    }
-    if (this.stillAnswering(request.conversationId)) {
-      throw new Error('Wait for the current turn to finish, then start the side task')
-    }
-    const brief = request.brief.trim()
-    if (brief === '') throw new Error('A side task needs something to do')
-
-    const taskId = newConversationId()
-    const profile = profileById(request.profileId)
-    const grants = this.newGrants()
-
-    let participant
-    try {
-      participant = await this.startParticipant(
-        request.agentId,
-        taskId,
-        (resuming) => this.sessionOptsFor({ cwd: parent.cwd, profile }, request.agentId, resuming),
-        profile,
-        grants,
-        undefined,
-        false,
-        source.session.sessionRef
-      )
-    } catch (error) {
-      throw new Error(
-        `Could not start the side task: ${error instanceof Error ? error.message : String(error)}`,
-        { cause: error }
-      )
-    }
-
-    /*
-     * No `spun-off` payload, and that is deliberate rather than a shortcut.
-     *
-     * Adding an event type is a five-file change here precisely so it is
-     * considered, and there is nothing this one would record that the log does
-     * not already hold: the room's first entry is the brief you actually typed,
-     * as an ordinary `user.message`. Reusing `aside.promoted` was the other
-     * option and is worse — it would write that an aside was promoted when no
-     * aside existed, into the one store this app treats as the truth.
-     *
-     * Provenance travels in the seed instead, where it is of use to the agent
-     * rather than to a query nobody has yet written.
-     */
-    participant.seedContext = [
-      'This is a side task, branched from a conversation you are already in.',
-      '',
-      'You have that conversation’s context because this session was forked from',
-      'it. The person has stepped aside to get one specific thing done without',
-      'interrupting what you were both in the middle of.',
-      '',
-      'Do the task below and nothing beyond it. Do not resume, summarise, or carry',
-      'on the work of the conversation this came from — it is still running',
-      'elsewhere and is not yours to continue.',
-    ].join('\n')
-    participant.seenSeq = this.store.lastSeq()
-
-    const conversation: ActiveConversation = {
-      conversationId: taskId,
-      participants: new Map([[request.agentId, participant]]),
-      grants,
-      profile,
-      cwd: parent.cwd,
-      title: brief.slice(0, 80),
-      lastAddressed: request.agentId,
-      lastSeenSeq: 0,
-      draft: '',
-      planning: false,
-    }
-    this.active.set(taskId, conversation)
-    this.rememberOpen()
-
-    /*
-     * The brief goes through `send`, not through the service directly.
-     *
-     * The same reason `forwardAside` does: routing, the log entry, the catch-up
-     * watermark and mention handling are the ones a typed message already gets,
-     * so a side task's first message cannot drift from an ordinary one. You did
-     * type these words, so `user.message` is what they are.
-     */
-    try {
-      await this.send(taskId, brief)
-    } catch (error) {
-      this.active.delete(taskId)
-      await participant.service.close('closed')
-      throw error
-    }
-
-    this.log.info('side task started', {
-      taskId,
-      parentId: request.conversationId,
-      agentId: request.agentId,
-      profileId: profile.id,
-    })
-    return {
-      conversationId: taskId,
-      participants: [request.agentId],
-      profileId: profile.id,
-      cwd: conversation.cwd,
-      title: conversation.title,
-      unread: 0,
-    }
-  }
-
   private asideSeed(asideId: string, excerpt: string): string {
     const said = this.store
       .read(asideId)
@@ -2592,13 +2539,14 @@ export class ChorusRuntime {
      * show. Reopening is not what starts an agent; `startParticipant` is, and
      * that is where the guard belongs.
      */
-    const savedState = readOpenSessions(this.userDataPath)
-    const saved = savedState.sessions
+    const savedState = readOpenProjects(this.userDataPath)
+    const saved = openConversations(savedState)
     this.workspaceSnapshot = savedState.workspace
     const restored: {
       conversationId: string
       participants: AgentId[]
       profileId: string
+      projectId: string
       cwd: string
       title: string
       unread: number
@@ -2606,7 +2554,7 @@ export class ChorusRuntime {
       planning: boolean
     }[] = []
 
-    for (const entry of saved) {
+    for (const { projectId, conversation: entry } of saved) {
       // Already open: restore is called once, but calling it twice must not
       // start a second set of agents for the same conversation.
       const open = this.active.get(entry.conversationId)
@@ -2615,6 +2563,7 @@ export class ChorusRuntime {
           conversationId: entry.conversationId,
           participants: [...open.participants.keys()],
           profileId: open.profile.id,
+          projectId: open.projectId,
           cwd: open.cwd,
           title: open.title,
           unread: this.unreadSince(entry.conversationId, open.lastSeenSeq),
@@ -2623,19 +2572,30 @@ export class ChorusRuntime {
         })
         continue
       }
-      if (describeDirectory(entry.cwd) !== null) {
+      /*
+       * The registry answers what `describeDirectory` used to. Both refusals it
+       * can raise mean the same thing here — this conversation has nowhere to
+       * open — but they are logged apart because only one of them is the
+       * person's problem: a project they removed is expected, a project whose
+       * folder vanished is something they may want to relocate.
+       */
+      try {
+        this.projects.resolveRoot(projectId)
+      } catch (error) {
         this.log.warn('a session could not be reopened', {
           conversationId: entry.conversationId,
-          cwd: entry.cwd,
+          projectId,
+          reason: error instanceof Error ? error.message : String(error),
         })
         continue
       }
-      const conversation = await this.reopen(entry)
+      const conversation = await this.reopen(projectId, entry)
       if (conversation === null) continue
       restored.push({
         conversationId: entry.conversationId,
         participants: [...conversation.participants.keys()],
         profileId: conversation.profile.id,
+        projectId: conversation.projectId,
         cwd: conversation.cwd,
         title: conversation.title,
         unread: this.unreadSince(entry.conversationId, entry.lastSeenSeq),
@@ -2651,15 +2611,25 @@ export class ChorusRuntime {
     return { sessions: restored, workspace: this.workspaceSnapshot }
   }
 
-  private async reopen(entry: OpenSession): Promise<ActiveConversation | null> {
+  private async reopen(
+    projectId: string,
+    entry: OpenConversation
+  ): Promise<ActiveConversation | null> {
     const profile = profileById(entry.profileId)
     const grants = this.newGrants()
+    /*
+     * Resolved from the registry rather than read out of the file, which is the
+     * whole reason the file no longer stores it. A root recorded at quit and
+     * replayed at launch is a stale copy the moment the project moves; asking the
+     * registry means a relocated project reopens where it now is.
+     */
     const conversation: ActiveConversation = {
       conversationId: entry.conversationId,
       participants: new Map(),
       grants,
       profile,
-      cwd: entry.cwd,
+      projectId,
+      cwd: this.projects.resolveRoot(projectId),
       title: entry.title,
       lastAddressed: undefined,
       lastSeenSeq: entry.lastSeenSeq,
@@ -2757,11 +2727,17 @@ export class ChorusRuntime {
     // launch restore something different.
     if (readOnlyProfiling()) return
 
-    writeOpenSessions(this.userDataPath, {
-      sessions: [...this.active.values()].map((c) => ({
+    /*
+     * Grouped by project, because that is now the thing being reopened. The old
+     * file was a flat session list with a path on each entry; conversations that
+     * shared a folder repeated it, and nothing said they were the same place.
+     */
+    const byProject = new Map<string, OpenConversation[]>()
+    for (const c of this.active.values()) {
+      const conversations = byProject.get(c.projectId) ?? []
+      conversations.push({
         conversationId: c.conversationId,
         agents: [...c.participants.keys()],
-        cwd: c.cwd,
         profileId: c.profile.id,
         title: c.title,
         lastSeenSeq: c.lastSeenSeq,
@@ -2773,6 +2749,14 @@ export class ChorusRuntime {
             .filter((p) => p.session.sessionRef.trim() !== '')
             .map((p) => [p.agentId, p.session.sessionRef])
         ),
+      })
+      byProject.set(c.projectId, conversations)
+    }
+
+    writeOpenProjects(this.userDataPath, {
+      projects: [...byProject].map(([projectId, conversations]) => ({
+        projectId,
+        conversations,
       })),
       workspace: this.workspaceSnapshot,
     })
@@ -2815,53 +2799,6 @@ export class ChorusRuntime {
   setConversationLayout(order: readonly string[], workspace: WorkspaceSnapshot): void {
     this.workspaceSnapshot = workspace
     this.reorderConversations(order)
-  }
-
-  /**
-   * Starts the same room again, empty.
-   *
-   * A new conversation rather than a cleared one: the old transcript stays in
-   * the log, where it is still the record of what happened, and the agents get
-   * genuinely fresh sessions rather than a context we asked them to forget.
-   * Same folder, same cast, same permissions, same name — the only thing that
-   * changes is that nothing has been said yet.
-   *
-   * It keeps its place in the grid, because a pane that jumps to the end when
-   * you restart it is a pane you then have to find again.
-   */
-  async restartConversation(conversationId: string): Promise<{
-    conversationId: string
-    participants: AgentId[]
-    profileId: string
-    cwd: string
-    title: string
-  }> {
-    const existing = this.require(conversationId)
-    /*
-     * The default cast, not this conversation's.
-     *
-     * Restart is "start this session over, with nothing said in it" — a fresh
-     * room, and a fresh room gets what a fresh room gets. Carrying the old cast
-     * forward made restart the one action that could not recover from a
-     * conversation whose agents were wrong: an agent that failed to start was
-     * still in the participants, so restarting reproduced the state you were
-     * restarting to escape.
-     *
-     * The directory and the profile still carry, because those are *where* and
-     * *how much you trust it* — facts about the work rather than about the room.
-     */
-    const agents = readSettings(this.userDataPath).agents
-    const { cwd, title } = existing
-    const profileId = existing.profile.id
-    const order = [...this.active.keys()]
-
-    await this.closeConversation(conversationId)
-    const started = await this.startConversation({ agents, cwd, profileId, title })
-    this.reorderConversations(
-      order.map((id) => (id === conversationId ? started.conversationId : id))
-    )
-    this.log.info('conversation restarted', { from: conversationId, to: started.conversationId })
-    return started
   }
 
   /** Conversations with live agents right now, newest last. */
@@ -2941,6 +2878,7 @@ export class ChorusRuntime {
     conversationId: string
     participants: AgentId[]
     profileId: string
+    projectId: string
     cwd: string
     title: string
     unread: number
@@ -2951,6 +2889,7 @@ export class ChorusRuntime {
         conversationId,
         participants: [...open.participants.keys()],
         profileId: open.profile.id,
+        projectId: open.projectId,
         cwd: open.cwd,
         title: open.title,
         unread: this.unreadSince(conversationId, open.lastSeenSeq),
@@ -2962,16 +2901,16 @@ export class ChorusRuntime {
       .find((candidate) => candidate.conversationId === conversationId)
     if (summary === undefined) throw new Error('That conversation is not in the log.')
 
-    const problem = describeDirectory(summary.cwd)
-    if (problem !== null) throw new Error(problem)
+    // The registry decides whether this can be reopened, and it refuses both an
+    // id nobody adopted and a project whose folder has gone.
+    this.projects.resolveRoot(summary.projectId)
 
     const agents = summary.agents.filter((id): id is AgentId => this.adapters.has(id as AgentId))
     if (agents.length === 0) throw new Error('No agent from that conversation is available.')
 
-    const conversation = await this.reopen({
+    const conversation = await this.reopen(summary.projectId, {
       conversationId,
       agents,
-      cwd: summary.cwd,
       profileId: DEFAULT_PROFILE_ID,
       title: summary.title,
       // Nothing to resume: those threads ended with their sessions.
@@ -2988,6 +2927,7 @@ export class ChorusRuntime {
       conversationId,
       participants: [...conversation.participants.keys()],
       profileId: conversation.profile.id,
+      projectId: conversation.projectId,
       cwd: conversation.cwd,
       title: conversation.title,
       unread: 0,
@@ -3308,38 +3248,197 @@ export class ChorusRuntime {
   }
 
   /**
-   * Points the conversation at another directory.
+   * The registry as the shell needs it: every project, with how many of its
+   * conversations are open.
    *
-   * This moves what *Chorus* means by the project — the review panel and the
-   * handoff brief follow it. It does not move an agent's shell: those were
-   * started with a working directory and keep it. The filesystem is not scoped
-   * (§4.4), so the agent can work anywhere it is told to, and the change is
-   * replayed as catch-up so the next one addressed is told.
+   * The count is the runtime's to add and not the store's. `ProjectStore` knows
+   * what has been adopted and nothing about what is running, which is the split
+   * that lets it stay a database — so the two facts are joined here, where both
+   * are already in hand.
    */
-  setProjectDirectory(conversationId: string, cwd: string): { cwd: string; title: string } {
-    const conversation = this.require(conversationId)
-    const next = cwd.trim() === '' ? homedir() : cwd.trim()
-    const problem = describeDirectory(next)
-    if (problem !== null) throw new Error(problem)
-
-    const previous = conversation.cwd
-    if (next === previous) return { cwd: previous, title: conversation.title }
-
-    this.store.append({
-      conversationId,
-      actor: 'system',
-      payload: { type: 'project.changed', cwd: next, previousCwd: previous },
-    })
-    conversation.cwd = next
-    // A title nobody has touched is still the folder's name, so it follows the
-    // folder. One that was chosen deliberately is left alone.
-    if (conversation.title === folderName(previous)) {
-      this.renameConversation(conversationId, folderName(next))
+  listProjects(): {
+    id: string
+    name: string
+    root: string
+    lastOpenedAt: number
+    openConversations: number
+    profileId: string | null
+    agentIds: AgentId[] | null
+  }[] {
+    const open = new Map<string, number>()
+    for (const conversation of this.active.values()) {
+      open.set(conversation.projectId, (open.get(conversation.projectId) ?? 0) + 1)
     }
-    this.rememberOpen()
-    this.log.info('project directory changed', { conversationId, from: previous, to: next })
-    return { cwd: next, title: conversation.title }
+    return this.projects.list().map((project) => ({
+      id: project.id,
+      name: project.name,
+      root: project.root,
+      lastOpenedAt: project.lastOpenedAt,
+      openConversations: open.get(project.id) ?? 0,
+      profileId: project.profileId,
+      /*
+       * Narrowed here rather than in the store, which holds `string[]` on
+       * purpose: which agents exist is this app's question, not the database's.
+       * A row naming an agent this build no longer ships is dropped rather than
+       * passed through, so the renderer never has to render a cast member it has
+       * no icon or launcher for — and dropping it beats refusing the whole
+       * project list over one stale name.
+       */
+      agentIds:
+        project.agentIds === null
+          ? null
+          : project.agentIds.filter((id): id is AgentId => id === 'codex' || id === 'claude'),
+    }))
   }
+
+  /**
+   * Which open conversations belong to the project at this root — Phase 6 slice
+   * 6c's routing rule, in one place.
+   *
+   * **Keyed by the project, never by the path**, which is the whole of what
+   * "routing is project-first" means. The old bridge matched a conversation's
+   * `cwd` against the editor's file, so two conversations that happened to share
+   * a directory string were the same target and a relocated project was none.
+   * Here the root resolves to a project id and conversations are selected by the
+   * id they carry, so the answer survives a relocation and cannot be spoofed by
+   * a coincidence of paths.
+   *
+   * An unadopted root returns nothing rather than everything. A surface can only
+   * have been opened for a project that exists, so this should not happen — and
+   * if it does, delivering a stray editor's contents to every conversation is
+   * the worst available answer.
+   */
+  conversationsForRoot(projectRoot: string): string[] {
+    const project = this.projects.findByRoot(projectRoot)
+    if (project === null) return []
+    return [...this.active.values()]
+      .filter((conversation) => conversation.projectId === project.id)
+      .map((conversation) => conversation.conversationId)
+  }
+
+  renameProject(projectId: string, name: string): { name: string } {
+    return { name: this.projects.rename(projectId, name).name }
+  }
+
+  /**
+   * Changes what agents may do in a project, and in everything running in it.
+   *
+   * A profile is an answer about a *place* — "agents may write in this
+   * repository" — so it is stored on the project, and every conversation under
+   * that project moves with it. Two rooms in one directory disagreeing about
+   * what may be run there is the state this removes; it is the same argument
+   * `setProfile` already makes one level down about two agents in one room.
+   *
+   * **The row is written first, then the live conversations follow.** The other
+   * order would leave a fanout that failed halfway with running conversations
+   * widened and nothing recording it — the durable answer would still say the
+   * old profile and the next launch would silently narrow them back. Written
+   * first, a failed fanout is a conversation that has not caught up yet, which
+   * a restart fixes.
+   *
+   * Each conversation still appends its own `policy.changed`, because a
+   * transcript has to show the widening above the actions it permitted. The
+   * project's row is current state; the log is what happened.
+   */
+  setProjectProfile(projectId: string, profileId: string): { profileId: string } {
+    const profile = profileById(profileId)
+    this.projects.setProfile(projectId, profile.id)
+
+    for (const conversation of [...this.active.values()]) {
+      if (conversation.projectId !== projectId) continue
+      if (conversation.profile.id === profile.id) continue
+      this.setProfile(conversation.conversationId, profile.id)
+    }
+    this.log.info('project policy changed', { projectId, to: profile.id })
+    return { profileId: profile.id }
+  }
+
+  /**
+   * Changes the project's cast, and reconciles every live conversation to it.
+   *
+   * Adds before it removes, deliberately. A conversation whose cast is being
+   * swapped wholesale would otherwise spend the middle of this operation with no
+   * participants at all, and a turn arriving in that window has nobody to route
+   * to. Adding first means the room is never empty.
+   *
+   * `allSettled` and not `all`: one agent failing to launch — a CLI that is not
+   * installed, an expired login — must not abandon the reconcile with the other
+   * conversations half-done. The project's row is already correct, so a failure
+   * here is a conversation that will pick the cast up when it next starts.
+   */
+  async setProjectAgents(
+    projectId: string,
+    agentIds: readonly AgentId[]
+  ): Promise<{ agentIds: AgentId[] }> {
+    const wanted = [...new Set(agentIds)]
+    this.projects.setAgents(projectId, wanted)
+
+    const additions: Promise<unknown>[] = []
+    const removals: Promise<unknown>[] = []
+    for (const conversation of [...this.active.values()]) {
+      if (conversation.projectId !== projectId) continue
+      const present = [...conversation.participants.keys()]
+      for (const agentId of wanted) {
+        if (!present.includes(agentId)) {
+          additions.push(this.addParticipant(conversation.conversationId, agentId))
+        }
+      }
+      for (const agentId of present) {
+        if (!wanted.includes(agentId)) {
+          removals.push(this.removeParticipant(conversation.conversationId, agentId))
+        }
+      }
+    }
+    await Promise.allSettled(additions)
+    await Promise.allSettled(removals)
+
+    this.log.info('project cast changed', { projectId, agentIds: wanted })
+    return { agentIds: wanted }
+  }
+
+  /**
+   * Forgets a project, unless one of its conversations is open.
+   *
+   * The guard lives here for the same reason the count does: `ProjectService`
+   * cannot see running conversations, so it would happily delete a record three
+   * open rooms are resolving their root through. They would not notice
+   * immediately — `cwd` is already resolved and cached on each one — which is
+   * exactly what makes it worth refusing. The failure would arrive later and
+   * somewhere else, as an agent that cannot start or a reopen that finds
+   * nothing, with no visible connection to the moment the project was removed.
+   */
+  forgetProject(projectId: string): { forgotten: boolean } {
+    const open = [...this.active.values()].filter((c) => c.projectId === projectId).length
+    if (open > 0) {
+      throw new Error(
+        `This project still has ${String(open)} open conversation${open === 1 ? '' : 's'}. Close them before removing it.`
+      )
+    }
+    return { forgotten: this.projects.forget(projectId) }
+  }
+
+  /**
+   * `setProjectDirectory` was here, and its removal is Phase 2's point rather
+   * than a tidy-up.
+   *
+   * It took a conversation and a path, appended `project.changed`, and assigned
+   * `conversation.cwd`. Three things were wrong with that once a Project owns the
+   * development environment. The room moved while **the agents inside it did
+   * not** — they keep the working directory they were spawned with, so the
+   * transcript and the shells disagreed from that moment on. Two rooms on one
+   * folder could be walked apart, which is only possible because each carried its
+   * own copy of the path. And it made "where is this conversation" a question
+   * with a per-conversation answer, which is exactly the shape this phase
+   * replaces.
+   *
+   * **What replaces it is `ProjectService.relocate`**, which moves the project
+   * and therefore every conversation under it, in one explicit operation — and
+   * which is honest that stopping and restarting what is already running against
+   * the old root is the caller's job.
+   *
+   * `project.changed` stays in the event schema. Transcripts already contain it
+   * and a reader must still render them; nothing appends it any more.
+   */
 
   /**
    * Changes what agents may do without asking, mid-conversation.
@@ -3427,179 +3526,6 @@ export class ChorusRuntime {
     const participant = this.require(conversationId).participants.get(agentId)
     if (participant === undefined) throw new Error(`"${agentId}" is not in this conversation`)
     await participant.service.answerUserInput(userInputId, response)
-  }
-
-  /**
-   * Reads the repository as it stands right now.
-   *
-   * Deliberately not derived from the event log: the log records what agents
-   * *proposed*, git records what is actually on disk. After a crash, a manual
-   * edit, or an approval that was denied, those differ — and the one worth
-   * reviewing is the disk.
-   */
-  async readWorkspace(
-    conversationId: string,
-    options: {
-      base?: string | undefined
-      committedOnly?: boolean | undefined
-      hunks?: boolean | undefined
-    } = {}
-  ): Promise<WorkspaceRead> {
-    const cwd = this.require(conversationId).cwd
-    return readWorkspace({
-      cwd,
-      ...(options.base === undefined ? {} : { base: options.base }),
-      ...(options.committedOnly === undefined ? {} : { committedOnly: options.committedOnly }),
-      ...(options.hunks === undefined ? {} : { hunks: options.hunks }),
-    })
-  }
-
-  /**
-   * Saves a file the person edited, and tells the room.
-   *
-   * The two halves are here together on purpose. A write that landed without
-   * the event is the failure the event exists to prevent — an agent mid-turn
-   * composing a patch against a version that no longer exists — so nothing may
-   * write the tree without appending, and this is the only method that writes.
-   *
-   * The append is **after** the write and only on success: an event saying a
-   * file changed when it did not would send the other agent to re-read a file
-   * that never moved, which is a smaller harm than the reverse but still a lie
-   * in the log.
-   */
-  async writeUserFile(
-    conversationId: string,
-    path: string,
-    content: string,
-    expectedSha: string | null,
-    force: boolean | undefined
-  ): Promise<WriteResult> {
-    const result = await writeProjectFile({
-      cwd: this.require(conversationId).cwd,
-      path,
-      content,
-      expectedSha,
-      ...(force === undefined ? {} : { force }),
-    })
-    // Only a write that landed is worth telling the room about. A refused one
-    // changed nothing, and an event for it would send the other agent to
-    // re-read a file that never moved.
-    if (result.outcome !== 'written') return result
-
-    this.store.append({
-      conversationId,
-      actor: 'user',
-      payload: {
-        type: 'file.edited.byUser',
-        path,
-        added: result.added,
-        removed: result.removed,
-      },
-    })
-    return result
-  }
-
-  /**
-   * Source control, driven by the person, with the room told afterwards.
-   *
-   * The append sits beside the command for the reason `writeUserFile` gives:
-   * an operation that landed without the event is the failure the event exists
-   * to prevent, and `discard` is the sharpest case — an agent whose work was
-   * just thrown away has no other way to learn it.
-   *
-   * Nothing is appended when the command fails. An event saying files were
-   * discarded when they were not would send the other agent to re-read work
-   * that is still exactly where it left it.
-   */
-  async runGitAction(request: {
-    conversationId: string
-    action: 'stage' | 'unstage' | 'discard' | 'commit' | 'push'
-    paths: readonly string[]
-    message?: string | undefined
-    setUpstream?: boolean | undefined
-  }): Promise<{ problem: string | null; detail: string | null }> {
-    const cwd = this.require(request.conversationId).cwd
-    let detail: string | null = null
-
-    const failure = async (): Promise<string | null> => {
-      switch (request.action) {
-        case 'stage': {
-          const r = await stage({ cwd, paths: request.paths })
-          return r.ok ? null : r.error.message
-        }
-        case 'unstage': {
-          const r = await unstage({ cwd, paths: request.paths })
-          return r.ok ? null : r.error.message
-        }
-        case 'discard': {
-          const r = await discard({ cwd, paths: request.paths })
-          return r.ok ? null : r.error.message
-        }
-        case 'commit': {
-          const r = await commit({ cwd, message: request.message ?? '' })
-          if (!r.ok) return r.error.message
-          // The subject, not the sha: it is what a person and an agent both
-          // recognise, and the sha is in the log's own ordering anyway.
-          detail = (request.message ?? '').trim().split('\n')[0] ?? null
-          return null
-        }
-        case 'push': {
-          const status = await readStatus({ cwd })
-          if (!status.ok) return status.error.message
-          const branch = status.value.branch
-          if (branch === null) return 'cannot push a detached HEAD'
-          const r = await push({
-            cwd,
-            remote: 'origin',
-            branch,
-            ...(request.setUpstream === undefined ? {} : { setUpstream: request.setUpstream }),
-          })
-          if (!r.ok) return r.error.message
-          detail = branch
-          return null
-        }
-      }
-    }
-
-    const problem = await failure()
-    if (problem !== null) return { problem, detail: null }
-
-    this.store.append({
-      conversationId: request.conversationId,
-      actor: 'user',
-      payload: {
-        type: 'repo.changed.byUser',
-        // Spelled out. Deriving the past tense by concatenation is how
-        // `discard` becomes `discardd` — and the enum would have accepted it
-        // only because the cast said so.
-        action: PAST_TENSE[request.action],
-        paths: [...request.paths],
-        detail,
-      },
-    })
-    return { problem: null, detail }
-  }
-
-  /** The branches a base picker can offer. */
-  async readBranches(
-    conversationId: string
-  ): Promise<{ branches: BranchRef[]; problem: string | null }> {
-    const result = await readBranches({ cwd: this.require(conversationId).cwd })
-    return result.ok
-      ? { branches: [...result.value], problem: null }
-      : { branches: [], problem: result.error.message }
-  }
-
-  /** Moves remote-tracking refs. Never called on a timer — see `fetchRef`. */
-  async fetchRemote(
-    conversationId: string,
-    remote: string | undefined
-  ): Promise<{ problem: string | null }> {
-    const result = await fetchRef({
-      cwd: this.require(conversationId).cwd,
-      remote: remote ?? 'origin',
-    })
-    return { problem: result.ok ? null : result.error.message }
   }
 
   /** Replays a conversation from the log — the only complete record (S3). */
@@ -4011,6 +3937,28 @@ export class ChorusRuntime {
 }
 
 /**
+ * The project-first product's own database, and the clean start the plan chose.
+ *
+ * **`chorus.db` is not opened by this build and is not touched by it.** Phase 2
+ * takes a new namespace rather than migrating the session-first schema: there is
+ * no conversation migration and no compatibility parser, which is the decision
+ * Mohamad accepted when he accepted a clean database. The old file stays exactly
+ * where it is, at whatever `PRAGMA user_version` it reached, readable by anything
+ * that wants it and loaded by nothing.
+ *
+ * **Left in place rather than renamed**, although the plan offered either. Not
+ * opening a file is reversible by changing this constant back; renaming somebody's
+ * only copy of their history on first launch is a mutation performed before anyone
+ * has agreed the new product works, and "beside it, never loaded automatically" is
+ * already true without it.
+ *
+ * The `v2` is the **product** generation, not the schema version. Schema version
+ * lives in `PRAGMA user_version` and is at 4; a fresh v2 file runs all four
+ * migrations at once and lands there.
+ */
+const DATABASE_FILE = 'chorus.v2.db'
+
+/**
  * Opens the database, and gets out of the way if it cannot be read.
  *
  * A corrupt SQLite file would otherwise make the app unstartable — the worst
@@ -4035,8 +3983,17 @@ function openOrRecover(
    * live database, with no sidecars to keep in step, and it is synchronous,
    * which `migrate` requires.
    */
+  /*
+   * Sibling names are derived from the database's own, not from a second literal.
+   * With two generations of file in one directory, a hardcoded `chorus.pre-vN.db`
+   * would let a v2 snapshot land on a name that reads as the v1 database's, and
+   * the one moment anybody reads these filenames is while recovering from
+   * something having already gone wrong.
+   */
+  const stem = basename(path).replace(/\.db$/, '')
+
   const snapshot = (db: SqliteHandle, from: number): string => {
-    const destination = join(userDataPath, `chorus.pre-v${String(from)}.db`)
+    const destination = join(userDataPath, `${stem}.pre-v${String(from)}.db`)
     // A leftover from an interrupted attempt would make VACUUM INTO fail.
     if (existsSync(destination)) rmSync(destination)
     // The path is ours, not a user's, but a quote in it would end the literal
@@ -4061,7 +4018,7 @@ function openOrRecover(
     db = openSqlite({ path })
   } catch (error) {
     if (!existsSync(path)) throw error
-    const moved = join(userDataPath, `chorus.unreadable-${String(Date.now())}.db`)
+    const moved = join(userDataPath, `${stem}.unreadable-${String(Date.now())}.db`)
     renameSync(path, moved)
     db = openSqlite({ path })
     recovered = moved
@@ -4082,15 +4039,17 @@ function folderName(cwd: string): string {
   return name === '' ? cwd : name
 }
 
-function describeDirectory(cwd: string): string | null {
-  if (!existsSync(cwd)) return `That directory does not exist: ${cwd}`
-  try {
-    if (!statSync(cwd).isDirectory()) return `That path is a file, not a directory: ${cwd}`
-  } catch (error) {
-    return `That directory cannot be read: ${error instanceof Error ? error.message : String(error)}`
-  }
-  return null
-}
+/*
+ * `describeDirectory` was here and has no callers left.
+ *
+ * Four places asked it whether a path was a usable directory: starting a
+ * conversation, restoring one, reopening one from history, and repointing one.
+ * The last no longer exists, and the other three now ask the registry instead —
+ * `ProjectService.resolveRoot` refuses an id nobody adopted and an adopted id
+ * whose folder has gone, which is the same question asked of the thing that
+ * actually owns the answer. `approveProjectRoot` performs the equivalent check
+ * once, at adoption, where a person is choosing.
+ */
 
 /**
  * A window onto the log with no agents behind it.

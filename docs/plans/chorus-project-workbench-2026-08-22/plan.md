@@ -21,14 +21,15 @@ old database so “clean” never has to mean “irreversibly deleted”.
 | Phase                                               | Status                              |  Estimate | Gate                                                                               |
 | --------------------------------------------------- | ----------------------------------- | --------: | ---------------------------------------------------------------------------------- |
 | 0 · The clean baseline                              | ✅ Codex approved                   |    0 days | Branch, base SHA and worktree status verified; archive preserved                   |
-| 1 · Prove the embedded workbench and extension host | 🔍 **Preflight under Codex review** | 1–2 weeks | Cross-platform kill gate passes before the product shell is rebuilt                |
-| 2 · Make Project the top-level domain               | ⬜ Not started                      | 1–2 weeks | Projects own roots; conversations cannot own or change cwd                         |
-| 3 · Replace the shell with project tabs             | ⬜ Not started                      | 2–3 weeks | Project rail, project tabs/splits and nested conversations work                    |
-| 4 · Ship the complete Code-OSS workbench            | ⬜ Not started                      | 4–8 weeks | Explorer/editor/search/SCM/terminal/tasks/debug/settings work from real projects   |
-| 5 · Make extensions a supported subsystem           | ⬜ Not started                      | 4–8 weeks | Every installed extension has a proven result or an explicit replacement/exception |
-| 6 · Join agents to the live workbench               | ⬜ Not started                      | 3–6 weeks | Agents observe and edit the same unsaved models with approval and undo             |
+| 1 · Prove the embedded workbench and extension host | ✅ Built, driven, UI approved 08-24 | 1–2 weeks | Cross-platform kill gate passes before the product shell is rebuilt                |
+| 2 · Make Project the top-level domain               | ✅ Built — typechecks, untested     | 1–2 weeks | Projects own roots; conversations cannot own or change cwd                         |
+| 3 · Replace the shell with project tabs             | ✅ Built, driven 08-24 — untested   | 2–3 weeks | Project rail, project tabs/splits and nested conversations work                    |
+| 4 · Ship the complete Code-OSS workbench            | 🟡 Core surfaces live, driven 08-24 | 4–8 weeks | Explorer/editor/search/SCM/terminal/tasks/debug/settings work from real projects   |
+| 5 · Make extensions a supported subsystem           | 🟡 5a–5g built 08-28, gate unmet    | 4–8 weeks | Every installed extension has a proven result or an explicit replacement/exception |
+| 6 · Join agents to the live workbench               | 🟡 6a–6c, 6f built; 6d/6e rewritten | 3–6 weeks | Agents observe and edit the same unsaved models with approval and undo             |
 | 7 · Cross-platform product cutover                  | ⬜ Not started                      | 3–6 weeks | The daily-development journey passes in packaged macOS, Windows and Linux builds   |
 | 8 · Remove the old product                          | ⬜ Not started                      | 1–2 weeks | No core path launches, installs or depends on external VS Code                     |
+| **9 · The product-first correction**                | 🟡 Built 08-28–29, untested         |         — | One place to do each thing; the editor owns git; settings belong to the project    |
 
 **Planning estimate:** roughly four to seven engineer-months for the full acceptance criterion.
 The Phase 1 vertical slice arrives much earlier. “Revamp today” means beginning from the right
@@ -398,22 +399,37 @@ diverge.
 `code --list-extensions --show-versions` returned 81 unique extension ids on 2026-08-22.
 The manifests establish four proof classes:
 
-| Class                             | Examples from this machine                                       | Required host/proof                                                     |
-| --------------------------------- | ---------------------------------------------------------------- | ----------------------------------------------------------------------- |
-| Contribution-only themes/snippets | Tokyo Night, GitHub Theme, icons, JS/React snippets              | Manifest contributions render correctly                                 |
-| Browser-capable                   | Draw.io (see below)                                              | Web host plus webview/storage/auth proof                                |
-| Node workspace extensions         | ESLint, Docker, GitLab, MongoDB, Postman, React Native, Tailwind | REH Node extension host plus process/filesystem/network proof           |
-| Microsoft/product-restricted      | Remote SSH, Remote Containers, Codespaces, Speech, Live Share    | Explicitly unsupported or replaced; never bypass licence/runtime checks |
+| Class                                 | Examples from this machine                                                                                                                              | Required host/proof                                                     |
+| ------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------- |
+| Contribution-only themes/snippets     | Tokyo Night, GitHub Theme, icons, JS/React snippets                                                                                                     | Manifest contributions render correctly                                 |
+| Browser-capable (`ui` declared first) | **24 of the 81** — Draw.io, Bookmarks, Better Comments, Material Icon Theme, Catppuccin, ES7 React snippets, auto-close/rename tag, Pretty TS Errors, … | Web host plus webview/storage/auth proof                                |
+| Node workspace extensions             | ESLint, Docker, GitLab, MongoDB, Postman, React Native, Tailwind                                                                                        | REH Node extension host plus process/filesystem/network proof           |
+| Microsoft/product-restricted          | Remote SSH, Remote Containers, Codespaces, Speech, Live Share                                                                                           | Explicitly unsupported or replaced; never bypass licence/runtime checks |
 
-**The Browser-capable row is narrower than it first read, and the preflight corrected it in both
-directions.** Being _capable_ of running in a browser is not the same as _landing_ in the web
-host. GitLens, GitHub PR, YAML and Error Lens deduce `extensionKind: ["workspace","web"]` and
-Prettier declares `["workspace"]`, so with a REH attached all five run in the **Node host** and
-belong in the row below; their web build is only the no-remote fallback. What decides the web
-host is declaring `ui` **first**, and among the extensions surveyed only Draw.io
-(`["ui","workspace"]`) does. The class is real and stays — it is also the host Chorus's own
-trusted bridge extension runs in — but it has one third-party occupant, not six. Preflight §6.1
-carries the reasoning and the VS Code citation.
+**The rule the preflight established is right; the survey it drew from the rule was wrong, and
+Phase 5 slice 5d found out by counting.** Being _capable_ of running in a browser is not the same
+as _landing_ in the web host. GitLens, GitHub PR, YAML and Error Lens deduce
+`extensionKind: ["workspace","web"]` and Prettier declares `["workspace"]`, so with a REH attached
+all five run in the **Node host** and belong in the row below; their web build is only the
+no-remote fallback. What decides the web host is declaring `ui` **first**. All of that stands.
+
+**What does not stand is "only Draw.io does".** This section said the class "has one third-party
+occupant, not six". Reading `extensionKind` out of all 81 installed manifests gives **24** whose
+first entry is `ui` — Draw.io among them, but also Bookmarks, Better Comments, Material Icon
+Theme, Catppuccin, ES7 React snippets, auto-close-tag, auto-rename-tag, Pretty TS Errors and
+sixteen more, almost all declaring the same `["ui","workspace"]` the sentence attributed uniquely
+to Draw.io. `scripts/extension-ledger.mjs` derives the number and
+[`extension-ledger.md`](./extension-ledger.md) lists every row.
+
+**Why the correction is worth more than the number.** The class decides _what evidence a row
+needs_: web host plus webview/storage/auth, rather than the REH Node host plus
+process/filesystem/network. Twenty-four extensions were scheduled against the wrong proof, so a
+Phase 5 that followed this table would have gathered the wrong evidence for a third of the estate
+and only discovered it when the proofs failed for reasons nobody had predicted.
+
+**And it is the same failure this plan keeps recording**: a conclusion drawn once, from a sample,
+then written as a property of the whole set. Preflight §6.1 carries the rule and the VS Code
+citation, and the rule was never in doubt — only the count taken from it.
 
 Two installed AI extensions—Anthropic Claude Code and OpenAI ChatGPT—are not required for the
 product acceptance criterion because Chorus already owns those agent integrations. They are
@@ -786,6 +802,21 @@ background agents.
 **User review gate.** Stop and ask Mohamad to review the project rail, project tabs/splits and
 conversation dock in the running UI before Phase 4 changes the workbench surfaces around them.
 
+**Corrected 2026-08-28 by Phase 9.** Three of the changes above shipped differently, and the
+differences are not refinements:
+
+- “Replace QuickRail's session rows with Project rows” shipped as _both_ for four days — project
+  tiles above a scrolling list of conversation tiles — because the rail was re-keyed without the
+  session list being removed. Phase 9 removed the conversation tiles. A rail of projects is the
+  thing this line asked for and did not get.
+- “Collapsible Chorus dock” shipped as a strip of chips with exactly one conversation on screen.
+  Phase 9 replaced it with a **tree of conversation groups** using the same `PaneTree` operations
+  as the outer layout, so a project's column splits four ways like a pane does.
+- “Preserve drag, reorder, split” was reported as done and was not: the drag module still carried
+  conversation ids through a layout keyed by projects. It produced a pane whose tab named a
+  project that did not exist, and the only reason anybody saw it was that
+  `ProjectService.resolveRoot` refuses an unknown id. Fixed in Phase 9; the lesson is in §8.
+
 ---
 
 ## Phase 4 · Ship the complete Code-OSS workbench
@@ -867,7 +898,7 @@ compatibility results and activation failures before agents are joined to the wo
 - Routing is project-first: only conversations in that project can receive its context, and
   recipient selection still follows the current turn/cast rules.
 
-**Editing.**
+**Editing.** _(6d and 6e, rewritten 2026-08-29 — see the note below.)_
 
 - Add a provider-neutral `EditorEdit` request distinct from direct filesystem writes.
 - Approval shows project-relative path, version, range and diff.
@@ -877,6 +908,26 @@ compatibility results and activation failures before agents are joined to the wo
 - Agent file links/reveals use the workbench editor and exact line/column.
 - External tool writes cause file-service invalidation and a visible conflict if a dirty model
   exists.
+
+**What changed under 6d and 6e.** Both were written when Chorus had its own diff surfaces, and
+they leaned on them: “approval shows … diff” meant `FileDiff` inside Chorus's own Changes panel,
+and “a visible conflict” meant that panel refreshing. Phase 9 deleted the Changes panel and the
+Review panel, on the decision that **the editor owns git**. So:
+
+- **The approval's diff stays in Chorus.** It is a decision surface, not a review surface — the
+  question is “may I write this”, and it has to be answerable without the editor open, because
+  the Editor switch can be off. `FileDiff` survives Phase 9 for exactly this and for the
+  transcript's diff cards; it is not a leftover.
+- **Reviewing what happened moves to the workbench's SCM view.** No Chorus surface re-reads git
+  after an edit lands. That is what makes the deletion safe rather than a capability loss, and it
+  is the one claim in this phase that a person has to confirm rather than a test.
+- **Conflict is reported where the edit was requested** — a refusal on the `EditorEdit`, shown in
+  the approval, not a panel that re-reads the working tree. The old wording described a surface
+  that no longer exists.
+- **What is genuinely lost is the merge-base diff.** `@chorus/workspace` can diff against a
+  branch's merge base; the editor's SCM only compares against `HEAD`. Accepted deliberately: the
+  function survives in the package, unreferenced, and the day something needs it the call site is
+  a few lines rather than a panel.
 
 **Conversation integration.**
 
@@ -964,6 +1015,78 @@ CLI, no bundled Chorus VSIX, and no path where external VS Code is needed to dev
 
 ---
 
+## Phase 9 · The product-first correction — 🟡 built 2026-08-28–29, untested
+
+**Why this phase exists.** It was not planned. Phases 2–6 built the project-first architecture and
+then, driven for the first time as a _product_, it turned out to have three problems no phase had
+named: settings were asked one level too low, the same job could be done in three places, and
+Chorus had rebuilt surfaces the embedded workbench already owns. Mohamad called the shape of the
+correction; this records it, because a plan that pretends it was right is worth less than one that
+says where it was wrong.
+
+**The three rules it applies.**
+
+1. **A setting belongs to the thing it is about.** A permission profile is an answer about a
+   _place_ — "agents may write in this repository" — so it belongs to the Project, not to whichever
+   conversation was asked first. Same for the cast and the folder.
+2. **One place to do each thing.** Ending a session was reachable from the composer, the project
+   card and the tab. Three doors to one irreversible action is three chances to build the habit of
+   clicking through a confirmation without reading it.
+3. **The editor owns what the editor owns.** Chorus had a Changes panel and a Review panel, both
+   reading git. The workbench has an SCM view, a diff editor and its own bindings. Two readers of
+   one repository is two things to keep in step.
+
+### What was built
+
+- **Project-level settings** — migration 5 adds `agent_ids`; `permission_profile_id` was already
+  carried by migration 4 without a reader, and this is the change that proves that call.
+  `setProjectProfile` writes the row _first_ and then moves every live conversation, each appending
+  its own `policy.changed`: the row is current state, the log is what happened. A new conversation
+  inherits the project's profile and cast — explicit argument beats project beats caller default.
+- **The rail is projects only.** One tile per project; the badge sums the project's unread with the
+  existing approval > question > unread precedence, and the working dot is _independent_ of it,
+  because at project scope "waiting" and "working" are not exclusive.
+- **The project card** replaced the conversation card: folder, settings, and the project's
+  conversations as rows.
+- **Conversations became a `PaneTree`.** The inner arrangement is the _same type_ as the workspace
+  layout, operated on by the _same functions_ — `layout.ts` is generic over
+  `{ layout, panes, focusedPaneId }`. Four directions, four-group ceiling, collapse-on-empty, all of
+  it shared rather than reimplemented. "Exactly the same as project level" is only guaranteed if the
+  two are one behaviour.
+- **The Editor switch** shows and hides a project's workbench, persisted per project as
+  `workbenchHidden`. Stored as _hidden_, so the empty record means every editor is on.
+- **The conversation strip** carries a `+` that starts a conversation in that group and an `×` that
+  ends that conversation — the only door left to ending one.
+
+### What was deleted, and what replaced it
+
+| Deleted                                                              | Replaced by                                      |
+| -------------------------------------------------------------------- | ------------------------------------------------ |
+| Restart session (UI, IPC, runtime, `replaceSession`)                 | Nothing. End and start again.                    |
+| Changes panel (`ChangesPanel`, `MonacoDiff`, 8 store actions, `⌘⇧G`) | The workbench's SCM view                         |
+| Review panel (`ReviewPanel`, 7 workspace channels, the repo watcher) | The workbench's SCM view                         |
+| Summary panel (`SummaryPanel`, `summary.ts`, `panelRequest`)         | Nothing.                                         |
+| Spin off a side task (IPC + 145-line runtime method)                 | Nothing.                                         |
+| End Session in the composer and the project card                     | The `×` on the conversation tab                  |
+| Project settings in the composer                                     | The project card                                 |
+| The Included chip and the context pill                               | Context is always sent                           |
+| `#` file trigger                                                     | Nothing — it inserted a character no parser read |
+| `SessionMenu` and its context                                        | The project card                                 |
+| ~1,000 lines of orphaned CSS                                         | —                                                |
+
+**`@chorus/workspace` survives**, and the reason is worth stating because it was nearly deleted on a
+bad reading: `parseDiff` draws the transcript's diff cards, and `resolveWithinRoot`,
+`canonicalRoot` and `projectRelativePath` are load-bearing in main. Only the _channels_ were dead.
+
+**Exit criteria.** Every setting is asked once, at the project. Each irreversible action has exactly
+one door. No Chorus surface reads git except the transcript's own diff cards. A project's
+conversations split, drag and resize the way its panes do.
+
+**User review gate.** Unmet. Nothing in this phase has been run, and it is the phase most in need of
+being driven rather than typechecked — three of its bugs were visible only on screen.
+
+---
+
 ## 6. Verification strategy
 
 Nothing is run while this plan is being written. Implementation verification happens only when
@@ -1026,6 +1149,22 @@ existing e2e warning about attaching to a stale Electron process applies unchang
    remain primary. Phase 4 chooses one project terminal authority.
 9. **Clean database is still recoverable.** The old file is retained but unsupported. If it is
    ever imported, that is a separate migration plan.
+10. **A wrong name survives a re-key where a wrong type does not — and this plan hit it five
+    times.** `activeTabId` changed from a conversation id to a project id in Phase 3, and
+    `useActiveConversationId`, the tab strip's `onClick`, its `onPointerDown`, `replaceSession` and
+    `removeSession` all went on compiling against a value that had changed meaning. Every one
+    failed _silently_: activating an absent tab is a no-op, closing an absent tab is a no-op, and
+    the drag's insert branch cheerfully built a pane out of a conversation id. The only one that
+    ever raised was the one that reached `ProjectService.resolveRoot`, which refuses an unknown
+    project. **When a field changes what it identifies, rename it in the same commit** — the
+    compiler cannot help, and the failures are invisible until something validates.
+11. **Deleting a feature is not finished when the button is gone.** Phase 9 removed nine, and each
+    one left a tail: a store slice, a schema field, an IPC channel, a runtime method, a watcher
+    with no caller, plural i18n keys, a hundred lines of CSS. Two near-misses are worth recording —
+    a `review.diffCapped` filter dropped `_one`/`_other`, which typecheck cannot see because a
+    missing translation is a runtime string; and a dead-CSS sweep by grep would have removed
+    `voice--claude` and `tok--keyword`, which are built with template literals and are invisible to
+    it. **Delete by ownership, never by absence of references.**
 
 ---
 

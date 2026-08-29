@@ -58,11 +58,11 @@ describe('workspace layout', () => {
    * who closed every tab, and re-opening them would undo that on each launch.
    */
   it('opens everything only when no workspace was ever saved', () => {
-    expect(reconcileWorkspace(null, ['a'])).toMatchObject({
+    expect(reconcileWorkspace(null, ['a'], ['a'])).toMatchObject({
       focusedPaneId: 'pane-1',
       panes: { 'pane-1': { tabs: ['a'] } },
     })
-    expect(reconcileWorkspace(EMPTY_WORKSPACE, ['a'])).toEqual(EMPTY_WORKSPACE)
+    expect(reconcileWorkspace(EMPTY_WORKSPACE, ['a'], ['a'])).toEqual(EMPTY_WORKSPACE)
   })
 
   it('opens an existing conversation by focusing it instead of duplicating it', () => {
@@ -212,6 +212,7 @@ describe('workspace layout', () => {
         sidebarHidden: true,
         sidebarWidth: SIDEBAR_WIDTH.default,
       },
+      ['a', 'b'],
       ['a', 'b']
     )
     expect(Object.values(result.panes).flatMap((pane) => pane.tabs)).toEqual(['a'])
@@ -219,7 +220,7 @@ describe('workspace layout', () => {
   })
 
   it('opens legacy restored conversations when there is no saved workspace', () => {
-    const result = reconcileWorkspace(null, ['a', 'b'])
+    const result = reconcileWorkspace(null, ['a', 'b'], ['a', 'b'])
     expect(Object.values(result.panes).flatMap((pane) => pane.tabs)).toEqual(['a', 'b'])
   })
 
@@ -263,9 +264,11 @@ describe('terminal panels across a restore', () => {
   })
 
   it('keeps a panel whose conversation is still open', () => {
-    const restored = reconcileWorkspace(withPanels({ a: panel({ open: true, height: 300 }) }), [
-      'a',
-    ])
+    const restored = reconcileWorkspace(
+      withPanels({ a: panel({ open: true, height: 300 }) }),
+      ['a'],
+      ['a']
+    )
     expect(restored.terminals['a']?.open).toBe(true)
     expect(restored.terminals['a']?.height).toBe(300)
   })
@@ -281,6 +284,7 @@ describe('terminal panels across a restore', () => {
         a: panel({ open: true, height: 300 }),
         ghost: panel({ open: true, height: 300 }),
       }),
+      ['a'],
       ['a']
     )
     expect(restored.terminals['ghost']).toBeUndefined()
@@ -298,6 +302,7 @@ describe('terminal panels across a restore', () => {
         ...saved,
         globalTerminal: panel({ open: true, height: 200, tabs: [{ id: 'g1' }], activeId: 'g1' }),
       },
+      [],
       []
     )
     expect(restored.globalTerminal).toEqual({
@@ -317,7 +322,7 @@ describe('terminal panels across a restore', () => {
   })
 
   it('survives a workspace that never had panels', () => {
-    const restored = reconcileWorkspace(null, ['a'])
+    const restored = reconcileWorkspace(null, ['a'], ['a'])
     expect(restored.terminals).toEqual({})
     expect(restored.globalTerminal.open).toBe(false)
   })

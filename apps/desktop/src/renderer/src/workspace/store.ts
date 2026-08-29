@@ -7,31 +7,31 @@ import type {
   TranscriptEvent,
 } from '../../../shared/ipc.js'
 import { countsAsUnread } from '../../../shared/unread.js'
-import type { ChangesPanelState, TerminalPanelState } from '../../../shared/workspace-layout.js'
+import type {
+  ConversationArrangement,
+  TerminalPanelState,
+} from '../../../shared/workspace-layout.js'
 // `WorkspaceSnapshot` is imported as a value, not a type: `SNAPSHOT_KEYS` below
 // reads its keys off the schema so the list cannot drift from the shape.
-import {
-  CLOSED_CHANGES_PANEL,
-  CLOSED_TERMINAL_PANEL,
-  WorkspaceSnapshot,
-} from '../../../shared/workspace-layout.js'
+import { CLOSED_TERMINAL_PANEL, WorkspaceSnapshot } from '../../../shared/workspace-layout.js'
 import {
   activateTab,
+  clampChorusWidth,
   clampSidebarWidth,
   closePane,
   closeTab,
   EMPTY_WORKSPACE,
   equalizeBranch,
   focusPane,
+  leafPaneIds,
   moveTab,
+  newGroupId,
   openSession,
   placeSession,
   reconcileWorkspace,
   newTerminalId,
-  normalizeChangesPanel,
   normalizeTerminalPanel,
   reorderTab,
-  replaceSession,
   setBranchSizes,
   splitTab,
   splitWithSession,
@@ -167,13 +167,28 @@ export interface WorkspaceActions {
   hydrate: (
     saved: WorkspaceSnapshot | null,
     conversationIds: readonly string[],
+    /** Which projects have a conversation open — what the tabs are keyed by. */
+    projectIds: readonly string[],
     /** What the log says was missed while the app was closed, per conversation. */
-    unreadByConversation?: Readonly<Record<string, number>>
+    unreadByConversation?: Readonly<Record<string, number>>,
+    /** Which conversations each project holds — what the inner columns are built from. */
+    conversationsByProject?: Readonly<Record<string, readonly string[]>>
   ) => void
-  openSession: (conversationId: string, paneId?: string) => void
-  activateTab: (paneId: string, conversationId: string) => void
+  /** Opens a **project** tab. Conversations live inside one; they are not tabs. */
+  openProject: (projectId: string, paneId?: string) => void
+  activateTab: (paneId: string, projectId: string) => void
+  /** Marks one conversation read. Separate from the tab actions on purpose. */
+  clearConversationUnread: (conversationId: string) => void
+  /**
+   * Puts one of a project's conversations on screen — what the dock does.
+   *
+   * Takes both ids because the pane is keyed by the project and the content by
+   * the conversation, and deriving one from the other would mean the store
+   * holding a session list it has no other reason to know about.
+   */
+  showConversation: (projectId: string, conversationId: string) => void
   focusPane: (paneId: string) => void
-  closeTab: (paneId: string, conversationId: string) => void
+  closeTab: (paneId: string, projectId: string) => void
   closePane: (paneId: string) => void
   reorderTab: (paneId: string, fromIndex: number, slotBefore: number) => void
   moveTab: (conversationId: string, targetPaneId: string, slotBefore: number) => void
@@ -190,8 +205,10 @@ export interface WorkspaceActions {
   setPlanning: (conversationId: string, planning: boolean) => void
   setBranchSizes: (path: readonly number[], sizes: readonly number[]) => void
   equalizeBranch: (path: readonly number[]) => void
-  replaceSession: (previousId: string, nextId: string) => void
+  /** Forgets one conversation's state. Leaves the project's tab alone. */
   removeSession: (conversationId: string) => void
+  /** Closes a project's tab. Call when its last conversation has gone. */
+  removeProject: (projectId: string) => void
   setSidebarHidden: (hidden: boolean) => void
   toggleGlobalTerminal: () => void
   setGlobalTerminalOpen: (open: boolean) => void
@@ -212,25 +229,58 @@ export interface WorkspaceActions {
   removeSessionTerminalTab: (conversationId: string, id: string) => void
   activateGlobalTerminal: (id: string) => void
   activateSessionTerminal: (conversationId: string, id: string) => void
-  /** Toggles one conversation's Changes panel, leaving every other one alone. */
-  toggleSessionChanges: (conversationId: string) => void
-  setSessionChangesHeight: (conversationId: string, height: number) => void
-  /** Only meaningful while the panel sits beside the transcript. */
-  setSessionChangesWidth: (conversationId: string, width: number) => void
-  /** How wide the file list is inside the panel, dragged from the divider. */
-  setSessionChangesListWidth: (conversationId: string, listWidth: number) => void
-  /** Which branch to compare against; null means the working tree. */
-  setSessionChangesBase: (conversationId: string, base: string | null) => void
-  setSessionChangesCommittedOnly: (conversationId: string, committedOnly: boolean) => void
-  setSessionChangesSelection: (conversationId: string, path: string | null) => void
-  /** Whole files in an editor, or the hunks git printed. */
-  setSessionChangesView: (conversationId: string, view: ChangesPanelState['view']) => void
-  /** Which list the left column shows: what changed, or the whole project. */
-  setSessionChangesColumn: (conversationId: string, column: ChangesPanelState['column']) => void
-  /** Expand or collapse one directory in the tree. */
-  toggleSessionChangesExpanded: (conversationId: string, path: string) => void
   /** Committed on drop, not on every pointer move; see `useSidebarResize`. */
   setSidebarWidth: (width: number) => void
+  /** The workbench/Chorus divider, for one project. See the field's own note. */
+  setChorusWidth: (projectId: string, width: number) => void
+  /** Shows or hides a project's workbench. Chorus takes the pane when it is off. */
+  toggleWorkbench: (projectId: string) => void
+  /**
+   * Puts a conversation on screen in the group that holds it.
+   *
+   * Distinct from `showConversation`, which searches every group: this names
+   * one, because a conversation open in a strip is being clicked in a *place*.
+   */
+  showConversationIn: (projectId: string, groupId: string, conversationId: string) => void
+  /** Which group a new conversation joins and the keyboard acts on. */
+  focusConversationGroup: (projectId: string, groupId: string) => void
+  /**
+   * Gives a newly created conversation a tab, in the focused group.
+   *
+   * **Required, not a convenience.** `reconcileConversationGroups` is the only
+   * other thing that places a conversation, and it runs at hydrate — so without
+   * this a conversation started while the app is open exists, streams, and has
+   * no tab anywhere until the next relaunch. Idempotent, so every path that can
+   * produce a conversation may call it without checking first.
+   */
+  adoptConversation: (projectId: string, conversationId: string) => void
+  /**
+   * Move a conversation to a slot in a group — the inner `placeSession`.
+   *
+   * Delegates to the identical function the pane tree uses, so "drop on a strip"
+   * behaves the same at both levels rather than the same by coincidence.
+   */
+  placeConversation: (
+    projectId: string,
+    conversationId: string,
+    targetGroupId: string,
+    slotBefore: number
+  ) => void
+  /** Split a group and put the conversation in the new one — the inner `splitWithSession`. */
+  splitConversation: (
+    projectId: string,
+    conversationId: string,
+    targetGroupId: string,
+    direction: SplitDirection
+  ) => void
+  /** Drop a conversation's tab from its group. Collapses a group left empty. */
+  closeConversationTab: (projectId: string, conversationId: string) => void
+  /** How a branch of the conversation tree divides, by path. */
+  setConversationSizes: (
+    projectId: string,
+    path: readonly number[],
+    sizes: readonly number[]
+  ) => void
   ingestEvents: (events: readonly TranscriptEvent[]) => void
   /** Pushed state, not a logged event — see the action for why it is separate. */
   ingestContextUsage: (usage: ContextUsagePush) => void
@@ -277,19 +327,24 @@ function editSession(
   }
 }
 
-/** The Changes panel's `editSession`, through its own normalizer. */
-function editChanges(
+/**
+ * Edit one project's conversation arrangement, or do nothing.
+ *
+ * **A project with no entry is left alone**, deliberately. Absent means "never
+ * arranged", and every one of these actions names a group that a non-existent
+ * arrangement cannot contain — so inventing one here would be inventing a group
+ * id the caller did not mean. `reconcileConversationGroups` is the only thing
+ * that creates an arrangement, because it is the only thing that knows which
+ * conversations are live.
+ */
+function editArrangement(
   state: WorkspaceStore,
-  conversationId: string,
-  change: (panel: ChangesPanelState) => ChangesPanelState
-): Pick<WorkspaceSnapshot, 'changes'> {
-  const current = state.changes[conversationId] ?? CLOSED_CHANGES_PANEL
-  return {
-    changes: {
-      ...state.changes,
-      [conversationId]: normalizeChangesPanel(change(current)),
-    },
-  }
+  projectId: string,
+  change: (arrangement: ConversationArrangement) => ConversationArrangement
+): Record<string, ConversationArrangement> {
+  const current = state.conversationGroups[projectId]
+  if (current === undefined) return state.conversationGroups
+  return { ...state.conversationGroups, [projectId]: change(current) }
 }
 
 /** A new terminal, appended and selected. Opens the panel if it was hidden. */
@@ -339,6 +394,9 @@ function snapshot(state: WorkspaceStore): WorkspaceSnapshot {
     focusedPaneId: state.focusedPaneId,
     sidebarHidden: state.sidebarHidden,
     sidebarWidth: state.sidebarWidth,
+    chorusWidths: state.chorusWidths,
+    conversationGroups: state.conversationGroups,
+    workbenchHidden: state.workbenchHidden,
     terminals: state.terminals,
     globalTerminal: state.globalTerminal,
     /*
@@ -347,7 +405,6 @@ function snapshot(state: WorkspaceStore): WorkspaceSnapshot {
      * persist — which is the same class of bug the comment on `SNAPSHOT_KEYS`
      * records, from the other end.
      */
-    changes: state.changes,
   }
 }
 
@@ -473,8 +530,19 @@ export const useWorkspaceStore = create<WorkspaceStore>()(
       hydrated: false,
       pulses: {},
       planning: {},
-      hydrate: (saved, conversationIds, unreadByConversation = {}) => {
-        const repaired = reconcileWorkspace(saved, conversationIds)
+      hydrate: (
+        saved,
+        conversationIds,
+        projectIds,
+        unreadByConversation = {},
+        conversationsByProject = {}
+      ) => {
+        const repaired = reconcileWorkspace(
+          saved,
+          conversationIds,
+          projectIds,
+          conversationsByProject
+        )
         set({
           ...repaired,
           hydrated: true,
@@ -498,12 +566,54 @@ export const useWorkspaceStore = create<WorkspaceStore>()(
           ),
         })
       },
-      openSession: (conversationId, paneId) => {
-        update((current) => openSession(current, conversationId, paneId))
+      /*
+       * The tab actions take **project** ids now, and `clearUnread` no longer
+       * rides along with them.
+       *
+       * Unread is a property of a conversation, and a tab is a project — which
+       * may hold several. Clearing on tab activation would have marked every
+       * conversation in a project read the moment one of them was shown, and
+       * clearing "the project's unread" is not a thing that exists. The caller
+       * clears the conversation it actually put on screen.
+       *
+       * The layout functions underneath are unchanged: they were always generic
+       * over an opaque tab id, which is the reason this re-key is a change of
+       * what goes in rather than a rewrite of the algebra.
+       */
+      openProject: (projectId, paneId) => {
+        update((current) => openSession(current, projectId, paneId))
+      },
+      activateTab: (paneId, projectId) => {
+        update((current) => activateTab(current, paneId, projectId))
+      },
+      clearConversationUnread: (conversationId) => {
         clearUnread(conversationId)
       },
-      activateTab: (paneId, conversationId) => {
-        update((current) => activateTab(current, paneId, conversationId))
+      /*
+       * Reveal, rather than a pointer write.
+       *
+       * This used to set `activeConversation[projectId]` — one conversation per
+       * project, which stopped being expressible the moment a project's column
+       * could hold two groups. The group that already holds the conversation
+       * owns the answer now, so this finds it, makes it that group's active tab
+       * and focuses the group. A conversation in no group is left alone: only
+       * `reconcileConversationGroups` places conversations, because only it knows
+       * which are live.
+       */
+      showConversation: (projectId, conversationId) => {
+        set((state) => ({
+          conversationGroups: editArrangement(state, projectId, (arrangement) => {
+            /*
+             * Reveal, rather than a pointer write. This used to set
+             * `activeConversation[projectId]` — one conversation per project,
+             * which stopped being expressible the moment a project's column
+             * became a tree. The group holding it owns the answer now.
+             */
+            const found = tabLocation(arrangement, conversationId)
+            if (found === null) return arrangement
+            return activateTab(focusPane(arrangement, found.paneId), found.paneId, conversationId)
+          }),
+        }))
         clearUnread(conversationId)
       },
       focusPane: (paneId) => {
@@ -547,35 +657,57 @@ export const useWorkspaceStore = create<WorkspaceStore>()(
       equalizeBranch: (path) => {
         update((current) => equalizeBranch(current, path))
       },
-      replaceSession: (previousId, nextId) => {
-        set((state) => {
-          const next = replaceSession(snapshot(state), previousId, nextId)
-          // The restarted room inherits the old one's pulse, so a badge earned
-          // before the restart does not survive it as a phantom.
-          const previousPulse = state.pulses[previousId]
-          const pulses = {
-            ...without(state.pulses, previousId),
-            [nextId]: previousPulse ?? EMPTY_PULSE,
+      /** Closes a project's tab everywhere. Call when its last conversation has gone. */
+      removeProject: (projectId) => {
+        update((current) => {
+          let next = current
+          for (const paneId of leafPaneIds(next.layout)) {
+            next = closeTab(next, paneId, projectId)
           }
-          return { ...next, pulses }
+          return next
         })
       },
       removeSession: (conversationId) => {
         set((state) => {
-          const location = tabLocation(state, conversationId)
-          const next =
-            location === null ? snapshot(state) : closeTab(state, location.paneId, conversationId)
+          /*
+           * **Its tab is in the project's tree, not in a pane.**
+           *
+           * This used to call `closeTab` on the pane holding it, which was right
+           * while a pane tab *was* a conversation. Since the re-key a pane tab is
+           * a project, so the lookup found nothing and the conversation's tab was
+           * simply left behind: ending the last conversation in a group left an
+           * empty bordered box with a `+` in it, and ending one in a split left a
+           * dead half that never collapsed.
+           *
+           * Going through `closeTab` on the *arrangement* is what fixes both,
+           * because that is the same function the pane tree uses — an emptied
+           * leaf is pruned and its branch merged by `normalizeTree`, so the
+           * surviving group takes the space with no merge logic written here.
+           */
+          const groups: Record<string, ConversationArrangement> = {}
+          for (const [projectId, arrangement] of Object.entries(state.conversationGroups)) {
+            const found = tabLocation(arrangement, conversationId)
+            const pruned =
+              found === null ? arrangement : closeTab(arrangement, found.paneId, conversationId)
+            /*
+             * A project left with no conversations loses its entry entirely
+             * rather than keeping one empty group. Absent is what `EditorPane`
+             * reads to draw the "no conversations" state, and it is what
+             * `reconcileConversationGroups` would have produced anyway.
+             */
+            const empty = Object.values(pruned.panes).every((pane) => pane.tabs.length === 0)
+            if (!empty) groups[projectId] = pruned
+          }
           /*
            * Its panel's visibility goes too. A conversation that ends and is
            * later replaced by one that reuses nothing should not inherit a panel
            * someone opened for the old one.
            */
           return {
-            ...next,
+            conversationGroups: groups,
             pulses: without(state.pulses, conversationId),
             planning: without(state.planning, conversationId),
             terminals: without(state.terminals, conversationId),
-            changes: without(state.changes, conversationId),
           }
         })
       },
@@ -616,65 +748,123 @@ export const useWorkspaceStore = create<WorkspaceStore>()(
           editSession(state, conversationId, (panel) => activateTerminalTab(panel, id))
         )
       },
-      toggleSessionChanges: (conversationId) => {
-        set((state) =>
-          editChanges(state, conversationId, (panel) => ({ ...panel, open: !panel.open }))
-        )
-      },
-      setSessionChangesHeight: (conversationId, height) => {
-        set((state) => editChanges(state, conversationId, (panel) => ({ ...panel, height })))
-      },
-      setSessionChangesWidth: (conversationId, width) => {
-        set((state) => editChanges(state, conversationId, (panel) => ({ ...panel, width })))
-      },
-      setSessionChangesListWidth: (conversationId, listWidth) => {
-        set((state) => editChanges(state, conversationId, (panel) => ({ ...panel, listWidth })))
-      },
-      setSessionChangesBase: (conversationId, base) => {
-        set((state) =>
-          editChanges(state, conversationId, (panel) => ({
-            ...panel,
-            base,
-            // The selection belongs to the old comparison. Keeping it would show
-            // a file the new base does not list, or none at all — the panel
-            // re-picks the first file of whatever comes back.
-            selectedPath: null,
-          }))
-        )
-      },
-      setSessionChangesCommittedOnly: (conversationId, committedOnly) => {
-        set((state) =>
-          editChanges(state, conversationId, (panel) => ({
-            ...panel,
-            committedOnly,
-            selectedPath: null,
-          }))
-        )
-      },
-      setSessionChangesSelection: (conversationId, selectedPath) => {
-        set((state) => editChanges(state, conversationId, (panel) => ({ ...panel, selectedPath })))
-      },
-      setSessionChangesView: (conversationId, view) => {
-        set((state) => editChanges(state, conversationId, (panel) => ({ ...panel, view })))
-      },
-      setSessionChangesColumn: (conversationId, column) => {
-        set((state) => editChanges(state, conversationId, (panel) => ({ ...panel, column })))
-      },
-      toggleSessionChangesExpanded: (conversationId, path) => {
-        set((state) =>
-          editChanges(state, conversationId, (panel) => ({
-            ...panel,
-            expanded: panel.expanded.includes(path)
-              ? panel.expanded.filter((entry) => entry !== path)
-              : [...panel.expanded, path],
-          }))
-        )
-      },
       setSidebarHidden: (sidebarHidden) => {
         set({ sidebarHidden })
       },
       setSidebarWidth: (width) => {
         set({ sidebarWidth: clampSidebarWidth(width) })
+      },
+      setChorusWidth: (projectId, width) => {
+        set((state) => ({
+          chorusWidths: { ...state.chorusWidths, [projectId]: clampChorusWidth(width) },
+        }))
+      },
+      showConversationIn: (projectId, groupId, conversationId) => {
+        set((state) => ({
+          conversationGroups: editArrangement(state, projectId, (arrangement) =>
+            activateTab(focusPane(arrangement, groupId), groupId, conversationId)
+          ),
+        }))
+        clearUnread(conversationId)
+      },
+      adoptConversation: (projectId, conversationId) => {
+        set((state) => {
+          const current = state.conversationGroups[projectId]
+          /*
+           * A project with no arrangement gets its first group here rather than
+           * being left to reconcile. It is the same one-empty-group seed, and
+           * building it now is what lets the very first conversation in a
+           * project have a tab the moment it starts.
+           */
+          if (current === undefined) {
+            const groupId = newGroupId()
+            return {
+              conversationGroups: {
+                ...state.conversationGroups,
+                [projectId]: {
+                  layout: { kind: 'leaf' as const, paneId: groupId },
+                  panes: {
+                    [groupId]: { id: groupId, tabs: [conversationId], activeTabId: conversationId },
+                  },
+                  focusedPaneId: groupId,
+                },
+              },
+            }
+          }
+          if (tabLocation(current, conversationId) !== null) return {}
+          const target = current.focusedPaneId ?? leafPaneIds(current.layout)[0]
+          const group = target === undefined ? undefined : current.panes[target]
+          if (target === undefined || group === undefined) return {}
+          return {
+            conversationGroups: {
+              ...state.conversationGroups,
+              [projectId]: {
+                ...current,
+                panes: {
+                  ...current.panes,
+                  [target]: {
+                    ...group,
+                    tabs: [...group.tabs, conversationId],
+                    activeTabId: conversationId,
+                  },
+                },
+              },
+            },
+          }
+        })
+      },
+      focusConversationGroup: (projectId, groupId) => {
+        set((state) => ({
+          conversationGroups: editArrangement(state, projectId, (arrangement) =>
+            focusPane(arrangement, groupId)
+          ),
+        }))
+      },
+      /*
+       * The four below are one line each, and that is the whole point of the
+       * `PaneTree` refactor. Reorder, move between groups, split in any of four
+       * directions, the four-group ceiling, collapsing a group the move emptied,
+       * repairing sizes — none of it is written twice. A fix to how a pane splits
+       * is a fix to how a conversation splits, by construction.
+       */
+      placeConversation: (projectId, conversationId, targetGroupId, slotBefore) => {
+        set((state) => ({
+          conversationGroups: editArrangement(state, projectId, (arrangement) =>
+            placeSession(arrangement, conversationId, targetGroupId, slotBefore)
+          ),
+        }))
+      },
+      splitConversation: (projectId, conversationId, targetGroupId, direction) => {
+        set((state) => ({
+          conversationGroups: editArrangement(state, projectId, (arrangement) =>
+            splitWithSession(arrangement, conversationId, targetGroupId, direction)
+          ),
+        }))
+      },
+      closeConversationTab: (projectId, conversationId) => {
+        set((state) => ({
+          conversationGroups: editArrangement(state, projectId, (arrangement) => {
+            const found = tabLocation(arrangement, conversationId)
+            return found === null
+              ? arrangement
+              : closeTab(arrangement, found.paneId, conversationId)
+          }),
+        }))
+      },
+      setConversationSizes: (projectId, path, sizes) => {
+        set((state) => ({
+          conversationGroups: editArrangement(state, projectId, (arrangement) =>
+            setBranchSizes(arrangement, path, sizes)
+          ),
+        }))
+      },
+      toggleWorkbench: (projectId) => {
+        set((state) => {
+          const next = { ...state.workbenchHidden }
+          if (next[projectId] === true) delete next[projectId]
+          else next[projectId] = true
+          return { workbenchHidden: next }
+        })
       },
       ingestEvents: (events) => {
         if (events.length === 0) return

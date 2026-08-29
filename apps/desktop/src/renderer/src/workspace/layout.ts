@@ -1,10 +1,8 @@
 import {
-  CHANGES_HEIGHT,
-  CHANGES_LIST,
-  CHANGES_WIDTH,
+  CHORUS_WIDTH,
   SIDEBAR_WIDTH,
   TERMINAL_HEIGHT,
-  type ChangesPanelState,
+  type ConversationArrangement,
   type TerminalPanelState,
   type WorkspaceLayoutNode,
   type WorkspacePane,
@@ -21,6 +19,13 @@ export function clampTerminalHeight(height: number): number {
 export function clampSidebarWidth(width: number): number {
   if (!Number.isFinite(width)) return SIDEBAR_WIDTH.default
   return Math.round(Math.min(SIDEBAR_WIDTH.max, Math.max(SIDEBAR_WIDTH.min, width)))
+}
+
+/** The same treatment for the workbench/Chorus divider, and for the same reason:
+ *  the width comes from a file a person can edit, so it is repaired not trusted. */
+export function clampChorusWidth(width: number): number {
+  if (!Number.isFinite(width)) return CHORUS_WIDTH.default
+  return Math.round(Math.min(CHORUS_WIDTH.max, Math.max(CHORUS_WIDTH.min, width)))
 }
 
 /**
@@ -76,59 +81,6 @@ export function normalizeTerminalPanel(panel: TerminalPanelState): TerminalPanel
   }
 }
 
-/**
- * The Changes panel's equivalent of `normalizeTerminalPanel`, and deliberately
- * much smaller.
- *
- * There is no roster to repair — a Changes panel holds one view of one
- * repository, not a list of live shells — so the only invariant that can be
- * broken by a hand-edited file is the height. `base` is *not* validated against
- * the repository here: this function is pure and synchronous, git is neither,
- * and a base that has since been deleted is a `problem` string the panel
- * displays rather than a state to repair silently.
- */
-export function normalizeChangesPanel(panel: ChangesPanelState): ChangesPanelState {
-  return {
-    open: panel.open,
-    height: clampChangesHeight(panel.height),
-    width: clampChangesWidth(panel.width),
-    base: panel.base === '' ? null : panel.base,
-    committedOnly: panel.committedOnly,
-    selectedPath: panel.selectedPath === '' ? null : panel.selectedPath,
-    view: panel.view,
-    listWidth: clampChangesList(panel.listWidth),
-    column: panel.column,
-    /*
-     * Bounded and de-duplicated.
-     *
-     * Expanding directories is unbounded user action and this rides in the
-     * persisted snapshot, so without a cap a long-lived session writes an
-     * ever-growing array to disk on every layout change. 200 is far past any
-     * tree anyone is actually reading.
-     */
-    expanded: [...new Set(panel.expanded.filter((path) => path !== ''))].slice(0, MAX_EXPANDED),
-  }
-}
-
-/** Enough for a deep tree, few enough that the snapshot stays small. */
-export const MAX_EXPANDED = 200
-
-export function clampChangesHeight(height: number): number {
-  if (!Number.isFinite(height)) return CHANGES_HEIGHT.default
-  return Math.min(Math.max(height, CHANGES_HEIGHT.min), CHANGES_HEIGHT.max)
-}
-
-/** Same shape as the panel's own clamp — a dragged value is never trusted raw. */
-export function clampChangesList(width: number): number {
-  if (!Number.isFinite(width)) return CHANGES_LIST.default
-  return Math.min(Math.max(Math.round(width), CHANGES_LIST.min), CHANGES_LIST.max)
-}
-
-export function clampChangesWidth(width: number): number {
-  if (!Number.isFinite(width)) return CHANGES_WIDTH.default
-  return Math.min(Math.max(width, CHANGES_WIDTH.min), CHANGES_WIDTH.max)
-}
-
 export type SplitDirection = 'left' | 'right' | 'up' | 'down'
 
 /** Four readable editor groups; conversations beyond this remain available as tabs. */
@@ -144,13 +96,18 @@ export const MAX_PANES = 4
  */
 export const EMPTY_WORKSPACE: WorkspaceSnapshot = {
   layout: null,
+  // Empty means every editor is on. See the field's own note in the schema.
+  workbenchHidden: {},
+  // Empty means no project has been arranged; reconcile builds each from the
+  // live conversation list. See the field's own note in the schema.
+  conversationGroups: {},
   panes: {},
   focusedPaneId: null,
   sidebarHidden: true,
   sidebarWidth: SIDEBAR_WIDTH.default,
+  chorusWidths: {},
   terminals: {},
   globalTerminal: { open: false, height: TERMINAL_HEIGHT.default, tabs: [], activeId: null },
-  changes: {},
 }
 
 interface NormalizedNode {
@@ -176,7 +133,7 @@ export function leafPaneIds(layout: WorkspaceLayoutNode | null): string[] {
 }
 
 export function tabLocation(
-  workspace: WorkspaceSnapshot,
+  workspace: PaneTree,
   conversationId: string
 ): { paneId: string; index: number } | null {
   for (const paneId of leafPaneIds(workspace.layout)) {
@@ -192,7 +149,37 @@ export function tabLocation(
  * A conversation has one view at most. Enforcing that here means a malformed
  * saved layout cannot create two composers for the same live session.
  */
-export function normalizeWorkspace(workspace: WorkspaceSnapshot): WorkspaceSnapshot {
+/**
+ * A tree of panes, at either level.
+ *
+ * The workspace is one — panes holding project tabs — and a project's
+ * conversation arrangement is another, holding conversation tabs. They were two
+ * separate implementations for about an hour, and the instruction that ended
+ * that was "exactly the same as project level": the only way to guarantee two
+ * behaviours are the same is for them to be one behaviour, so every operation
+ * below takes a `PaneTree` and returns the same object type it was given.
+ *
+ * **"Pane" therefore means "a container of tabs in a tree", not "one quarter of
+ * the window".** At the inner level a pane is a conversation group. That is the
+ * same word VS Code uses for both, and it is why nothing here is renamed: a
+ * function that splits a tree does not care what the leaves hold.
+ */
+export interface PaneTree {
+  readonly layout: WorkspaceLayoutNode | null
+  readonly panes: Record<string, WorkspacePane>
+  readonly focusedPaneId: string | null
+}
+
+/**
+ * The tree half of `normalizeWorkspace`, which is all either level shares.
+ *
+ * Prunes panes the layout does not reach, drops duplicate tabs, collapses
+ * branches with one child, merges same-orientation nesting and repairs sizes —
+ * everything that is true of a tree regardless of what its tabs name. The
+ * snapshot's own repairs (widths, terminal rosters) stay in
+ * `normalizeWorkspace`, because a conversation arrangement has none of them.
+ */
+export function normalizeTree<T extends PaneTree>(workspace: T): T {
   const oldOrder = leafPaneIds(workspace.layout)
   const oldFocusIndex =
     workspace.focusedPaneId === null ? -1 : oldOrder.indexOf(workspace.focusedPaneId)
@@ -264,12 +251,29 @@ export function normalizeWorkspace(workspace: WorkspaceSnapshot): WorkspaceSnaps
       ? workspace.focusedPaneId
       : (nextOrder[Math.min(Math.max(oldFocusIndex, 0), nextOrder.length - 1)] ?? null)
 
+  /*
+   * Spread, so every field this function knows nothing about survives it. That
+   * is what lets one implementation serve both levels: the workspace keeps its
+   * widths and rosters, a conversation arrangement keeps whatever it grows, and
+   * neither has to be listed here.
+   */
+  return { ...workspace, layout, panes, focusedPaneId }
+}
+
+/** The workspace's own repairs, on top of the tree's. */
+export function normalizeWorkspace(workspace: WorkspaceSnapshot): WorkspaceSnapshot {
+  const tree = normalizeTree(workspace)
   return {
-    layout,
-    panes,
-    focusedPaneId,
-    sidebarHidden: workspace.sidebarHidden,
+    ...tree,
     sidebarWidth: clampSidebarWidth(workspace.sidebarWidth),
+    /*
+     * Clamped on the way through, per project. A snapshot edited by hand or
+     * written by an older build can hold anything, and an out-of-range width
+     * here is a pane that cannot be dragged back.
+     */
+    chorusWidths: Object.fromEntries(
+      Object.entries(workspace.chorusWidths).map(([id, width]) => [id, clampChorusWidth(width)])
+    ),
     /*
      * Every panel's roster repaired, both scopes, on the way through.
      *
@@ -292,26 +296,20 @@ export function normalizeWorkspace(workspace: WorkspaceSnapshot): WorkspaceSnaps
     globalTerminal: normalizeTerminalPanel(workspace.globalTerminal),
     // Repaired here for the same reason, and pruned by conversation in
     // `reconcileWorkspace` for the same reason too.
-    changes: Object.fromEntries(
-      Object.entries(workspace.changes).map(([conversationId, panel]) => [
-        conversationId,
-        normalizeChangesPanel(panel),
-      ])
-    ),
   }
 }
 
-function nextPaneId(workspace: WorkspaceSnapshot): string {
+function nextPaneId(workspace: PaneTree): string {
   let index = 1
   while (workspace.panes[`pane-${String(index)}`] !== undefined) index += 1
   return `pane-${String(index)}`
 }
 
-export function openSession(
-  workspace: WorkspaceSnapshot,
+export function openSession<T extends PaneTree>(
+  workspace: T,
   conversationId: string,
   requestedPaneId?: string
-): WorkspaceSnapshot {
+): T {
   const existing = tabLocation(workspace, conversationId)
   if (existing !== null) return activateTab(workspace, existing.paneId, conversationId)
 
@@ -352,11 +350,11 @@ export function openSession(
   }
 }
 
-export function activateTab(
-  workspace: WorkspaceSnapshot,
+export function activateTab<T extends PaneTree>(
+  workspace: T,
   paneId: string,
   conversationId: string
-): WorkspaceSnapshot {
+): T {
   const pane = workspace.panes[paneId]
   if (!pane?.tabs.includes(conversationId)) return workspace
   if (workspace.focusedPaneId === paneId && pane.activeTabId === conversationId) return workspace
@@ -367,7 +365,7 @@ export function activateTab(
   }
 }
 
-export function focusPane(workspace: WorkspaceSnapshot, paneId: string): WorkspaceSnapshot {
+export function focusPane<T extends PaneTree>(workspace: T, paneId: string): T {
   if (!leafPaneIds(workspace.layout).includes(paneId) || workspace.focusedPaneId === paneId) {
     return workspace
   }
@@ -385,39 +383,39 @@ function withoutTab(pane: WorkspacePane, conversationId: string): WorkspacePane 
   return { ...pane, tabs, activeTabId }
 }
 
-export function closeTab(
-  workspace: WorkspaceSnapshot,
+export function closeTab<T extends PaneTree>(
+  workspace: T,
   paneId: string,
   conversationId: string
-): WorkspaceSnapshot {
+): T {
   const pane = workspace.panes[paneId]
   if (!pane?.tabs.includes(conversationId)) return workspace
-  return normalizeWorkspace({
+  return normalizeTree({
     ...workspace,
     panes: { ...workspace.panes, [paneId]: withoutTab(pane, conversationId) },
   })
 }
 
-function closeAllTabs(workspace: WorkspaceSnapshot, paneId: string): WorkspaceSnapshot {
+function closeAllTabs<T extends PaneTree>(workspace: T, paneId: string): T {
   const pane = workspace.panes[paneId]
   if (pane === undefined) return workspace
-  return normalizeWorkspace({
+  return normalizeTree({
     ...workspace,
     panes: { ...workspace.panes, [paneId]: { ...pane, tabs: [], activeTabId: null } },
   })
 }
 
 /** Emptying a pane is what removes it: normalisation drops a leaf with no tabs. */
-export function closePane(workspace: WorkspaceSnapshot, paneId: string): WorkspaceSnapshot {
+export function closePane<T extends PaneTree>(workspace: T, paneId: string): T {
   return closeAllTabs(workspace, paneId)
 }
 
-export function reorderTab(
-  workspace: WorkspaceSnapshot,
+export function reorderTab<T extends PaneTree>(
+  workspace: T,
   paneId: string,
   fromIndex: number,
   slotBefore: number
-): WorkspaceSnapshot {
+): T {
   const pane = workspace.panes[paneId]
   if (pane === undefined || fromIndex < 0 || fromIndex >= pane.tabs.length) return workspace
   const slot = Math.max(0, Math.min(slotBefore, pane.tabs.length))
@@ -430,12 +428,12 @@ export function reorderTab(
   return { ...workspace, panes: { ...workspace.panes, [paneId]: { ...pane, tabs } } }
 }
 
-export function moveTab(
-  workspace: WorkspaceSnapshot,
+export function moveTab<T extends PaneTree>(
+  workspace: T,
   conversationId: string,
   targetPaneId: string,
   slotBefore: number
-): WorkspaceSnapshot {
+): T {
   const source = tabLocation(workspace, conversationId)
   const target = workspace.panes[targetPaneId]
   if (source === null || target === undefined) return workspace
@@ -447,7 +445,7 @@ export function moveTab(
   if (sourcePane === undefined) return workspace
   const targetTabs = [...target.tabs]
   targetTabs.splice(Math.max(0, Math.min(slotBefore, targetTabs.length)), 0, conversationId)
-  return normalizeWorkspace({
+  return normalizeTree({
     ...workspace,
     panes: {
       ...workspace.panes,
@@ -489,13 +487,13 @@ function insertSplit(
  * one-tab pane therefore cannot split itself: doing so would only move its sole
  * tab and normalization would collapse the empty source back away.
  */
-export function splitTab(
-  workspace: WorkspaceSnapshot,
+export function splitTab<T extends PaneTree>(
+  workspace: T,
   conversationId: string,
   targetPaneId: string,
   direction: SplitDirection,
   requestedNewPaneId?: string
-): WorkspaceSnapshot {
+): T {
   const source = tabLocation(workspace, conversationId)
   if (source === null || workspace.panes[targetPaneId] === undefined || workspace.layout === null) {
     return workspace
@@ -513,7 +511,7 @@ export function splitTab(
 
   const newPaneId = requestedNewPaneId ?? nextPaneId(workspace)
   if (workspace.panes[newPaneId] !== undefined) return workspace
-  return normalizeWorkspace({
+  return normalizeTree({
     ...workspace,
     layout: insertSplit(workspace.layout, targetPaneId, newPaneId, direction),
     panes: {
@@ -538,12 +536,12 @@ export function splitTab(
  * path can produce two tabs for one conversation, because the moving path is
  * still `moveTab` and the inserting path only runs when there is no tab to find.
  */
-export function placeSession(
-  workspace: WorkspaceSnapshot,
+export function placeSession<T extends PaneTree>(
+  workspace: T,
   conversationId: string,
   targetPaneId: string,
   slotBefore: number
-): WorkspaceSnapshot {
+): T {
   if (tabLocation(workspace, conversationId) !== null) {
     return moveTab(workspace, conversationId, targetPaneId, slotBefore)
   }
@@ -569,13 +567,13 @@ export function placeSession(
  * so nothing can disappear to make room. A fourth pane is therefore the last
  * one a rail drag can create, which is what the disabled drop target says.
  */
-export function splitWithSession(
-  workspace: WorkspaceSnapshot,
+export function splitWithSession<T extends PaneTree>(
+  workspace: T,
   conversationId: string,
   targetPaneId: string,
   direction: SplitDirection,
   requestedNewPaneId?: string
-): WorkspaceSnapshot {
+): T {
   if (tabLocation(workspace, conversationId) !== null) {
     return splitTab(workspace, conversationId, targetPaneId, direction, requestedNewPaneId)
   }
@@ -584,7 +582,7 @@ export function splitWithSession(
 
   const newPaneId = requestedNewPaneId ?? nextPaneId(workspace)
   if (workspace.panes[newPaneId] !== undefined) return workspace
-  return normalizeWorkspace({
+  return normalizeTree({
     ...workspace,
     layout: insertSplit(workspace.layout, targetPaneId, newPaneId, direction),
     panes: {
@@ -612,11 +610,11 @@ function updateBranch(
   }
 }
 
-export function setBranchSizes(
-  workspace: WorkspaceSnapshot,
+export function setBranchSizes<T extends PaneTree>(
+  workspace: T,
   path: readonly number[],
   sizes: readonly number[]
-): WorkspaceSnapshot {
+): T {
   if (workspace.layout === null) return workspace
   return {
     ...workspace,
@@ -628,10 +626,7 @@ export function setBranchSizes(
   }
 }
 
-export function equalizeBranch(
-  workspace: WorkspaceSnapshot,
-  path: readonly number[]
-): WorkspaceSnapshot {
+export function equalizeBranch<T extends PaneTree>(workspace: T, path: readonly number[]): T {
   if (workspace.layout === null) return workspace
   return {
     ...workspace,
@@ -669,18 +664,136 @@ export function replaceSession(
 }
 
 /** Repairs a saved tree against the conversations the runtime actually restored. */
+/**
+ * A project's conversation groups, healed against what is actually running.
+ *
+ * The stored arrangement is a *preference*, never a source of truth about which
+ * conversations exist. Sessions end while the app is closed, start from the
+ * rail, and are restarted under new ids, so every entry here is a claim the live
+ * list has to confirm. Two repairs, and the second is the one that matters:
+ *
+ *  1. **Drop what is gone**, then let `normalizeTree` do the rest — it already
+ *     prunes leaves whose pane vanished, collapses single-child branches and
+ *     repairs sizes, at both levels, because it is the same function.
+ *  2. **Adopt what is new.** Anything running that no group holds joins the
+ *     focused group — otherwise a conversation would exist with no way to reach
+ *     it, which is the silent-loss failure the outer reconcile also guards.
+ *
+ * Returns `null` when the project has no conversations at all, so the caller can
+ * omit the entry rather than persist an empty arrangement — absent means "never
+ * arranged", and an empty record would claim otherwise.
+ */
+export function reconcileConversationGroups(
+  saved: ConversationArrangement | undefined,
+  conversationIds: readonly string[]
+): ConversationArrangement | null {
+  if (conversationIds.length === 0) return null
+  const live = new Set(conversationIds)
+
+  const seed: ConversationArrangement =
+    saved === undefined || saved.layout === null
+      ? emptyArrangement()
+      : {
+          layout: saved.layout,
+          panes: Object.fromEntries(
+            Object.entries(saved.panes).map(([paneId, pane]) => [
+              paneId,
+              { ...pane, tabs: pane.tabs.filter((id) => live.has(id)) },
+            ])
+          ),
+          focusedPaneId: saved.focusedPaneId,
+        }
+
+  /*
+   * Normalised *before* adoption, not after. Normalising drops panes whose tabs
+   * have all gone, so doing it second would adopt new conversations into a group
+   * that is about to be deleted and lose them — the arrangement would come back
+   * with a conversation running and no tab anywhere.
+   */
+  let arrangement = normalizeTree(seed)
+  if (arrangement.layout === null) arrangement = emptyArrangement()
+
+  const held = new Set(Object.values(arrangement.panes).flatMap((pane) => pane.tabs))
+  const missing = conversationIds.filter((id) => !held.has(id))
+  if (missing.length > 0) {
+    const target = arrangement.focusedPaneId ?? leafPaneIds(arrangement.layout)[0] ?? FIRST_GROUP_ID
+    const pane = arrangement.panes[target] ?? { id: target, tabs: [], activeTabId: null }
+    arrangement = normalizeTree({
+      ...arrangement,
+      panes: {
+        ...arrangement.panes,
+        /*
+         * Appended in live-list order, which arrives newest-last — so a
+         * conversation started while the app was closed lands at the end of the
+         * strip rather than wherever a set iteration put it.
+         */
+        [target]: { ...pane, tabs: [...pane.tabs, ...missing] },
+      },
+    })
+  }
+
+  return arrangement
+}
+
+/** One empty group, which is what a project with no stored arrangement starts as. */
+function emptyArrangement(): ConversationArrangement {
+  const id = newGroupId()
+  return {
+    layout: { kind: 'leaf', paneId: id },
+    panes: { [id]: { id, tabs: [], activeTabId: null } },
+    focusedPaneId: id,
+  }
+}
+
+/*
+ * Only reachable when a stored arrangement has a focused id naming nothing and
+ * an empty layout, which `normalizeTree` has already ruled out — kept so the
+ * adoption path has no `undefined` branch rather than because it can happen.
+ */
+const FIRST_GROUP_ID = 'group-1'
+
+/**
+ * A fresh group id. A UUID rather than a counter, for the reason `newTerminalId`
+ * gives: the arrangement outlives the process, and a counter restarting at 1
+ * reuses ids across a relaunch.
+ */
+export function newGroupId(): string {
+  return crypto.randomUUID()
+}
+
 export function reconcileWorkspace(
   saved: WorkspaceSnapshot | null,
-  conversationIds: readonly string[]
+  conversationIds: readonly string[],
+  projectIds: readonly string[],
+  /**
+   * Which conversations each project holds, which the two flat lists above
+   * cannot express. Defaulted so the many existing callers and tests that only
+   * care about panes keep compiling; the cost of omitting it is that every
+   * project's column is rebuilt empty, which is exactly right for a caller that
+   * has no conversations to place.
+   */
+  conversationsByProject: Readonly<Record<string, readonly string[]>> = {}
 ): WorkspaceSnapshot {
+  /*
+   * Two sets, because this function reconciles two different things and they
+   * stopped being the same list when tabs were re-keyed.
+   *
+   * **Tabs are projects; panels are conversations.** Filtering tabs against
+   * conversation ids discarded every tab on every launch — a saved layout could
+   * not survive a restart — and seeding from conversation ids gave one tab per
+   * conversation, so three conversations in one project opened as three
+   * identical tabs. Both were silent: the app came up, looked plausible, and
+   * had simply thrown the layout away.
+   */
   const allowed = new Set(conversationIds)
+  const allowedProjects = new Set(projectIds)
   let workspace = normalizeWorkspace(saved ?? EMPTY_WORKSPACE)
   workspace = normalizeWorkspace({
     ...workspace,
     panes: Object.fromEntries(
       Object.entries(workspace.panes).map(([paneId, pane]) => [
         paneId,
-        { ...pane, tabs: pane.tabs.filter((id) => allowed.has(id)) },
+        { ...pane, tabs: pane.tabs.filter((id) => allowedProjects.has(id)) },
       ])
     ),
   })
@@ -697,19 +810,36 @@ export function reconcileWorkspace(
     terminals: Object.fromEntries(
       Object.entries(workspace.terminals).filter(([conversationId]) => allowed.has(conversationId))
     ),
-    // Changes panels are pruned on the same rule and for the same reason: the
-    // map would otherwise keep an entry for every conversation ever ended.
-    changes: Object.fromEntries(
-      Object.entries(workspace.changes)
-        .filter(([conversationId]) => allowed.has(conversationId))
-        .map(([conversationId, panel]) => [conversationId, normalizeChangesPanel(panel)])
-    ),
   }
-  // A legacy file has no opinion about tabs, so preserve the old app's visible
-  // launch by opening everything into one group. A v2 workspace does have an
-  // opinion: a missing id is a deliberately closed view that must stay closed.
+  /*
+   * A workspace with no saved opinion opens every **project** into one group.
+   * One tab per project, however many conversations each holds — the dock is
+   * what reaches the others. A saved workspace does have an opinion, and a
+   * missing id there is a deliberately closed view that must stay closed.
+   */
   if (saved === null) {
-    for (const conversationId of conversationIds) workspace = openSession(workspace, conversationId)
+    for (const projectId of projectIds) workspace = openSession(workspace, projectId)
   }
-  return workspace
+  /*
+   * Every project's conversation groups, rebuilt from the live list.
+   *
+   * Done last, and for **every** project rather than only the arranged ones: a
+   * project with no stored arrangement still needs one built, because that is
+   * what says which conversation its column shows. A project that has vanished
+   * from `conversationsByProject` drops out here rather than being pruned
+   * separately — `reconcileConversationGroups` returns null for an empty list
+   * and the entry is simply not written.
+   */
+  const groups: Record<string, ConversationArrangement> = {}
+  for (const projectId of new Set([
+    ...Object.keys(conversationsByProject),
+    ...Object.keys(workspace.conversationGroups),
+  ])) {
+    const arranged = reconcileConversationGroups(
+      workspace.conversationGroups[projectId],
+      conversationsByProject[projectId] ?? []
+    )
+    if (arranged !== null) groups[projectId] = arranged
+  }
+  return { ...workspace, conversationGroups: groups }
 }

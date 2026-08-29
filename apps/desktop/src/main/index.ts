@@ -14,8 +14,7 @@ import {
   forwardDiagnosticsToRenderer,
   forwardTerminalToRenderer,
   forwardLimitsToRenderer,
-  forwardWorkspaceChangesToRenderer,
-  stopWorkspaceWatches,
+  forwardWorkbenchContextToRenderer,
   registerIpcHandlers,
 } from './ipc.js'
 import { createLogger } from './logging.js'
@@ -211,7 +210,11 @@ void app.whenReady().then(async () => {
       })
     })
 
-  runtime = ChorusRuntime.open(app.getPath('userData'), log)
+  // A local binding as well as the module one: the workbench resolver below is a
+  // closure, and the module `runtime` is nullable for the whole life of the app,
+  // so narrowing it here would not survive into the callback.
+  const opened = ChorusRuntime.open(app.getPath('userData'), log)
+  runtime = opened
   registerIpcHandlers(runtime)
   /*
    * Separate from `registerIpcHandlers` because these handlers need `event`.
@@ -219,7 +222,14 @@ void app.whenReady().then(async () => {
    * request, and a channel that is not registered fails at `invoke` with a
    * message about the channel rather than about the workbench.
    */
-  registerWorkbenchHandlers(devServerUrl)
+  registerWorkbenchHandlers(devServerUrl, (projectId) => opened.projects.resolveRoot(projectId))
+  /*
+   * Phase 6 slice 6c. Beside the other forwarders and taking no bridge: the
+   * embedded workbench reports through main's own surface channel, so unlike
+   * `forwardIdeContextToRenderer` there is no external process to be attached
+   * first — this works whether or not VS Code is installed.
+   */
+  forwardWorkbenchContextToRenderer(runtime)
   forwardLimitsToRenderer(runtime)
   forwardContextUsageToRenderer(runtime)
   forwardTasksToRenderer(runtime)
@@ -227,7 +237,6 @@ void app.whenReady().then(async () => {
   forwardTerminalToRenderer(runtime)
   // Takes no runtime: the watches are keyed by the conversations that ask for
   // one, not by what the runtime happens to have open.
-  forwardWorkspaceChangesToRenderer(log)
   // Owns ⌘+ / ⌘− / ⌘0; a menu accelerator is handled before the page sees it.
   installMenu()
   forwardEventsToRenderer(runtime)
@@ -368,7 +377,6 @@ async function shutDownEverything(): Promise<void> {
   ideBridge = null
   // Synchronous and first: a watch holds no resource worth draining, and one
   // still firing during shutdown would push at windows that are going away.
-  stopWorkspaceWatches()
   // Same reasoning one level out: a surface left attached to a window that is
   // going away is a `WebContents` nothing will ever close.
   closeAllSurfaces()

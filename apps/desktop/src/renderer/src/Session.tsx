@@ -19,24 +19,9 @@ import {
   type PaneAnchor,
   type SourceEntry,
 } from './quote.js'
-import type {
-  ActivityPush,
-  IdeContextPush,
-  TerminalRefShape,
-  TranscriptEvent,
-} from '../../shared/ipc.js'
+import type { ActivityPush, IdeContextPush, TranscriptEvent } from '../../shared/ipc.js'
 import { askableQuestion, questionText } from '../../shared/question-text.js'
-import { PANE_SIDE_BY_SIDE_MIN } from '../../shared/workspace-layout.js'
-import { ChangesPanel } from './ChangesPanel.js'
-import { TerminalPanel } from './TerminalPanel.js'
-import {
-  useSessionActivity,
-  useSessionChanges,
-  useSessionTerminal,
-  useWorkspaceActions,
-} from './workspace/hooks.js'
-import { ReviewPanel } from './ReviewPanel.js'
-import { SummaryPanel } from './SummaryPanel.js'
+import { useSessionActivity, useWorkbenchShown, useWorkspaceActions } from './workspace/hooks.js'
 import {
   answersThinking,
   groupedWith,
@@ -112,6 +97,12 @@ export const ALL_AGENTS: AgentId[] = ['claude', 'codex']
 export interface SessionInfo {
   readonly conversationId: string
   readonly participants: AgentId[]
+  /**
+   * The project this conversation belongs to, and what the outer tabs are keyed
+   * by. `cwd` is that project's root — kept because the UI shows a path, not
+   * because a conversation has one of its own.
+   */
+  readonly projectId: string
   readonly cwd: string
   readonly profileId: string
   readonly title: string
@@ -162,7 +153,6 @@ export interface SessionCarry {
    * because the content it describes is the content that will be there.
    */
   readonly scrollTop: number
-  readonly ideIncluded: boolean
   /**
    * An aside card that was open when the pane went away.
    *
@@ -211,13 +201,8 @@ export function Session(props: {
    * ends with a room that has to appear in the workspace, and only the shell
    * knows how to put it there.
    */
-  onSpinOff: (conversationId: string, agentId: 'codex' | 'claude', brief: string) => void
   /** Set when the sidenav asked for a panel this pane owns. */
-  panelRequest?: 'review' | 'summary' | undefined
   /** Starting over and ending, offered in the composer as well as in the menu. */
-  onRestart?: (() => void) | undefined
-  onEnd?: (() => void) | undefined
-  onPanelOpened: () => void
   /*
    * Undefined is spelled out because `exactOptionalPropertyTypes` is on: the
    * caller reads this out of a Map, and a miss is a real value it has to be
@@ -254,7 +239,6 @@ export function Session(props: {
   const box = useRef<ComposerState>({
     draft: props.carry?.draft ?? '',
     attached: [...(props.carry?.attached ?? [])],
-    ideIncluded: props.carry?.ideIncluded ?? true,
   })
   const [error, setError] = useState<string | null>(null)
 
@@ -266,14 +250,12 @@ export function Session(props: {
    * be mounted when it fires — and because the store is what gets persisted, so
    * a panel is where you left it after a relaunch.
    */
-  const terminal = useSessionTerminal(conversationId)
   /*
    * This session's Changes panel, in the store for the same two reasons the
    * terminal is: `⌘⇧G` is handled by a document-level listener in `Workspace`
    * and may fire while this is unmounted, and the store is what persists — so
    * the base you chose is still chosen after a relaunch.
    */
-  const changes = useSessionChanges(conversationId)
   /*
    * What each agent says it is doing, as a comma-joined `agent:activity` string.
    *
@@ -282,53 +264,10 @@ export function Session(props: {
    * push, and this arrives several times a turn.
    */
   const activityByAgent = useSessionActivity(conversationId)
-  const {
-    toggleSessionTerminal,
-    setSessionTerminalHeight,
-    addSessionTerminal,
-    activateSessionTerminal,
-    removeSessionTerminalTab,
-    toggleSessionChanges,
-    setSessionChangesHeight,
-    setSessionChangesWidth,
-    setSessionChangesListWidth,
-    setSessionChangesBase,
-    setSessionChangesCommittedOnly,
-    setSessionChangesSelection,
-    setSessionChangesView,
-    setSessionChangesColumn,
-    toggleSessionChangesExpanded,
-  } = useWorkspaceActions()
-  /*
-   * How this session names one of its shells.
-   *
-   * The panel holds the roster and asks for a ref per tab, so scope
-   * construction stays at the call site that knows the conversation — the panel
-   * itself is shared by both scopes and must not learn to build either.
-   */
-  const terminalRefFor = useCallback(
-    (id: string): TerminalRefShape => ({ scope: 'session', conversationId, id }),
-    [conversationId]
-  )
+  const { toggleWorkbench } = useWorkspaceActions()
+  const workbenchShown = useWorkbenchShown(props.session.projectId)
   const [handoff, setHandoff] = useState<HandoffDraft | null>(null)
-  const [reviewing, setReviewing] = useState(false)
-  const [summarising, setSummarising] = useState(false)
 
-  /*
-   * A panel asked for from outside — the sidenav card, which has the buttons
-   * but not the panels.
-   *
-   * The panels live in here because they are about one conversation and read
-   * its transcript, and a card can be showing a session that is not mounted at
-   * all. So the card activates the session first and leaves a request; this
-   * picks it up on the mount that follows and clears it, so it fires once.
-   */
-  useEffect(() => {
-    if (props.panelRequest === undefined) return
-    if (props.panelRequest === 'review') setReviewing(true)
-    if (props.panelRequest === 'summary') setSummarising(true)
-    props.onPanelOpened()
-  }, [props])
   /** A passage selected in this pane's transcript, and where to offer to quote it. */
   const [selected, setSelected] = useState<{
     text: string
@@ -375,46 +314,6 @@ export function Session(props: {
   /** Empty space at the foot of the current turn, so its question can reach the top. */
   /** Read once: whether this pane was the active one at the moment it mounted. */
   const activeOnMount = useRef(props.active)
-
-  /*
-   * Whether this pane is wide enough to put the Changes panel beside the
-   * transcript rather than under it.
-   *
-   * Measured on the **pane**, never the window. `.pane` is already an
-   * inline-size container for exactly this reason — three panes tiled on a
-   * wide screen are each as cramped as one pane on a narrow one — and a
-   * `matchMedia` test would put a 300px pane into a side-by-side layout the
-   * moment someone maximised the window.
-   *
-   * A boolean rather than the width, and written only when it *crosses*, so
-   * dragging a splitter re-renders the transcript once instead of on every
-   * frame. The ref is what makes that cheap: reading `wide` in the callback
-   * would need it in the dependency array, and the observer would then be torn
-   * down and rebuilt on the one render that matters.
-   */
-  const [paneWide, setPaneWide] = useState(false)
-  const paneWideNow = useRef(false)
-  useEffect(() => {
-    const node = pane.current
-    if (node === null) return
-    const measure = (): void => {
-      const wide = node.clientWidth >= PANE_SIDE_BY_SIDE_MIN
-      if (wide === paneWideNow.current) return
-      paneWideNow.current = wide
-      setPaneWide(wide)
-    }
-    measure()
-    const observer = new ResizeObserver(measure)
-    observer.observe(node)
-    return () => {
-      observer.disconnect()
-    }
-  }, [])
-  /*
-   * `under` whenever the panel is shut, so nothing reads a side-by-side
-   * orientation for a panel that is not on screen.
-   */
-  const changesOrientation: 'side' | 'under' = paneWide && changes.open ? 'side' : 'under'
 
   /*
    * Live events, held back until the transcript they belong on has arrived.
@@ -1396,7 +1295,7 @@ export function Session(props: {
    * what lets the draft live in the composer and a keystroke repaint a textarea
    * rather than a conversation.
    */
-  const latest = useRef<Omit<SessionCarry, 'draft' | 'attached' | 'ideIncluded'>>({
+  const latest = useRef<Omit<SessionCarry, 'draft' | 'attached'>>({
     view,
     following: following.current,
     scrollTop: props.carry?.scrollTop ?? 0,
@@ -1849,7 +1748,15 @@ export function Session(props: {
        * transcript is still the only child that takes the slack — the property
        * `.score` has always relied on.
        */}
-      <div className="pane-split" data-orientation={changesOrientation}>
+      {/*
+        Kept as a wrapper with a fixed orientation, not collapsed away.
+        
+        It divided the transcript from the Changes panel, and that panel is gone
+        — changes are read from git inside the workbench now. `.score` relies on
+        being the child of this element that takes the slack, so removing it
+        would be a layout change dressed as a cleanup.
+      */}
+      <div className="pane-split" data-orientation="under">
         <div
           className="score"
           ref={score}
@@ -2061,44 +1968,6 @@ export function Session(props: {
          * the work under discussion, and giving it the same axis switch would
          * mean two grips changing meaning together for no gain.
          */}
-        {changes.open && (
-          <ChangesPanel
-            conversationId={conversationId}
-            panel={changes}
-            orientation={changesOrientation}
-            onHeightChange={(height) => {
-              setSessionChangesHeight(conversationId, height)
-            }}
-            onWidthChange={(width) => {
-              setSessionChangesWidth(conversationId, width)
-            }}
-            onListWidthChange={(listWidth) => {
-              setSessionChangesListWidth(conversationId, listWidth)
-            }}
-            onClose={() => {
-              toggleSessionChanges(conversationId)
-            }}
-            onBaseChange={(base) => {
-              setSessionChangesBase(conversationId, base)
-            }}
-            onCommittedOnlyChange={(committedOnly) => {
-              setSessionChangesCommittedOnly(conversationId, committedOnly)
-            }}
-            onSelect={(path) => {
-              setSessionChangesSelection(conversationId, path)
-            }}
-            onViewChange={(view) => {
-              setSessionChangesView(conversationId, view)
-            }}
-            onColumnChange={(column) => {
-              setSessionChangesColumn(conversationId, column)
-            }}
-            onToggleExpanded={(path) => {
-              toggleSessionChangesExpanded(conversationId, path)
-            }}
-            onError={setError}
-          />
-        )}
       </div>
 
       {askingAbout !== null && (
@@ -2130,34 +1999,6 @@ export function Session(props: {
         />
       )}
 
-      {reviewing && (
-        <ReviewPanel
-          conversationId={conversationId}
-          onClose={() => {
-            setReviewing(false)
-          }}
-          onError={setError}
-        />
-      )}
-
-      {summarising && (
-        <SummaryPanel
-          conversationId={conversationId}
-          onClose={() => {
-            setSummarising(false)
-          }}
-          onAsk={(prompt) => {
-            // An ordinary message, deliberately. Chorus has no side-channel to
-            // an agent, so a summary asked for privately would be a reply
-            // arriving from nowhere — and the answer is worth keeping in the
-            // room anyway.
-            following.current = true
-            window.chorus.sendMessage({ conversationId, text: prompt }).catch(fail(setError))
-          }}
-          onError={setError}
-        />
-      )}
-
       {handoff !== null && (
         <HandoffComposer
           conversationId={conversationId}
@@ -2173,62 +2014,19 @@ export function Session(props: {
       )}
 
       {/*
-       * This session's terminal, between the transcript and the dock.
+       * This session's terminal was here, and Phase 4 slice 4d retired it.
        *
-       * `.pane` is a flex column whose only stretching child is `.score`, so a
-       * fixed-height row lands here without touching an existing rule. Above the
-       * composer rather than below it: the composer is where you talk to an
-       * agent and stays adjacent to the approvals it answers.
+       * It was a real PTY in main, per conversation, above the composer. A
+       * project pane now carries a whole workbench, and that workbench has its
+       * own terminal running on the REH — the same process tree that already
+       * owns the project's files, rather than a second shell beside it with its
+       * own idea of where the project is. Two terminals per project, one of them
+       * unable to see what the other did, is worse than either alone.
        *
-       * Mounted only while open. The shell is in main and outlives this, so
-       * closing the panel detaches a view and kills nothing.
+       * **The global terminal is untouched and stays a PTY.** It belongs to no
+       * project, so a per-project workbench has nowhere to put it, and
+       * `CLAUDE.md` states plainly that the person gets a real shell.
        */}
-      {terminal.open && (
-        <TerminalPanel
-          panel={terminal}
-          refFor={terminalRefFor}
-          /*
-           * The room's name, not its path.
-           *
-           * It read `Terminal — /var/folders/lh/…/T/chorus-abc123` in any
-           * scratch workspace, which is the one string on screen that says
-           * nothing about which session you are looking at. The title is what
-           * the tab, the rail tile and the composition all call it.
-           */
-          title={t('terminal.sessionTitle', { project: props.session.title })}
-          onHeightChange={(height) => {
-            /*
-             * No `commitLayout` bypass here, unlike the sash and the sidebar.
-             * Those fire per frame and need the debounce skipped on release;
-             * this fires *once*, on release already, so the 180ms window in
-             * `App` is exactly what it is for.
-             */
-            setSessionTerminalHeight(conversationId, height)
-          }}
-          onClose={() => {
-            toggleSessionTerminal(conversationId)
-          }}
-          onAddTerminal={() => {
-            addSessionTerminal(conversationId)
-          }}
-          onActivateTerminal={(id) => {
-            activateSessionTerminal(conversationId, id)
-          }}
-          onRemoveTerminal={(id) => {
-            removeSessionTerminalTab(conversationId, id)
-          }}
-          onFocusAway={() => {
-            /*
-             * Put the caret back where someone would expect it. Queried from the
-             * pane rather than held as a ref because the composer is several
-             * components down and this is the only thing that ever asks.
-             */
-            pane.current?.querySelector<HTMLTextAreaElement>('.composer textarea')?.focus()
-          }}
-          variant="session"
-          shortcut={t('terminal.shortcutSession')}
-        />
-      )}
 
       <div className="dock">
         {/*
@@ -2296,6 +2094,10 @@ export function Session(props: {
         <Composer
           ref={composer}
           conversationId={conversationId}
+          workbenchShown={workbenchShown}
+          onToggleWorkbench={() => {
+            toggleWorkbench(props.session.projectId)
+          }}
           participants={participants}
           busy={view.busy}
           working={view.working}
@@ -2308,42 +2110,6 @@ export function Session(props: {
                 initial: {
                   draft: props.carry.draft,
                   attached: props.carry.attached,
-                  ideIncluded: props.carry.ideIncluded,
-                },
-              })}
-          /*
-           * Offered only once an agent is actually here to fork from. Main
-           * refuses a participant with no session anyway; this stops the button
-           * being live in the seconds before one exists.
-           */
-          {...(participants.length === 0
-            ? {}
-            : {
-                onSpinOff: (brief: string) => {
-                  /*
-                   * Whoever spoke last, not whoever is listed first.
-                   *
-                   * `participants[0]` was the first attempt and it is wrong in
-                   * the case this feature is *for*: you are reading an agent's
-                   * reply, you spot something, and you branch — so the context
-                   * worth forking is that agent's. In a two-agent room the list
-                   * order has nothing to do with who you were working with.
-                   *
-                   * Found by driving it: the room listed codex first, codex had
-                   * exhausted its weekly window, and the fork failed with no tab
-                   * and an error about an agent the person had not been talking
-                   * to for an hour.
-                   */
-                  const last = [...view.messages]
-                    .reverse()
-                    .find((m) => m.actor === 'codex' || m.actor === 'claude')
-                  const spoke = last?.actor
-                  const agentId =
-                    (spoke === 'codex' || spoke === 'claude') && participants.includes(spoke)
-                      ? spoke
-                      : participants[0]
-                  if (agentId !== 'codex' && agentId !== 'claude') return
-                  props.onSpinOff(conversationId, agentId, brief)
                 },
               })}
           onError={fail(setError)}
@@ -2355,24 +2121,6 @@ export function Session(props: {
           onSendFailed={() => {
             setAwaiting(false)
           }}
-          /*
-           * The four session actions, in the row where the work happens.
-           *
-           * The panels are opened here rather than through the session menu's
-           * `onOpenPanel`, because this component already owns whether they are
-           * showing — the menu's route exists for a session that is *not* the
-           * one you are typing in.
-           */
-          onOpenPanel={(panel) => {
-            if (panel === 'review') setReviewing(true)
-            else setSummarising(true)
-          }}
-          changesOpen={changes.open}
-          onToggleChanges={() => {
-            toggleSessionChanges(conversationId)
-          }}
-          {...(props.onRestart === undefined ? {} : { onRestart: props.onRestart })}
-          {...(props.onEnd === undefined ? {} : { onEnd: props.onEnd })}
         />
       </div>
     </section>

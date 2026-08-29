@@ -3707,11 +3707,24 @@ body {
 }
 
 /* Stop and Send sit together while a turn is running. */
+/*
+ * Wraps rather than overflows, and that is a narrow-column fix.
+ *
+ * Nine triggers and the send button at `flex: none` fit a pane-width composer
+ * and do not fit a conversation column, which can be a third of one once a
+ * project's column is split. Nothing shrank and nothing wrapped, so the row
+ * simply ran past its own box — the send button ended up outside the composer
+ * and over the transcript's border, which is the stray blue circle that showed
+ * up in the bottom right. Clipping it would have hidden the overflow rather than
+ * removed it; wrapping keeps every control reachable and inside.
+ */
 .composer-tools {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: calc(var(--step) * 2);
   flex: none;
+  min-width: 0;
   padding-top: calc(var(--step) * 2);
   border-top: 1px solid var(--border-default);
 }
@@ -3738,6 +3751,44 @@ body {
   cursor: pointer;
 }
 
+/*
+ * A mention button is a name, so it is the one trigger that is not square.
+ *
+ * `@` used to be a single 26px character button that opened a menu to pick who.
+ * With two agents the menu was a click and a read to save typing six letters, so
+ * the choice moved onto the row — and a name needs width the square does not
+ * have. It keeps the height and the hover treatment so the row still reads as
+ * one set of controls.
+ *
+ * The dot carries the agent's colour from `.voice--claude` / `.voice--codex`,
+ * which is where every other surface gets it, so a person learns one mapping.
+ */
+.composer-mention {
+  display: inline-flex;
+  align-items: center;
+  gap: calc(var(--step) * 1.5);
+  width: auto;
+  padding: 0 calc(var(--step) * 1.5);
+  font: 12px var(--ui-font);
+}
+
+/*
+ * `var(--voice)`, not `currentcolor`.
+ *
+ * `.voice--claude` and `.voice--codex` set a `--voice` custom property rather
+ * than a colour — that is how every other surface tints an agent's dot. This
+ * rule said `currentcolor`, which on a `.composer-trigger` is `--text-muted`,
+ * so both dots came out the same grey and the class did nothing. The fallback
+ * matches `.voice-dot`'s own, so an agent with no class still draws.
+ */
+.composer-mention .voice-dot {
+  width: 6px;
+  height: 6px;
+  flex: none;
+  border-radius: 50%;
+  background: var(--voice, var(--muted));
+}
+
 .composer-trigger:hover,
 .composer-trigger:focus-visible {
   border-color: var(--border-default);
@@ -3756,40 +3807,6 @@ body {
  */
 .composer-tools .send {
   margin-left: auto;
-}
-
-/*
- * The summary mark, first in the row.
- *
- * Quieter than Send at the other end: Send is the one thing you press to make
- * something happen, and two circles of equal weight at either end of the same
- * row would read as a pair of equals. This one borrows the shape and drops the
- * colour, so it reads as chrome you can reach for rather than an action waiting
- * on you.
- */
-.summary-open {
-  display: grid;
-  place-items: center;
-  width: 24px;
-  height: 24px;
-  flex: none;
-  padding: 0;
-  border: 1px solid var(--line);
-  border-radius: 50%;
-  background: transparent;
-  color: var(--muted);
-  font-family: var(--mono);
-  font-size: 13px;
-  line-height: 1;
-  cursor: pointer;
-  transition:
-    color 120ms ease,
-    border-color 120ms ease;
-}
-
-.summary-open:hover {
-  color: var(--bone);
-  border-color: color-mix(in srgb, var(--bone) 30%, var(--line));
 }
 
 .hint {
@@ -4100,21 +4117,6 @@ body {
   cursor: default;
 }
 
-/*
- * The caret a control grows when it opens a menu.
- *
- * Drawn rather than typed: `▾` is a different size and baseline in every face,
- * and three of these sit beside text at three different sizes.
- */
-.composer-caret {
-  width: 0;
-  height: 0;
-  border-top: 4px solid currentColor;
-  border-right: 3px solid transparent;
-  border-left: 3px solid transparent;
-  opacity: 0.7;
-}
-
 /* Only the first of the pair pushes off the row's left content. */
 .composer-add {
   margin-left: auto;
@@ -4137,38 +4139,10 @@ body {
   stroke-linejoin: round;
 }
 
-/*
- * Ending, kept quiet until it is the dangerous one.
- *
- * Red on hover rather than always: a permanently red button beside the box you
- * type in reads as an alarm, and this one is ordinary right up until an agent
- * is mid-turn — which is when it arms, and says so.
- */
-.composer-end:hover,
-.composer-end:focus-visible {
-  border-color: color-mix(in srgb, var(--danger) 55%, transparent);
-  color: var(--danger);
-}
-
-.composer-end[data-armed='true'] {
-  border-color: var(--danger);
-  background: color-mix(in srgb, var(--danger) 14%, transparent);
-  color: var(--danger);
-}
-
 /* The `+` beside the paperclip: same size and quietness, different job. */
 .composer-more svg {
   width: 16px;
   height: 16px;
-  fill: none;
-  stroke: currentColor;
-  stroke-width: 1.6;
-  stroke-linecap: round;
-}
-
-.composer-settings svg {
-  width: 15px;
-  height: 15px;
   fill: none;
   stroke: currentColor;
   stroke-width: 1.6;
@@ -4734,194 +4708,12 @@ input::placeholder {
   height: 86vh;
 }
 
-.review-branch {
-  font-family: var(--mono);
-  font-size: 11px;
-  color: var(--muted);
-}
-
-.review-totals {
-  margin-left: auto;
-  font-family: var(--mono);
-  font-size: 11px;
-}
-
 .added {
   color: var(--codex);
 }
 
 .removed {
   color: var(--alert);
-}
-
-.review-body {
-  display: grid;
-  grid-template-columns: 220px 1fr;
-  gap: calc(var(--step) * 4);
-  flex: 1;
-  min-height: 0;
-}
-
-.review-files {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  overflow-y: auto;
-  padding-right: calc(var(--step) * 2);
-  border-right: 1px solid var(--line);
-}
-
-.review-file {
-  display: flex;
-  justify-content: space-between;
-  gap: calc(var(--step) * 2);
-  padding: calc(var(--step) * 1.5) calc(var(--step) * 2);
-  border: 0;
-  border-radius: 5px;
-  background: none;
-  color: var(--muted);
-  font-family: var(--mono);
-  font-size: 11.5px;
-  text-align: left;
-  cursor: pointer;
-}
-
-.review-file:hover {
-  color: var(--bone);
-}
-
-.review-file[data-on='true'] {
-  background: var(--sunken);
-  color: var(--bone);
-}
-
-.review-file-path {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.review-file-counts {
-  display: flex;
-  gap: calc(var(--step) * 1.5);
-  flex: none;
-}
-
-.review-diff {
-  overflow: auto;
-  min-width: 0;
-}
-
-/* ---------------------------------------------------------------- summary */
-
-.summary-spend {
-  margin-left: auto;
-  font-size: 11px;
-  color: var(--text-muted);
-}
-
-.summary-body {
-  display: flex;
-  flex-direction: column;
-  gap: calc(var(--step) * 5);
-  overflow-y: auto;
-  min-height: 0;
-}
-
-.summary-block {
-  display: flex;
-  flex-direction: column;
-  gap: calc(var(--step) * 2);
-}
-
-/* Structure, so it takes the chrome's voice like every other heading. */
-.summary-title {
-  margin: 0;
-  font-size: 10px;
-  font-weight: 600;
-  letter-spacing: 0.14em;
-  text-transform: uppercase;
-  color: var(--text-muted);
-}
-
-.summary-agents,
-.summary-problems,
-.summary-files {
-  margin: 0;
-  padding: 0;
-  list-style: none;
-  display: flex;
-  flex-direction: column;
-  gap: var(--step);
-}
-
-.summary-agent {
-  display: flex;
-  align-items: baseline;
-  gap: calc(var(--step) * 3);
-  padding: calc(var(--step) * 1.5) calc(var(--step) * 2);
-  border-left: 2px solid var(--voice, var(--line));
-  background: var(--sunken);
-  border-radius: 0 4px 4px 0;
-}
-
-.summary-agent--codex {
-  --voice: var(--codex);
-}
-
-.summary-agent--claude {
-  --voice: var(--claude);
-}
-
-.summary-agent-name {
-  font-size: 11px;
-  letter-spacing: 0.1em;
-  text-transform: uppercase;
-  color: var(--voice, var(--muted));
-  flex: none;
-}
-
-.summary-agent-facts {
-  font-size: 12px;
-  color: var(--muted);
-  /* Counts are the one thing here that must not be clipped as the sheet narrows. */
-  overflow-wrap: break-word;
-  min-width: 0;
-}
-
-.summary-problem {
-  display: flex;
-  align-items: baseline;
-  gap: calc(var(--step) * 3);
-  font-size: 12px;
-  color: var(--muted);
-}
-
-.summary-problem-who {
-  flex: none;
-  font-size: 10px;
-  letter-spacing: 0.1em;
-  text-transform: uppercase;
-  color: var(--text-muted);
-}
-
-/* An error is the one kind that is not merely a fact about the run. */
-.summary-problem[data-kind='error'] .summary-problem-detail {
-  color: var(--alert);
-}
-
-.summary-problem-detail {
-  min-width: 0;
-  overflow-wrap: break-word;
-}
-
-.summary-files {
-  font-size: 12px;
-  color: var(--muted);
-}
-
-.summary-files li {
-  overflow-wrap: anywhere;
 }
 
 .hunk {
@@ -6321,6 +6113,16 @@ input::placeholder {
  * began. A border and a radius do, and they cost a pixel.
  */
 .workspace-pane-content {
+  /*
+   * A column, because the dock sits above the conversation inside this box.
+   *
+   * It used to hold exactly one child that filled it. Adding the dock as a
+   * sibling pushed that child down by the dock's height while it still measured
+   * itself against the full box — so the bottom of the conversation, which is
+   * the composer, fell outside and was cut off by the `overflow: hidden` below.
+   */
+  display: flex;
+  flex-direction: column;
   min-width: 0;
   min-height: 0;
   overflow: hidden;
@@ -6813,44 +6615,15 @@ input::placeholder {
 }
 
 /*
- * The reference, in two spans, and the split is what keeps the lines.
+ * The Editor switch — shows and hides this project's workbench.
  *
- * One span ellipsised from the end threw the line range away first — the pill
- * read `…/procedure-pricing/hcpc-pri…`, which names neither the file nor the
- * lines. `pillReference` shortens the path at a directory boundary, and these
- * rules decide what happens when even that does not fit: the path gives, the
- * range does not.
- */
-.ide-pill-ref {
-  display: flex;
-  align-items: baseline;
-}
-
-.ide-pill-path {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-/*
- * `flex: none` is the guarantee, not a tidy-up. Everything else in the pill can
- * be reconstructed by looking at the editor; which lines are going with the
- * message cannot, so it is the one part that never shrinks.
- */
-.ide-pill-lines {
-  flex: none;
-}
-
-/*
- * Which editor the selection came from, and whether it is going.
+ * It was a label saying which editor a selection came from, beside a pill naming
+ * the file and a chip deciding whether to send it. All three are one control
+ * now: context is always sent, so there is nothing to disclose and nothing to
+ * decide, and the chip that sat here does the obvious thing instead.
  *
- * Two chips rather than two words inside the pill: "VS Code" beside a path reads
- * as part of the path, and the include state is a control while the editor name
- * is a fact. Same height, different shapes — one is a label, one is pressable.
  */
-.ide-source,
-.ide-included {
+.ide-source {
   display: inline-flex;
   align-items: center;
   gap: calc(var(--step) * 2);
@@ -6871,32 +6644,31 @@ input::placeholder {
   opacity: 0.85;
 }
 
-.ide-included {
+.ide-source {
   cursor: pointer;
 }
 
-.ide-included:hover,
-.ide-included:focus-visible {
+.ide-source:hover,
+.ide-source:focus-visible {
   border-color: var(--border-strong);
   color: var(--text-primary);
 }
 
-/* A tick that is on or a ring that is off — the state, not just the word. */
-.ide-included-mark {
-  width: 11px;
-  height: 11px;
-  flex: none;
-  border: 1.5px solid var(--text-muted);
-  border-radius: 50%;
+/*
+ * Off reads as off, and by more than colour.
+ *
+ * The editor being hidden is the unusual state and the one worth seeing at a
+ * glance, so it is the one that changes: the chip dims and the mark goes
+ * hollow. WCAG 1.4.1 — the border weight moves with the colour, so the state
+ * survives a monochrome display.
+ */
+.ide-source[aria-pressed='false'] {
+  border-style: dashed;
+  color: var(--text-muted);
 }
 
-.ide-included[data-on='true'] .ide-included-mark {
-  border-color: var(--ok, var(--voice-codex));
-  background: var(--ok, var(--voice-codex));
-}
-
-.ide-included[data-on='true'] {
-  color: var(--text-primary);
+.ide-source[aria-pressed='false'] .ide-source-icon {
+  opacity: 0.5;
 }
 
 /* The attach affordance, at the far end of the row it belongs to. */
@@ -6935,29 +6707,6 @@ input::placeholder {
   background: var(--bg-control);
   color: var(--text-primary);
   outline: none;
-}
-
-/*
- * Which version, and whether it is remembered. Dimmer and not monospaced, so it
- * reads as a note about the reference rather than part of the path — and it
- * gives up its width first, because a truncated `MR a1b2c3d` still says what it
- * needs to while a truncated path does not.
- */
-.ide-pill-mark {
-  /*
-   * The comment above said the mark gives up its width first, and until this
-   * number it did not. Both children sat at `flex-shrink: 1`, and flexbox
-   * distributes shrinkage in proportion to each item's *own* width — so the
-   * long path absorbed most of it and ellipsised while a nine-character
-   * `MR a1b2c3d` stayed almost whole, itself clipped to `MR`. A high factor is
-   * what actually expresses the priority the comment claims.
-   */
-  flex-shrink: 12;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  opacity: 0.72;
 }
 
 /* Anything that is not `ready` is an explanation, not a reference. */
@@ -7578,6 +7327,35 @@ input::placeholder {
 }
 
 /*
+ * A project, as two letters.
+ *
+ * Deliberately the same tile as a session rather than a new shape: they are one
+ * column and a second visual language down the same rail would read as two rails
+ * that happen to be adjacent. What separates them is the group boundary and the
+ * mark below, not the tile.
+ */
+.rail-project {
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+}
+
+/*
+ * Carries a conversation, shown as a bar under the tile rather than a dot beside
+ * it — the dot position is already spoken for by a session's state mark, and two
+ * different meanings in one place is how a rail stops being readable.
+ */
+.rail-project[data-open='true']::after {
+  content: '';
+  position: absolute;
+  bottom: 4px;
+  width: 14px;
+  height: 2px;
+  border-radius: 1px;
+  background: var(--text-secondary);
+}
+
+/*
  * A session, as two letters and a state mark.
  *
  * The monogram is the thing you learn; the mark is the thing you scan. Both are
@@ -8149,80 +7927,6 @@ input::placeholder {
 .rail-usage:focus-visible {
   outline: 2px solid var(--focus-ring);
   outline-offset: 2px;
-}
-
-/*
- * The two actions at the foot of the preview.
- *
- * Quiet, and the destructive one is only red once it is armed: a card that
- * appears on hover should not have a red button on it by default, or every pass
- * of the pointer over the rail flashes an alarm.
- */
-.session-preview-actions {
-  display: flex;
-  gap: var(--step);
-  margin-top: calc(var(--step) * 3);
-  padding-top: calc(var(--step) * 2);
-  border-top: 1px solid var(--border-default);
-}
-
-.session-preview-actions button {
-  flex: 1;
-  /*
-   * The mark and the word, centred as a pair.
-   *
-   * `inline-flex` rather than `flex` so the button still sizes to its content
-   * the way `flex: 1` above expects, and `gap` rather than a margin on the icon
-   * so an armed End — which swaps a power symbol for a cross and lengthens its
-   * label — cannot drift out of alignment with the button beside it.
-   */
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  gap: calc(var(--step) * 1.5);
-  padding: calc(var(--step) * 1.5) calc(var(--step) * 2);
-  border: 1px solid var(--border-default);
-  border-radius: var(--radius);
-  background: transparent;
-  color: var(--text-secondary);
-  font-family: var(--ui-font);
-  font-size: 12px;
-  cursor: pointer;
-}
-
-/*
- * 14px against a 12px label: an icon set to the text's own size reads smaller
- * than it, because a glyph fills its box and a letter does not. `currentcolor`
- * is what makes the danger states free — the mark follows the word to red on
- * hover and on arming without a rule of its own.
- */
-.session-preview-icon {
-  flex: none;
-  width: 14px;
-  height: 14px;
-  fill: none;
-  stroke: currentcolor;
-  stroke-width: 1.8;
-  stroke-linecap: round;
-  stroke-linejoin: round;
-}
-
-.session-preview-actions button:hover,
-.session-preview-actions button:focus-visible {
-  background: var(--bg-control);
-  color: var(--text-primary);
-}
-
-.session-preview-danger:hover,
-.session-preview-danger:focus-visible {
-  border-color: color-mix(in srgb, var(--danger) 55%, transparent);
-  color: var(--danger);
-}
-
-.session-preview-danger[data-armed='true'] {
-  border-color: var(--danger);
-  background: color-mix(in srgb, var(--danger) 14%, transparent);
-  color: var(--danger);
 }
 
 /* ------------------------------------------------------ the session drawer */
@@ -9171,18 +8875,82 @@ input::placeholder {
   cursor: text;
 }
 
-/* Summary and Changes sit above the destructive pair, with a little air between
-   the two rows so they do not read as one four-button block. */
-.session-preview-actions--panels {
-  margin-top: calc(var(--step) * 3);
-  padding-top: 0;
-  border-top: 0;
+.project-preview-conversations {
+  display: flex;
+  flex-direction: column;
+  gap: var(--step);
+  margin: 0;
+  padding: 0;
+  list-style: none;
 }
 
-.session-preview-actions--panels + .session-preview-actions {
-  margin-top: var(--step);
-  padding-top: 0;
-  border-top: 0;
+.project-preview-conversations > li {
+  display: flex;
+  align-items: center;
+  gap: var(--step);
+  min-width: 0;
+}
+
+/*
+ * The name takes the room and the four actions take what they need.
+ *
+ * `min-width: 0` on both the row and this, because a flex item's default
+ * `min-width: auto` refuses to shrink below its content — a long conversation
+ * title would push the four buttons off the right edge of a 300px card rather
+ * than truncate, and the buttons are the half you came for.
+ */
+.project-preview-conversation {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-align: left;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  background: none;
+  border: 0;
+  padding: calc(var(--step) * 0.5) 0;
+  color: var(--text-default);
+  cursor: pointer;
+}
+
+.project-preview-conversation:hover {
+  color: var(--text-strong);
+}
+
+.project-preview-conversation-actions {
+  display: flex;
+  flex: none;
+  gap: calc(var(--step) * 0.5);
+}
+
+/*
+ * Icon-only, so the mark is the whole control rather than a decoration beside a
+ * word. `.session-preview-icon` inside is sized by the rule these share; what is
+ * different here is that there is no label to sit next to, so the button is
+ * square and the name lives in `aria-label` and `title`.
+ */
+.project-preview-conversation-actions button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  background: none;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  color: var(--text-muted);
+  cursor: pointer;
+}
+
+.project-preview-conversation-actions button:hover {
+  border-color: var(--border-default);
+  color: var(--text-default);
+}
+
+.session-preview-empty {
+  margin: 0;
+  color: var(--text-muted);
 }
 
 /* --------------------------------------------------- the tab/pane join */
@@ -9337,281 +9105,12 @@ input::placeholder {
   flex-direction: row;
 }
 
-/*
- * The Changes panel — a docked strip, the terminal's twin.
- *
- * Deliberately the same geometry as `.terminal-panel`: both are fixed-size
- * children of a flex container whose other child stretches, so neither needs a
- * change to an existing rule. The two columns inside repeat `.review-body`'s
- * grid, because a file list beside a diff is the same shape wherever it appears.
- *
- * **Not a container**, deliberately. The body's stacking rule below was a
- * `@container` query for one commit, and `container-type: inline-size` carries
- * `contain: layout style inline-size` with it — which left Monaco mounted, in a
- * correctly-sized box, rendering a single empty line. Four driver assertions
- * failed together and none of them named containment. The width test moved to
- * `data-narrow`, which the component already knows.
- */
-.changes-panel {
-  --changes-height: 320px;
-  --changes-width: 420px;
-  position: relative;
-  display: flex;
-  flex: 0 0 auto;
-  flex-direction: column;
-  height: var(--changes-height);
-  min-height: 0;
-  margin: 0 calc(var(--step) * 3) calc(var(--step) * 2);
-  border: 1px solid var(--border-default);
-  border-radius: 9px;
-  background: var(--bg-chrome);
-  overflow: hidden;
-}
-
-/*
- * Beside the transcript: the fixed measurement is the width, and the height is
- * whatever the row gives it.
- *
- * `height: auto` matters more than it looks — the stacked rule above sets a
- * real height, and leaving it would stop the panel stretching and leave Monaco
- * in a box shorter than the transcript for no visible reason. The left margin
- * goes because `.score`'s own right padding is already the gap between them.
- */
-.changes-panel[data-orientation='side'] {
-  flex: 0 1 var(--changes-width);
-  width: var(--changes-width);
-  /*
-   * The transcript's floor, enforced where the grip cannot reach.
-   *
-   * A width stored while the pane was wide is applied unchanged when the pane
-   * is merely wide *enough*, and nothing dragged anything, so the pointer
-   * handler's clamp never runs. `flex-shrink: 1` above is what lets this bite.
-   */
-  max-width: calc(100% - var(--transcript-min));
-  height: auto;
-  margin: 0 calc(var(--step) * 3) calc(var(--step) * 2) 0;
-}
-
-/* The grip is the top edge, so dragging up grows the panel downward-anchored. */
-.changes-grip {
-  position: absolute;
-  top: 0;
-  right: 0;
-  left: 0;
-  height: 6px;
-  cursor: ns-resize;
-}
-
-/* Beside the transcript it is the left edge, for the same reason: the grip sits
-   on the side the panel grows away from. */
-.changes-panel[data-orientation='side'] .changes-grip {
-  top: 0;
-  right: auto;
-  bottom: 0;
-  left: 0;
-  width: 6px;
-  height: auto;
-  cursor: ew-resize;
-}
-
-.changes-grip:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: -2px;
-}
-
 .changes-head {
   display: flex;
   align-items: center;
   gap: calc(var(--step) * 2);
   padding: calc(var(--step) * 2) calc(var(--step) * 3);
   border-bottom: 1px solid var(--line);
-}
-
-.changes-title {
-  font-size: 12px;
-}
-
-/* Pushes everything after it to the right edge. */
-.changes-branch {
-  margin-left: auto;
-  color: var(--muted);
-  font-family: var(--mono);
-  font-size: 11px;
-}
-
-.changes-totals {
-  font-family: var(--mono);
-  font-size: 11px;
-}
-
-.changes-base select,
-.changes-committed {
-  color: var(--muted);
-  font-size: 11px;
-}
-
-.changes-committed {
-  display: flex;
-  align-items: center;
-  gap: calc(var(--step) * 1);
-}
-
-.changes-body {
-  display: grid;
-  /*
-   * The list column is dragged, not fixed. `--changes-list` is written by the
-   * panel from its persisted width, and again on each pointer move while the
-   * divider is held — see `startListResize`.
-   */
-  grid-template-columns: var(--changes-list, 260px) auto 1fr;
-  gap: calc(var(--step) * 2);
-  flex: 1;
-  min-height: 0;
-  padding: calc(var(--step) * 2) calc(var(--step) * 3);
-}
-
-/*
- * A narrow panel keeps both columns and gives the list less room.
- *
- * The first version of this stacked them — list above, diff below — and that
- * is the wrong trade: the two halves are read *against* each other, so putting
- * the code under the file it belongs to is not a smaller version of the panel,
- * it is a different one. The list is the half that survives being squeezed,
- * because a path can be truncated and a line of code cannot.
- *
- * An attribute, not a container query. `container-type` on `.changes-panel`
- * left Monaco mounted, correctly sized and rendering a single empty line —
- * see the note on `.changes-panel` above. The component already knows its own
- * width, so this reads the fact from the place that has it.
- */
-.changes-panel[data-narrow='true'] .changes-body {
-  grid-template-columns: 150px minmax(0, 1fr);
-  gap: calc(var(--step) * 2);
-}
-
-/* The head's controls wrap rather than being clipped by the panel's
-   `overflow: hidden`, which is what a narrow panel did to the base picker. */
-.changes-panel[data-narrow='true'] .changes-head {
-  flex-wrap: wrap;
-  row-gap: calc(var(--step) * 1);
-}
-
-.changes-panel[data-narrow='true'] .changes-branch {
-  margin-left: 0;
-}
-
-.changes-files {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  overflow-y: auto;
-  padding-right: calc(var(--step) * 2);
-  border-right: 1px solid var(--line);
-}
-
-.changes-file {
-  display: flex;
-  align-items: center;
-  gap: calc(var(--step) * 2);
-  padding: calc(var(--step) * 1.5) calc(var(--step) * 2);
-  border: 0;
-  border-radius: 5px;
-  background: none;
-  color: var(--muted);
-  font-family: var(--mono);
-  font-size: 11.5px;
-  text-align: left;
-  cursor: pointer;
-}
-
-.changes-file:hover {
-  color: var(--bone);
-}
-
-.changes-file[data-on='true'] {
-  background: var(--sunken);
-  color: var(--bone);
-}
-
-/* Fixed width, so the paths beside them line up rather than stepping. */
-.changes-file-mark {
-  flex: 0 0 auto;
-  width: 1.1em;
-  text-align: center;
-  font-weight: 600;
-}
-
-/*
- * VS Code's status colours, and its two deliberate mismatches.
- *
- * The letter set and the colour set are **not** one-to-one upstream, and the two
- * places they diverge are copied on purpose rather than tidied:
- *
- *   - `T` (type changed) is coloured as **modified**
- *   - `C` (copied) is coloured as **renamed**
- *
- * Also upstream: untracked and renamed share the same green, and in the 2026
- * themes conflicted and deleted share the same red. Making either pair distinct
- * would look more informative and be less familiar.
- *
- * Values are `gitDecoration.*` from Dark 2026; the light block re-states them.
- * `renamed` is the exception — the 2026 themes do not override it, so it keeps
- * the git extension's registry default.
- */
-.changes-file-mark--added,
-.changes-file-mark--untracked {
-  color: var(--git-added, #73c991);
-}
-
-.changes-file-mark--removed,
-.changes-file-mark--conflicted {
-  color: var(--git-deleted, #f48771);
-}
-
-.changes-file-mark--modified,
-.changes-file-mark--typechanged {
-  color: var(--git-modified, #e5ba7d);
-}
-
-.changes-file-mark--renamed,
-.changes-file-mark--copied {
-  color: var(--git-renamed, #73c991);
-}
-
-/*
- * A deleted file is struck through, as it is in VS Code's own list. The mark
- * keeps its shape — striking the letter as well would make `D` unreadable at
- * this size.
- */
-.changes-file[data-status='removed'] .changes-file-path {
-  text-decoration: line-through;
-}
-
-.changes-file-path {
-  flex: 1;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.changes-file-counts {
-  flex: 0 0 auto;
-  display: flex;
-  gap: calc(var(--step) * 1);
-}
-
-.changes-diff {
-  overflow: auto;
-  min-height: 0;
-}
-
-.changes-empty {
-  padding: calc(var(--step) * 4) calc(var(--step) * 3);
-}
-
-.changes-foot {
-  padding: calc(var(--step) * 1.5) calc(var(--step) * 3);
-  border-top: 1px solid var(--line);
 }
 
 /*
@@ -9646,167 +9145,6 @@ input::placeholder {
   overflow: hidden;
 }
 
-/* The left column now holds a switch above whichever list is showing. */
-.changes-column {
-  display: flex;
-  flex-direction: column;
-  min-height: 0;
-  /* The border moved to `.changes-split`, which is the thing you now grab. */
-  min-width: 0;
-}
-
-/*
- * The activity rail, VS Code's way of switching a side bar.
- *
- * Horizontal rather than vertical, because this panel is a wide strip and not a
- * tall column — the rail sits above the list where the text tabs used to. The
- * arrangement is the local answer; what is borrowed is that a *view* is chosen
- * by an icon and marked with an edge, rather than by a word in a tab.
- */
-.changes-activity {
-  display: flex;
-  gap: calc(var(--step) * 1);
-  padding-bottom: calc(var(--step) * 1.5);
-}
-
-.changes-activity-btn {
-  position: relative;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  padding: calc(var(--step) * 1);
-  border: 0;
-  border-radius: 5px;
-  background: none;
-  /* Dimmed until chosen, which is how the rail says which view you are in. */
-  color: var(--muted);
-  opacity: 0.7;
-  cursor: pointer;
-}
-
-.changes-activity-btn:hover {
-  opacity: 1;
-}
-
-.changes-activity-btn[aria-selected='true'] {
-  background: var(--sunken);
-  color: var(--bone);
-  opacity: 1;
-}
-
-/*
- * The selected view keeps an edge, as an editor marks its active one.
- *
- * On the leading edge rather than underneath: an underline reads as a tab, and
- * the point of the rail is that these are views rather than tabs.
- */
-.changes-activity-btn[aria-selected='true']::before {
-  content: '';
-  position: absolute;
-  inset-inline-start: 0;
-  inset-block: calc(var(--step) * 0.75);
-  width: 2px;
-  border-radius: 2px;
-  background: var(--accent-text, currentcolor);
-}
-
-/*
- * The changed count, as a badge on Source Control rather than a word in a tab.
- *
- * `pointer-events: none` so it cannot swallow the click meant for the button
- * it sits on — it overlaps the icon's corner by design.
- */
-.changes-badge {
-  position: absolute;
-  top: 2px;
-  inset-inline-end: 2px;
-  min-width: 14px;
-  padding: 0 3px;
-  border-radius: 7px;
-  background: var(--accent-text, var(--bone));
-  color: var(--bg-chrome);
-  font-family: var(--mono);
-  font-size: 9px;
-  line-height: 14px;
-  text-align: center;
-  pointer-events: none;
-}
-
-/* The lists scroll; the rail above them does not. */
-.changes-files,
-.changes-tree {
-  flex: 1;
-  min-height: 0;
-}
-
-/*
- * The files list keeps its own border in the modal Review sheet, but inside the
- * column that border now belongs to the column.
- */
-.changes-column .changes-files {
-  padding-right: 0;
-  border-right: 0;
-}
-
-.changes-tree {
-  display: flex;
-  flex-direction: column;
-  gap: 1px;
-  overflow-y: auto;
-}
-
-/*
- * One flat list with an indent per depth, rather than nested lists.
- *
- * Keeps the DOM shallow for a deep path, and is what lets a single roving
- * tabindex work — arrow movement over an index rather than a walk of a tree.
- */
-.changes-tree-row {
-  display: flex;
-  align-items: center;
-  gap: calc(var(--step) * 1);
-  padding: 2px calc(var(--step) * 1.5);
-  padding-left: calc(var(--step) * 1.5 + var(--depth, 0) * 12px);
-  border: 0;
-  border-radius: 4px;
-  background: none;
-  color: var(--muted);
-  font-family: var(--mono);
-  font-size: 11.5px;
-  text-align: left;
-  cursor: pointer;
-}
-
-.changes-tree-row:hover {
-  color: var(--bone);
-}
-
-.changes-tree-row[data-on='true'] {
-  background: var(--sunken);
-  color: var(--bone);
-}
-
-.changes-tree-row[data-directory='true'] .changes-tree-name {
-  color: inherit;
-}
-
-/*
- * Fixed width so names line up whether or not a row has a twisty.
- *
- * 9px at 0.6 opacity was the first try and it was nearly invisible — a
- * disclosure arrow has to be findable before it can be clicked, and this one
- * carries the whole of "there is more underneath". Sized to sit under the file
- * icons beside it rather than to be discreet.
- */
-.changes-tree-twist {
-  flex: 0 0 auto;
-  width: 1.1em;
-  opacity: 0.9;
-  font-size: 13px;
-  line-height: 1;
-  text-align: center;
-}
-
 /*
  * VS Code's own default file icons, as a font.
  *
@@ -9838,204 +9176,6 @@ input::placeholder {
   /* Colour comes from the theme file per file type, so nothing inherits here. */
   font-style: normal;
   font-weight: normal;
-}
-
-.changes-tree-name {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-/* Drift from the upstream, beside the branch name. Hidden at zero — see the panel. */
-.changes-ahead,
-.changes-behind {
-  margin-left: calc(var(--step) * 1);
-  font-family: var(--mono);
-  font-size: 10.5px;
-}
-
-.changes-ahead {
-  color: var(--added, #4ea36a);
-}
-
-.changes-behind {
-  color: var(--removed, #c25b5b);
-}
-
-/* A changed file inside a folder row is indented like the project tree's. */
-.changes-file {
-  padding-left: calc(var(--step) * 2 + var(--depth, 0) * 12px);
-}
-
-/* Folder headings in the changed list: a label, not a control. */
-.changes-tree-row--dir {
-  color: var(--muted);
-  cursor: default;
-  opacity: 0.85;
-}
-
-/*
- * The right-hand column: diff above, commit box below.
- *
- * Added when the commit box arrived, and it broke Monaco immediately — the
- * height rules used to reach .changes-diff as a direct grid child of
- * .changes-body, and inserting a wrapper left the editor in a zero-height box
- * again. Third time for that failure in this panel, and the first time it was
- * reported as itself rather than as "no decorations".
- */
-.changes-right {
-  display: flex;
-  flex-direction: column;
-  min-height: 0;
-}
-
-.changes-right .changes-diff {
-  flex: 1;
-  min-height: 0;
-}
-
-/* The commit box neither scrolls nor shrinks; the diff above absorbs the space. */
-.changes-commit {
-  display: flex;
-  flex: 0 0 auto;
-  gap: calc(var(--step) * 2);
-  align-items: center;
-  padding-top: calc(var(--step) * 2);
-}
-
-.changes-commit input {
-  flex: 1;
-  min-width: 0;
-  padding: calc(var(--step) * 1.5) calc(var(--step) * 2);
-  border: 1px solid var(--border-default);
-  border-radius: 6px;
-  background: var(--sunken);
-  color: var(--bone);
-  font-size: 12px;
-}
-
-/* Staged / Changes headings, with their bulk action on the right. */
-.changes-group {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: calc(var(--step) * 1.5) calc(var(--step) * 1) calc(var(--step) * 0.5);
-}
-
-.changes-group-name {
-  color: var(--muted);
-  font-size: 10.5px;
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
-}
-
-/* A file row is a row of controls now, not one button. */
-.changes-file {
-  display: flex;
-  align-items: center;
-  gap: calc(var(--step) * 1);
-}
-
-.changes-file-open {
-  display: flex;
-  flex: 1;
-  align-items: center;
-  gap: calc(var(--step) * 2);
-  min-width: 0;
-  border: 0;
-  background: none;
-  color: inherit;
-  font: inherit;
-  text-align: left;
-  cursor: pointer;
-}
-
-.changes-stage,
-.changes-discard {
-  flex: 0 0 auto;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: 20px;
-  height: 20px;
-  padding: 0;
-  border: 0;
-  border-radius: 4px;
-  background: none;
-  color: var(--muted);
-  font-size: 15px;
-  line-height: 1;
-  cursor: pointer;
-}
-
-.changes-stage:hover:not(:disabled),
-.changes-discard:hover:not(:disabled) {
-  background: var(--sunken);
-  color: var(--bone);
-}
-
-.changes-stage:disabled,
-.changes-discard:disabled {
-  cursor: default;
-  opacity: 0.4;
-}
-
-/* `+` reads as adding to the index; `−` as taking back out of it. */
-.changes-stage[data-staged='true'] {
-  color: var(--git-added, var(--muted));
-}
-
-/*
- * Discard is dimmed, not hidden.
- *
- * It was `opacity: 0` until hover, on the reasoning that a destructive control
- * should not be a permanent invitation. But hiding it does not make it safer —
- * the confirmation does that, and it names the file — while a control nobody
- * can find is a feature nobody has. Dimmed keeps it out of the way and still
- * on the page.
- */
-.changes-discard {
-  opacity: 0.45;
-}
-
-.changes-file:hover .changes-discard,
-.changes-discard:focus-visible {
-  opacity: 1;
-  color: var(--git-deleted, var(--muted));
-}
-
-/*
- * The draggable divider between the file list and the diff.
- *
- * Four pixels wide with a one-pixel line drawn inside it: a one-pixel target is
- * a target nobody hits, and a four-pixel *line* is a bar. The hit area and the
- * thing you see are deliberately different sizes.
- */
-.changes-split {
-  position: relative;
-  width: 5px;
-  cursor: col-resize;
-  background: none;
-  border: 0;
-}
-
-.changes-split::before {
-  content: '';
-  position: absolute;
-  inset-block: 0;
-  inset-inline-start: 2px;
-  width: 1px;
-  background: var(--line);
-}
-
-.changes-split:hover::before,
-.changes-split:focus-visible::before {
-  background: var(--accent-text, var(--bone));
-  width: 2px;
-}
-
-.changes-split:focus-visible {
-  outline: none;
 }
 
 /*
@@ -10111,8 +9251,731 @@ input::placeholder {
   flex: none;
 }
 
-/* The rectangle main tracks. It is empty by construction — see WorkbenchFrame. */
+/*
+ * The rectangle main tracks. Empty by construction — see WorkbenchFrame — except
+ * for the still it paints while an overlay has the real view hidden.
+ */
 .workbench-surface {
   flex: 1;
   min-height: 0;
+  position: relative;
+}
+
+/*
+ * A picture of the editor, exactly where the editor was.
+ *
+ * Absolutely filling the placeholder rather than laid out in it: the capture is
+ * at device scale and one frame behind whatever a drag is doing to the pane, so
+ * an image participating in layout could push its own container around. `cover`
+ * because the placeholder can have been resized in the frame between the capture
+ * and the paint, and a letterboxed editor is more obviously wrong than one
+ * cropped by a pixel.
+ */
+.workbench-still {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  object-position: top left;
+  /* It is scenery. Clicks belong to the overlay in front of it. */
+  pointer-events: none;
+  user-select: none;
+}
+
+/*
+ * The Chorus dock: a project's conversations, and which one the pane is on.
+ *
+ * Above the conversation rather than beside it, because the pane is already
+ * split vertically by the tab strip and a second vertical edge would compete
+ * with it. Absent entirely at one conversation — see `ConversationDock`.
+ */
+/*
+ * This rule used to be `.workspace-pane-content > *:not(.conversation-dock)`,
+ * written when that container had exactly one child. It has three now — the
+ * workbench, the sash and Chorus — and it was setting `flex: 1 1 auto` on **all
+ * of them**.
+ *
+ * It also outranked the column's own `flex-grow: 0`: `.workspace-pane-content >
+ * *:not(.conversation-dock)` scores two classes against one, so source order
+ * could not save it. The visible result was the **9px sash stretched to hundreds
+ * of pixels** and the workbench squeezed into what was left — which reads as the
+ * surface having failed to resize, and is nothing of the kind.
+ *
+ * The equivalent for the Chorus column lives with that column, below.
+ */
+
+/*
+ * The strip, split into a scrolling list and a pinned control.
+ *
+ * The `+` used to be inside the scroller with `margin-left: auto`, which pins it
+ * right only while everything fits — past that the tabs pushed it off the edge
+ * and it could not be reached without scrolling to the end. The overflow moved
+ * onto the tabs so the button can sit outside it.
+ */
+/*
+ * `position: relative` and no clip, so the active tab's overlapping pixel is
+ * painted rather than cut off. An overflow container clips it while the tab's
+ * rect still reports it — the failure `.workspace-tabs` carries four attempts'
+ * worth of notes about.
+ */
+.conversation-dock {
+  position: relative;
+  z-index: 1;
+  flex: 0 0 auto;
+  display: flex;
+  gap: 4px;
+  align-items: flex-end;
+  padding: calc(var(--step) * 1.5) calc(var(--step) * 2) 0;
+  /*
+   * **No border here.** The line under the strip is the *body's* top border, the
+   * way the pane's line is `.workspace-pane-content`'s. It was on the strip, so
+   * the active tab covered that one and the body drew a second line right below
+   * it — two rules a pixel apart under every active tab, which is what read as a
+   * doubled edge.
+   */
+  /*
+   * The pane's own ground, not a surface tint. The strip used to be a lighter
+   * bar with flat pills on it, which read as a toolbar; the tabs are cards
+   * sitting on the transcript now, and a card only reads as sitting on
+   * something if the thing behind it is that something.
+   */
+  background: transparent;
+}
+
+/*
+ * `min-width: 0` is what makes it scroll rather than push. A flex item's default
+ * `min-width: auto` refuses to shrink below its content, so without this the
+ * list would grow past the strip and take the button with it — the same trap
+ * the project preview's conversation rows carry a note about.
+ */
+/*
+ * Pulled down the pixel the active tab overlaps, for the reason
+ * `.workspace-tabs` carries at length: this is an overflow container, and an
+ * overflow container clips the tab's `-1px`. The measurement still reports the
+ * overlap while nothing of it is painted, which is what made that one take four
+ * attempts one level out. Moving the scroller instead of clipping inside it is
+ * the fix, and it is the same fix here.
+ */
+.conversation-dock-tabs {
+  display: flex;
+  flex: 1 1 auto;
+  gap: calc(var(--step) * 1.5);
+  align-items: flex-end;
+  min-width: 0;
+  margin-bottom: -1px;
+  overflow-x: auto;
+  overflow-y: hidden;
+  /* The tabs are the chrome; a scrollbar under them would be chrome on chrome. */
+  scrollbar-width: none;
+  scroll-behavior: smooth;
+}
+
+.conversation-dock-tabs::-webkit-scrollbar {
+  display: none;
+}
+
+/*
+ * A conversation tab is a project tab, one level in.
+ *
+ * Same card with a rounded top sitting on what it opens, same accent border on
+ * the active one, same hover that shows an edge rather than a fill — because the
+ * ground is what says which is open, and filling an inactive tab makes it the
+ * heaviest thing in the strip while the open one looks secondary.
+ *
+ * Smaller, and only smaller: 28px against 34px, 12px text against 13px, a
+ * narrower minimum. The two strips sit one above the other in the same pane, so
+ * they have to read as the same kind of object at two levels rather than as two
+ * unrelated controls — identical would make the inner one compete with the
+ * outer for which is the pane's real tab row.
+ */
+.conversation-dock-tab {
+  position: relative;
+  flex: 0 1 auto;
+  /*
+   * The project tab's own numbers. `min-width` is the one that will bite in a
+   * narrow column — 160px is what stops a tab being a truncated stub, and past
+   * it the strip scrolls, which costs a gesture rather than the name.
+   */
+  min-width: 160px;
+  max-width: 260px;
+  height: 34px;
+  display: flex;
+  align-items: center;
+  margin-bottom: -1px;
+  margin-right: calc(var(--step) * 1.5);
+  border: 1px solid transparent;
+  border-radius: 9px 9px 0 0;
+  background: transparent;
+  color: var(--text-secondary);
+  font: 13px var(--ui-font);
+  white-space: nowrap;
+  text-align: left;
+  text-overflow: ellipsis;
+  cursor: default;
+  outline: none;
+  touch-action: none;
+}
+
+/*
+ * The tab is the frame; this is the label inside it.
+ *
+ * Split when the × arrived, for the reason the project tab is split: a
+ * `<button>` cannot contain a `<button>`, so the close has to be a sibling and
+ * the tab has to become the thing that holds both. `padding-right` leaves the ×
+ * its corner — the project tab reserves 28px for the same reason.
+ */
+.conversation-dock-tab-main {
+  display: flex;
+  align-items: center;
+  flex: 1 1 auto;
+  min-width: 0;
+  height: 100%;
+  padding: 0 28px 0 calc(var(--step) * 3);
+  border: 0;
+  border-radius: inherit;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  overflow: hidden;
+  white-space: nowrap;
+  text-align: left;
+  text-overflow: ellipsis;
+  cursor: default;
+  outline: none;
+  touch-action: none;
+}
+
+/*
+ * Hidden until the tab is hovered or open, like the project tab's.
+ *
+ * A destructive control that is always visible on every tab is one that gets
+ * pressed by accident on the way to somewhere else; one that appears under the
+ * pointer is deliberate by the time it is reachable.
+ */
+.conversation-dock-tab-close {
+  position: absolute;
+  top: 5px;
+  right: 5px;
+  display: grid;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+  opacity: 0;
+}
+
+.conversation-dock-tab:hover .conversation-dock-tab-close,
+.conversation-dock-tab[data-active='true'] .conversation-dock-tab-close,
+.conversation-dock-tab-close:focus-visible {
+  opacity: 1;
+}
+
+/* It ends a session, so it says so on the way in. */
+.conversation-dock-tab-close:hover,
+.conversation-dock-tab-close:focus-visible {
+  background: var(--bg-control);
+  color: var(--danger);
+  outline: none;
+}
+
+/* An edge, not a fill — see the note above. */
+.conversation-dock-tab:not([data-active='true']):hover {
+  border-color: color-mix(in srgb, var(--accent-text) 40%, transparent);
+  color: var(--text-primary);
+}
+
+.conversation-dock-tab:focus-visible {
+  box-shadow: inset 0 0 0 1px var(--muted);
+  outline: none;
+}
+
+/*
+ * The bottom edge is a cover rather than an edge, exactly as the project tab's
+ * is: the tab is pulled down one pixel onto the strip's border to erase it, so
+ * that pixel has to be whatever is underneath. `transparent` shows the very
+ * border it was meant to hide and draws a rule across the tab.
+ */
+/*
+ * The bottom edge is a cover, not an edge — the project tab's rule, verbatim.
+ *
+ * The tab is pulled down one pixel onto the body's top border to erase it, so
+ * that pixel has to be whatever the body is. `transparent` shows exactly the
+ * border it was meant to hide and draws a rule across the tab, which is the
+ * shape of the bug that was visible here. `z-index` is what lets the cover work
+ * at all: the body is a later sibling, so without it the body paints over the
+ * tab.
+ */
+.conversation-dock-tab[data-active='true'] {
+  z-index: 1;
+  border-color: var(--accent-text);
+  border-bottom-color: var(--bg-pane-active);
+  background: var(--bg-pane-active);
+  color: var(--text-primary);
+}
+
+/*
+ * A project pane's two regions — plan §2.4.
+ *
+ * The workbench takes the space and Chorus sits beside it, because that is the
+ * hierarchy: the project is the environment and the conversation is one thing
+ * happening in it. Row rather than column so the transcript keeps a readable
+ * measure while the editor gets the width it needs.
+ *
+ * The workbench region is a **placeholder with a rectangle**. Nothing renders
+ * inside it: main mirrors a `WebContentsView` over the space it occupies, which
+ * is why it needs a size and no content, and why `position: relative` matters —
+ * the error line below is the only thing that ever draws here.
+ */
+.workspace-pane-content {
+  flex-direction: row;
+}
+
+/*
+ * The surface stops 8px short of the divider, always.
+ *
+ * A `WebContentsView` is a native view above this document, so wherever it
+ * reaches, this renderer gets no pointer events. During a drag the sash moves
+ * with the pointer immediately while the view follows a frame or two later over
+ * IPC — so a view flush against the divider covers the sash exactly when the
+ * pointer needs it, and the drag sticks.
+ *
+ * **Permanent rather than applied while dragging.** A gutter that opens on
+ * pointerdown makes the editor visibly jump left the instant you touch the
+ * divider; one that is always there moves nothing, ever, and reads as the
+ * divider's own gutter. 8px is enough for a dropped frame at 60Hz.
+ */
+.workspace-pane-workbench {
+  position: relative;
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
+  /*
+   * Inset from the pane's own edges as well as from the divider, and this half
+   * is not about the sash.
+   *
+   * `.workspace-pane-content` is rounded and clips its children, which works for
+   * every child except this one: the workbench is a native view composited
+   * *above* the document, so `overflow: hidden` cannot touch it and neither can
+   * `border-radius`. A square view filling the box therefore cut the corner off
+   * the curve and painted over the pane's own border along the bottom and left —
+   * which is why the focus outline appeared on three sides and stopped.
+   *
+   * 3px clears a 10px radius: the curve's deepest excursion from the corner is
+   * `r * (1 - 1/√2)`, about 2.9px. So the view sits as a square rectangle inside
+   * an unbroken rounded pane, which is what it looks like in every editor that
+   * has both.
+   */
+  padding: 3px 8px 3px 3px;
+}
+
+.workspace-pane-workbench > .workbench-surface {
+  width: 100%;
+  height: 100%;
+}
+
+.workspace-pane-workbench-error {
+  position: absolute;
+  inset: 12px 12px auto 12px;
+  margin: 0;
+  padding: 8px 12px;
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  background: var(--bg-surface);
+  color: var(--text-primary);
+  font-size: 12px;
+}
+
+/* Chorus beside it: the dock, then the conversation, stacked. */
+/*
+ * Longhand, and `clamp()` on `width` rather than inside the `flex` shorthand.
+ *
+ * `flex: 0 0 clamp(…)` is the obvious way to write this and it is why the
+ * workbench came up squeezed into a third of the pane with the editor wrapping
+ * at twenty characters: a `flex-basis` the parser will not accept invalidates
+ * the **whole** declaration, so the column lost its grow and shrink values too
+ * and fell back to sizing on content. A dropped declaration is silent — there is
+ * no warning anywhere, only a layout that looks like a design decision.
+ */
+/*
+ * A **row** of conversation groups, where it used to be a column of dock + one
+ * transcript.
+ *
+ * The direction flipped when a project's conversations gained groups: the
+ * children here are now one or two `.conversation-column`s side by side, and
+ * each of those is the column that used to be this element.
+ */
+.workspace-pane-chorus {
+  display: flex;
+  flex-direction: row;
+  flex-grow: 0;
+  flex-shrink: 0;
+  flex-basis: auto;
+  width: clamp(340px, 30%, 520px);
+  min-width: 0;
+  min-height: 0;
+  border-left: 1px solid var(--border-default);
+}
+
+/*
+ * With the editor off, Chorus is the pane.
+ *
+ * `flex-grow` alone is not enough: the rule above sets an explicit `width`, and a
+ * flex item's width wins over its ability to grow — so without clearing it the
+ * column stayed at its clamp and sat in the left half of the pane with dead
+ * space beside it. The border goes too; there is nothing on the other side of it
+ * to divide.
+ *
+ * The project's remembered `chorusWidths` entry is untouched by any of this. It is an inline
+ * style that the pane simply stops writing while the editor is off, so switching
+ * back restores the divider exactly where it was left.
+ */
+.workspace-pane-chorus[data-full='true'] {
+  flex-grow: 1;
+  width: auto;
+  border-left: 0;
+}
+
+/*
+ * Each group is the column this element used to be, and its `flex-grow` comes
+ * from the stored size as an inline style.
+ *
+ * `flex-basis: 0` so the growth factors divide the whole width rather than what
+ * is left over after content — with `auto` a long transcript would win space its
+ * stored fraction never asked for.
+ *
+ * **Not `.workspace-pane-chorus > *`.** That was the shape of the rule here
+ * before, and it is the one recorded a few hundred lines up as having inflated a
+ * 9px sash to hundreds of pixels: a universal child selector catches the divider
+ * too, and it outranks the divider's own `flex` on specificity.
+ */
+.conversation-branch {
+  display: flex;
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
+}
+
+/*
+ * `flex-basis: 0` so the growth factors divide the whole space rather than what
+ * is left after content — with `auto` a long transcript would win room its
+ * stored fraction never asked for. The same reason the pane tree does it.
+ */
+.conversation-branch-child {
+  display: flex;
+  flex-basis: 0;
+  min-width: 0;
+  min-height: 0;
+}
+
+.conversation-column {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
+}
+
+/*
+ * Which conversation the keyboard is talking to — round the **body**, not round
+ * the whole group.
+ *
+ * Round the group it enclosed the tab strip too, and the result was the mess in
+ * the screenshot: the strip's bottom border, the active tab's own three-sided
+ * border and the group's top border all met in the same two pixels, each drawn
+ * for a different reason. A tab is a card that sits on the thing it opens, so
+ * the outline belongs on the thing it opens.
+ *
+ * That is also exactly the pane's geometry one level out — strip above,
+ * bordered content below, active tab seated on the content's top edge — so a
+ * person learns the arrangement once and reads it at both levels.
+ */
+.conversation-body {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  /*
+   * Clipped, so the rounded bottom corners are corners rather than a curve with
+   * square content painted over it.
+   *
+   * This was removed once, on the reading that it was cutting the composer's
+   * send button in half. It was — but the button was *outside the composer*,
+   * having overflowed a tool row too wide for a narrow column, so the clip was
+   * reporting a layout bug rather than causing one. `.composer-tools` wraps now
+   * and nothing escapes, which is what makes the clip safe to keep.
+   */
+  overflow: hidden;
+  /*
+   * The resting border is visible, not transparent — it is the line the strip
+   * used to draw, and the active tab's bottom edge is what erases the pixel of
+   * it directly under the tab. Only the colour changes on focus, so nothing
+   * shifts by two pixels.
+   */
+  border: 1px solid var(--border-default);
+  border-radius: 0 0 9px 9px;
+}
+
+.conversation-column[data-focused='true'] .conversation-body {
+  border-color: var(--accent-text);
+}
+
+/*
+ * The transcript fills the body, which fills the column.
+ *
+ * Two rules rather than one because the session moved a level deeper when the
+ * focus outline did: `.conversation-column`'s children are now the strip and the
+ * body, and the session is the body's. A single `.conversation-column *` would
+ * have caught both and is the shape of the rule recorded further up as having
+ * inflated a 9px sash to hundreds of pixels.
+ */
+.conversation-column > *:not(.conversation-dock) {
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+.conversation-body > * {
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+/*
+ * Which group the keyboard and a new conversation will land in — and it is said
+ * the way the pane strip says it, not with a second invention.
+ *
+ * This was an accent line under the focused group's whole strip, which is a
+ * different signal in a different place for the same question one level out.
+ * The convention already in this file: both wear the accent, so colour says "a
+ * tab" rather than "this tab", and the **line** says which is live — solid where
+ * the caret is, dashed where it is not. A colour difference alone reads as two
+ * shades of grey; a dashed edge survives being seen out of the corner of an eye,
+ * and it is WCAG 1.4.1's rule that colour is never the only signal.
+ */
+.conversation-column:not([data-focused='true']) .conversation-dock-tab[data-active='true'] {
+  border-style: dashed;
+  border-color: color-mix(in srgb, var(--accent-text) 55%, transparent);
+  /* Except the edge that is a cover rather than an edge — see the tab's note. */
+  border-bottom-style: solid;
+  border-bottom-color: var(--bg-canvas);
+  /*
+   * And the ground goes back to the untinted one with it, for the reason the
+   * pane tab gives: an unfocused group's transcript never takes the
+   * `--bg-pane-active` tint, so a tab that kept it would put the four-point step
+   * the tint was matched to on every group that is *not* the live one.
+   */
+  background: var(--bg-canvas);
+}
+
+/*
+ * Where a dragged conversation would land.
+ *
+ * Two shapes rather than one colour, because the two answers are different in
+ * kind: **`group`** means it joins this column's strip, so the whole column is
+ * tinted; **`split`** means a new column is about to appear beside this one, so
+ * the edge it would appear on is drawn as a bar. A single highlight for both
+ * would leave "will this split or not" to be guessed from pointer position,
+ * which is the question the feedback exists to answer.
+ */
+.conversation-column[data-drop] {
+  position: relative;
+}
+
+.conversation-column[data-drop]::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  border-radius: 6px;
+}
+
+.conversation-column[data-drop='group']::after {
+  background: color-mix(in srgb, var(--accent-text) 12%, transparent);
+  outline: 1px solid var(--accent-text);
+  outline-offset: -1px;
+}
+
+/*
+ * The half that is about to become a new group, on the side the drop names.
+ *
+ * Four directions, drawn as the actual rectangle the split would occupy —
+ * half the group, on that edge. It was a fixed bar on the right while the drag
+ * only offered one direction, and the bar pointed the wrong way whenever the
+ * action did not. Directional preview means the shading cannot disagree with the
+ * result: both come from the same `direction` on the same target.
+ */
+.conversation-column[data-drop='split']::after {
+  background: color-mix(in srgb, var(--accent-text) 20%, transparent);
+  outline: 1px solid var(--accent-text);
+  outline-offset: -1px;
+}
+
+.conversation-column[data-drop='split'][data-drop-direction='left']::after {
+  right: 50%;
+}
+
+.conversation-column[data-drop='split'][data-drop-direction='right']::after {
+  left: 50%;
+}
+
+.conversation-column[data-drop='split'][data-drop-direction='up']::after {
+  bottom: 50%;
+}
+
+.conversation-column[data-drop='split'][data-drop-direction='down']::after {
+  top: 50%;
+}
+
+/*
+ * The divider between two groups. Same 9px grab target as every other sash; the
+ * orientation follows the branch it sits in, which is why the row/column rules
+ * are split rather than folded into one.
+ */
+.conversation-sash {
+  z-index: 2;
+  background: transparent;
+  -webkit-app-region: no-drag;
+}
+
+.conversation-branch[data-orientation='row'] > .conversation-sash {
+  flex: 0 0 9px;
+  cursor: col-resize;
+  border-left: 1px solid var(--border-default);
+}
+
+.conversation-branch[data-orientation='column'] > .conversation-sash {
+  flex: 0 0 9px;
+  cursor: row-resize;
+  border-top: 1px solid var(--border-default);
+}
+
+.conversation-sash:hover,
+.conversation-sash:focus-visible {
+  background: var(--accent-text);
+}
+
+/*
+ * The `+` that starts a conversation in this group.
+ *
+ * Pushed to the end of the strip with `margin-left: auto` rather than placed
+ * after a spacer, so it stays at the right edge whether the strip holds one tab
+ * or twelve — and it does not scroll away with them, because the strip's
+ * overflow is on the tabs.
+ */
+/* Sits on the strip's baseline with the tabs, one pixel clear of the border. */
+.conversation-dock-add {
+  flex: none;
+  width: 24px;
+  height: 24px;
+  margin-bottom: calc(var(--step) * 0.5);
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: none;
+  color: var(--text-muted);
+  font-size: 15px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.conversation-dock-add:hover,
+.conversation-dock-add:focus-visible {
+  border-color: var(--border-default);
+  color: var(--text-primary);
+}
+
+/*
+ * A project with every conversation ended.
+ *
+ * It rendered nothing here, which reads as a pane that failed rather than one
+ * with nothing in it — and there was no way out, because the only `+` was in the
+ * rail and meant "the most recent project" rather than this one.
+ */
+.conversation-empty {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: calc(var(--step) * 3);
+  padding: calc(var(--step) * 6);
+  color: var(--text-muted);
+  text-align: center;
+}
+
+.conversation-empty > p {
+  margin: 0;
+}
+
+/*
+ * The accent, because it is the only thing to do on this screen.
+ *
+ * A bordered surface button is right where it is one option among several; here
+ * the pane is empty and there is exactly one way forward, so the control should
+ * look like the answer rather than like a choice.
+ */
+.conversation-empty > button {
+  padding: 7px 16px;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  background: var(--accent-text);
+  color: var(--bg-canvas);
+  font: 12px var(--ui-font);
+  cursor: pointer;
+  transition:
+    background 120ms ease,
+    border-color 120ms ease;
+}
+
+.conversation-empty > button:hover,
+.conversation-empty > button:focus-visible {
+  background: color-mix(in srgb, var(--accent-text) 85%, var(--bone));
+  outline: none;
+}
+
+.conversation-empty > button:focus-visible {
+  border-color: var(--bone);
+}
+
+/* The tab in flight, dimmed where it came from. */
+.conversation-dock-tab[data-dragging] {
+  opacity: 0.4;
+}
+
+/*
+ * The workbench/Chorus divider.
+ *
+ * Wider hit area than it looks: 1px of visible line inside 9px of grab target,
+ * the same trade `.workspace-sash` makes. A `col-resize` cursor and a hover tint
+ * are the only affordance — a visible handle would draw a third vertical edge
+ * into a pane that already has two.
+ */
+/* No negative margin on the left: that would put the grab area back over the
+   view the padding above just cleared. It may overlap Chorus, which is ours. */
+.chorus-sash {
+  flex: 0 0 9px;
+  margin: 0 -4px 0 0;
+  z-index: 2;
+  cursor: col-resize;
+  background: transparent;
+  -webkit-app-region: no-drag;
+}
+
+.chorus-sash:hover,
+.chorus-sash:focus-visible {
+  background: linear-gradient(
+    to right,
+    transparent 4px,
+    var(--accent-text) 4px,
+    var(--accent-text) 5px,
+    transparent 5px
+  );
+  outline: none;
 }

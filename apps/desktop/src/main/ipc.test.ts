@@ -16,26 +16,6 @@ vi.mock('electron', () => ({
 
 const { buildHandlers } = await import('./ipc.js')
 
-function runtimeWith(cwd: string, title = 'before') {
-  const setProjectDirectory = vi.fn((_id: string, next: string) => ({
-    cwd: next,
-    // The runtime renames an untouched conversation with the folder it moved to.
-    title: next.split('/').pop() ?? next,
-  }))
-  const runtime = {
-    projectDirectory: () => cwd,
-    conversationTitle: () => title,
-    setProjectDirectory,
-  } as unknown as ChorusRuntime
-  return { runtime, setProjectDirectory }
-}
-
-/** The handler map is keyed by channel; this is how a request reaches one. */
-const choose = async (runtime: ChorusRuntime) =>
-  (await (buildHandlers(runtime)['conversation:chooseCwd'] as (r: unknown) => Promise<unknown>)({
-    conversationId: 'c1',
-  })) as { cwd: string; changed: boolean }
-
 /**
  * Which paths a transcript row may open, decided in main.
  *
@@ -108,56 +88,71 @@ describe('ide:openFile', () => {
    */
 })
 
-describe('conversation:chooseCwd', () => {
-  it('applies the folder that was picked', () => {
-    showOpenDialog.mockResolvedValueOnce({ canceled: false, filePaths: ['/tmp/picked'] })
-    const { runtime, setProjectDirectory } = runtimeWith('/tmp/before')
+/*
+ * `conversation:chooseCwd` had five tests here and they are gone with the
+ * channel. They asserted that picking a folder repointed a conversation, which
+ * is the operation Phase 2 removed: a Conversation belongs to exactly one
+ * Project, and moving a project moves every conversation in it at once.
+ *
+ * What replaces them tests the two halves of that: the start path adopts, and
+ * the channels that could move a room no longer exist.
+ */
+describe('conversation:start', () => {
+  const started = {
+    conversationId: 'c1',
+    participants: ['claude'] as const,
+    profileId: 'read-only',
+    cwd: '/tmp/repo',
+    title: 'repo',
+  }
 
-    return choose(runtime).then((result) => {
-      // Through the runtime, so a picked path is validated and recorded exactly
-      // as a typed one is.
-      expect(setProjectDirectory).toHaveBeenCalledWith('c1', '/tmp/picked')
-      // The title follows the folder's last piece, which is what names a project.
-      expect(result).toEqual({ cwd: '/tmp/picked', title: 'picked', changed: true })
-    })
-  })
-
-  it('changes nothing when the dialog is cancelled', async () => {
-    // The case a driver cannot reach: a native modal cannot be dismissed by one.
-    showOpenDialog.mockResolvedValueOnce({ canceled: true, filePaths: [] })
-    const { runtime, setProjectDirectory } = runtimeWith('/tmp/before')
-
-    expect(await choose(runtime)).toEqual({ cwd: '/tmp/before', title: 'before', changed: false })
-    expect(setProjectDirectory).not.toHaveBeenCalled()
-  })
-
-  it('treats an empty selection as a cancel', async () => {
-    // `canceled: false` with no paths should not reach the runtime as undefined.
-    showOpenDialog.mockResolvedValueOnce({ canceled: false, filePaths: [] })
-    const { runtime, setProjectDirectory } = runtimeWith('/tmp/before')
-
-    expect(await choose(runtime)).toEqual({ cwd: '/tmp/before', title: 'before', changed: false })
-    expect(setProjectDirectory).not.toHaveBeenCalled()
-  })
-
-  it('reports no change when the same folder is picked again', async () => {
-    showOpenDialog.mockResolvedValueOnce({ canceled: false, filePaths: ['/tmp/before'] })
-    const { runtime } = runtimeWith('/tmp/before')
-
-    expect(await choose(runtime)).toEqual({ cwd: '/tmp/before', title: 'before', changed: false })
-  })
-
-  it('opens the panel where the conversation already is', async () => {
-    showOpenDialog.mockResolvedValueOnce({ canceled: true, filePaths: [] })
-    const { runtime } = runtimeWith('/tmp/before')
-    await choose(runtime)
-
-    expect(showOpenDialog).toHaveBeenLastCalledWith(
-      expect.objectContaining({
-        defaultPath: '/tmp/before',
-        properties: ['openDirectory', 'createDirectory'],
-      })
+  const startWith = async (request: unknown) => {
+    const startConversationIn = vi.fn((_options: Record<string, unknown>) =>
+      Promise.resolve(started)
     )
+    const runtime = { startConversationIn } as unknown as ChorusRuntime
+    await (buildHandlers(runtime)['conversation:start'] as (r: unknown) => Promise<unknown>)(
+      request
+    )
+    return startConversationIn
+  }
+
+  it('goes through the adopting entry point, not the project-id one', async () => {
+    // `startConversationIn` turns the directory into a project on the way past.
+    // Calling `startConversation` here instead would need an id the renderer has
+    // no way to produce, which is the bug this routing exists to prevent.
+    const startConversationIn = await startWith({ agents: ['claude'], cwd: '/tmp/repo' })
+    expect(startConversationIn).toHaveBeenCalledWith({ agents: ['claude'], cwd: '/tmp/repo' })
+  })
+
+  it('omits an absent profile rather than passing undefined through', async () => {
+    const startConversationIn = await startWith({ agents: ['claude'], cwd: '/tmp/repo' })
+    expect(Object.keys(startConversationIn.mock.calls[0]?.[0] ?? {})).not.toContain('profileId')
+  })
+
+  it('passes a profile when one is given', async () => {
+    const startConversationIn = await startWith({
+      agents: ['claude'],
+      cwd: '/tmp/repo',
+      profileId: 'trusted',
+    })
+    expect(startConversationIn).toHaveBeenCalledWith(
+      expect.objectContaining({ profileId: 'trusted' })
+    )
+  })
+})
+
+describe('the channels that could move a conversation', () => {
+  /*
+   * A guard rather than a formality. The renderer's controls are gone, but a
+   * live handler would let anything with the preload bridge repoint a room —
+   * and the whole invariant is that this is not expressible, not that nothing
+   * currently asks for it.
+   */
+  it('are not registered at all', () => {
+    const handlers = buildHandlers({} as unknown as ChorusRuntime) as Record<string, unknown>
+    expect(handlers['conversation:setCwd']).toBeUndefined()
+    expect(handlers['conversation:chooseCwd']).toBeUndefined()
   })
 })
 

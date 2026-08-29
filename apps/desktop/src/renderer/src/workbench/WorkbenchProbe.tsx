@@ -129,7 +129,7 @@ export function WorkbenchProbe(): React.JSX.Element | null {
             </header>
             {pane.project !== null && (
               <WorkbenchFrame
-                grant={pane.project.grant}
+                target={{ grant: pane.project.grant }}
                 projectRoot={pane.project.projectRoot}
                 onFailed={setError}
               />

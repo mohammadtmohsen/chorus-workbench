@@ -3,6 +3,7 @@ import {
   WORKBENCH_CONNECTION_CHANNEL,
   WORKBENCH_USER_SETTINGS_READ_CHANNEL,
   WORKBENCH_USER_SETTINGS_WRITE_CHANNEL,
+  WORKBENCH_CONTEXT_CHANNEL,
 } from '../shared/workbench-ipc.js'
 
 /**
@@ -46,23 +47,35 @@ vi.mock('electron', () => ({
   },
 }))
 
-const { CONNECTION_CHANNEL, USER_SETTINGS_READ_CHANNEL, USER_SETTINGS_WRITE_CHANNEL, asConnection } =
-  await import('./workbench.js')
+const {
+  CONNECTION_CHANNEL,
+  USER_SETTINGS_READ_CHANNEL,
+  USER_SETTINGS_WRITE_CHANNEL,
+  CONTEXT_CHANNEL,
+  asConnection,
+} = await import('./workbench.js')
 
 describe('the workbench preload', () => {
   it('names the same channels the shared contract does', () => {
     expect(CONNECTION_CHANNEL).toBe(WORKBENCH_CONNECTION_CHANNEL)
     expect(USER_SETTINGS_READ_CHANNEL).toBe(WORKBENCH_USER_SETTINGS_READ_CHANNEL)
     expect(USER_SETTINGS_WRITE_CHANNEL).toBe(WORKBENCH_USER_SETTINGS_WRITE_CHANNEL)
+    expect(CONTEXT_CHANNEL).toBe(WORKBENCH_CONTEXT_CHANNEL)
   })
 
-  it('exposes exactly three methods, and no fourth', () => {
+  it('exposes exactly four methods, and no fifth', () => {
     // The list, not the count: a method named here is a capability a document
     // running extension code is handed, so which ones they are is the assertion.
     expect(Object.keys(exposed ?? {})).toEqual([
       'connection',
       'readUserSettings',
       'writeUserSettings',
+      /*
+       * Phase 6 slice 6a. It reports and cannot ask: no reply, no path — the
+       * value is already project-relative — and no way to name a project, since
+       * main derives that from the sender.
+       */
+      'reportContext',
     ])
   })
 

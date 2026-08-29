@@ -1,4 +1,5 @@
 import { useEffect, useRef } from 'react'
+import { useShellOverlay } from './workspace/overlay.js'
 
 /**
  * Makes a modal behave like one for a keyboard user.
@@ -16,6 +17,18 @@ import { useEffect, useRef } from 'react'
  */
 export function useDialog<T extends HTMLElement>(onClose: () => void): React.RefObject<T | null> {
   const ref = useRef<T | null>(null)
+
+  /*
+   * A fourth thing, and it belongs here for the same reason as the other three:
+   * every caller mounts this hook exactly while its modal is on screen.
+   *
+   * The workbench is a native `WebContentsView` composited above the DOM, so a
+   * dialog overlapping it is drawn cut in half — the End Session confirmation
+   * was, at the workbench's left edge. Hiding the views for the life of the
+   * dialog is the only fix; putting it in `useDialog` means no future dialog has
+   * to remember. See `workspace/overlay.ts`.
+   */
+  useShellOverlay()
 
   /*
    * The callback, held in a ref so the effect below can depend on nothing.

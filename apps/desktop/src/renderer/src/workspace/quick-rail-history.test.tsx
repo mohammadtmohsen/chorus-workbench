@@ -45,6 +45,9 @@ function railWith(onOpenHistory: () => void): HTMLElement {
     <QuickRail
       sessions={[]}
       starting={false}
+      projects={[]}
+      onAddProject={() => Promise.resolve()}
+      onOpenProject={() => undefined}
       preview={{ open: null, show: () => undefined, hide: () => undefined } as never}
       onNewSession={() => undefined}
       onOpenSettings={() => undefined}
@@ -53,7 +56,7 @@ function railWith(onOpenHistory: () => void): HTMLElement {
       onToggleTerminal={() => undefined}
       onReorderSessions={() => undefined}
       draggingId={null}
-      onSessionPointerDown={() => undefined}
+      onProjectPointerDown={() => undefined}
       consumeSuppressedClick={() => false}
     />
   ).container

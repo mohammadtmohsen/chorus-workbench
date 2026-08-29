@@ -30,7 +30,85 @@ Nothing here can be finished by me alone.
 
 ## Open
 
-### C-062 · Git does not work — no SCM service override is registered
+### C-063 · An extension installs into every project at once, and nothing says so
+
+**Live as of 2026-08-24**, the moment Phase 5 slice 5a made extensions
+installable: Mohamad installed one from Open VSX and it worked.
+
+**One server, one extensions directory.** `workbench-host.ts` spawns a single REH
+with a single `--extensions-dir`, leased by a refcount over open projects. Every
+project pane connects to that same server. So installing ESLint while working in
+one project installs it for every project you will ever open — and disabling or
+uninstalling it does the same, from whichever project you happened to be in.
+
+**VS Code's Extensions view cannot say this**, and that is not a gap in the view.
+In VS Code one window is one remote is one extensions directory, so the statement
+"installed" is unambiguous. Here four panes share one server, and the same word
+means something the person did not ask for.
+
+**The sharp edge is trust.** Workspace trust is decided per project — the prompt
+names one folder — but the extension it gates is global. So trusting project A
+can activate an extension inside project B, which was never trusted, without
+anything being shown in B.
+
+**Predicted by the plan, and now real.** §2.4 lists it among the hazards created
+by choosing a shared REH: *whether one REH serving two roots isolates them well
+enough when its extensions directory and global storage are per-server*. It was
+hypothetical while nothing could be installed.
+
+**Decided 2026-08-24 — accept the shared scope, and say so.** The alternative was
+real and cheaper than first assumed: `IRemoteUserDataProfilesService` is already
+registered by the gallery override, so a profile per project would partition
+extensions on the **same** server rather than needing one server each. It was
+declined anyway — one machine, one person, and an extension set that follows you
+between projects is the behaviour you would want; the cost was a mapping, a
+profile service, and re-installing everything per project.
+
+**The disclosure is the condition of accepting it**, and it is
+`renderer/src/workbench/extension-scope.ts`: a notification on the first install
+and the first uninstall of each surface, saying the change reaches every project.
+At the moment of the action rather than in a document, because a README is read
+once and months before it matters; once per kind per surface, because five
+identical banners are noise by the second.
+
+**The "trust hole" this entry claimed does not exist — withdrawn 2026-08-24.**
+It said trusting project A could activate an extension inside project B, which
+was never trusted. That was reasoned from the architecture (one extensions
+directory, per-project trust) without reading the mechanism, and the mechanism
+disagrees.
+
+`extensionEnablementService.js:566` — `_isDisabledByWorkspaceTrust` returns false
+only when **that workbench's** workspace is trusted, and otherwise reports
+`DisabledByTrustRequirement` for any extension whose manifest does not declare
+`untrustedWorkspaces` support. Each project pane is its own workbench with its own
+workspace and its own trust state, so an untrusted project disables the extension
+for itself no matter what another project trusted.
+
+**Global install with per-workspace activation gating is VS Code's own model**,
+not something the shared REH broke — and Chorus inherits it. Sharing an extensions
+directory shares what is *installed*; it does not share what is *activated*.
+
+**Kept rather than deleted, because the error is the useful part.** This was a
+defect asserted from a plausible shape without checking, which is the same failure
+§4 made about Draw.io and the same one C-057 was withdrawn for. Three times now in
+this plan.
+
+**And 5d's ledger records results under a per-server scope**, which this decision
+makes permanent rather than provisional — noted in its header.
+
+### C-062 · ~~Git does not work — no SCM service override is registered~~ — **closed 2026-08-24**
+
+**All three conditions met.** The override is in the service set at the pinned
+`33.0.9`; a project pane opened on a real repository shows `main` and a sync
+control in the status bar with the source-control icon in the activity bar; and
+Mohamad has since driven the workbench repeatedly with no sign of the
+`registerSCMProvider` refusal.
+
+**The answer worth keeping is the one registration only made askable:** Git works
+against a `vscode-remote://` root through the REH. The branch and the remote
+indicator appeared in the same frame, so the server read it — not a local shim.
+
+The detail below is the original entry, kept for the reasoning.
 
 **Observed in the running workbench**, in the Window output channel, on an
 ordinary project open:
@@ -54,7 +132,43 @@ budgets for it as new work: the first step is a service override, not a feature.
 the source-control view populated for a real repository, and the error absent from
 a clean launch. **Not a Phase 1 blocker** — Phase 1 never claimed Git.
 
-### C-061 · No web worker is configured, so every worker-backed feature fails
+**First of the three, done — 2026-08-24, Phase 4 slice 4a.** The package is
+installed at `33.0.9`, matching the pin the rest of the set is on, and
+`getScmServiceOverride()` is in `services.ts`.
+
+**And the second condition is met — observed 2026-08-24, in the running app.**
+A project pane opened on a real repository shows **`main` and a sync control in
+the status bar**, with the source-control icon present in the activity bar. That
+is the built-in Git extension having registered its provider successfully, which
+is the thing this entry existed to make possible.
+
+**It also answers the question the registration only made askable**: Git works
+against a `vscode-remote://` root through the REH. The status bar reports the
+remote as `127.0.0.1:50677` in the same frame, so the branch was read by the
+server rather than by anything local.
+
+**What is left is the smallest of the three**: nobody has confirmed the
+`Unsupported: SCMService.registerSCMProvider` line is absent from a clean launch's
+Window output. A provider that registers is strong evidence it is gone, but the
+error was the symptom this entry was filed from and it should be read once.
+
+### C-061 · ~~No web worker is configured~~ — **closed 2026-08-24, with one condition moved rather than met**
+
+**Two of three conditions met.** `renderer/src/workbench/workers.ts` installs
+`MonacoEnvironment.getWorker` before `initialize` for four labels —
+`editorWorkerService`, `OutputLinkDetectionWorker`, `LocalFileSearchWorker`,
+`TextMateWorker` — every one read out of the installed packages rather than
+inferred. And the workbench has since been driven through editing, Git, a
+terminal and a debug session with no worker failure.
+
+**The third was never measured, and is being moved rather than quietly dropped.**
+This entry asked for "a note saying whether it moved C-054's reproduction rate —
+measured, not assumed", and nobody has counted anything. Keeping C-061 open on it
+would be wrong: the worker gap is fixed and proven. But so would closing it
+silently, because the question is real. **It belongs to C-054**, which is the
+entry that owns a reproduction rate, and it is recorded there.
+
+The detail below is the original entry, kept for the reasoning.
 
 **Observed repeatedly in one session**, thrown three times inside two seconds:
 
@@ -82,6 +196,23 @@ The board has already paid once for reasoning ahead of the evidence on C-054.
 **Done means**: a `MonacoEnvironment` worker factory registered for the workbench,
 the error absent from a clean launch, and a note saying whether it moved C-054's
 reproduction rate — measured, not assumed.
+
+**First of the three, done — 2026-08-24, Phase 4 slice 4a.**
+`renderer/src/workbench/workers.ts` installs `MonacoEnvironment.getWorker` before
+`initialize`, covering four labels: `editorWorkerService`,
+`OutputLinkDetectionWorker`, `LocalFileSearchWorker` and `TextMateWorker`.
+
+**Every label and module was read out of the installed packages.** The three
+overrides that need a worker each ship their own `./worker` entry;
+`editorWorkerService` has none and comes from the client's own VS Code source
+through the `./vscode/*` export map. `getWorker` rather than `getWorkerUrl`
+because `StandaloneWebWorkerService._createWorker` tries it first, and a URL would
+mean resolving a bare package specifier at runtime, which
+`new URL(…, import.meta.url)` cannot do.
+
+**Still open, and it is the larger half**: nobody has launched the app since. The
+error being gone is unobserved, and whether this moves C-054 at all is exactly the
+kind of claim this entry already says must be measured rather than assumed.
 
 ### C-060 · A loopback REH connection reported 23.5 s latency and an unresponsive extension host
 
@@ -426,6 +557,24 @@ kill a process is a claim that cannot be made. Repeated **in-app** quits are a
 different question and are proved in `quit-gate.test.ts`.
 
 ### C-054 · A file can open to a blank editor — **critical tracked release defect**
+
+**Two changes since the ten-run batch have moved the ground under this entry, and
+neither has been measured against it.** Both arrived in Phase 4 and both are
+plausible causes of a file opening to nothing, so the reproduction rate recorded
+below describes a build that no longer exists.
+
+- **C-061 — no worker was configured.** `MonacoEnvironment.getWorker` was never
+  installed, so every worker-backed service threw, including the editor worker.
+  Moved here from C-061, which asked for "a note saying whether it moved C-054's
+  reproduction rate" and could not answer it: a rate belongs to this entry.
+- **C-060 — 23.5 s latency on a loopback connection**, with the extension host
+  going unresponsive twice inside a minute. A file that opens and shows nothing
+  for sixty seconds is the right shape for an extension host that has stopped
+  answering.
+
+**So the next batch is not a re-run, it is a first run against a different
+build.** Neither of the two above may be written up as the cause until that
+happens — C-057 was withdrawn for exactly this, reasoning ahead of the evidence.
 
 **Mohamad's decision, 2026-08-23: Chorus continues with `monaco-vscode-api` +
 VSCodium REH. The fork pivot is cancelled.** C-054 stops being an architecture gate

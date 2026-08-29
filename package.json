@@ -21,13 +21,15 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "errors": "turbo run typecheck",
-    "check": "pnpm run typecheck && pnpm run lint && pnpm run format:check && pnpm run test",
+    "check": "pnpm run typecheck && pnpm run lint && pnpm run format:check && pnpm run workbench:check && pnpm run test",
     "clean": "turbo run clean && node scripts/rm.mjs node_modules",
     "e2e": "pnpm --filter @chorus/desktop run build && pnpm --filter @chorus/desktop run e2e",
     "package": "pnpm run build && pnpm --filter chorus-vscode run package && pnpm --filter @chorus/desktop run package",
     "app:install": "pnpm --filter @chorus/desktop run app:install",
     "verify:package": "pnpm package && pnpm --filter @chorus/desktop run verify:package",
-    "verify:package:windows": "pnpm package && pnpm --filter @chorus/desktop run verify:package:windows"
+    "verify:package:windows": "pnpm package && pnpm --filter @chorus/desktop run verify:package:windows",
+    "workbench:manifest": "node scripts/workbench-manifest.mjs",
+    "workbench:check": "node scripts/workbench-manifest.mjs --check"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",

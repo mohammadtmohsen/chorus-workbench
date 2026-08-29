@@ -50,7 +50,8 @@ export const AppInfo = z.object({
    * happens to be home".
    *
    * An empty directory has always meant "start at home" — the runtime resolves
-   * it that way on both `startConversation` and `setProjectDirectory`, because
+   * it that way on `startConversationIn`, which adopts the result as a project,
+   * because
    * a directory is a starting point rather than a boundary. But it resolves it
    * *before* the renderer ever sees it, so a session that was never given a
    * project looked identical to one deliberately pointed at home, and there was
@@ -231,6 +232,21 @@ export type IdeProvenanceShape = z.infer<typeof IdeProvenanceShape>
  */
 export const IdeContextPush = z.object({
   conversationId: z.string(),
+  /**
+   * Which editor this came from — Phase 6 slice 6f.
+   *
+   * **Two sources are live at once.** Chorus's embedded workbench reports through
+   * `workbench:context`, and the external VS Code bridge still reports over its
+   * socket. Before this field the renderer had no way to tell them apart, so the
+   * composer labelled everything `VS Code` — including a selection made in
+   * Chorus's own editor, which is a disclosure saying the wrong thing about where
+   * a person's code is going.
+   *
+   * Disclosure is the reason this is in the payload rather than inferred. The
+   * pill exists to answer "what am I about to send, and from where"; an answer
+   * the renderer guesses is not an answer.
+   */
+  editor: z.enum(['workbench', 'external']),
   status: IdeStatusShape,
   file: z
     .object({
@@ -349,15 +365,25 @@ export const IPC_CONTRACT = {
     /** Several agents share one conversation — that is the point of Chorus. */
     request: z.object({
       agents: z.array(z.enum(['codex', 'claude'])).min(1),
-      /** Empty means "start at home" — a directory is a starting point, not a boundary. */
-      cwd: z.string(),
+      /*
+       * The project it belongs to, and the `cwd` that used to be here is gone.
+       *
+       * That field let the renderer name any directory, and an empty one meant
+       * "start at home" — so a conversation could be created somewhere nobody
+       * had adopted, which is the thing Phase 2 spent its whole length making
+       * impossible everywhere else. A session is started **in a project** now,
+       * and a project is only ever made by a person choosing a folder from a
+       * native dialog.
+       */
+      projectId: z.string().min(1),
       profileId: z.string().optional(),
     }),
     response: z.object({
       conversationId: z.string(),
       participants: z.array(z.enum(['codex', 'claude'])),
       profileId: z.string(),
-      /** Where the session actually started, which may not be what was asked for. */
+      /** The project's root, resolved. Still returned because the UI shows it. */
+      projectId: z.string(),
       cwd: z.string(),
       /** Defaults to the folder's name; the user can rename it. */
       title: z.string(),
@@ -432,6 +458,7 @@ export const IPC_CONTRACT = {
           conversationId: z.string(),
           participants: z.array(z.enum(['codex', 'claude'])),
           profileId: z.string(),
+          projectId: z.string(),
           cwd: z.string(),
           title: z.string(),
           /** Counted out of the log against the saved watermark, not remembered. */
@@ -575,6 +602,7 @@ export const IPC_CONTRACT = {
         z.object({
           conversationId: z.string(),
           title: z.string(),
+          projectId: z.string(),
           cwd: z.string(),
           agents: z.array(z.string()),
           updatedAt: z.number().int(),
@@ -598,6 +626,7 @@ export const IPC_CONTRACT = {
       conversationId: z.string(),
       participants: z.array(z.enum(['codex', 'claude'])),
       profileId: z.string(),
+      projectId: z.string(),
       cwd: z.string(),
       title: z.string(),
       unread: z.number().int().min(0),
@@ -680,24 +709,6 @@ export const IPC_CONTRACT = {
   },
 
   /**
-   * Starts the same room again with nothing said in it.
-   *
-   * Returns a *new* conversation: the old transcript stays in the log rather
-   * than being erased, and the agents get fresh sessions rather than a context
-   * they were asked to ignore.
-   */
-  'conversation:restart': {
-    request: z.object({ conversationId: z.string() }),
-    response: z.object({
-      conversationId: z.string(),
-      participants: z.array(z.enum(['codex', 'claude'])),
-      profileId: z.string(),
-      cwd: z.string(),
-      title: z.string(),
-    }),
-  },
-
-  /**
    * Writes pasted bytes down and returns the path.
    *
    * Base64 because the bridge carries JSON; a screenshot is a few megabytes
@@ -711,11 +722,14 @@ export const IPC_CONTRACT = {
   /**
    * A folder to attach, chosen from a real dialog.
    *
-   * Deliberately not `conversation:chooseCwd`, which opens the same dialog and
-   * then **sets the project directory**. Attaching a folder and moving the
-   * project are different intentions, and one control doing both silently is the
-   * kind of thing nobody notices until an agent is working in the wrong tree.
-   * This one takes no conversation and changes no state; it returns a path.
+   * It takes no conversation and changes no state; it returns a path.
+   *
+   * That used to distinguish it from `conversation:chooseCwd`, which opened the
+   * same dialog and then repointed a conversation. That channel is gone — a
+   * conversation belongs to a project and cannot be moved — so this is now the
+   * only folder dialog in the product, and both callers ask it the same
+   * question: attaching a folder to a message, and choosing where the next
+   * session opens. Neither moves anything that already exists.
    */
   'files:chooseDirectory': {
     request: z.void(),
@@ -788,17 +802,135 @@ export const IPC_CONTRACT = {
     response: z.object({ title: z.string() }),
   },
 
-  'conversation:chooseCwd': {
-    request: z.object({ conversationId: z.string() }),
-    response: z.object({ cwd: z.string(), title: z.string(), changed: z.boolean() }),
+  /*
+   * The project registry, reachable at last — Phase 2's exit criteria say a
+   * project can be created, opened, renamed and removed, and until now the last
+   * two existed only as methods nothing could call.
+   *
+   * **No channel here takes a path.** Creating one is `conversation:start`
+   * adopting the folder a person picked from a native dialog; everything else
+   * names a project by id. That is the same rule `workbench:open` follows, and
+   * it is what stops the registry becoming a second way to say "open this
+   * arbitrary directory".
+   */
+  /**
+   * Add Project: the native chooser, and a project for whatever comes back.
+   *
+   * No arguments and no path in either direction's request, for the reason
+   * `workbench:chooseProject` gives — choosing *is* the authorisation, and a
+   * `defaultPath` would be the renderer naming a directory one indirection out.
+   * `project` is null when the dialog was cancelled.
+   *
+   * Idempotent by way of `adopt`: picking a folder that is already a project
+   * returns that project rather than a second one, and `created` says which
+   * happened so the rail can say "you already have this" instead of quietly
+   * doing nothing visible.
+   */
+  'project:adopt': {
+    request: z.object({}).strict(),
+    response: z.object({
+      project: z
+        .object({ id: z.string(), name: z.string(), root: z.string(), created: z.boolean() })
+        .nullable(),
+    }),
   },
 
-  /** Repoints the conversation's project directory while it is open. */
-  'conversation:setCwd': {
-    request: z.object({ conversationId: z.string(), cwd: z.string() }),
-    /** The title comes back because an untouched one follows the folder. */
-    response: z.object({ cwd: z.string(), title: z.string() }),
+  'project:list': {
+    request: z.object({}).strict(),
+    response: z.object({
+      projects: z.array(
+        z.object({
+          id: z.string(),
+          name: z.string(),
+          root: z.string(),
+          lastOpenedAt: z.number(),
+          /** How many of this project's conversations are open right now. */
+          openConversations: z.number().int().min(0),
+          /**
+           * What agents in this project may do — one answer for every
+           * conversation in it. Null means the project has never been asked and
+           * the renderer should show whatever the app's default profile is,
+           * rather than inventing one of its own.
+           */
+          profileId: z.string().nullable(),
+          /**
+           * The cast. **Null is not an empty cast** — it is "never asked", which
+           * is every project that predates the setting. An empty array is a
+           * project somebody deliberately emptied, and the two must render
+           * differently or the second one silently regains its agents.
+           */
+          agentIds: z.array(z.enum(['codex', 'claude'])).nullable(),
+        })
+      ),
+    }),
   },
+
+  'project:rename': {
+    request: z.object({ projectId: z.string(), name: z.string() }),
+    response: z.object({ name: z.string() }),
+  },
+
+  /**
+   * Sets what agents may do in a project, and in everything running in it.
+   *
+   * This replaces `policy:set`'s role for a live conversation. A profile is an
+   * answer about a *place* — "agents may write in this repository" — so asking
+   * it once per conversation both repeated the question and allowed two rooms in
+   * one directory to disagree about what could be run there.
+   *
+   * Main writes the project's row first and then moves its live conversations,
+   * each of which appends its own `policy.changed`: the row is current state and
+   * the log is what happened.
+   */
+  'project:setProfile': {
+    request: z.object({ projectId: z.string(), profileId: z.string() }),
+    response: z.object({ profileId: z.string() }),
+  },
+
+  /**
+   * Sets the project's cast, and reconciles every live conversation to it.
+   *
+   * An empty array is accepted and means it: a project with no agents. What
+   * cannot be expressed here is "never asked" — that is the absence of an
+   * answer, and only a project that has never been set is in it.
+   */
+  'project:setAgents': {
+    request: z.object({ projectId: z.string(), agentIds: z.array(z.enum(['codex', 'claude'])) }),
+    response: z.object({ agentIds: z.array(z.enum(['codex', 'claude'])) }),
+  },
+
+  /**
+   * Drops a project from the registry.
+   *
+   * Refused while any of its conversations is open, and that refusal is the
+   * point rather than a convenience: those rooms resolve their root through this
+   * record, so removing it under them would leave a conversation whose directory
+   * cannot be answered — and the failure would surface later, somewhere else, as
+   * an agent unable to start.
+   */
+  'project:forget': {
+    request: z.object({ projectId: z.string() }),
+    response: z.object({ forgotten: z.boolean() }),
+  },
+
+  /*
+   * `conversation:chooseCwd` and `conversation:setCwd` were here, and both are
+   * gone rather than reshaped.
+   *
+   * They were the two ways a conversation could change its own directory — one
+   * from a native dialog, one from any string the renderer cared to send. A
+   * Project now owns the development environment and a Conversation belongs to
+   * exactly one Project, so neither operation has a meaning: the room cannot
+   * move on its own, and moving the project moves every room in it at once,
+   * which is `ProjectService.relocate` and not a conversation channel.
+   *
+   * **Choosing a folder still works and did not need a channel of its own.**
+   * `files:chooseDirectory` below already opens the same dialog and is
+   * documented as the deliberately non-mutating twin — "it takes no conversation
+   * and changes no state; it returns a path". The renderer now uses it to decide
+   * where the *next* conversation opens, which is the only question a folder
+   * picker is still allowed to answer.
+   */
   'conversation:close': {
     request: z.object({ conversationId: z.string() }),
     response: z.object({ ok: z.literal(true) }),
@@ -950,33 +1082,6 @@ export const IPC_CONTRACT = {
    * never what words the agent is handed. `aside:open` needs an excerpt because
    * it names a passage in someone else's conversation; this one cannot.
    */
-  /**
-   * Branch the conversation you are in into a side task, in its own room.
-   *
-   * Not `conversation:start`, which knows nothing about what you were looking
-   * at, and not `aside:promote`, which needs an aside — and an aside is
-   * read-only by construction, so opening one purely to promote it was a way of
-   * obtaining a room rather than of asking a question.
-   *
-   * The parent is untouched: nothing is appended to it and its agent is not
-   * interrupted.
-   */
-  'conversation:spinOff': {
-    request: z.object({
-      conversationId: z.string(),
-      agentId: z.enum(['codex', 'claude']),
-      brief: z.string().min(1),
-      profileId: z.string(),
-    }),
-    response: z.object({
-      conversationId: z.string(),
-      participants: z.array(z.enum(['codex', 'claude'])),
-      profileId: z.string(),
-      cwd: z.string(),
-      title: z.string(),
-      unread: z.number().int().min(0),
-    }),
-  },
 
   'aside:restate': {
     request: z.object({
@@ -1010,6 +1115,7 @@ export const IPC_CONTRACT = {
       conversationId: z.string(),
       participants: z.array(z.enum(['codex', 'claude'])),
       profileId: z.string(),
+      projectId: z.string(),
       cwd: z.string(),
       title: z.string(),
       unread: z.number().int().min(0),
@@ -1048,252 +1154,6 @@ export const IPC_CONTRACT = {
         createdAt: z.number().int(),
       })
     ),
-  },
-  /**
-   * The repository as it stands on disk, not as the log describes it. Those
-   * differ after a crash, a manual edit, or a denied approval.
-   */
-  'workspace:read': {
-    request: z.object({
-      conversationId: z.string(),
-      /**
-       * Compare against this branch instead of showing uncommitted work.
-       *
-       * Optional, so the old call — and the modal review sheet that still makes
-       * it — keeps meaning exactly what it did.
-       */
-      base: z.string().optional(),
-      committedOnly: z.boolean().optional(),
-      /**
-       * Whether the caller will render the hunks.
-       *
-       * The Changes panel says `false` while it is showing Monaco, which aligns
-       * two whole files fetched through `workspace:fileVersions` and never
-       * looks at a hunk. Every file still comes back with its counts and its
-       * status letter, so the list is identical — what is skipped is building,
-       * validating twice and cloning several thousand line objects that nothing
-       * renders. Absent means true, so `ReviewPanel` and the handoff are
-       * unchanged.
-       */
-      hunks: z.boolean().optional(),
-    }),
-    response: z.object({
-      status: z.object({
-        branch: z.string().nullable(),
-        upstream: z.string().nullable(),
-        ahead: z.number().int(),
-        behind: z.number().int(),
-        clean: z.boolean(),
-        files: z.array(
-          z.object({
-            path: z.string(),
-            from: z.string().optional(),
-            // Must track `FileState` in `packages/workspace/src/status.ts`.
-            // `ignored` is absent there by decision, not by omission.
-            state: z.enum([
-              'added',
-              'modified',
-              'deleted',
-              'renamed',
-              'copied',
-              'typechanged',
-              'untracked',
-              'conflicted',
-            ]),
-            staged: z.boolean(),
-            unstaged: z.boolean(),
-          })
-        ),
-      }),
-      diff: z.array(
-        z.object({
-          path: z.string(),
-          oldPath: z.string(),
-          added: z.number().int(),
-          removed: z.number().int(),
-          binary: z.boolean(),
-          // Computed by `parseDiff` from git's own headers and, until 2026-08-19,
-          // dropped here — so the renderer could not tell an added file from a
-          // renamed one and would have had to guess from the hunks, which
-          // `diff.ts` explicitly warns against.
-          status: z.enum(['added', 'removed', 'modified', 'renamed']),
-          hunks: z.array(
-            z.object({
-              header: z.string(),
-              lines: z.array(
-                z.object({
-                  kind: z.enum(['context', 'added', 'removed', 'meta']),
-                  text: z.string(),
-                  before: z.number().int().optional(),
-                  after: z.number().int().optional(),
-                })
-              ),
-            })
-          ),
-        })
-      ),
-      problem: z.string().nullable(),
-      /**
-       * Which baseline the diff is against, or null for the working tree.
-       *
-       * Null also when a base was asked for and could not be resolved — the diff
-       * is then empty and `problem` says why. A panel labelled "vs develop" that
-       * is quietly showing something else is worse than one showing nothing.
-       */
-      comparison: z.object({ base: z.string(), mergeBase: z.string() }).nullable().default(null),
-    }),
-  },
-  /**
-   * The branches a base picker can offer, most recently committed first.
-   *
-   * Separate from `workspace:read` because it changes on a different clock: the
-   * diff is re-read whenever the tree moves, and the branch list only when
-   * someone opens the picker.
-   */
-  'workspace:branches': {
-    request: z.object({ conversationId: z.string() }),
-    response: z.object({
-      branches: z.array(z.object({ name: z.string(), remote: z.boolean(), head: z.boolean() })),
-      problem: z.string().nullable(),
-    }),
-  },
-  /**
-   * One directory of the project, for the file tree.
-   *
-   * One directory per call, not a walk: a recursive listing of a repository
-   * with `node_modules` is hundreds of thousands of entries crossing IPC to
-   * draw a tree that is collapsed. `path` is repo-relative; `''` is the root.
-   */
-  'workspace:tree': {
-    request: z.object({ conversationId: z.string(), path: z.string() }),
-    response: z.object({
-      entries: z.array(z.object({ name: z.string(), path: z.string(), directory: z.boolean() })),
-      problem: z.string().nullable(),
-    }),
-  },
-  /**
-   * One file's two versions, whole, for an editor that aligns them itself.
-   *
-   * Separate from `workspace:read` and requested per file on purpose: the panel
-   * lists forty changed files and shows one, and sending every file's full text
-   * to draw a list would be most of a repository over IPC.
-   */
-  'workspace:fileVersions': {
-    request: z.object({
-      conversationId: z.string(),
-      path: z.string(),
-      base: z.string().optional(),
-      committedOnly: z.boolean().optional(),
-    }),
-    response: z.object({
-      /**
-       * `absent` is an answer, not a failure — a file added on this branch has
-       * no original side, and a deleted one has no modified side.
-       */
-      original: FileVersionShape,
-      modified: FileVersionShape,
-      /**
-       * A digest of the working-tree bytes this read saw.
-       *
-       * Echoed back on save so a write can be refused when the file moved
-       * underneath the editor. Null when the modified side did not come from
-       * disk — an absent file, a binary one, or a `committedOnly` comparison —
-       * none of which is writable anyway.
-       */
-      sha: z.string().nullable(),
-      problem: z.string().nullable(),
-    }),
-  },
-  /**
-   * The person saving a file they edited in Chorus.
-   *
-   * **The first write into a project tree this app has ever had.** Everything
-   * else that mutates a project goes through an agent's CLI and the approval
-   * gate; this does not, and deliberately — the engine exists to decide what an
-   * *agent* may do on someone's behalf, and a person editing their own file on
-   * their own machine has already given the only consent there is.
-   *
-   * What the engine's primitive is for here is the path: every write resolves
-   * through `resolveWithinRoot`, so a `..` cannot escape however it arrived.
-   */
-  'workspace:write': {
-    request: z.object({
-      conversationId: z.string(),
-      path: z.string(),
-      content: z.string(),
-      /**
-       * The digest the editor loaded, so a save that would overwrite someone
-       * else's work is refused rather than silently winning.
-       *
-       * Null means "there was no file when I loaded this" — a save that creates
-       * one. The check is the same either way: what is on disk now has to match
-       * what the editor was looking at.
-       */
-      expectedSha: z.string().nullable(),
-      /** Save anyway, after the conflict has been shown and accepted. */
-      force: z.boolean().optional(),
-    }),
-    response: z.object({
-      /**
-       * `conflict` is not a failure — it is the file having moved, and the only
-       * outcome the panel offers a choice about.
-       */
-      outcome: z.enum(['written', 'conflict', 'failed']),
-      problem: z.string().nullable(),
-      /** What was appended to the log, so the caller knows the agents were told. */
-      added: z.number().int(),
-      removed: z.number().int(),
-      /**
-       * The digest of what was written, for the editor to save against next.
-       *
-       * Autosave writes repeatedly, and every write after the first would be
-       * refused as stale without this — the editor's loaded `sha` describes a
-       * version its own previous save replaced. Null unless the outcome is
-       * `written`.
-       */
-      sha: z.string().nullable().default(null),
-    }),
-  },
-  /**
-   * Source control the person drives from the panel.
-   *
-   * One channel rather than five, because the shape is the same and the
-   * difference is a verb. Every one of these is a *mutation the user asked
-   * for*: no adapter can reach them, and the permission engine is not
-   * consulted, because the engine decides what an **agent** may do on someone's
-   * behalf and this is the someone.
-   *
-   * `discard` is the only one that destroys work, and the only one the panel
-   * confirms first — see `ConfirmDiscard`. The refusal to offer `--force` on a
-   * push is in `git-write.ts`, where it belongs.
-   */
-  'workspace:git': {
-    request: z.object({
-      conversationId: z.string(),
-      action: z.enum(['stage', 'unstage', 'discard', 'commit', 'push']),
-      /** For stage/unstage/discard. Empty for the rest. */
-      paths: z.array(z.string()).default([]),
-      /** For commit. */
-      message: z.string().optional(),
-      /** For push, when the branch has no upstream yet. */
-      setUpstream: z.boolean().optional(),
-    }),
-    response: z.object({
-      problem: z.string().nullable(),
-      /** The new commit, or the branch pushed — whatever names what happened. */
-      detail: z.string().nullable(),
-    }),
-  },
-  /**
-   * Move remote-tracking refs, so a base branch is current.
-   *
-   * A request and never a timer. It talks to the network on someone else's
-   * connection and can prompt for a passphrase, which is not a thing to do
-   * behind their back — see `fetchRef`.
-   */
-  'workspace:fetch': {
-    request: z.object({ conversationId: z.string(), remote: z.string().optional() }),
-    response: z.object({ problem: z.string().nullable() }),
   },
   /** Recent log entries, already redacted as they were written. */
   /**
@@ -1657,10 +1517,6 @@ export type LimitsPush = z.infer<typeof LimitsPush>
  * panel re-ask for the thing it is actually displaying. It also keeps the
  * watcher cheap: no diff runs unless a panel is open to want one.
  */
-export const WORKSPACE_PUSH_CHANNEL = 'workspace:changed'
-
-export const WorkspaceChangedPush = z.object({ conversationId: z.string() })
-export type WorkspaceChangedPush = z.infer<typeof WorkspaceChangedPush>
 
 export const CONTEXT_PUSH_CHANNEL = 'agents:context'
 
@@ -1823,9 +1679,6 @@ export interface ChorusApi extends WorkbenchShellApi {
   readonly reopenConversation: (
     request: IpcRequest<'conversation:reopen'>
   ) => Promise<IpcResponse<'conversation:reopen'>>
-  readonly restartConversation: (
-    request: IpcRequest<'conversation:restart'>
-  ) => Promise<IpcResponse<'conversation:restart'>>
   readonly previewFile: (
     request: IpcRequest<'files:preview'>
   ) => Promise<IpcResponse<'files:preview'>>
@@ -1840,12 +1693,24 @@ export interface ChorusApi extends WorkbenchShellApi {
   readonly renameConversation: (
     request: IpcRequest<'conversation:rename'>
   ) => Promise<IpcResponse<'conversation:rename'>>
-  readonly chooseProjectDirectory: (
-    request: IpcRequest<'conversation:chooseCwd'>
-  ) => Promise<IpcResponse<'conversation:chooseCwd'>>
-  readonly setProjectDirectory: (
-    request: IpcRequest<'conversation:setCwd'>
-  ) => Promise<IpcResponse<'conversation:setCwd'>>
+  readonly adoptProject: (
+    request: IpcRequest<'project:adopt'>
+  ) => Promise<IpcResponse<'project:adopt'>>
+  readonly listProjects: (
+    request: IpcRequest<'project:list'>
+  ) => Promise<IpcResponse<'project:list'>>
+  readonly renameProject: (
+    request: IpcRequest<'project:rename'>
+  ) => Promise<IpcResponse<'project:rename'>>
+  readonly forgetProject: (
+    request: IpcRequest<'project:forget'>
+  ) => Promise<IpcResponse<'project:forget'>>
+  readonly setProjectProfile: (
+    request: IpcRequest<'project:setProfile'>
+  ) => Promise<IpcResponse<'project:setProfile'>>
+  readonly setProjectAgents: (
+    request: IpcRequest<'project:setAgents'>
+  ) => Promise<IpcResponse<'project:setAgents'>>
   readonly onScale: (listener: (scale: number) => void) => () => void
   readonly onSettings: (listener: (settings: IpcResponse<'settings:read'>) => void) => () => void
   readonly onDiagnostic: (listener: (diagnostic: DiagnosticPush) => void) => () => void
@@ -1914,29 +1779,7 @@ export interface ChorusApi extends WorkbenchShellApi {
   readonly setProfile: (request: IpcRequest<'policy:set'>) => Promise<IpcResponse<'policy:set'>>
   readonly readDiagnostics: () => Promise<IpcResponse<'diagnostics:read'>>
   readonly exportDiagnostics: () => Promise<IpcResponse<'diagnostics:export'>>
-  readonly readWorkspace: (
-    request: IpcRequest<'workspace:read'>
-  ) => Promise<IpcResponse<'workspace:read'>>
-  readonly readBranches: (
-    request: IpcRequest<'workspace:branches'>
-  ) => Promise<IpcResponse<'workspace:branches'>>
-  readonly fetchRemote: (
-    request: IpcRequest<'workspace:fetch'>
-  ) => Promise<IpcResponse<'workspace:fetch'>>
-  readonly readTree: (
-    request: IpcRequest<'workspace:tree'>
-  ) => Promise<IpcResponse<'workspace:tree'>>
-  readonly writeProjectFile: (
-    request: IpcRequest<'workspace:write'>
-  ) => Promise<IpcResponse<'workspace:write'>>
-  readonly runGitAction: (
-    request: IpcRequest<'workspace:git'>
-  ) => Promise<IpcResponse<'workspace:git'>>
-  readonly readFileVersions: (
-    request: IpcRequest<'workspace:fileVersions'>
-  ) => Promise<IpcResponse<'workspace:fileVersions'>>
   /** Fires when a conversation's repository moves. Carries no diff — see the channel. */
-  readonly onWorkspaceChanged: (listener: (payload: WorkspaceChangedPush) => void) => () => void
   readonly ideExtensionStatus: () => Promise<IpcResponse<'ide:extensionStatus'>>
   readonly ideInstallExtension: () => Promise<IpcResponse<'ide:installExtension'>>
   readonly ideOpenProject: (
@@ -1963,9 +1806,6 @@ export interface ChorusApi extends WorkbenchShellApi {
   readonly promoteAside: (
     request: IpcRequest<'aside:promote'>
   ) => Promise<IpcResponse<'aside:promote'>>
-  readonly spinOffTask: (
-    request: IpcRequest<'conversation:spinOff'>
-  ) => Promise<IpcResponse<'conversation:spinOff'>>
   readonly forwardAside: (
     request: IpcRequest<'aside:forward'>
   ) => Promise<IpcResponse<'aside:forward'>>

@@ -3,9 +3,9 @@ import { useShallow } from 'zustand/react/shallow'
 import type { AgentId } from '@chorus/shared'
 import type { SessionRowState } from './session-row.js'
 import {
-  CLOSED_CHANGES_PANEL,
+  CHORUS_WIDTH,
   CLOSED_TERMINAL_PANEL,
-  type ChangesPanelState,
+  type ConversationArrangement,
   type TerminalPanelState,
   type WorkspaceLayoutNode,
   type WorkspacePane,
@@ -46,7 +46,16 @@ import {
 function selectActions(state: WorkspaceStore): WorkspaceActions {
   const {
     hydrate,
-    openSession,
+    openProject,
+    clearConversationUnread,
+    showConversation,
+    showConversationIn,
+    focusConversationGroup,
+    adoptConversation,
+    splitConversation,
+    placeConversation,
+    closeConversationTab,
+    setConversationSizes,
     activateTab,
     focusPane,
     closeTab,
@@ -59,10 +68,12 @@ function selectActions(state: WorkspaceStore): WorkspaceActions {
     setPlanning,
     setBranchSizes,
     equalizeBranch,
-    replaceSession,
     removeSession,
+    removeProject,
     setSidebarHidden,
     setSidebarWidth,
+    setChorusWidth,
+    toggleWorkbench,
     toggleGlobalTerminal,
     setGlobalTerminalOpen,
     setGlobalTerminalHeight,
@@ -74,16 +85,6 @@ function selectActions(state: WorkspaceStore): WorkspaceActions {
     removeSessionTerminalTab,
     activateGlobalTerminal,
     activateSessionTerminal,
-    toggleSessionChanges,
-    setSessionChangesHeight,
-    setSessionChangesWidth,
-    setSessionChangesListWidth,
-    setSessionChangesBase,
-    setSessionChangesCommittedOnly,
-    setSessionChangesSelection,
-    setSessionChangesView,
-    setSessionChangesColumn,
-    toggleSessionChangesExpanded,
     ingestEvents,
     ingestContextUsage,
     ingestTasks,
@@ -91,7 +92,16 @@ function selectActions(state: WorkspaceStore): WorkspaceActions {
   } = state
   return {
     hydrate,
-    openSession,
+    openProject,
+    clearConversationUnread,
+    showConversation,
+    showConversationIn,
+    focusConversationGroup,
+    adoptConversation,
+    splitConversation,
+    placeConversation,
+    closeConversationTab,
+    setConversationSizes,
     activateTab,
     focusPane,
     closeTab,
@@ -104,10 +114,12 @@ function selectActions(state: WorkspaceStore): WorkspaceActions {
     setPlanning,
     setBranchSizes,
     equalizeBranch,
-    replaceSession,
     removeSession,
+    removeProject,
     setSidebarHidden,
     setSidebarWidth,
+    setChorusWidth,
+    toggleWorkbench,
     toggleGlobalTerminal,
     setGlobalTerminalOpen,
     setGlobalTerminalHeight,
@@ -119,16 +131,6 @@ function selectActions(state: WorkspaceStore): WorkspaceActions {
     removeSessionTerminalTab,
     activateGlobalTerminal,
     activateSessionTerminal,
-    toggleSessionChanges,
-    setSessionChangesHeight,
-    setSessionChangesWidth,
-    setSessionChangesListWidth,
-    setSessionChangesBase,
-    setSessionChangesCommittedOnly,
-    setSessionChangesSelection,
-    setSessionChangesView,
-    setSessionChangesColumn,
-    toggleSessionChangesExpanded,
     ingestEvents,
     ingestContextUsage,
     ingestTasks,
@@ -189,14 +191,18 @@ export function useSessionTerminal(conversationId: string): TerminalPanelState {
 }
 
 /**
- * One conversation's Changes panel.
+ * One project's conversation arrangement, or undefined when it has none.
  *
- * `CLOSED_CHANGES_PANEL` is a module constant for the reason `useSessionTerminal`
- * gives directly above: a fresh object literal in the selector never equals
- * itself, and the pane would re-render on every store change.
+ * Undefined is a real answer — a project with no conversations has no
+ * arrangement at all — and the column renders nothing rather than inventing a
+ * group. See the schema's own note on why absent differs from empty.
  */
-export function useSessionChanges(conversationId: string): ChangesPanelState {
-  return useWorkspaceStore((state) => state.changes[conversationId] ?? CLOSED_CHANGES_PANEL)
+export function useConversationGroups(
+  projectId: string | null
+): ConversationArrangement | undefined {
+  return useWorkspaceStore((state) =>
+    projectId === null ? undefined : state.conversationGroups[projectId]
+  )
 }
 
 export function useSidebarHidden(): boolean {
@@ -207,12 +213,39 @@ export function useSidebarWidth(): number {
   return useWorkspaceStore((state) => state.sidebarWidth)
 }
 
+/** Whether this project's workbench is on screen. Absent means on. */
+export function useWorkbenchShown(projectId: string | null): boolean {
+  return useWorkspaceStore((state) =>
+    projectId === null ? false : state.workbenchHidden[projectId] !== true
+  )
+}
+
 /**
- * The conversation showing in the focused pane — the one the sidebar marks
- * active, and the only one of the three leaf states that is about focus rather
- * than about being on screen at all.
+ * One project's workbench/Chorus divider, falling back to the default.
+ *
+ * The fallback lives here rather than in the store so that a project which has
+ * never been dragged holds *no* entry — the record then says exactly which
+ * projects somebody has arranged, and seeding every project with 420 on first
+ * sight would make that unanswerable.
  */
-export function useActiveConversationId(): string | null {
+export function useChorusWidth(projectId: string | null): number {
+  return useWorkspaceStore((state) =>
+    projectId === null
+      ? CHORUS_WIDTH.default
+      : (state.chorusWidths[projectId] ?? CHORUS_WIDTH.default)
+  )
+}
+
+/**
+ * The **project** showing in the focused pane.
+ *
+ * Renamed from `useActiveConversationId`, which is what it was called while a
+ * tab was a conversation. Phase 3 re-keyed `activeTabId` to a project id and
+ * left the name, so the one caller — the rail, comparing it against
+ * `session.conversationId` to mark the active tile — silently stopped matching
+ * anything. A wrong name survives a re-key in a way a wrong type does not.
+ */
+export function useActiveProjectId(): string | null {
   return useWorkspaceStore((state) =>
     state.focusedPaneId === null ? null : (state.panes[state.focusedPaneId]?.activeTabId ?? null)
   )
@@ -306,20 +339,157 @@ export function useSessionRowState(conversationId: string): SessionRowState {
 }
 
 /**
- * Which conversations have a tab somewhere, as one comparable string.
+ * Every pulse in a project, folded into one row.
  *
- * The list needs this to mark rows "open elsewhere", and it needs it once
- * rather than once per row — twenty rows each walking the layout tree is twenty
- * subscriptions to a value that is the same for all of them. A `Set` would be a
+ * **One subscription per project, not one per conversation.** A project with six
+ * conversations rendering six `useSessionRowState` calls would be six store
+ * subscriptions to produce one 44px tile, and the rules of hooks make it
+ * impossible anyway: the count changes as conversations open and close.
+ *
+ * `ids` is joined into a string before it is closed over, for the reason the
+ * comment above `useSessionRowState` gives — the caller builds a new array every
+ * render, and a dependency on its identity would defeat the memo. `useShallow`
+ * compares the flattened result, so the selector re-running is free.
+ *
+ * The fold is a sum for the counts and a *union* for `working`: two agents
+ * working in two different conversations of one project is two voices, and the
+ * tile's dot needs to know it cannot name one of them.
+ */
+export function useProjectRowState(conversationIds: readonly string[]): SessionRowState {
+  const key = conversationIds.join(',')
+  const flat = useWorkspaceStore(
+    useShallow((state: WorkspaceStore) => {
+      let approvals = 0
+      let questions = 0
+      let unread = 0
+      let failed = false
+      const working = new Set<string>()
+      for (const id of key === '' ? [] : key.split(',')) {
+        const pulse = state.pulses[id]
+        if (pulse === undefined) continue
+        approvals += pulse.approvalIds.length
+        questions += pulse.questionIds.length
+        unread += pulse.unread
+        failed = failed || pulse.failed
+        for (const agentId of pulse.working) working.add(agentId)
+      }
+      return { approvals, questions, unread, failed, working: [...working].sort().join(',') }
+    })
+  )
+  return useMemo(
+    () => ({
+      approvals: flat.approvals,
+      questions: flat.questions,
+      working: flat.working === '' ? [] : (flat.working.split(',') as AgentId[]),
+      unread: flat.unread,
+      failed: flat.failed,
+    }),
+    [flat.approvals, flat.questions, flat.working, flat.unread, flat.failed]
+  )
+}
+
+/**
+ * Which **projects** have a tab somewhere, as one comparable string.
+ *
+ * It was `useOpenConversationKey` and the name outlived the truth: `pane.tabs`
+ * holds project ids since the re-key, so this has been answering a different
+ * question than it claimed for as long as tabs have been projects. Renamed
+ * rather than left, because a wrong name is the one kind of error that survives
+ * a re-key — nothing about a string of ids fails to compile when the ids change
+ * meaning.
+ *
+ * The rail needs this to mark tiles "open elsewhere", and it needs it once
+ * rather than once per tile — twenty tiles each walking the layout tree is
+ * twenty subscriptions to a value that is the same for all of them. A `Set` would be a
  * new object on every store change and never compare equal, so the selector
  * returns the primitive and the caller rebuilds the set behind a `useMemo`.
  */
-export function useOpenConversationKey(): string {
+export function useOpenProjectKey(): string {
   return useWorkspaceStore((state) =>
     leafPaneIds(state.layout)
       .flatMap((paneId) => state.panes[paneId]?.tabs ?? [])
       .join('\n')
   )
+}
+
+/** What the project card reports across all of a project's conversations. */
+export interface ProjectFacts {
+  readonly tokens: number
+  readonly costUsd: number | null
+  /** The fullest context window in the project, or null if nobody has reported. */
+  readonly contextPercent: number | null
+  readonly tasks: readonly {
+    readonly id: string
+    readonly kind: string
+    readonly description: string
+    readonly agentId: string
+    readonly conversationId: string
+  }[]
+}
+
+/**
+ * The card's figures, summed over a project rather than read from one room.
+ *
+ * Spend adds up, because each conversation's total is already the sum of its
+ * agents' latest reports. Context does **not**: it is a percentage of a window,
+ * and adding two of them produces a number that means nothing. The fullest one
+ * is the answer to the question the figure exists for — "is anything about to
+ * run out of room".
+ *
+ * Serialised through JSON so the memo compares by value. The join-a-string trick
+ * the hooks above use does not reach a task list, and returning a fresh array
+ * from the selector would re-render the card on every store change. The list is
+ * a handful of short objects; this is cheaper than the render it prevents.
+ */
+export function useProjectFacts(conversationIds: readonly string[]): ProjectFacts {
+  const key = conversationIds.join(',')
+  const encoded = useWorkspaceStore((state) => {
+    let tokens = 0
+    let cost: number | null = null
+    let context: number | null = null
+    const tasks: ProjectFacts['tasks'][number][] = []
+    for (const conversationId of key === '' ? [] : key.split(',')) {
+      const pulse = state.pulses[conversationId]
+      if (pulse === undefined) continue
+      tokens += pulse.tokens
+      if (pulse.costUsd != null) cost = (cost ?? 0) + pulse.costUsd
+      for (const percent of Object.values(pulse.contextByActor)) {
+        context = context === null ? percent : Math.max(context, percent)
+      }
+      for (const [agentId, list] of Object.entries(pulse.tasksByActor)) {
+        for (const task of list) {
+          tasks.push({
+            id: task.id,
+            kind: task.kind,
+            description: task.description,
+            agentId,
+            conversationId,
+          })
+        }
+      }
+    }
+    return JSON.stringify({ tokens, costUsd: cost, contextPercent: context, tasks })
+  })
+  return useMemo(() => JSON.parse(encoded) as ProjectFacts, [encoded])
+}
+
+/**
+ * Whether **every** conversation in a project is planning.
+ *
+ * One subscription reading the whole `planning` record, not one per session:
+ * the list's length changes as conversations open and close, so a loop of
+ * `usePlanning` calls would break the rules of hooks the first time it did.
+ *
+ * Empty is false rather than vacuously true. A project with nothing running is
+ * not in plan mode; it is in no mode, and a control reading On over an empty
+ * project would claim a restraint that is restraining nothing.
+ */
+export function useEveryPlanning(conversationIds: readonly string[]): boolean {
+  const key = conversationIds.join(',')
+  return useWorkspaceStore((state) => {
+    if (key === '') return false
+    return key.split(',').every((id) => state.planning[id] === true)
+  })
 }
 
 /** Reading and reasoning only. Runtime state; it never survives a relaunch. */

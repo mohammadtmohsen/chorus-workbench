@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { ErrorNotice } from './ErrorNotice.js'
 import { useTranslation } from 'react-i18next'
 import type { TFunction } from 'i18next'
-import type { AgentProbeResult } from '../../shared/ipc.js'
+import type { AgentProbeResult, IpcResponse } from '../../shared/ipc.js'
 import { ChorusLogo } from './ChorusLogo.js'
 import { LogViewer } from './LogViewer.js'
 import { fail, Session, type AgentId, type SessionCarry, type SessionInfo } from './Session.js'
@@ -24,7 +24,7 @@ import { setRunningPlatform } from './shortcuts.js'
  * drops you into whichever pane you left open is a second thing to do rather
  * than the thing done, so it opens the conversation it was about.
  */
-function raise(notice: Notice, title: string, t: TFunction): void {
+function raise(notice: Notice, title: string, t: TFunction, projectId: string): void {
   try {
     const banner = new Notification(t(`notify.${notice.kind}`, { agent: notice.actor }), {
       body: title,
@@ -34,7 +34,8 @@ function raise(notice: Notice, title: string, t: TFunction): void {
     })
     banner.onclick = () => {
       void window.chorus.focusWindow()
-      useWorkspaceStore.getState().openSession(notice.conversationId)
+      useWorkspaceStore.getState().openProject(projectId)
+      useWorkspaceStore.getState().clearConversationUnread(notice.conversationId)
     }
   } catch {
     // Denied at the OS level, or unsupported. Silence is the only sane response
@@ -58,6 +59,8 @@ export function App(): React.JSX.Element {
   const [home, setHome] = useState('')
   const [probes, setProbes] = useState<AgentProbeResult[] | null>(null)
   const [profiles, setProfiles] = useState<{ id: string; name: string; summary: string }[]>([])
+  /** The registry, most recently opened first — the order the rail draws in. */
+  const [projects, setProjects] = useState<IpcResponse<'project:list'>['projects']>([])
   const [defaults, setDefaults] = useState<Defaults>({
     /* Matches the main process's default, and has to keep matching it: this
        stands only until `readSettings` answers, but a session started inside
@@ -90,6 +93,8 @@ export function App(): React.JSX.Element {
   const [explainLanguage, setExplainLanguage] = useState('')
   const [sessions, setSessions] = useState<SessionInfo[]>([])
   const sessionsRef = useRef<SessionInfo[]>([])
+  /** So the opening session of a launch is opened once, and only on a launch. */
+  const autoStarted = useRef(false)
   const carries = useRef(new Map<string, SessionCarry>())
   /**
    * Unanswered approvals and questions per conversation, for the dock badge.
@@ -154,13 +159,19 @@ export function App(): React.JSX.Element {
    */
   const openFromHistory = useCallback(
     async (conversationId: string) => {
-      if (sessionsRef.current.some((session) => session.conversationId === conversationId)) {
-        useWorkspaceStore.getState().openSession(conversationId)
+      const already = sessionsRef.current.find(
+        (session) => session.conversationId === conversationId
+      )
+      if (already !== undefined) {
+        useWorkspaceStore.getState().openProject(already.projectId)
+        useWorkspaceStore.getState().clearConversationUnread(conversationId)
         return
       }
       const reopened = await window.chorus.reopenConversation({ conversationId })
       updateSessions((current) => [...current, reopened])
-      useWorkspaceStore.getState().openSession(reopened.conversationId)
+      useWorkspaceStore.getState().openProject(reopened.projectId)
+      useWorkspaceStore.getState().adoptConversation(reopened.projectId, reopened.conversationId)
+      useWorkspaceStore.getState().clearConversationUnread(reopened.conversationId)
     },
     [updateSessions]
   )
@@ -227,7 +238,7 @@ export function App(): React.JSX.Element {
           const session = sessionsRef.current.find(
             (s) => s.conversationId === notice.conversationId
           )
-          raise(notice, session?.title ?? '', t)
+          raise(notice, session?.title ?? '', t, session?.projectId ?? '')
         }
       }),
     [t, markSeenSoon]
@@ -361,6 +372,12 @@ export function App(): React.JSX.Element {
     window.chorus.probeAgents().then(setProbes).catch(fail(setError))
     window.chorus.profiles().then(setProfiles).catch(fail(setError))
     window.chorus
+      .listProjects({})
+      .then(({ projects: listed }) => {
+        setProjects(listed)
+      })
+      .catch(fail(setError))
+    window.chorus
       .readSettings()
       .then(({ agents, cwd, profileId, explainLanguage: language }) => {
         setDefaults({ agents, cwd, profileId })
@@ -414,15 +431,25 @@ export function App(): React.JSX.Element {
               attached: held?.attached ?? [],
               following: held?.following ?? true,
               scrollTop: held?.scrollTop ?? 0,
-              ideIncluded: held?.ideIncluded ?? true,
             })
           }
           useWorkspaceStore.getState().hydrate(
             workspace,
             merged.map((session) => session.conversationId),
+            [...new Set(merged.map((session) => session.projectId))],
             // Counted by the main process out of the log, against the watermark
             // saved when each card was last on screen.
-            Object.fromEntries(reopened.map((session) => [session.conversationId, session.unread]))
+            Object.fromEntries(reopened.map((session) => [session.conversationId, session.unread])),
+            /*
+             * Which conversations each project holds. The two flat lists above
+             * cannot express it, and the inner columns are built from exactly
+             * this — a project missing here has its arrangement dropped rather
+             * than kept pointing at conversations nobody is running.
+             */
+            merged.reduce<Record<string, string[]>>((byProject, session) => {
+              ;(byProject[session.projectId] ??= []).push(session.conversationId)
+              return byProject
+            }, {})
           )
           /*
            * Plan mode, seeded after the hydrate that clears it.
@@ -507,25 +534,86 @@ export function App(): React.JSX.Element {
     }
   }, [])
 
+  /*
+   * The projects rail's data. Refreshed rather than patched after anything that
+   * could change it, because `openConversations` is a count main computes and a
+   * renderer guessing at it would drift the moment a session ended anywhere else.
+   */
+  const refreshProjects = useCallback(async () => {
+    try {
+      const { projects: listed } = await window.chorus.listProjects({})
+      setProjects(listed)
+      return listed
+    } catch (error) {
+      fail(setError)(error)
+      return []
+    }
+  }, [])
+
+  /*
+   * Starting a session, now in a project rather than in a directory.
+   *
+   * `defaults.cwd` used to decide this, which meant a session could be created
+   * in a folder nobody had adopted — and on the first launch of all, before
+   * settings had loaded, in the home directory. There is no path in this
+   * function any more: without a project there is nothing to start, and Add
+   * Project is the affordance that fixes that.
+   */
+  const startIn = useCallback(
+    (projectId: string) => {
+      setError(null)
+      setStarting(true)
+      window.chorus
+        .startConversation({
+          agents: defaults.agents,
+          projectId,
+          profileId: defaults.profileId,
+        })
+        .then(async (session) => {
+          updateSessions((current) => [...current, session])
+          useWorkspaceStore.getState().openProject(session.projectId)
+          /* A tab for it, in the focused group. Without this the conversation
+             streams into a project that has nowhere to show it until relaunch. */
+          useWorkspaceStore.getState().adoptConversation(session.projectId, session.conversationId)
+          useWorkspaceStore.getState().clearConversationUnread(session.conversationId)
+          await refreshProjects()
+        })
+        .catch(fail(setError))
+        .finally(() => {
+          setStarting(false)
+        })
+    },
+    [defaults, updateSessions, refreshProjects]
+  )
+
+  /*
+   * `+` starts in the most recently opened project, which is what the list is
+   * ordered by. It is disabled when there are none, so this is a guard rather
+   * than a fallback — silently adopting something would be inventing a project
+   * the person did not choose.
+   */
   const start = useCallback(() => {
+    const mostRecent = projects[0]
+    if (mostRecent === undefined) return
+    startIn(mostRecent.id)
+  }, [projects, startIn])
+
+  const addProject = useCallback(async () => {
     setError(null)
-    setStarting(true)
-    window.chorus
-      .startConversation({
-        agents: defaults.agents,
-        cwd: defaults.cwd,
-        profileId: defaults.profileId,
-      })
-      .then((session) => {
-        updateSessions((current) => [...current, session])
-        useWorkspaceStore.getState().openSession(session.conversationId)
-        setDefaults((current) => ({ ...current, cwd: session.cwd }))
-      })
-      .catch(fail(setError))
-      .finally(() => {
-        setStarting(false)
-      })
-  }, [defaults, updateSessions])
+    try {
+      const { project } = await window.chorus.adoptProject({})
+      if (project === null) return
+      const listed = await refreshProjects()
+      // A folder that was already a project opens rather than announcing itself;
+      // a new one starts its first conversation, because an empty project has
+      // nothing to show and Add Project is not a filing exercise.
+      if (project.created || listed.every((p) => p.openConversations === 0)) {
+        startIn(project.id)
+      }
+    } catch (error) {
+      fail(setError)(error)
+    }
+  }, [refreshProjects, startIn])
 
   /*
    * The first session waits for the settings, not just for the restore.
@@ -545,33 +633,24 @@ export function App(): React.JSX.Element {
    * Confirmed rather than assumed: the settings on this machine name a real
    * folder, and the session still opened at home.
    */
+  /*
+   * Two conditions were implicit before and are not any more.
+   *
+   * It needs a **project**, because `start()` cannot invent one; and it must fire
+   * **once per launch**, because the moment it also waited on `projects` it
+   * became able to fire when the first project was adopted — racing
+   * `addProject`'s own start and giving two conversations for one click. "The
+   * opening session of a launch" was always the intent; it used to be enforced
+   * by the fact that `sessions.length > 0` right afterwards, which is a
+   * consequence rather than a guard.
+   */
   useEffect(() => {
+    if (autoStarted.current) return
     if (!restored || !settingsRead || starting || sessions.length > 0 || error !== null) return
+    if (projects.length === 0) return
+    autoStarted.current = true
     start()
-  }, [restored, settingsRead, starting, sessions.length, error, start])
-
-  const applyRestart = useCallback(
-    (previousId: string, restarted: SessionInfo) => {
-      carries.current.delete(previousId)
-      updateSessions((current) =>
-        current.map((session) => (session.conversationId === previousId ? restarted : session))
-      )
-      useWorkspaceStore.getState().replaceSession(previousId, restarted.conversationId)
-    },
-    [updateSessions]
-  )
-
-  const restart = useCallback(
-    (conversationId: string) => {
-      window.chorus
-        .restartConversation({ conversationId })
-        .then((restarted) => {
-          applyRestart(conversationId, restarted)
-        })
-        .catch(fail(setError))
-    },
-    [applyRestart]
-  )
+  }, [restored, settingsRead, starting, sessions.length, error, projects.length, start])
 
   /**
    * An aside stops being a footnote and becomes a room.
@@ -587,7 +666,11 @@ export function App(): React.JSX.Element {
         try {
           const promoted = await window.chorus.promoteAside({ asideId, profileId })
           updateSessions((current) => [...current, promoted])
-          useWorkspaceStore.getState().openSession(promoted.conversationId)
+          useWorkspaceStore.getState().openProject(promoted.projectId)
+          useWorkspaceStore
+            .getState()
+            .adoptConversation(promoted.projectId, promoted.conversationId)
+          useWorkspaceStore.getState().clearConversationUnread(promoted.conversationId)
         } catch (error) {
           fail(setError)(error)
         }
@@ -605,28 +688,6 @@ export function App(): React.JSX.Element {
    * nothing is appended to it and its agent is not interrupted, which is the
    * entire point of the action.
    */
-  const spinOffTask = useCallback(
-    (conversationId: string, agentId: 'codex' | 'claude', brief: string) => {
-      void (async () => {
-        try {
-          const task = await window.chorus.spinOffTask({
-            conversationId,
-            agentId,
-            brief,
-            // Able to change things, because a side task that cannot is the
-            // aside we already have. Changed per room from its own menu.
-            profileId: 'workspace-write',
-          })
-          updateSessions((current) => [...current, task])
-          useWorkspaceStore.getState().openSession(task.conversationId)
-        } catch (error) {
-          fail(setError)(error)
-        }
-      })()
-    },
-    [updateSessions]
-  )
-
   /**
    * A session card dropped at a new place in the rail.
    *
@@ -661,14 +722,32 @@ export function App(): React.JSX.Element {
 
   const endNow = useCallback(
     (conversationId: string) => {
+      const ending = sessionsRef.current.find((s) => s.conversationId === conversationId)
       carries.current.delete(conversationId)
       updateSessions((current) =>
         current.filter((session) => session.conversationId !== conversationId)
       )
       useWorkspaceStore.getState().removeSession(conversationId)
+      /*
+       * The project's tab closes only when its last conversation has gone, and
+       * that decision is here because this is the layer that can see the others.
+       *
+       * Ending one of three conversations used to close the tab it was in,
+       * because the tab was the conversation. Under project tabs the same call
+       * would take the other two off screen while they carried on running in
+       * main — the sharpest form of the UI disagreeing with what is actually
+       * alive.
+       */
+      if (ending !== undefined) {
+        const siblings = sessionsRef.current.some(
+          (session) => session.projectId === ending.projectId
+        )
+        if (!siblings) useWorkspaceStore.getState().removeProject(ending.projectId)
+      }
       window.chorus.closeConversation({ conversationId }).catch(fail(setError))
+      void refreshProjects()
     },
-    [updateSessions]
+    [updateSessions, refreshProjects]
   )
 
   /*
@@ -689,7 +768,6 @@ export function App(): React.JSX.Element {
    * renderer while three other sessions stream into it.
    */
   const [confirming, setConfirming] = useState<{
-    readonly kind: 'restart' | 'end'
     readonly conversationId: string
     readonly working: boolean
   } | null>(null)
@@ -702,21 +780,14 @@ export function App(): React.JSX.Element {
    * only needs the answer at the moment it opens, and a turn finishing while
    * someone reads a sentence does not change what the sentence should have said.
    */
-  const ask = useCallback((kind: 'restart' | 'end', conversationId: string) => {
+  const ask = useCallback((conversationId: string) => {
     const pulse = useWorkspaceStore.getState().pulses[conversationId]
-    setConfirming({ kind, conversationId, working: (pulse?.working.length ?? 0) > 0 })
+    setConfirming({ conversationId, working: (pulse?.working.length ?? 0) > 0 })
   }, [])
-
-  const askRestart = useCallback(
-    (conversationId: string) => {
-      ask('restart', conversationId)
-    },
-    [ask]
-  )
 
   const askEnd = useCallback(
     (conversationId: string) => {
-      ask('end', conversationId)
+      ask(conversationId)
     },
     [ask]
   )
@@ -770,33 +841,6 @@ export function App(): React.JSX.Element {
     [updateSessions]
   )
 
-  /*
-   * A panel the sidenav asked for, held until the session it belongs to is
-   * mounted. Opening one means activating that session first — the panels read
-   * a transcript, and a background session does not have one on screen.
-   */
-  const [panelRequest, setPanelRequest] = useState<{
-    conversationId: string
-    panel: 'review' | 'summary'
-  } | null>(null)
-
-  /*
-   * The door back to those two panels.
-   *
-   * This state survived the sidenav's removal and its only caller did not, so
-   * `setPanelRequest` was being called with `null` and nothing else — Summary and
-   * Review still worked and could not be reached. The hover card asks for them
-   * now.
-   *
-   * `openSession` first, and that is the comment above made operational: a panel
-   * reads a mounted transcript, so requesting one for a background session has
-   * to put it on screen before the request means anything.
-   */
-  const openPanel = useCallback((conversationId: string, panel: 'review' | 'summary') => {
-    useWorkspaceStore.getState().openSession(conversationId)
-    setPanelRequest({ conversationId, panel })
-  }, [])
-
   /** What a conversation may do, changed from wherever the profile is shown. */
   const applyProfile = useCallback(
     async (conversationId: string, profileId: string) => {
@@ -817,49 +861,18 @@ export function App(): React.JSX.Element {
     [updateSessions, remember]
   )
 
-  /** Where a conversation is pointed, changed from wherever the path is shown. */
-  const setCwd = useCallback(
-    (conversationId: string, cwd: string, title: string) => {
-      updateSessions((current) =>
-        current.map((candidate) =>
-          candidate.conversationId === conversationId ? { ...candidate, cwd, title } : candidate
-        )
-      )
-      remember({ cwd })
-    },
-    [updateSessions, remember]
-  )
-
-  const chooseFolder = useCallback(
-    async (conversationId: string) => {
-      try {
-        const { cwd, title } = await window.chorus.chooseProjectDirectory({ conversationId })
-        setCwd(conversationId, cwd, title)
-      } catch (error) {
-        fail(setError)(error)
-      }
-    },
-    [setCwd]
-  )
-
   /*
-   * A path typed rather than picked, and an empty one meaning "no folder".
+  /*
+   * `setCwd`, `chooseFolder`, `setFolder` and then `chooseStartFolder` all stood
+   * here in turn, and all four are gone.
    *
-   * The runtime has always read an empty directory as "start at home" — a
-   * directory is a starting point, not a boundary — so clearing the field is
-   * how a session goes back to having no project of its own.
+   * The first three were the renderer's half of a conversation owning a mutable
+   * directory. `chooseStartFolder` replaced them for one slice as a picker that
+   * chose where the *next* session opened — honest, but still a path in the
+   * renderer's hands, and still a folder that nobody had adopted. `addProject`
+   * above is what it becomes: the same dialog, opened by main, producing a
+   * project rather than a string.
    */
-  const setFolder = useCallback(
-    async (conversationId: string, cwd: string) => {
-      try {
-        const applied = await window.chorus.setProjectDirectory({ conversationId, cwd })
-        setCwd(conversationId, applied.cwd, applied.title)
-      } catch (error) {
-        fail(setError)(error)
-      }
-    },
-    [setCwd]
-  )
 
   /*
    * The IPC and the error live here rather than in the control, because the
@@ -886,6 +899,83 @@ export function App(): React.JSX.Element {
       }
     },
     [setParticipants]
+  )
+
+  /**
+   * The three project-level writes the rail's card makes.
+   *
+   * Each refreshes the project list rather than patching it. The list is small,
+   * main is the thing that decided what the value became — `setProjectAgents`
+   * folds duplicates, `setProjectProfile` resolves the id through the policy
+   * engine — and patching it here would be a second copy of that arithmetic,
+   * drifting. It is the same argument `refreshProjects` already makes for
+   * adopt and forget.
+   *
+   * Agents also reach every live conversation in the project, so the *session*
+   * list has to be refreshed too: main added or removed participants, and
+   * nothing else would tell the panes.
+   */
+  const renameProject = useCallback(
+    (projectId: string, name: string) => {
+      const clean = name.trim()
+      if (clean === '') return
+      window.chorus
+        .renameProject({ projectId, name: clean })
+        .then(() => refreshProjects())
+        .catch(fail(setError))
+    },
+    [refreshProjects]
+  )
+
+  const chooseProjectProfile = useCallback(
+    async (projectId: string, profileId: string) => {
+      try {
+        await window.chorus.setProjectProfile({ projectId, profileId })
+        await refreshProjects()
+      } catch (error) {
+        fail(setError)(error)
+      }
+    },
+    [refreshProjects]
+  )
+
+  const toggleProjectAgent = useCallback(
+    async (projectId: string, agentId: AgentId, present: boolean) => {
+      /*
+       * The cast to write is derived from what the card is showing, which for a
+       * never-asked project is the union of its conversations' participants —
+       * see `ProjectSettings`. Deriving it again here rather than passing it
+       * down keeps the toggle's argument a single agent, and the two derivations
+       * agree because both read the same session list.
+       */
+      const project = projects.find((candidate) => candidate.id === projectId)
+      if (project === undefined) return
+      const mine = sessionsRef.current.filter((session) => session.projectId === projectId)
+      const current: readonly AgentId[] = project.agentIds ?? [
+        ...new Set(mine.flatMap((session) => session.participants)),
+      ]
+      const next = present
+        ? current.filter((id) => id !== agentId)
+        : [...new Set([...current, agentId])]
+      try {
+        await window.chorus.setProjectAgents({ projectId, agentIds: next })
+        await refreshProjects()
+        /*
+         * Main reconciled every live conversation in the project, so the panes
+         * have to be told. Patched from `next` rather than re-listed: main's
+         * fanout is `allSettled`, so a conversation whose agent failed to launch
+         * would be overwritten here by a list that has not caught up either —
+         * and one extra `conversation:list` per toggle buys nothing over the
+         * value main just confirmed.
+         */
+        for (const session of mine) {
+          setParticipants(session.conversationId, [...next])
+        }
+      } catch (error) {
+        fail(setError)(error)
+      }
+    },
+    [projects, refreshProjects, setParticipants]
   )
 
   /*
@@ -954,9 +1044,49 @@ export function App(): React.JSX.Element {
     </>
   )
 
-  if (restoring || (sessions.length === 0 && error === null)) {
+  if (restoring) {
     return <div className="empty" aria-busy="true" />
   }
+  /*
+   * No projects yet: the first-launch screen, and the only way out of it.
+   *
+   * This branch used to be the same blank `aria-busy` div as `restoring`, and it
+   * was survivable only because the auto-start effect immediately created a
+   * session in `defaults.cwd`. A session cannot be created without a project any
+   * more, so that escape is gone and the blank div became permanent — no rail,
+   * therefore no Add Project, therefore no way to ever leave it. It rendered as
+   * a black window.
+   *
+   * The plan describes exactly this screen: "the clean product starts with an
+   * empty Projects rail and one primary action: Add Project."
+   */
+  if (sessions.length === 0 && projects.length === 0 && error === null) {
+    return (
+      <>
+        <div className="empty">
+          <ChorusLogo label={t('app.name')} />
+          <h1>{t('app.name')}</h1>
+          <p>{t('project.firstRun')}</p>
+          <button
+            type="button"
+            className="primary"
+            onClick={() => {
+              void addProject()
+            }}
+          >
+            {t('rail.addProject')}
+          </button>
+        </div>
+        {sheets}
+      </>
+    )
+  }
+  /*
+   * With projects but no open conversation we fall through to the full stage
+   * rather than to a blank div. The rail is the way back in — clicking a project
+   * starts a conversation in it — and hiding it because nothing is open is what
+   * made the no-project case unrecoverable one branch above.
+   */
   if (sessions.length === 0) {
     return (
       <>
@@ -1013,10 +1143,9 @@ export function App(): React.JSX.Element {
         sessions={sessions}
         starting={starting}
         onNewSession={start}
+        onStartInProject={startIn}
         onRename={rename}
-        onRestart={askRestart}
         onEnd={askEnd}
-        onOpenPanel={openPanel}
         onCommitLayout={commitLayout}
         onReorderSessions={moveSession}
         onOpenSettings={() => {
@@ -1028,8 +1157,12 @@ export function App(): React.JSX.Element {
         profiles={profiles}
         installed={installed}
         onToggleAgent={toggleAgent}
-        onChooseFolder={chooseFolder}
-        onSetFolder={setFolder}
+        onRenameProject={renameProject}
+        onToggleProjectAgent={toggleProjectAgent}
+        onChooseProjectProfile={chooseProjectProfile}
+        projects={projects}
+        onAddProject={addProject}
+        onOpenProject={startIn}
         home={home}
         onChooseProfile={applyProfile}
         renderSession={(session, focused, paneId) => (
@@ -1040,51 +1173,32 @@ export function App(): React.JSX.Element {
             onActivate={() => {
               useWorkspaceStore.getState().focusPane(paneId)
             }}
-            panelRequest={
-              panelRequest?.conversationId === session.conversationId
-                ? panelRequest.panel
-                : undefined
-            }
-            onPanelOpened={() => {
-              setPanelRequest(null)
-            }}
             carry={carries.current.get(session.conversationId)}
             onCarry={keepCarry}
             onPromoteAside={promoteAside}
-            onSpinOff={spinOffTask}
             /* Read once here rather than per pane: it decides whether Explain
                exists under every reply, and four panes asking the same question
                of the same file is four answers that must agree. */
             explainLanguage={explainLanguage}
-            /* The same two handlers the session menu is given, so a button in
-               the composer and a row in the menu do one thing, not two. */
-            onRestart={() => {
-              askRestart(session.conversationId)
-            }}
-            onEnd={() => {
-              askEnd(session.conversationId)
-            }}
           />
         )}
       />
 
       {sheets}
       {/*
-        Last, so it covers the sheets as well as the workspace. Restart and End
-        are reachable from the composer, which is behind a sheet often enough.
+        Last, so it covers the sheets as well as the workspace. End is reachable
+        from the composer, which is behind a sheet often enough.
       */}
       {confirming !== null && (
         <ConfirmSessionAction
-          kind={confirming.kind}
           working={confirming.working}
           onCancel={() => {
             setConfirming(null)
           }}
           onConfirm={() => {
-            const { kind, conversationId } = confirming
+            const { conversationId } = confirming
             setConfirming(null)
-            if (kind === 'end') endNow(conversationId)
-            else restart(conversationId)
+            endNow(conversationId)
           }}
         />
       )}

@@ -388,13 +388,41 @@ describe('what main will open, and what it refuses', () => {
     )
   })
 
-  it('refuses a project id, because nothing resolves one yet', async () => {
-    // Fail-closed, and named rather than absent: the arm is in the schema so the
-    // channel's shape is settled while it is cheap, and ProjectService fills the
-    // lookup behind it.
+  it('refuses a project id when no registry was wired', async () => {
+    // Fail-closed rather than falling through to the grant branch, where
+    // `target.grant` is not even present. A build that forgot to inject the
+    // resolver must refuse, not misread the request as something else.
     await expect(
       handlers.get('workbench:open')?.({ sender: shell }, { projectId: 'anything' })
-    ).rejects.toThrow(/is known to this window/)
+    ).rejects.toThrow(/No project registry is wired/)
+  })
+
+  /*
+   * The wired half. Re-registering only reassigns the module-level resolver, and
+   * the registration is restored in the `finally` so the surrounding file keeps
+   * the unwired default every other test was written against.
+   */
+  it('opens a project id against the injected registry, and passes its refusal through', async () => {
+    const adopted = new Map([['known', ROOT_A]])
+    surface.registerWorkbenchHandlers(undefined, (projectId) => {
+      const root = adopted.get(projectId)
+      if (root === undefined) throw new Error(`No project with id ${projectId}`)
+      return root
+    })
+
+    try {
+      await expect(
+        handlers.get('workbench:open')?.({ sender: shell }, { projectId: 'known' })
+      ).resolves.toEqual({ viewId: expect.any(String) })
+
+      // The renderer cannot invent one: an id nobody adopted resolves to nothing,
+      // which is what bounds the openable set now that a grant is not required.
+      await expect(
+        handlers.get('workbench:open')?.({ sender: shell }, { projectId: 'invented' })
+      ).rejects.toThrow(/No project with id invented/)
+    } finally {
+      surface.registerWorkbenchHandlers(undefined)
+    }
   })
 
   it('lets a grant die with the document it was minted for', async () => {

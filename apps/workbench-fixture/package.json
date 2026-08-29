@@ -1,0 +1,25 @@
+{
+  "name": "chorus-workbench-fixture",
+  "displayName": "Chorus Workbench Fixture",
+  "description": "Proves the remote extension host can activate an extension, read the project and start a process.",
+  "publisher": "chorus",
+  "version": "0.1.0",
+  "private": true,
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.94.0"
+  },
+  "extensionKind": ["workspace"],
+  "categories": ["Other"],
+  "activationEvents": ["onStartupFinished"],
+  "main": "./extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "chorusFixture.report",
+        "title": "Chorus Fixture: Show Host Report",
+        "category": "Chorus"
+      }
+    ]
+  }
+}

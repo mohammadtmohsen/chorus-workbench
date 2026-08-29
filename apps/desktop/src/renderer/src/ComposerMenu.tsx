@@ -1,5 +1,6 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
+import { useShellOverlay } from './workspace/overlay.js'
 
 /**
  * A small menu hung off a control in the composer.
@@ -44,6 +45,10 @@ export function ComposerMenu({
 }): React.JSX.Element {
   const surface = useRef<HTMLDivElement | null>(null)
   const [placed, setPlaced] = useState<{ left: number; top: number } | null>(null)
+
+  /* Portalled and mount-gated, so the native workbench view would otherwise be
+     drawn over it. See `workspace/overlay.ts`. */
+  useShellOverlay()
 
   /*
    * Measured, then placed, then shown.

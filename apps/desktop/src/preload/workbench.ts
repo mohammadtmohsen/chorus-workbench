@@ -51,6 +51,8 @@ export const CONNECTION_CHANNEL = 'workbench:connection'
  */
 export const USER_SETTINGS_READ_CHANNEL = 'workbench:userSettings:read'
 export const USER_SETTINGS_WRITE_CHANNEL = 'workbench:userSettings:write'
+/* Phase 6 slice 6a, spelled out here for the same reason and under the same test. */
+export const CONTEXT_CHANNEL = 'workbench:context'
 
 /**
  * A hand-written check instead of a schema, for the reason above — and it is now
@@ -155,6 +157,23 @@ const api: ChorusWorkbenchApi = {
 
   writeUserSettings: async (text: string) => {
     await ipcRenderer.invoke(USER_SETTINGS_WRITE_CHANNEL, text)
+  },
+
+  /*
+   * `send`, not `invoke`, and the difference is deliberate.
+   *
+   * This fires on cursor movement, so it is the highest-frequency thing crossing
+   * this boundary by a wide margin. `invoke` would make every keystroke await a
+   * round trip to main before the editor's own handler returned; `send` posts and
+   * returns. A dropped report costs nothing — the next movement supersedes it,
+   * because this channel carries **state and not history**.
+   *
+   * The payload is validated in main regardless. A surface runs third-party
+   * extension code, so nothing arriving from one is trusted here, and `send`
+   * removes the reply rather than the check.
+   */
+  reportContext: (context) => {
+    ipcRenderer.send(CONTEXT_CHANNEL, context)
   },
 }
 

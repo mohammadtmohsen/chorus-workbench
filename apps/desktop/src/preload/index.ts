@@ -17,8 +17,6 @@ import {
   LimitsPush,
   SCALE_PUSH_CHANNEL,
   SETTINGS_PUSH_CHANNEL,
-  WORKSPACE_PUSH_CHANNEL,
-  WorkspaceChangedPush,
   EventsPush,
   IPC_CONTRACT,
   type ChorusApi,
@@ -76,6 +74,7 @@ const api: ChorusApi = {
   openWorkbench: invokeWorkbench('workbench:open'),
   setWorkbenchBounds: invokeWorkbench('workbench:setBounds'),
   closeWorkbench: invokeWorkbench('workbench:close'),
+  setWorkbenchVisible: invokeWorkbench('workbench:setVisible'),
   probeAgents: invoke('agents:probe'),
   startConversation: invoke('conversation:start'),
   sendMessage: invoke('conversation:send'),
@@ -97,7 +96,6 @@ const api: ChorusApi = {
   plugins: () => invoke('agents:plugins')({}),
   stopTask: invoke('tasks:stop'),
   reopenConversation: invoke('conversation:reopen'),
-  restartConversation: invoke('conversation:restart'),
   previewFile: invoke('files:preview'),
   stashFile: invoke('files:stash'),
   // Renderers cannot read a File's path any more; only the bridge can.
@@ -117,8 +115,12 @@ const api: ChorusApi = {
   focusWindow: invoke('app:focus'),
   copyText: invoke('app:copyText'),
   renameConversation: invoke('conversation:rename'),
-  chooseProjectDirectory: invoke('conversation:chooseCwd'),
-  setProjectDirectory: invoke('conversation:setCwd'),
+  adoptProject: invoke('project:adopt'),
+  listProjects: invoke('project:list'),
+  renameProject: invoke('project:rename'),
+  forgetProject: invoke('project:forget'),
+  setProjectProfile: invoke('project:setProfile'),
+  setProjectAgents: invoke('project:setAgents'),
   chooseDirectory: invoke('files:chooseDirectory'),
   readSettings: () => invoke('settings:read')({}),
   writeSettings: invoke('settings:write'),
@@ -129,13 +131,6 @@ const api: ChorusApi = {
   setProfile: invoke('policy:set'),
   readDiagnostics: invoke('diagnostics:read'),
   exportDiagnostics: invoke('diagnostics:export'),
-  readWorkspace: invoke('workspace:read'),
-  readBranches: invoke('workspace:branches'),
-  fetchRemote: invoke('workspace:fetch'),
-  runGitAction: invoke('workspace:git'),
-  readTree: invoke('workspace:tree'),
-  readFileVersions: invoke('workspace:fileVersions'),
-  writeProjectFile: invoke('workspace:write'),
   ideSnapshot: invoke('ide:snapshot'),
   ideExtensionStatus: () => invoke('ide:extensionStatus')({}),
   ideInstallExtension: () => invoke('ide:installExtension')({}),
@@ -147,7 +142,6 @@ const api: ChorusApi = {
   askAside: invoke('aside:ask'),
   restateAside: invoke('aside:restate'),
   promoteAside: invoke('aside:promote'),
-  spinOffTask: invoke('conversation:spinOff'),
   forwardAside: invoke('aside:forward'),
   closeAside: invoke('aside:close'),
   listAsides: invoke('aside:list'),
@@ -162,16 +156,6 @@ const api: ChorusApi = {
     ipcRenderer.on(EVENTS_PUSH_CHANNEL, wrapped)
     return () => {
       ipcRenderer.removeListener(EVENTS_PUSH_CHANNEL, wrapped)
-    }
-  },
-  onWorkspaceChanged: (listener) => {
-    const wrapped = (_event: unknown, payload: unknown): void => {
-      const parsed = WorkspaceChangedPush.safeParse(payload)
-      if (parsed.success) listener(parsed.data)
-    }
-    ipcRenderer.on(WORKSPACE_PUSH_CHANNEL, wrapped)
-    return () => {
-      ipcRenderer.removeListener(WORKSPACE_PUSH_CHANNEL, wrapped)
     }
   },
   onIdeContext: (listener) => {

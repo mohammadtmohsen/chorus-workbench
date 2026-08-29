@@ -1,5 +1,47 @@
 # Status — Chorus becomes the development environment
 
+## 2026-08-29 · Phase 9, and the plan corrected to match the code
+
+**Nothing in this entry has been run.** Everything below typechecks — 18/18 including tests — and
+`npm test` has not been executed once across roughly fifty slices. Read every claim here as "the
+compiler agrees", not as "it works".
+
+**Phases 5 and 6 were marked ⬜ Not started in the plan's table and were not.** 5a–5g and 6a, 6b, 6c
+and 6f were built on 08-28. The table is corrected; it had been wrong for a day.
+
+**Phase 9 is new and was not planned.** Driven as a product for the first time, the project-first
+architecture had three problems no phase had named — settings asked one level too low, three doors
+to one action, and Chorus re-implementing surfaces the workbench already owns. Mohamad called the
+shape of the correction. The phase records what was built, what was deleted and what replaced it.
+
+**Two things in the plan were corrected rather than left standing:**
+
+- **Phase 3's changes list described a shell that never shipped.** The rail was re-keyed to projects
+  without the conversation rows being removed, so for four days it showed both. The dock shipped as
+  a strip of chips, not the tree it now is. And "preserve drag, reorder, split" was reported done
+  while the drag still carried conversation ids through a project-keyed layout.
+- **Phase 6's 6d and 6e leaned on surfaces that no longer exist.** They were written when Chorus had
+  its own Changes and Review panels. Rewritten against the workbench's SCM view, with the split
+  stated: the approval's diff stays in Chorus because it is a _decision_ surface answerable with the
+  editor switched off; reviewing what happened moves to the editor.
+
+**Two risks added to §8, both learned the hard way here.** A wrong _name_ survives a re-key where a
+wrong type does not — five call sites went on compiling against `activeTabId` after it stopped
+naming a conversation, and every one failed silently except the one that reached a validator. And
+deleting a feature is not finished when the button is gone: nine deletions left store slices, schema
+fields, channels, watchers, plural i18n keys and a thousand lines of CSS behind them.
+
+**What is genuinely lost, and was accepted.** The merge-base diff. `@chorus/workspace` can diff
+against a branch's merge base; the editor's SCM only compares against `HEAD`. The function survives
+in the package with no caller.
+
+**The gate that matters is unmet.** Phase 5's user review gate was never met and it explicitly gates
+Phase 6; Phase 9 has no review at all. Three of Phase 9's own bugs — the drop shading, the escaping
+send button, the doubled tab seam — were visible only on screen, which is the argument for driving
+it rather than typechecking it again.
+
+---
+
 **As of 2026-08-24. Phase 0 ✅ approved by Codex. Phase 1 preflight ✅ accepted by Codex after five
 review rounds. Phase 1's first authorised slice — the serverless containment probe — is built, run,
 driven by hand, and hardened against a sixth and a seventh review. Phase 1's second authorised
@@ -673,6 +715,185 @@ the _first_ leg stayed quiet, and the sequencing explains the rest.
 
 **`pnpm check` now exits 0**, with `typecheck` re-run uncached (`turbo run typecheck --force`, 18/18
 executed, 0 cached).
+
+## Phase 5 · Opened — three slices were already delivered, and the ledger corrected the plan
+
+**5a is the only slice that needed code, and it is verified.** Registering
+`extension-gallery-service-override` supplied the management half the workbench
+lacked — gallery, workbench extensions service, enablement, recommendations, and
+`IExtensionManagementServerService`, which is what installs a workspace extension
+on the **server** rather than in the browser. Mohamad installed an extension from
+Open VSX on 2026-08-24 and it worked.
+
+**The Open VSX configuration was copied from the server, not composed.** The
+unpacked REH already carries one, because VSCodium ships it — so "use Open VSX as
+the default registry" was half-satisfied before the phase began, and what was
+missing was the client agreeing. A first draft of the client config guessed
+`resourceUrlTemplate` and `extensionUrlTemplate` from memory; the server sets
+neither. `resourceUrlTemplate` is deliberately left **empty** rather than
+asserted: it is the web host's asset path, and a wrong URL there fails as a
+network error rather than as configuration.
+
+**5b and 5c needed no code at all**, and the reason is the same for both:
+registering a service brings its whole contribution with it. `Install from
+VSIX…` is contributed by `extensions.contribution`, gated on having a local or
+remote server — which 5a supplied — and backed by the dialogs override's
+`IFileDialogService`. 5c's five requirements (source, version, host kind,
+workspace trust, activation errors) are all native, the last two through the
+extension editor's **Runtime Status** tab. Three slices in a row where the work
+was to find out that the work was done.
+
+### The ledger found a factual error in the approved plan
+
+**§4 said the browser-capable class had "one third-party occupant, not six".
+There are 24.** Reading `extensionKind` out of all 81 installed manifests gives
+twenty-four whose first entry is `ui` — the exact `["ui","workspace"]` shape the
+section attributed uniquely to Draw.io. The **rule** the preflight established was
+never wrong; the **count** taken from it was, and §4 is now corrected with the
+number and the method.
+
+It matters because the class decides what evidence a row needs — web host plus
+webview/storage/auth, versus the REH Node host plus process/filesystem/network. A
+Phase 5 following the old table would have gathered the wrong proof for a third of
+the estate and learned so only when it failed.
+
+**16 of the 81 are absent from Open VSX**, a blocker discoverable without running
+anything: the Microsoft-restricted ones §4 already names, plus several ordinary
+extensions with no open-registry home.
+
+**One caveat now applies to every row — `BOARD.md` C-063.** Chorus runs one REH
+with one extensions directory shared by every open project, so every result is
+proved under a per-server scope. Workspace trust is per project but the extension
+it gates is global, so trusting one project can activate an extension inside
+another that was never trusted.
+
+**The four result columns are empty and that is the design.** §4 is explicit that
+installation is not the gate — activation and one representative action are — so
+those are for a person, and an empty cell means unproved rather than failed.
+
+## Phase 4 · Six slices, the review gate passed, and the phase is **not finished**
+
+**🟡 rather than ✅, and the distinction is the point.** Mohamad drove editing,
+navigation, Git, a terminal and a debug session in the embedded workbench on
+2026-08-24, which is exactly what the phase's user review gate asks for — so the
+gate is met and Phase 5 is unblocked. The **exit criteria are not**: they ask for
+steps 1–8 of the daily acceptance journey with no Chorus substitutes, and several
+services in the phase's own list have never been registered.
+
+**What landed, in six slices.**
+
+| Slice | What it did                                                                                                   |
+| ----- | ------------------------------------------------------------------------------------------------------------- |
+| 4a    | `MonacoEnvironment.getWorker` for four labels (C-061) · SCM override (C-062)                                  |
+| 4b    | The workbench moved into the project pane — `WorkbenchTarget` by project id, two regions, a resizable divider |
+| 4c    | The custom file tree retired; the workbench Explorer is the file browser                                      |
+| 4d    | Terminals through the REH; the per-session panel retired, **the global one kept as a PTY**                    |
+| 4f    | Debug service registered; `js-debug` had been activating with nowhere to put its views                        |
+| 4g    | Code-OSS's own chat and inline completions off by default — one agent product, not two                        |
+
+**4e was re-scoped and parked, deliberately.** Half of it was already true: 4a
+gave the workbench real Git, so the primary Git surface is the workbench's by
+virtue of existing. What remained was deleting the panel's embedded diff viewers
+— `FileDiff` and `MonacoDiff`, 650 lines and the 4.87 MB Monaco adds to the main
+chunk — but clicking a changed file would then need to open in the workbench's
+diff editor, and **there is no channel for that**. A surface's preload is three
+methods on purpose, because a workbench document runs third-party extension code.
+Widening that boundary to win a bundle size is a poor trade against what Phase 1
+hardened it for, so the panel stays: it shows changes since the _conversation's
+base_, which SCM structurally cannot.
+
+**What the service set still lacks**, against the phase's own list: tasks,
+testing, comments, timeline, snippets and outline, the extension gallery,
+webviews, authentication.
+
+### What the surface told us, twice, before anyone looked for it
+
+**Two of these slices were diagnosed by the workbench's own Window output**, which
+is worth recording because nothing was instrumented to find them. `js-debug`
+logged that the `debug` view container did not exist and its views were being
+dumped into the Explorer — that is 4f, stated by the thing that was broken. The
+`SCMService.registerSCMProvider is not supported` line was 4c/4a in the same way.
+A service that is absent says so; the cost was that nobody was reading the channel.
+
+### Three defects in the layout, all mine, all invisible to the typechecker
+
+Recorded because they are the same class as the four in Phases 2 and 3.
+
+1. **`flex: 0 0 clamp(…)`** — a `flex-basis` the parser rejects invalidates the
+   _whole_ declaration, so the Chorus column lost its grow and shrink too and
+   sized on content. The editor came up wrapping at twenty characters.
+2. **`.workspace-pane-content > *:not(.conversation-dock)`** — written when that
+   container had one child, applied to three, and outranked the column's own
+   `flex-grow: 0` on specificity. **The 9px sash inflated to hundreds of pixels**
+   and read as the workbench failing to resize.
+3. **A drag that hid the editor.** A `WebContentsView` is a native view above the
+   document and pointer capture cannot span two `WebContents`, so a drag crossing
+   the workbench died. The first fix reported a zero rectangle — the drag worked
+   and the editor vanished. The second applied a gutter on pointerdown, which made
+   the editor jump. The third is a permanent 8px inset: nothing moves, ever.
+
+**And one that was not a defect in the product at all.** A greedy regex intended
+to delete one function removed **259 lines of `Session.tsx`** — most of
+`SessionInfo` and the whole opening of the component. It was recoverable only
+because those particular lines existed in the Phase 1 commit. Everything written
+since would have been gone. That is the sharpest argument in this file for
+committing between slices, and it is an argument from an event rather than a
+principle.
+
+## Phases 2 and 3 · Built in seven slices, driven by hand, and **never once tested**
+
+**Both phases are written and both were driven in the running app on 2026-08-24.** Phase 2 makes
+Project the top-level domain; Phase 3 puts it on screen. What follows is the record, and the last
+line of it is the one that matters most.
+
+**Phase 2, four slices.** A `Project` domain and `ProjectStore` in `event-store` (migration 4
+recreates the `projects` table, which had existed unused since migration 1 — no INSERT anywhere in
+the repo, and not a projection). `ProjectService` in main, the only layer allowed to ask the
+filesystem. A new database namespace, `chorus.v2.db`, with the old file left in place rather than
+renamed. Then the re-key: `ActiveConversation.cwd` became **readonly**, `setProjectDirectory` was
+deleted, `open-sessions.ts` became `open-projects.ts` recording ids and no paths, and
+`conversation:setCwd` / `conversation:chooseCwd` were removed from the contract.
+
+**Phase 3, three slices.** A projects group in the rail with a real Add Project. The layout algebra
+re-keyed from `conversationId` to `projectId` — the algebra itself unchanged, because it was always
+generic over an opaque tab id. Then the Chorus dock, a per-project conversation switcher with a
+persisted pointer and a newest-conversation fallback.
+
+**What closed on the way.** Phase 1's **E2** — `WorkbenchTarget`'s `projectId` arm had been failing
+closed since it was written, and `ProjectService.resolveRoot` is what it now resolves against.
+
+### Four defects found, and all four were invisible to the typechecker
+
+Recorded because the pattern is the same each time and it is the argument for the tests that were
+skipped.
+
+1. **`cwd: row.cwd ?? row.projectId`** in `listConversations`. Honest while `project_id` held the
+   directory a conversation was created in; it holds a real id now, so a history row with no agent
+   session would have shown a **UUID where a path goes**.
+2. **A blank first-run screen.** `App` returned a bare `aria-busy` div whenever there were no
+   sessions, which was survivable only because auto-start immediately made one. Once a session
+   required a project, the div became permanent — no rail, so no Add Project, so no way out. **It
+   presented as a black window.**
+3. **`reconcileWorkspace` filtered tabs against conversation ids.** Tabs are projects now, so every
+   tab was discarded on every launch: a saved layout could not survive a restart.
+4. **The same function seeded one tab per conversation**, so one project with three conversations
+   opened as three identical tabs — and the dock, which only appears at two conversations in one
+   project, could never appear at all.
+
+**Each of these compiled. Two of them shipped a plausible-looking app that had quietly thrown
+something away.** `npm run errors` went green over defect 1 four separate times.
+
+### The bound on all of it
+
+**Nothing here has been tested.** Not one of the seven slices has had `npm test` run against it, by
+explicit decision each time it was raised. **64 tests in `layout.test.ts` and `store.test.ts` guard
+exactly the behaviour Phase 3 re-keyed** — drag, reorder, split, focus, the four-pane cap — and they
+now compile against the new signatures without having been executed. The close semantics, the
+restart-no-longer-touches-layout decision, and the dock's fallback are each a judgement recorded in a
+comment and confirmed by nothing.
+
+**Nor is any of it committed.** Phases 2 and 3 sit in one working tree on top of Phase 1's commit,
+with no intermediate state to bisect against.
 
 ## Phase 1 · The user UI review — passed, and the bound on what that proves
 

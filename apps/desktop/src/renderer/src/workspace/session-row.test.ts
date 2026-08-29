@@ -21,6 +21,7 @@ const IDLE: SessionRowState = {
 const session = (conversationId: string, title: string): SessionInfo => ({
   conversationId,
   participants: ['claude'],
+  projectId: 'project-1',
   cwd: '/tmp',
   profileId: 'read-only',
   title,

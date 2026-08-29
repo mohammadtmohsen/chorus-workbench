@@ -102,6 +102,65 @@ export function projectRow(
 }
 
 /**
+ * A project as every rail tile, card and menu needs it.
+ *
+ * Written structurally rather than as `IpcResponse<'project:list'>[...]` so that
+ * this file — which is pure, has no React and no IPC — stays that way. It is the
+ * same shape by construction: a mismatch fails at the `QuickRail` call site,
+ * which is where the list actually arrives.
+ */
+export interface ProjectInfo {
+  readonly id: string
+  readonly name: string
+  readonly root: string
+  readonly openConversations: number
+  /** Null means never asked, and the card shows the app default rather than a blank. */
+  readonly profileId: string | null
+  /** Null is "never asked"; `[]` is a project deliberately emptied. Not the same. */
+  readonly agentIds: readonly AgentId[] | null
+}
+
+/**
+ * What a project tile shows, from its conversations folded into one row.
+ *
+ * Two signals rather than one, and that is the difference from `projectRow`.
+ * A conversation is in exactly one state, so a row can show a single mark and be
+ * complete. A project is several conversations at once: one blocked on an
+ * approval while another is mid-turn is an ordinary Tuesday, and collapsing that
+ * to "approval" would hide the fact that work is still moving.
+ *
+ * So the **badge** reports the most urgent thing anybody in the project is
+ * waiting for, by the same precedence a single row uses, and the **dot** reports
+ * whether anything is running — independently, and at the same time.
+ */
+export interface ProjectRowFacts {
+  readonly state: SessionState
+  /**
+   * Summed across the project, and belonging to whichever state is reported.
+   *
+   * Not "total unread" flatly: a project with an agent blocked on a tool call
+   * would then advertise how much text you had not read, which is the less
+   * useful of the two numbers by a distance. Same rule as a single row, applied
+   * to the sum.
+   */
+  readonly count: number
+  /** Independent of `state` — a project can be waiting *and* working. */
+  readonly working: readonly AgentId[]
+  /** Which agent is working, when exactly one is across the whole project. */
+  readonly voice: AgentId | null
+}
+
+export function projectTile(row: SessionRowState): ProjectRowFacts {
+  const state = stateOf(row)
+  return {
+    state,
+    count: state === 'approval' ? row.approvals : state === 'question' ? row.questions : row.unread,
+    working: row.working,
+    voice: row.working.length === 1 ? (row.working[0] ?? null) : null,
+  }
+}
+
+/**
  * Two letters that stand for a title at 44px.
  *
  * Initials of the first two words where there are two — `Fix login` is `FL`,
@@ -135,16 +194,29 @@ export function monogramOf(title: string): string {
  * renumber a later one, which is the price of not inventing an identifier —
  * and the accessible name is the full title either way.
  */
-export function monogramsFor(sessions: readonly SessionInfo[]): ReadonlyMap<string, string> {
+export function monogramsForNames(
+  entries: readonly { readonly id: string; readonly name: string }[]
+): ReadonlyMap<string, string> {
   const seen = new Map<string, number>()
   const marks = new Map<string, string>()
-  for (const session of sessions) {
-    const base = monogramOf(session.title)
+  for (const entry of entries) {
+    const base = monogramOf(entry.name)
     const taken = seen.get(base) ?? 0
     seen.set(base, taken + 1)
-    marks.set(session.conversationId, taken === 0 ? base : `${base}${String(taken + 1)}`)
+    marks.set(entry.id, taken === 0 ? base : `${base}${String(taken + 1)}`)
   }
   return marks
+}
+
+/**
+ * The same, for sessions. Kept as its own name because the two lists are keyed
+ * differently — a project by its id, a session by its conversation id — and a
+ * caller passing the wrong one would get a map that silently matches nothing.
+ */
+export function monogramsFor(sessions: readonly SessionInfo[]): ReadonlyMap<string, string> {
+  return monogramsForNames(
+    sessions.map((session) => ({ id: session.conversationId, name: session.title }))
+  )
 }
 
 /**

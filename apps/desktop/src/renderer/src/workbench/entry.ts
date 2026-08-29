@@ -1,5 +1,8 @@
 import { initialize } from '@codingame/monaco-vscode-api'
 import { prepareWorkbench } from './services.js'
+import { reportEditorContext } from './context.js'
+import { announceSharedExtensionScope } from './extension-scope.js'
+import { registerWorkbenchWorkers } from './workers.js'
 import { persistUserSettings, restoreUserSettings } from './user-settings.js'
 
 /**
@@ -54,6 +57,13 @@ async function main(): Promise<void> {
   container.className = 'workbench-root'
   document.body.replaceChildren(container)
 
+  /*
+   * Before `initialize`, because a service that resolves a worker during startup
+   * reads `MonacoEnvironment` off `globalThis` at that moment — there is no
+   * registry to add to afterwards, only a global to have set in time.
+   */
+  registerWorkbenchWorkers()
+
   const { services, options, env } = prepareWorkbench(connection)
   await initialize(services, container, options, env)
 
@@ -64,6 +74,20 @@ async function main(): Promise<void> {
    * reaches the same failure element as everything else through `main`'s catch.
    */
   await persistUserSettings((text) => window.chorusWorkbench.writeUserSettings(text))
+
+  /*
+   * C-063's disclosure, and the condition on which the shared scope was accepted.
+   * Same placement rule as the line above: after `initialize`, because the
+   * services do not exist before it.
+   */
+  await announceSharedExtensionScope()
+
+  /*
+   * Phase 6 slice 6a. After `initialize` like the two above, and given the root
+   * from the descriptor so the relativising happens here — no path crosses back
+   * to main.
+   */
+  await reportEditorContext(connection.projectRoot)
 }
 
 /*

@@ -27,7 +27,6 @@ function carryOfMessages(messages: readonly TranscriptMessage[]): SessionCarry {
     attached: [],
     following: true,
     scrollTop: 120,
-    ideIncluded: false,
   }
 }
 
@@ -52,7 +51,6 @@ function carryOf(chars: number): SessionCarry {
     attached: [],
     following: true,
     scrollTop: 120,
-    ideIncluded: false,
   }
 }
 

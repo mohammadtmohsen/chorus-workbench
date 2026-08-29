@@ -114,6 +114,53 @@ export const WORKBENCH_USER_SETTINGS_READ_CHANNEL = 'workbench:userSettings:read
 export const WORKBENCH_USER_SETTINGS_WRITE_CHANNEL = 'workbench:userSettings:write'
 
 /**
+ * What the editor is looking at — Phase 6 slice 6a.
+ *
+ * **The surface does not say which project this is**, and that is the same rule
+ * `workbench:open` follows one direction out: main derives the project from the
+ * sender, because a project named in a request is a claim and a project derived
+ * from the `WebContents` is a fact. A compromised surface can misreport its own
+ * cursor; it cannot attribute that cursor to somebody else's project.
+ *
+ * **Relative, never absolute.** The path is already project-relative when it
+ * leaves here, so no root crosses the boundary and nothing downstream has to
+ * decide whether a path is inside the project — the question does not arise.
+ * `null` is a real value: an empty editor group, or an editor on something with
+ * no file behind it.
+ *
+ * **This is state, not history.** `CLAUDE.md`'s rule: would reading it back a
+ * week later be worse than having none? A cursor position from last Tuesday is
+ * noise, so it travels on a push channel and is held in memory, and there is no
+ * `ChorusEventPayload` for it. Approvals and edits are events; looking at a file
+ * is not.
+ */
+export const WORKBENCH_CONTEXT_CHANNEL = 'workbench:context'
+
+export const WorkbenchContext = z
+  .object({
+    /** Project-relative, POSIX separators, or null when nothing is open. */
+    relativePath: z.string().nullable(),
+    /** 1-based and inclusive, matching what the editor shows. */
+    startLine: z.number().int().min(1).nullable(),
+    endLine: z.number().int().min(1).nullable(),
+    /** True when the caret sits somewhere rather than covering a range. */
+    isEmpty: z.boolean(),
+    /** The model has unsaved changes — a fact about the buffer, not the disk. */
+    isDirty: z.boolean(),
+    languageId: z.string(),
+    /**
+     * The selected text's size in **bytes**, not characters.
+     *
+     * A byte cap is what the provider boundary is expressed in, and a selection
+     * of emoji or CJK is several times its character count. Measured here where
+     * the text is, so nothing downstream has to hold the text to size it.
+     */
+    selectedBytes: z.number().int().min(0),
+  })
+  .strict()
+export type WorkbenchContext = z.infer<typeof WorkbenchContext>
+
+/**
  * What the shell may name when it asks for a surface, and the whole point is
  * that a path is not on the list.
  *
@@ -173,6 +220,57 @@ export const WORKBENCH_SHELL_CONTRACT = {
     request: z.object({ viewId: z.string().min(1), rect: WorkbenchRect }),
     response: z.object({ ok: z.literal(true) }),
   },
+  /**
+   * Stand every surface down, or bring them back.
+   *
+   * **A `WebContentsView` is composited above this window's DOM**, so anything
+   * the shell draws over the workbench region is behind it: a hover card, a
+   * context menu, the Settings sheet, and — the one that made this urgent — a
+   * confirmation dialog rendered cut in half at the workbench's left edge.
+   * There is no z-index that reaches a native view.
+   *
+   * So the shell says when it has an overlay up and main hides the views for the
+   * duration. `setVisible(false)` rather than a zero rectangle: the surface keeps
+   * its bounds, nothing re-lays-out, and the workbench is not told anything
+   * happened — it is a compositing change, not a resize.
+   *
+   * All surfaces at once, deliberately. An overlay is a window-level moment and
+   * the shell does not know which surfaces its dialog overlaps; hiding only the
+   * focused pane's would leave a dialog clipped by a sibling.
+   */
+  'workbench:setVisible': {
+    /*
+     * `viewId` narrows it to one surface; absent means every surface this
+     * window owns.
+     *
+     * Two callers with two different scopes. A **shell overlay** — a dialog, a
+     * hover card — is a window-level moment: it does not know which surfaces it
+     * covers, and hiding only the focused pane's would leave a dialog clipped by
+     * a sibling. The **Editor switch** is the opposite: it turns off one
+     * project's editor and must not touch the three beside it.
+     */
+    request: z.object({ visible: z.boolean(), viewId: z.string().min(1).optional() }).strict(),
+    /*
+     * **A hide returns a still of what it hid**, one JPEG per surface, captured
+     * while the view was up and in the same step that took it down. Hiding alone
+     * left an empty rectangle where the editor had been, which for a modal is
+     * tolerable and for a hover card is worse than the occlusion it fixed. The
+     * shell paints the still into the placeholder the view was sitting over, so
+     * the editor appears unchanged — frozen, for as long as the overlay is up.
+     *
+     * JPEG rather than PNG: the capture is at device scale, so a text-heavy
+     * editor is several megabytes as PNG and this crosses an IPC boundary on
+     * every hover. The `img` downsamples it back to CSS pixels, which is what
+     * hides the artefacts.
+     *
+     * A show returns none — there is nothing to paint once the views are back.
+     */
+    response: z.object({
+      ok: z.literal(true),
+      /** Empty on a show, and on a hide by a window with no surfaces open. */
+      stills: z.array(z.object({ viewId: z.string(), dataUrl: z.string() })),
+    }),
+  },
   'workbench:close': {
     request: z.object({ viewId: z.string().min(1) }),
     response: z.object({ ok: z.literal(true) }),
@@ -192,7 +290,7 @@ export const WORKBENCH_SHELL_CHANNELS = Object.keys(
   WORKBENCH_SHELL_CONTRACT
 ) as WorkbenchShellChannel[]
 
-/** The four methods the shell's preload adds to `window.chorus`. */
+/** The five methods the shell's preload adds to `window.chorus`. */
 export interface WorkbenchShellApi {
   /**
    * Puts the native chooser in front of the person and returns what main minted
@@ -214,6 +312,18 @@ export interface WorkbenchShellApi {
   readonly closeWorkbench: (
     request: WorkbenchShellRequest<'workbench:close'>
   ) => Promise<{ ok: true }>
+  /**
+   * Hides every surface this window owns, for as long as a shell overlay is up.
+   *
+   * A `WebContentsView` composites *above* the renderer's DOM, so no z-index the
+   * shell can write puts a dialog or a hover card in front of the workbench — the
+   * confirm dialog was cut in half at the workbench's left edge. `setVisible`
+   * rather than a zero rectangle: the bounds survive, nothing re-lays-out inside
+   * the workbench, and it is never told anything happened.
+   */
+  readonly setWorkbenchVisible: (
+    request: WorkbenchShellRequest<'workbench:setVisible'>
+  ) => Promise<WorkbenchShellResponse<'workbench:setVisible'>>
 }
 
 /**
@@ -235,6 +345,12 @@ export interface ChorusWorkbenchApi {
    * defaults rather than inheriting somebody's.
    */
   readonly readUserSettings: () => Promise<string | null>
+  /**
+   * Reports what this surface's editor is looking at. Fire-and-forget: a lost
+   * report is corrected by the next one, and blocking the editor on main would
+   * be the wrong trade for a value that changes on every keystroke.
+   */
+  readonly reportContext: (context: WorkbenchContext) => void
   /** Hands main the current text of the user's settings file, to store as-is. */
   readonly writeUserSettings: (text: string) => Promise<void>
 }

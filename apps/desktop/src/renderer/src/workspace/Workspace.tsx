@@ -1,16 +1,22 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
 import type { CSSProperties, KeyboardEvent, PointerEvent as ReactPointerEvent } from 'react'
 import { useTranslation } from 'react-i18next'
 import type { WorkspaceLayoutNode } from '../../../shared/workspace-layout.js'
 import type { AgentId, SessionInfo } from '../Session.js'
 import { QuickRail } from './QuickRail.js'
-import { SessionMenu, type MenuTarget } from './SessionMenu.js'
-import { SessionMenuContext } from './session-menu-context.js'
-import { createPreviewController, SessionPreviewHost } from './SessionPreview.js'
+import { ConversationTree } from './ConversationTree.js'
+import { useConversationDrag } from './useConversationDrag.js'
+import { useShellOverlay } from './overlay.js'
+import { createPreviewController, ProjectPreviewHost } from './SessionPreview.js'
 import { TerminalPanel } from '../TerminalPanel.js'
 import type { TerminalRefShape } from '../../../shared/ipc.js'
 import { leafPaneIds, type SplitDirection } from './layout.js'
+import { WorkbenchFrame } from '../workbench/WorkbenchFrame.js'
 import {
+  useConversationGroups,
+  useChorusWidth,
+  useWorkbenchShown,
   usePane,
   useGlobalTerminal,
   useSessionRowState,
@@ -19,6 +25,7 @@ import {
 } from './hooks.js'
 import { stateOf } from './session-row.js'
 import { StateMark } from './SessionRow.js'
+import type { ProjectInfo } from './session-row.js'
 import { countRender } from './render-count.js'
 import { monogramOf, stepSlot } from './session-row.js'
 import { useWorkspaceStore } from './store.js'
@@ -48,9 +55,9 @@ interface WorkspaceProps {
   readonly sessions: readonly SessionInfo[]
   readonly starting: boolean
   readonly onNewSession: () => void
+  /** Starts a conversation in one named project — the `+` inside a pane. */
+  readonly onStartInProject: (projectId: string) => void
   readonly onRename: (conversationId: string, title: string) => void
-  readonly onOpenPanel: (conversationId: string, panel: 'review' | 'summary') => void
-  readonly onRestart: (conversationId: string) => void
   readonly onEnd: (conversationId: string) => void
   readonly onCommitLayout: () => void
   /** A card dropped at a new place in the rail's order. */
@@ -69,8 +76,18 @@ interface WorkspaceProps {
     agentId: AgentId,
     present: boolean
   ) => Promise<void>
-  readonly onChooseFolder: (conversationId: string) => Promise<void>
-  readonly onSetFolder: (conversationId: string, cwd: string) => Promise<void>
+  readonly projects: readonly ProjectInfo[]
+  readonly onRenameProject: (projectId: string, name: string) => void
+  /** Project-level, and it reaches every conversation in the project. */
+  readonly onToggleProjectAgent: (
+    projectId: string,
+    agentId: AgentId,
+    present: boolean
+  ) => Promise<void>
+  readonly onChooseProjectProfile: (projectId: string, profileId: string) => Promise<void>
+  readonly onAddProject: () => Promise<void>
+  /** Starts a conversation in a project. There is no other way to start one. */
+  readonly onOpenProject: (projectId: string) => void
   readonly home: string
   readonly onChooseProfile: (conversationId: string, profileId: string) => Promise<void>
   readonly renderSession: (
@@ -163,6 +180,7 @@ export function Workspace(props: WorkspaceProps): React.JSX.Element {
   const {
     placeSession,
     splitWithSession,
+    showConversation,
     closeTab,
     activateTab,
     focusPane,
@@ -198,9 +216,35 @@ export function Workspace(props: WorkspaceProps): React.JSX.Element {
     ),
     onReorder: props.onReorderSessions,
   })
-  const onSessionPointerDown = useCallback(
-    (conversationId: string, title: string, event: ReactPointerEvent<HTMLElement>) => {
-      drag.onPointerDown(conversationId, title, null, event)
+
+  /*
+   * A drag is an overlay, for the same reason a dialog is.
+   *
+   * The drop shading and the pane outlines are DOM, and a `WebContentsView` is
+   * composited above the DOM — so every zone that mattered was drawn *underneath*
+   * the editor it was pointing at, and the only visible ones were over Chorus.
+   * There is no z-index that reaches a native view; hiding it is the only lever.
+   *
+   * This reuses the still-frame path, which is what makes it tolerable: main
+   * captures each surface as it hides it and the frames paint that, so the editor
+   * appears frozen for the length of the drag rather than blinking out. A drag
+   * lasts long enough for the capture's round trip to be invisible, unlike the
+   * hover card that path was written for.
+   */
+  useShellOverlay(drag.drag !== null)
+  /*
+   * A rail tile drags the **project**, which is what a pane tab is keyed by.
+   *
+   * It goes through the same `onPointerDown` as a tab, and that is correct even
+   * though the parameter is still named `conversationId`: the drag module moves
+   * whatever a tab holds, and a tab holds a project id. The name is the last of
+   * the re-key residue and is being corrected with the drag module itself, not
+   * here — renaming the parameter without reworking `onReorder`, which really
+   * does want a conversation, would trade one wrong name for another.
+   */
+  const onProjectPointerDown = useCallback(
+    (projectId: string, name: string, event: ReactPointerEvent<HTMLElement>) => {
+      drag.onPointerDown(projectId, name, null, event)
     },
     [drag]
   )
@@ -239,30 +283,25 @@ export function Workspace(props: WorkspaceProps): React.JSX.Element {
         state.toggleGlobalTerminal()
         return
       }
-      if (primaryOnly(event) && event.key.toLowerCase() === 'j') {
-        event.preventDefault()
-        // The global terminal answers its own ⌘J; a session's must not take it.
-        if (document.activeElement?.closest('.terminal-panel--global') != null) return
-        if (activeId === null) return
-        state.toggleSessionTerminal(activeId)
-        return
-      }
+      /*
+       * ⌘J used to open this session's own terminal and no longer exists.
+       *
+       * A project pane carries a workbench with its own terminal on the REH, so
+       * the chord is left alone here rather than swallowed — the workbench binds
+       * `⌃\`` for it, and a shell inside the editor should answer the editor's
+       * key. ⌘⇧J still opens the global terminal, which belongs to no project
+       * and is still a PTY in main.
+       */
 
       /*
-       * ⌘⇧G — this session's Changes panel.
+       * ⌘⇧G opened this session's Changes panel and is now unbound.
        *
-       * Session-scoped only, because a change belongs to a repository and the
-       * global terminal belongs to no conversation. With no active tab there is
-       * nothing to compare, so the chord is left alone rather than swallowed —
-       * `preventDefault` on a key that did nothing is how a shortcut becomes
-       * untestable (C-027).
+       * The panel is gone: changes are read from git inside the workbench, which
+       * has its own SCM view and its own bindings for it. Left unbound rather
+       * than re-pointed at the workbench's view — a chord that reaches into the
+       * editor from outside it is a second way to do something the editor
+       * already does, and `activeId` is a *project* here anyway.
        */
-      if (primaryShift(event) && !event.altKey && event.key.toLowerCase() === 'g') {
-        if (activeId === null) return
-        event.preventDefault()
-        state.toggleSessionChanges(activeId)
-        return
-      }
 
       /*
        * ⌃⇧` — another terminal in whichever panel you are in. VS Code's binding.
@@ -412,62 +451,49 @@ export function Workspace(props: WorkspaceProps): React.JSX.Element {
     }
   }, [])
 
-  /*
-   * The session menu is owned here.
-   *
-   * It is opened from the composer's own controls, which sit inside a pane —
-   * several components away, with `App` as the only common ancestor. The context
-   * carries the opener down; this component already holds every callback the
-   * menu needs.
-   */
-  const [menu, setMenu] = useState<MenuTarget | null>(null)
-  const openMenu = useCallback((target: MenuTarget) => {
-    setMenu(target)
-  }, [])
-  const menuSession =
-    menu === null
-      ? undefined
-      : props.sessions.find((session) => session.conversationId === menu.conversationId)
-
   return (
-    <SessionMenuContext.Provider value={openMenu}>
-      <div className="workspace-shell">
-        <QuickRail
-          sessions={props.sessions}
-          starting={props.starting}
-          preview={preview}
-          onNewSession={props.onNewSession}
-          onOpenSettings={props.onOpenSettings}
-          onOpenHistory={props.onOpenHistory}
-          terminalOpen={globalTerminal.open}
-          onToggleTerminal={toggleGlobalTerminal}
-          onSessionPointerDown={onSessionPointerDown}
-          onReorderSessions={props.onReorderSessions}
-          draggingId={drag.drag?.fromRail === true ? drag.drag.conversationId : null}
-          consumeSuppressedClick={drag.consumeSuppressedClick}
-        />
-        <main className="workspace-editor" aria-label="Workspace">
-          {layout === null ? (
-            <EmptyWorkspace />
-          ) : (
-            <LayoutView
-              node={layout}
-              path={[]}
-              sessions={sessions}
-              focusedPaneId={focusedPaneId}
-              drag={drag.drag}
-              onTabPointerDown={drag.onPointerDown}
-              consumeSuppressedClick={drag.consumeSuppressedClick}
-              onActivate={activateTab}
-              onFocus={focusPane}
-              onClose={closeTab}
-              onReorder={reorderTab}
-              onRename={props.onRename}
-              onCommitLayout={props.onCommitLayout}
-              renderSession={props.renderSession}
-            />
-          )}
-          {/*
+    <div className="workspace-shell">
+      <QuickRail
+        sessions={props.sessions}
+        starting={props.starting}
+        preview={preview}
+        onNewSession={props.onNewSession}
+        projects={props.projects}
+        onAddProject={props.onAddProject}
+        onOpenProject={props.onOpenProject}
+        onOpenSettings={props.onOpenSettings}
+        onOpenHistory={props.onOpenHistory}
+        terminalOpen={globalTerminal.open}
+        onToggleTerminal={toggleGlobalTerminal}
+        onProjectPointerDown={onProjectPointerDown}
+        onReorderSessions={props.onReorderSessions}
+        draggingId={drag.drag?.fromRail === true ? drag.drag.conversationId : null}
+        consumeSuppressedClick={drag.consumeSuppressedClick}
+      />
+      <main className="workspace-editor" aria-label="Workspace">
+        {layout === null ? (
+          <EmptyWorkspace />
+        ) : (
+          <LayoutView
+            node={layout}
+            path={[]}
+            sessions={sessions}
+            focusedPaneId={focusedPaneId}
+            drag={drag.drag}
+            onTabPointerDown={drag.onPointerDown}
+            onStartInProject={props.onStartInProject}
+            onEndConversation={props.onEnd}
+            consumeSuppressedClick={drag.consumeSuppressedClick}
+            onActivate={activateTab}
+            onFocus={focusPane}
+            onClose={closeTab}
+            onReorder={reorderTab}
+            onRename={props.onRename}
+            onCommitLayout={props.onCommitLayout}
+            renderSession={props.renderSession}
+          />
+        )}
+        {/*
             The global terminal, inside the editor area rather than the shell.
 
             Below every pane and beside the rail, which is the only arrangement
@@ -475,68 +501,45 @@ export function Workspace(props: WorkspaceProps): React.JSX.Element {
             conversation, so it is mounted here and not inside a `Session` —
             nothing about a conversation ending should reach it.
           */}
-          {globalTerminal.open && (
-            <TerminalPanel
-              panel={globalTerminal}
-              refFor={globalTerminalRef}
-              title={t('terminal.globalTitle')}
-              onHeightChange={(height) => {
-                setGlobalTerminalHeight(height)
-                props.onCommitLayout()
-              }}
-              onClose={() => {
-                setGlobalTerminalOpen(false)
-              }}
-              onAddTerminal={addGlobalTerminal}
-              onActivateTerminal={activateGlobalTerminal}
-              onRemoveTerminal={removeGlobalTerminalTab}
-              onFocusAway={() => undefined}
-              variant="global"
-              shortcut={shortcutLabel({ primary: true, shift: true, key: 'j' })}
-            />
-          )}
-        </main>
-        <DragFeedback drag={drag.drag} />
-        {/*
+        {globalTerminal.open && (
+          <TerminalPanel
+            panel={globalTerminal}
+            refFor={globalTerminalRef}
+            title={t('terminal.globalTitle')}
+            onHeightChange={(height) => {
+              setGlobalTerminalHeight(height)
+              props.onCommitLayout()
+            }}
+            onClose={() => {
+              setGlobalTerminalOpen(false)
+            }}
+            onAddTerminal={addGlobalTerminal}
+            onActivateTerminal={activateGlobalTerminal}
+            onRemoveTerminal={removeGlobalTerminalTab}
+            onFocusAway={() => undefined}
+            variant="global"
+            shortcut={shortcutLabel({ primary: true, shift: true, key: 'j' })}
+          />
+        )}
+      </main>
+      <DragFeedback drag={drag.drag} />
+      {/*
           One preview for the app, beside the shell rather than inside the rail,
           and rendered last so it is not inside anything that clips.
         */}
-        <SessionPreviewHost
-          controller={preview}
-          sessions={props.sessions}
-          profiles={props.profiles}
-          home={props.home}
-          installed={props.installed}
-          onRestart={props.onRestart}
-          onEnd={props.onEnd}
-          onRename={props.onRename}
-          onOpenPanel={props.onOpenPanel}
-          onToggleAgent={props.onToggleAgent}
-          onChooseFolder={props.onChooseFolder}
-          onSetFolder={props.onSetFolder}
-          onChooseProfile={props.onChooseProfile}
-        />
-
-        {menu !== null && menuSession !== undefined && (
-          <SessionMenu
-            target={menu}
-            session={menuSession}
-            home={props.home}
-            profiles={props.profiles}
-            installed={props.installed}
-            onClose={() => {
-              setMenu(null)
-            }}
-            onToggleAgent={(agentId, present) =>
-              props.onToggleAgent(menu.conversationId, agentId, present)
-            }
-            onChooseFolder={() => props.onChooseFolder(menu.conversationId)}
-            onSetFolder={(cwd) => props.onSetFolder(menu.conversationId, cwd)}
-            onChooseProfile={(profileId) => props.onChooseProfile(menu.conversationId, profileId)}
-          />
-        )}
-      </div>
-    </SessionMenuContext.Provider>
+      <ProjectPreviewHost
+        controller={preview}
+        projects={props.projects}
+        sessions={props.sessions}
+        profiles={props.profiles}
+        home={props.home}
+        installed={props.installed}
+        onRename={props.onRenameProject}
+        onShowConversation={showConversation}
+        onToggleAgent={props.onToggleProjectAgent}
+        onChooseProfile={props.onChooseProjectProfile}
+      />
+    </div>
   )
 }
 
@@ -563,6 +566,10 @@ interface LayoutViewProps {
     event: ReactPointerEvent<HTMLElement>
   ) => void
   readonly consumeSuppressedClick: () => boolean
+  /** Starts a conversation in one named project — the `+` inside a pane. */
+  readonly onStartInProject: (projectId: string) => void
+  /** Ends one conversation — the × on its tab. Opens `App`'s confirmation. */
+  readonly onEndConversation: (conversationId: string) => void
   readonly onActivate: (paneId: string, conversationId: string) => void
   readonly onFocus: (paneId: string) => void
   readonly onClose: (paneId: string, conversationId: string) => void
@@ -714,9 +721,66 @@ function Sash(props: {
 }
 
 function EditorPane(props: LayoutViewProps & { readonly paneId: string }): React.JSX.Element {
+  const { t } = useTranslation()
   const pane = usePane(props.paneId)
+  /*
+   * Held per pane, not globally: one project failing to open a surface says
+   * nothing about the other three, and a shared message would blame whichever
+   * pane the reader happened to be looking at.
+   */
+  const [workbenchError, setWorkbenchError] = useState<string | null>(null)
+  /*
+   * A tab names a project; what gets rendered is one conversation inside it.
+   *
+   * The pointer is stored per project and the fallback is the newest — in that
+   * order, and the order is the point. A stored pointer alone would blank the
+   * pane when the conversation it names ends; a derived newest alone cannot
+   * express "show me the older one", which is the whole reason the dock exists.
+   * Together, the pointer decides and the list heals it.
+   */
+  const projectId = pane?.activeTabId ?? null
+  const chorusWidth = useChorusWidth(projectId)
+  const workbenchShown = useWorkbenchShown(projectId)
+  const arrangement = useConversationGroups(projectId)
+  const { splitConversation, placeConversation, setConversationSizes, focusConversationGroup } =
+    useWorkspaceActions()
+  const commitLayout = props.onCommitLayout
+  /*
+   * One drag per pane, not one per app. A conversation cannot leave its project
+   * and a project's column lives in exactly one pane, so there is nothing for a
+   * shared instance to coordinate — and per-pane state means dragging in one
+   * pane re-renders only that pane.
+   */
+  const conversationDrag = useConversationDrag({
+    groupCount: arrangement === undefined ? 0 : Object.keys(arrangement.panes).length,
+    onPlace: (conversationId, targetGroupId, slot) => {
+      if (projectId === null) return
+      placeConversation(projectId, conversationId, targetGroupId, slot)
+      commitLayout()
+    },
+    onSplit: (conversationId, targetGroupId, direction) => {
+      if (projectId === null) return
+      splitConversation(projectId, conversationId, targetGroupId, direction)
+      commitLayout()
+    },
+  })
+
+  /*
+   * Every hook above the early return, which it was not.
+   *
+   * `useActiveConversationFor` sat *below* `if (pane === undefined)`, so the
+   * number of hooks this component ran depended on whether the pane still
+   * existed — and a pane is normalised away while a caller is still holding its
+   * id, which is exactly the case the guard is there for. React would have
+   * renumbered the remaining hooks on that render. Reading `pane?.activeTabId`
+   * costs nothing and makes the order unconditional.
+   */
   if (pane === undefined) return <div />
-  const active = pane.activeTabId === null ? undefined : props.sessions.get(pane.activeTabId)
+
+  const conversations =
+    projectId === null
+      ? []
+      : [...props.sessions.values()].filter((session) => session.projectId === projectId)
   const focused = props.focusedPaneId === props.paneId
   return (
     <section
@@ -731,15 +795,240 @@ function EditorPane(props: LayoutViewProps & { readonly paneId: string }): React
       <div
         className="workspace-pane-content"
         data-pane-content
-        id={active === undefined ? undefined : `panel-${props.paneId}-${active.conversationId}`}
+        /*
+         * Keyed by the project, matching the tab's `aria-controls`. It used to
+         * be the conversation id on both sides; only the tab moved to the
+         * project, which left the two naming different things and the
+         * tab/panel relationship broken for assistive technology.
+         */
+        id={projectId === null ? undefined : `panel-${props.paneId}-${projectId}`}
         role="tabpanel"
-        aria-labelledby={
-          active === undefined ? undefined : `tab-${props.paneId}-${active.conversationId}`
-        }
+        aria-labelledby={projectId === null ? undefined : `tab-${props.paneId}-${projectId}`}
       >
-        {active !== undefined && props.renderSession(active, focused, props.paneId)}
+        {/*
+          Two regions: the workbench, and Chorus beside it.
+
+          Plan §2.4 sets the shape — each visible project gets its own surface in
+          its own `WebContentsView`, up to the four-pane cap. So this mounts per
+          pane rather than once for the focused one: four panes showing four
+          projects are four surfaces, which is the configuration the containment
+          gate proved for two and the memory gate is owed for four.
+
+          It is also, knowingly, the configuration C-054 has only ever been seen
+          in. That defect is undiagnosed and this decision walks into it rather
+          than around it.
+        */}
+        {/*
+          Rendered even when the editor is switched off, and that is the point.
+
+          Unmounting `WorkbenchFrame` runs its cleanup, which closes the surface
+          — a whole `WebContents` destroyed, and switching back would reload the
+          workbench and lose every open file. So the frame stays mounted with
+          `hidden`, which stops it reporting bounds and asks main to make its one
+          view invisible. The view keeps its rectangle, nothing inside it
+          reflows, and coming back is a compositing change rather than a launch.
+
+          The region and the sash are what actually leave the layout, so Chorus
+          takes the pane.
+        */}
+        {projectId !== null && (
+          <div className="workspace-pane-workbench" hidden={!workbenchShown}>
+            <WorkbenchFrame
+              key={projectId}
+              target={{ projectId }}
+              /* Displayed only, and any of the project's conversations answers
+                 it — they all share one root, which is what a project is. */
+              projectRoot={conversations[0]?.cwd ?? ''}
+              hidden={!workbenchShown}
+              onFailed={setWorkbenchError}
+            />
+            {workbenchError !== null && (
+              <p className="workspace-pane-workbench-error">{workbenchError}</p>
+            )}
+          </div>
+        )}
+        {projectId !== null && workbenchShown && (
+          <ChorusSash projectId={projectId} onCommit={props.onCommitLayout} />
+        )}
+        <div
+          className="workspace-pane-chorus"
+          /* Full width with the editor off: the sash is gone, so there is nothing
+             left for the remembered width to divide. */
+          style={workbenchShown ? { width: `${String(chorusWidth)}px` } : undefined}
+          data-full={!workbenchShown}
+        >
+          {/*
+            The project's conversation tree, which is usually one group.
+            
+            Rendered the way the workspace renders its panes, one level in —
+            same node type, same split and move functions, same drop zones. The
+            arrangement is absent for a project with no conversations, and then
+            there is nothing to draw.
+          */}
+          {/*
+            A project whose conversations have all ended.
+            
+            The column rendered nothing at all here, which reads as a pane that
+            failed rather than one with nothing in it — and there was no way
+            back, because the only `+` was in the rail and meant "the most recent
+            project", not this one.
+          */}
+          {projectId !== null && arrangement?.layout == null && (
+            <div className="conversation-empty">
+              <p>{t('project.noConversations')}</p>
+              <button
+                type="button"
+                onClick={() => {
+                  props.onStartInProject(projectId)
+                }}
+              >
+                {t('conversation.newInGroup')}
+              </button>
+            </div>
+          )}
+          {projectId !== null && arrangement?.layout != null && (
+            <ConversationTree
+              node={arrangement.layout}
+              path={[]}
+              projectId={projectId}
+              arrangement={arrangement}
+              sessions={conversations}
+              paneId={props.paneId}
+              paneFocused={focused}
+              drag={conversationDrag}
+              onSizes={(path, sizes) => {
+                setConversationSizes(projectId, path, sizes)
+                props.onCommitLayout()
+              }}
+              /*
+               * Focus first, start second. A new conversation joins the focused
+               * group — that is the one rule `adoptConversation` follows — so
+               * pressing `+` in a group is expressed as making that group the
+               * focused one and then starting. No second placement path.
+               */
+              onNewConversation={(groupId) => {
+                focusConversationGroup(projectId, groupId)
+                props.onStartInProject(projectId)
+              }}
+              onEndConversation={props.onEndConversation}
+              renderSession={props.renderSession}
+            />
+          )}
+          {/*
+            The ghost, portalled to the body so no column's overflow clips it.
+
+            Without something following the pointer a drag reads as a tab that
+            has stopped responding — the source dims and a target tints, but
+            neither is under your hand. `pointer-events: none` in the stylesheet
+            is load-bearing rather than cosmetic: the drop target is resolved
+            with `elementFromPoint`, and a ghost that could be hit would be the
+            element found on every single move.
+          */}
+          {conversationDrag.drag !== null &&
+            createPortal(
+              <div
+                className="conversation-drag-ghost"
+                style={{ left: conversationDrag.drag.x, top: conversationDrag.drag.y }}
+              >
+                {conversationDrag.drag.title}
+              </div>,
+              document.body
+            )}
+        </div>
       </div>
     </section>
+  )
+}
+
+/**
+ * The divider between the workbench and Chorus.
+ *
+ * **Measured from the right edge of the pane**, not from a start offset plus a
+ * delta. The workbench on the other side is a `WebContentsView` composited by
+ * the window, and it resizes by main mirroring a rectangle this renderer
+ * reports — so a drag is two processes agreeing frame by frame. Deriving the
+ * width from the pointer's absolute position means a frame that arrives late
+ * lands in the right place anyway, where an accumulated delta would drift.
+ *
+ * Pointer capture rather than window listeners, so a fast drag that leaves the
+ * element keeps resizing; and the width is committed on release for the same
+ * reason the sidebar's is — the snapshot is rewritten whole, and writing it per
+ * frame would be a file write per pixel.
+ */
+function ChorusSash({
+  projectId,
+  onCommit,
+}: {
+  /** Whose divider this is. One number for the whole app moved every pane at once. */
+  readonly projectId: string
+  readonly onCommit: () => void
+}): React.JSX.Element {
+  const { setChorusWidth } = useWorkspaceActions()
+
+  const resize = (event: ReactPointerEvent<HTMLDivElement>): void => {
+    /*
+     * The element is captured in a local, not read from the event later.
+     *
+     * React nulls `currentTarget` the moment the handler returns, so a closure
+     * that reaches for it during `pointermove` — or worse, during cleanup —
+     * finds `null`. The listeners attached fine and were then never removed,
+     * which is a leak per drag.
+     */
+    const sash = event.currentTarget
+    const pane = sash.closest('[data-pane-content]')
+    const chorus = pane?.querySelector('.workspace-pane-chorus')
+    if (pane === null || pane === undefined || chorus === null || chorus === undefined) return
+
+    const right = pane.getBoundingClientRect().right
+    const startWidth = chorus.getBoundingClientRect().width
+    /*
+     * **Where in the sash you grabbed, preserved.** Without this the divider
+     * jumps to sit exactly under the pointer on mousedown — a few pixels, but
+     * it is the whole difference between dragging a handle and the handle
+     * teleporting. The offset is then held for the life of the drag, so the
+     * width still comes from the pointer's absolute position and cannot drift
+     * the way an accumulated delta would.
+     */
+    const grab = right - event.clientX - startWidth
+
+    sash.setPointerCapture(event.pointerId)
+
+    const move = (moved: PointerEvent): void => {
+      setChorusWidth(projectId, right - moved.clientX - grab)
+    }
+    const stop = (): void => {
+      sash.removeEventListener('pointermove', move)
+      sash.removeEventListener('pointerup', stop)
+      sash.removeEventListener('pointercancel', stop)
+      sash.releasePointerCapture(event.pointerId)
+      onCommit()
+    }
+    sash.addEventListener('pointermove', move)
+    sash.addEventListener('pointerup', stop)
+    // A capture lost to a system gesture fires this and never `pointerup`.
+    sash.addEventListener('pointercancel', stop)
+  }
+
+  return (
+    <div
+      className="chorus-sash"
+      role="separator"
+      aria-orientation="vertical"
+      tabIndex={0}
+      onPointerDown={resize}
+      onKeyDown={(event) => {
+        // Same keys the pane sashes use, so one gesture works everywhere.
+        const step = event.shiftKey ? 40 : 8
+        if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return
+        event.preventDefault()
+        const pane = event.currentTarget.closest('[data-pane-content]')
+        const chorus = pane?.querySelector('.workspace-pane-chorus')
+        if (chorus === null || chorus === undefined) return
+        const current = chorus.getBoundingClientRect().width
+        setChorusWidth(projectId, event.key === 'ArrowLeft' ? current + step : current - step)
+      }}
+      onKeyUp={onCommit}
+    />
   )
 }
 
@@ -777,13 +1066,33 @@ function PaneTabStrip(
   return (
     <div className="workspace-tab-strip" data-tab-strip role="tablist">
       <div className="workspace-tabs">
-        {props.pane.tabs.flatMap((conversationId, index) => {
-          const session = props.sessions.get(conversationId)
+        {/*
+          A tab is a **project**, and this strip was still resolving it as a
+          conversation — `sessions.get(tabId)` against a map keyed by
+          conversation id.
+
+          The `flatMap` is why it looked plausible for three slices instead of
+          throwing: an id it could not resolve was dropped, so a pane keyed by
+          project rendered whichever conversations happened to share those ids
+          and silently omitted the rest. `EditorPane` and `reconcileWorkspace`
+          were re-keyed in Phase 3 and this was missed.
+        */}
+        {props.pane.tabs.flatMap((projectId, index) => {
+          /*
+           * The project's newest conversation names the tab, matching what
+           * `EditorPane` chooses to render inside it. A project with no open
+           * conversation has nothing to title a tab with and is dropped, which
+           * is the one case the old `flatMap` handled correctly by accident.
+           */
+          const session = [...props.sessions.values()]
+            .filter((candidate) => candidate.projectId === projectId)
+            .at(-1)
           if (session === undefined) return []
-          const active = props.pane.activeTabId === conversationId
+          const conversationId = session.conversationId
+          const active = props.pane.activeTabId === projectId
           return [
             <div
-              key={conversationId}
+              key={projectId}
               className="workspace-tab"
               data-active={active}
               data-dragging={props.drag?.conversationId === conversationId}
@@ -804,22 +1113,44 @@ function PaneTabStrip(
                 }}
                 type="button"
                 className="workspace-tab-main"
-                data-workspace-tab={conversationId}
-                id={`tab-${props.paneId}-${conversationId}`}
+                data-workspace-tab={projectId}
+                id={`tab-${props.paneId}-${projectId}`}
                 role="tab"
                 tabIndex={active ? 0 : -1}
                 aria-selected={active}
-                aria-controls={`panel-${props.paneId}-${conversationId}`}
+                aria-controls={`panel-${props.paneId}-${projectId}`}
                 title={session.title}
                 onPointerDown={(event) => {
-                  props.onTabPointerDown(conversationId, session.title, props.paneId, event)
+                  /*
+                   * The **project**, matching `data-workspace-tab` two lines up
+                   * and `onClick` below — and the last place in this file that
+                   * was still handing a conversation id to something keyed by
+                   * projects.
+                   *
+                   * Dragging a tab carried the conversation, so `splitWithSession`
+                   * looked it up in `pane.tabs` (project ids), found nothing, and
+                   * took its *insert* branch: a new pane whose only tab was a
+                   * conversation id. `WorkbenchFrame` then opened that as a
+                   * project and main answered `UnknownProjectError`, which is the
+                   * one place the mistake finally became visible. Everything
+                   * before it — the drag, the drop, the split, the new pane — was
+                   * a silent success.
+                   */
+                  props.onTabPointerDown(projectId, session.title, props.paneId, event)
                 }}
                 onClick={() => {
                   if (props.consumeSuppressedClick()) return
-                  props.onActivate(props.paneId, conversationId)
+                  /*
+                   * The project, not the conversation. `activateTab` matches
+                   * against `pane.tabs`, which holds project ids — so a
+                   * conversation id matched nothing and clicking a tab did
+                   * nothing at all, silently, because activating an absent tab
+                   * is a no-op rather than an error.
+                   */
+                  props.onActivate(props.paneId, projectId)
                 }}
                 onAuxClick={(event) => {
-                  if (event.button === 1) props.onClose(props.paneId, conversationId)
+                  if (event.button === 1) props.onClose(props.paneId, projectId)
                 }}
                 onKeyDown={(event) => {
                   onTabKeyDown(index, event)
@@ -852,7 +1183,9 @@ function PaneTabStrip(
                 title={t('workspace.closeTab', { title: session.title })}
                 onClick={(event) => {
                   event.stopPropagation()
-                  props.onClose(props.paneId, conversationId)
+                  // The tab is the project, so this closes the project's tab —
+                  // the conversations inside it keep running in main.
+                  props.onClose(props.paneId, projectId)
                 }}
               >
                 <span aria-hidden="true">×</span>

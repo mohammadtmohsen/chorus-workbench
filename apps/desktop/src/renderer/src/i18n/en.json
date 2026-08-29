@@ -14,6 +14,8 @@
     "noneAtAll": "Chorus drives the coding CLI you already have, and could not find one. Install either of these and press Try again:"
   },
   "conversation": {
+    "newInGroup": "New conversation here",
+    "endTitled": "End {{title}}",
     "cast": "Agents",
     "projectPath": "Project directory — optional",
     "projectPathPlaceholder": "Leave empty to start in your home folder",
@@ -25,8 +27,6 @@
     "messageLabel": "Message",
     "placeholder": "Say something. Type @ to choose who answers.",
     "attach": "Attach a file",
-    "mentionCast": "Choose who answers",
-    "mentionFile": "Refer to a file",
     "send": "Send",
     "steer": "Send — the agent keeps working and takes this in",
     "moreLines": "+{{count}} more",
@@ -42,20 +42,14 @@
     "tryAgain": "Try again",
     "sessionLabel": "Session in {{path}}",
     "editPath": "Change the project directory",
-    "choosePath": "Choose the project folder",
+    "chooseStartFolder": "Choose the folder for new sessions",
+    "projectFolder": "Project folder",
     "noFolder": "No folder",
-    "clearFolder": "Work without a folder",
     "renameTitle": "Rename this session",
     "titlePlaceholder": "Empty for the folder's name",
     "addAgent": "Bring {{agent}} in — it reads the conversation so far",
     "removeAgent": "Take {{agent}} out of this conversation",
     "nobodyHere": "Nobody is in this conversation. Add an agent to start again.",
-    "changesLabel": "Changes",
-    "changesHint": "What this branch has changed, and the project's files (⌘⇧G)",
-    "spinOff": "Start this as a side task",
-    "spinOffHint": "Send this to a new session instead — it keeps this conversation's context, can make changes, and leaves this chat running",
-    "restartLabel": "Start this session over, with nothing said in it",
-    "endLabel": "End this session",
     "quoteInMessage": "Quote in message",
     "endConfirm": "An agent is working — press again to end this session",
     "cancel": "Cancel",
@@ -74,8 +68,6 @@
     "addFolder": "Folder…",
     "addSelection": "Current selection",
     "addSelectionDetail": "Include what VS Code has open",
-    "settings": "Session settings",
-    "endArmed": "An agent is working — press again to end this session",
     "includedMenu": "What goes with this message",
     "thinkingWords": [
       "thinking",
@@ -94,7 +86,8 @@
       "awaitingInput": "waiting on you"
     },
     "waitingWords": ["waiting", "reaching the agent", "handing it over", "getting started"],
-    "go": "Go ahead"
+    "go": "Go ahead",
+    "mentionAgent": "Mention {{agent}}"
   },
   "workspace": {
     "sessions": "Sessions",
@@ -113,7 +106,6 @@
     "closeOthers": "Close Others",
     "closeAll": "Close All",
     "rename": "Rename",
-    "restart": "Restart Session",
     "end": "End Session",
     "endConfirm": "An agent is still working. End this session?",
     "moveHere": "Move here",
@@ -130,9 +122,6 @@
       "right": "Split right"
     },
     "noMatches": "No session matches that.",
-    "confirmRestartTitle": "Restart this session?",
-    "confirmRestartBody": "The agents reconnect and the conversation stays. Anything they are part-way through is lost.",
-    "confirmRestartBodyWorking": "An agent is working right now. Restarting stops it mid-turn; the conversation stays.",
     "confirmEndTitle": "End this session?",
     "confirmEndBody": "The agents leave and the session closes. The conversation is kept and can be reopened from history.",
     "confirmEndBodyWorking": "An agent is working right now. Ending stops it mid-turn. The conversation is kept and can be reopened from history.",
@@ -213,46 +202,8 @@
     "exported": "Saved to {{path}}",
     "done": "Done"
   },
-  "summary": {
-    "open": "Summary",
-    "openShort": "Sum",
-    "heading": "What happened in this session",
-    "loading": "Reading the log…",
-    "empty": "Nothing has happened yet.",
-    "whatAgentsDid": "What each agent did",
-    "noAgentWork": "No agent has taken a turn yet.",
-    "turns_one": "{{count}} turn",
-    "turns_other": "{{count}} turns",
-    "commands_one": "{{count}} command",
-    "commands_other": "{{count}} commands",
-    "filesCount_one": "{{count}} file",
-    "filesCount_other": "{{count}} files",
-    "failed": "{{count}} failed",
-    "denied_one": "{{count}} denied",
-    "denied_other": "{{count}} denied",
-    "problems_one": "{{count}} problem",
-    "problems_other": "{{count}} problems",
-    "noProblems": "Nothing went wrong.",
-    "files_one": "{{count}} file touched",
-    "files_other": "{{count}} files touched",
-    "source": "Counted from the log. What is missing and what is next are questions for an agent.",
-    "ask": "Ask an agent",
-    "refresh": "Refresh",
-    "done": "Done"
-  },
   "review": {
-    "open": "Review changes",
-    "openShort": "Diff",
-    "heading": "Changes on disk",
-    "loading": "Reading the repository…",
-    "clean": "Nothing has changed yet.",
-    "untrackedOnly": "Only untracked files — nothing to diff yet.",
-    "files": "Changed files",
     "binary": "Binary file.",
-    "detached": "detached",
-    "source": "Read from git, not from the transcript.",
-    "refresh": "Refresh",
-    "done": "Done",
     "diffCapped_one": "{{count}} more line not shown — open it in the editor view.",
     "diffCapped_other": "{{count}} more lines not shown — open it in the editor view."
   },
@@ -364,7 +315,10 @@
     },
     "diagnostic": {
       "heading": "VS Code problem"
-    }
+    },
+    "editorWorkbench": "Editor",
+    "showEditor": "Show the editor",
+    "hideEditor": "Hide the editor"
   },
   "notice": {
     "omitted": "{{bytes}} bytes omitted — the output was too large to keep",
@@ -573,8 +527,19 @@
     "confirmKillCancel": "Cancel",
     "confirmKill": "Kill"
   },
+  "project": {
+    "firstRun": "Add a project folder to begin. Chorus opens conversations inside a project, and everything an agent does happens there.",
+    "renameTitle": "Rename this project",
+    "noConversations": "No conversations in this project yet."
+  },
+  "dock": {
+    "conversations": "Conversations in this project"
+  },
   "rail": {
-    "label": "Sessions, terminal and settings"
+    "label": "Projects, terminal and settings",
+    "projects": "Projects",
+    "addProject": "Add project",
+    "openProject": "New conversation in {{name}}"
   },
   "state": {
     "idle": "idle",

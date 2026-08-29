@@ -12,10 +12,8 @@ import { useTranslation } from 'react-i18next'
 import type { IdeContextPush } from '../../shared/ipc.js'
 import { quotePath } from './attach.js'
 import { ComposerMenu, type MenuItem } from './ComposerMenu.js'
-import { useSessionMenu } from './workspace/session-menu-context.js'
 import { Attachments, type Attachment } from './Attachments.js'
-import { formatContextBlock, markFor, versionFor, withEditorContext } from './editor-context.js'
-import { pillReference } from './shorten.js'
+import { formatContextBlock, versionFor, withEditorContext } from './editor-context.js'
 import {
   applyMention,
   commandOptions,
@@ -79,11 +77,13 @@ export interface ComposerHandle {
 export interface ComposerState {
   draft: string
   attached: Attachment[]
-  ideIncluded: boolean
 }
 
 export interface ComposerProps {
   readonly conversationId: string
+  /** Whether this project's workbench is on screen — the Editor switch's state. */
+  readonly workbenchShown: boolean
+  readonly onToggleWorkbench: () => void
   readonly participants: readonly string[]
   /** Drives whether the one button offers Send or Stop. */
   readonly busy: boolean
@@ -97,24 +97,17 @@ export interface ComposerProps {
    * session in the list, including the ones open in no pane and therefore having
    * no composer to press. This is the copy for the session you are typing in.
    */
-  readonly onOpenPanel?: ((panel: 'review' | 'summary') => void) | undefined
   /**
    * Branches this conversation into a side task carrying the draft as its brief.
    *
    * Undefined where there is no agent to fork from — the pane decides, because
    * only it knows whether anyone has actually started a session yet.
    */
-  readonly onSpinOff?: ((brief: string) => void) | undefined
   /** Show or hide this session's Changes panel. Absent outside a git repository. */
-  readonly onToggleChanges?: (() => void) | undefined
   /** Whether the panel is showing, so the button can say which way it goes. */
-  readonly changesOpen?: boolean | undefined
-  readonly onRestart?: (() => void) | undefined
-  readonly onEnd?: (() => void) | undefined
   readonly initial?: {
     readonly draft?: string
     readonly attached?: readonly Attachment[]
-    readonly ideIncluded?: boolean
   }
   /**
    * Where to leave the draft, written on every render.
@@ -200,7 +193,6 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(
       setDraftState(next)
     }, [])
     const [attached, setAttached] = useState<Attachment[]>([...(props.initial?.attached ?? [])])
-    const [ideIncluded, setIncluded] = useState(props.initial?.ideIncluded ?? true)
     /*
      * Which of the composer's own menus is open, and where it hangs from.
      *
@@ -209,24 +201,12 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(
      * screen at once.
      */
     const [menu, setMenu] = useState<{
-      kind: 'add' | 'included'
+      kind: 'add'
       anchor: DOMRect
       trigger: HTMLElement | null
     } | null>(null)
-    /*
-     * Ending asks twice while a turn is in flight — the one moment there is
-     * anything to lose, and the same rule the session menu follows. Disarmed
-     * whenever the agent stops, so a stale arming cannot end a quiet session on
-     * one click an hour later.
-     */
-    const [armedEnd, setArmedEnd] = useState(false)
-    useEffect(() => {
-      if (!props.busy) setArmedEnd(false)
-    }, [props.busy])
-    /** The shell's one session menu — the chips and the sliders both open it. */
-    const openSessionMenu = useSessionMenu()
 
-    const openMenuFrom = (kind: 'add' | 'included', event: React.MouseEvent<HTMLElement>): void => {
+    const openMenuFrom = (kind: 'add', event: React.MouseEvent<HTMLElement>): void => {
       const trigger = event.currentTarget
       setMenu({ kind, anchor: trigger.getBoundingClientRect(), trigger })
     }
@@ -352,7 +332,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(
     const active = liveStamp?.query ?? null
 
     const hasDraft = draft.trim() !== '' || attached.length > 0
-    props.report.current = { draft, attached, ideIncluded }
+    props.report.current = { draft, attached }
 
     useEffect(() => {
       /*
@@ -564,6 +544,30 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(
           : { query: found, from: el.value, rev: rev.current, caret: el.selectionStart }
       )
     }, [])
+
+    /**
+     * Types something into the box at the caret and hands the box back.
+     *
+     * Extracted when `@` became one button per agent: three buttons doing the
+     * same four steps by hand is three places for the caret arithmetic to
+     * disagree. `at + text.length` rather than `at + 1` is the whole reason it
+     * could not stay inline — the old version only ever inserted one character.
+     *
+     * `refreshMention` afterwards because the character may *be* a trigger: `#`
+     * opens the file picker exactly as typing it does, which is the point of the
+     * button. A whole mention with a trailing space parses as no query, so the
+     * agent buttons pass through it harmlessly rather than needing a second path.
+     */
+    const insertAtCaret = (text: string): void => {
+      const box = input.current
+      const at = box?.selectionStart ?? draft.length
+      writeDraft(`${draft.slice(0, at)}${text}${draft.slice(at)}`)
+      box?.focus()
+      window.requestAnimationFrame(() => {
+        box?.setSelectionRange(at + text.length, at + text.length)
+        refreshMention()
+      })
+    }
 
     /*
      * And asked again the moment someone actually wants them.
@@ -836,7 +840,6 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(
      * inert when the selection is already going, so the menu reports the state
      * as well as setting it.
      */
-    const ide = props.ide
     const addItems: MenuItem[] = [
       {
         key: 'file',
@@ -857,53 +860,19 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(
           })
         },
       },
-      ...(ide !== null && ide.status === 'ready'
-        ? [
-            {
-              key: 'selection',
-              label: t('conversation.addSelection'),
-              detail: t('conversation.addSelectionDetail'),
-              checked: ideIncluded,
-              disabled: ideIncluded,
-              onChoose: () => {
-                setIncluded(true)
-              },
-            },
-          ]
-        : []),
     ]
 
     /*
-     * What will actually be sent, and one way to drop each of them.
+     * Always, whenever there is something to send.
      *
-     * The toggle comes first and is focused on open, so the chip still answers a
-     * click-then-Enter the way the plain toggle it replaced did. Attachments are
-     * *removed* rather than excluded: an inclusion flag per item would have to
-     * survive a tab unmount through `SessionCarry`, and an excluded file that
-     * silently came back would be the worst failure available to a control whose
-     * whole job is "do not send this".
+     * This was `&& ideIncluded`. **Dropping the switch drops a disclosure
+     * control**, and that is worth writing down rather than discovering: the
+     * pill said which file was going and the chip said which editor it came
+     * from, and neither exists now. What is sent is a path and a line range from
+     * whatever is focused in the workbench — it is the person's own editor, in
+     * their own window — so the trade is deliberate, not an oversight.
      */
-    const includedItems: MenuItem[] = [
-      {
-        key: 'selection',
-        label: ideIncluded ? t('ide.exclude') : t('ide.include'),
-        checked: ideIncluded,
-        onChoose: () => {
-          // Once excluded it stays excluded: a live selection change must never
-          // silently re-enable context the user turned off.
-          setIncluded((on) => !on)
-        },
-      },
-      ...attached.map((item) => ({
-        key: item.path,
-        label: t('attachments.remove', { name: item.name }),
-        onChoose: () => {
-          setAttached((current) => current.filter((one) => one.path !== item.path))
-        },
-      })),
-    ]
-
-    const ideAttached = props.ide !== null && props.ide.status === 'ready' && ideIncluded
+    const ideAttached = props.ide !== null && props.ide.status === 'ready'
     const { onError, onSending, onSendFailed } = props
 
     const send = useCallback(() => {
@@ -1079,102 +1048,41 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(
          * on the left, the ways to add on the right.
          */}
         <div className="composer-context">
-          {ide !== null && ide.status !== 'unavailable' && (
-            <div className="ide-pill" data-status={ide.status}>
-              {/*
-               * The lines are split off the path, and that is the whole point of
-               * the two spans.
-               *
-               * This was one span with `text-overflow: ellipsis`. CSS elides
-               * from the end, so on a deep path the line range went first and
-               * the pill read `…/procedure-pricing/hcpc-pri…` — a reference with
-               * no file name and no lines. `pillReference` shortens the path at
-               * a directory boundary and hands the range back separately; the
-               * stylesheet pins it against shrinking, so what gets dropped is a
-               * directory rather than the one part you cannot see for yourself.
-               *
-               * `formatReference` rather than the template literal that used to
-               * be here: it is the same string the *message* carries, and two
-               * copies of "when does a range collapse to one number" is one copy
-               * too many.
-               */}
-              {ide.status === 'ready' && ide.file !== null ? (
-                (() => {
-                  const shown = pillReference(ide.file)
-                  return (
-                    <span className="ide-pill-what ide-pill-ref" title={shown.full}>
-                      <span className="ide-pill-path">{shown.path}</span>
-                      {shown.lines !== '' && <span className="ide-pill-lines">{shown.lines}</span>}
-                    </span>
-                  )
-                })()
-              ) : (
-                <span className="ide-pill-what">{t(`ide.status.${ide.status}`)}</span>
-              )}
-              {/*
-               * Which selection this is, when the path does not already say it: a
-               * merge request commit, a git ref, or that these lines are
-               * remembered rather than live. Separate from the path so it can be
-               * dimmed, and so a long branch name cannot be mistaken for part of
-               * the file name.
-               */}
-              {ide.status === 'ready' && ide.file !== null && (
-                <span className="ide-pill-mark">
-                  {[
-                    ide.file.source === 'cached' ? t('ide.mark.cached') : null,
-                    ...(() => {
-                      const mark = markFor(ide.file.provenance)
-                      return mark === null ? [] : [t(mark.key, mark.params)]
-                    })(),
-                  ]
-                    .filter((part) => part !== null)
-                    .join(' · ')}
-                </span>
-              )}
-            </div>
-          )}
           {/*
-           * Where the selection came from, as its own chip.
+           * The editor switch, and it is the only thing left on this side of the
+           * row.
            *
-           * It was inside the pill, where "VS Code" read as part of the path.
-           * Provenance and inclusion are two different questions — which editor
-           * is this, and is it going with the message — and the approved
-           * composition asks them separately.
+           * Two controls stood here and both are gone. The **pill** named the
+           * file and lines that would ride along with the message; the
+           * **Included chip** was the switch that decided whether they did. The
+           * switch went first — an editor open beside a conversation is context,
+           * and asking every time was a question with one sensible answer — and
+           * with nothing to decide, a read-only pill restating what is already
+           * on screen two inches to the left earned nothing.
+           *
+           * What replaces them is a control over the *editor* rather than over
+           * the message: it shows and hides the workbench in this pane. The
+           * label is unchanged and the icon is the one the provenance chip wore,
+           * which is deliberate — it sits where "Editor" always sat, and now it
+           * does the obvious thing when you press it.
+           *
+           * **Always rendered**, including when no file is open and when the
+           * bridge is unavailable. It is a layout control now, not a report
+           * about a selection, and a switch that vanishes when there is nothing
+           * selected is a switch you cannot find when you want the editor back.
            */}
-          {ide !== null && ide.status === 'ready' && (
-            <span className="ide-source">
-              <svg className="ide-source-icon" viewBox="0 0 24 24" aria-hidden="true">
-                <path d="M17 3.5 9.5 11 5 7.5 3 9l4 3-4 3 2 1.5L9.5 13l7.5 7.5 4-2v-13l-4-2Zm0 4.2v8.6L12 12l5-4.3Z" />
-              </svg>
-              {t('ide.editor')}
-            </span>
-          )}
-          {ide !== null && ide.status === 'ready' && (
-            /*
-             * A chip that opens what will be sent, rather than a bare toggle.
-             *
-             * The toggle is still the first thing in the menu and still takes
-             * one keystroke, so the old gesture — click, Enter — does what it
-             * always did. What the caret adds is the list: the selection and
-             * every attachment, each removable, in the one place that claims to
-             * say what goes with the message.
-             */
-            <button
-              type="button"
-              className="ide-included"
-              aria-haspopup="menu"
-              aria-expanded={menu?.kind === 'included'}
-              data-on={ideIncluded}
-              title={t('ide.includedMenu')}
-              onClick={(event) => {
-                openMenuFrom('included', event)
-              }}
-            >
-              <span className="ide-included-mark" aria-hidden="true" />
-              {ideIncluded ? t('ide.on') : t('ide.off')}
-              <span className="composer-caret" aria-hidden="true" />
-            </button>
-          )}
+          <button
+            type="button"
+            className="ide-source"
+            aria-pressed={props.workbenchShown}
+            title={props.workbenchShown ? t('ide.hideEditor') : t('ide.showEditor')}
+            onClick={props.onToggleWorkbench}
+          >
+            <svg className="ide-source-icon" viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M17 3.5 9.5 11 5 7.5 3 9l4 3-4 3 2 1.5L9.5 13l7.5 7.5 4-2v-13l-4-2Zm0 4.2v8.6L12 12l5-4.3Z" />
+            </svg>
+            {t('ide.editorWorkbench')}
+          </button>
 
           {/*
            * The way to add a file that is not the one open in the editor.
@@ -1314,8 +1222,8 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(
           <ComposerMenu
             anchor={menu.anchor}
             trigger={menu.trigger}
-            label={t(menu.kind === 'add' ? 'conversation.addContext' : 'ide.includedMenu')}
-            items={menu.kind === 'add' ? addItems : includedItems}
+            label={t('conversation.addContext')}
+            items={addItems}
             onClose={() => {
               setMenu(null)
             }}
@@ -1511,34 +1419,37 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(
         */}
           <div className="composer-tools">
             {/*
-              The two triggers, as buttons as well as characters.
-
-              `@` and `#` already open the cast and the file picker when typed;
-              nothing said so. These insert the character at the caret and hand
-              the box back, so the menu that opens is the same menu — one code
-              path, discoverable from the row rather than from documentation.
+              The cast, as one button each, and `#` as the character it inserts.
+              
+              `@` was a single button that typed the character and let the mention
+              menu offer the choice. Two agents is a list of two, and a menu for a
+              two-item list is a click and a read to save typing six letters — so
+              the choice moved onto the row and each button inserts the whole
+              mention. `#` stays a character button, because the thing it opens is
+              a file picker over a list nobody can enumerate in a toolbar.
+              
+              **Only the conversation's own participants.** Mentioning an agent
+              that is not in the room addresses nobody, and the cast is a project
+              setting reachable from the project card — offering `@codex` where
+              codex was deliberately removed would be offering to talk to an empty
+              chair.
             */}
-            {(['@', '#'] as const).map((trigger) => (
+            {participants.map((agent) => (
               <button
-                key={trigger}
+                key={agent}
                 type="button"
-                className="composer-trigger"
-                aria-label={t(
-                  trigger === '@' ? 'conversation.mentionCast' : 'conversation.mentionFile'
-                )}
-                title={t(trigger === '@' ? 'conversation.mentionCast' : 'conversation.mentionFile')}
+                className={`composer-trigger composer-mention voice--${agent}`}
+                aria-label={t('conversation.mentionAgent', { agent })}
+                title={t('conversation.mentionAgent', { agent })}
                 onClick={() => {
-                  const box = input.current
-                  const at = box?.selectionStart ?? draft.length
-                  writeDraft(`${draft.slice(0, at)}${trigger}${draft.slice(at)}`)
-                  box?.focus()
-                  window.requestAnimationFrame(() => {
-                    box?.setSelectionRange(at + 1, at + 1)
-                    refreshMention()
-                  })
+                  insertAtCaret(`@${agent} `)
                 }}
               >
-                <span aria-hidden="true">{trigger}</span>
+                <span className="voice-dot" aria-hidden="true" />
+                {/* The `@` is part of the label, not decoration: the button
+                    inserts a mention, and showing what it types is what makes
+                    that legible without a tooltip. */}
+                <span aria-hidden="true">@{agent}</span>
               </button>
             ))}
             {/*
@@ -1548,162 +1459,6 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(
               folder, the permission profile, plan mode. Not a second menu that
               does the same job: the one that exists is the one that opens.
             */}
-            {/*
-              What this session is, beside what it may do.
-
-              Summary and Review changes read the conversation; Restart and End
-              act on it. Same handlers as the menu's rows — one action, two
-              places to reach it, rather than two implementations.
-            */}
-            {props.onOpenPanel !== undefined && (
-              <>
-                <button
-                  type="button"
-                  className="composer-trigger"
-                  aria-label={t('summary.open')}
-                  title={t('summary.open')}
-                  onClick={() => {
-                    props.onOpenPanel?.('summary')
-                  }}
-                >
-                  <svg viewBox="0 0 24 24" aria-hidden="true">
-                    <path d="M5 5h14M5 10h14M5 15h9M5 20h6" />
-                  </svg>
-                </button>
-                <button
-                  type="button"
-                  className="composer-trigger"
-                  aria-label={t('review.open')}
-                  title={t('review.open')}
-                  onClick={() => {
-                    props.onOpenPanel?.('review')
-                  }}
-                >
-                  <svg viewBox="0 0 24 24" aria-hidden="true">
-                    <path d="M4 6h7M4 12h7M4 18h7M17 4v16M13.5 7.5 17 4l3.5 3.5" />
-                  </svg>
-                </button>
-              </>
-            )}
-            {/*
-              Send this somewhere else instead of into the turn you are in.
-
-              The case it exists for: mid-flow with an agent, you notice one
-              thing that needs fixing. Typing it here redirects the turn; a new
-              session starts an agent that has not seen any of what you were
-              both looking at; and an aside cannot act at all — it is read-only
-              by construction, so "open an aside and promote it" was a way of
-              obtaining a room rather than of asking a question.
-
-              Beside Send because that is the decision being made — these words,
-              but not here. It takes the draft for the same reason: you have
-              already written the thing, and a dialog asking for it again would
-              be asking you to approve your own sentence.
-
-              Disabled with an empty box rather than hidden. It is a property of
-              the draft, not of the session, and a control that vanishes as you
-              delete a word teaches nothing about when it applies.
-            */}
-            {props.onSpinOff !== undefined && (
-              <button
-                type="button"
-                className="composer-trigger"
-                disabled={draft.trim() === ''}
-                aria-label={t('conversation.spinOff')}
-                title={t('conversation.spinOffHint')}
-                onClick={() => {
-                  const brief = draft.trim()
-                  if (brief === '') return
-                  props.onSpinOff?.(brief)
-                  writeDraft('')
-                }}
-              >
-                <svg viewBox="0 0 24 24" aria-hidden="true">
-                  <path d="M6 3v8a4 4 0 0 0 4 4h8M14 11l4 4-4 4M6 3a2 2 0 1 0 0 4 2 2 0 0 0 0-4" />
-                </svg>
-              </button>
-            )}
-            {/*
-             * The change itself, beside the actions that act on it.
-             *
-             * The panel already has `⌘⇧G` and nothing on screen said so. A
-             * chord is not a discoverable surface — it is the thing you use
-             * once you know the feature exists — and reviewing a diff is the
-             * step this row was missing between asking for work and ending the
-             * session.
-             *
-             * A toggle rather than an open, and `aria-pressed` rather than two
-             * labels, because the panel is a place the session can be in and
-             * the same key already closes it.
-             */}
-            {props.onToggleChanges !== undefined && (
-              <button
-                type="button"
-                className="composer-trigger"
-                aria-pressed={props.changesOpen === true}
-                aria-label={t('conversation.changesLabel')}
-                title={t('conversation.changesHint')}
-                onClick={props.onToggleChanges}
-              >
-                <svg viewBox="0 0 24 24" aria-hidden="true">
-                  <path d="M4 4h7v16H4zM13 4h7v16h-7M6 10h3M6 13h3M15 10h3M15 13h3M16.5 8.5v3" />
-                </svg>
-              </button>
-            )}
-            {props.onRestart !== undefined && (
-              <button
-                type="button"
-                className="composer-trigger"
-                aria-label={t('conversation.restartLabel')}
-                title={t('conversation.restartLabel')}
-                onClick={props.onRestart}
-              >
-                <svg viewBox="0 0 24 24" aria-hidden="true">
-                  <path d="M20 12a8 8 0 1 1-2.4-5.7M20 4v4h-4" />
-                </svg>
-              </button>
-            )}
-            {props.onEnd !== undefined && (
-              <button
-                type="button"
-                className="composer-trigger composer-end"
-                data-armed={armedEnd ? 'true' : undefined}
-                aria-label={armedEnd ? t('conversation.endArmed') : t('conversation.endLabel')}
-                title={armedEnd ? t('conversation.endArmed') : t('conversation.endLabel')}
-                onClick={() => {
-                  // Armed only while an agent is working, exactly as the menu
-                  // does it: the one moment ending costs something.
-                  if (props.busy && !armedEnd) {
-                    setArmedEnd(true)
-                    return
-                  }
-                  props.onEnd?.()
-                }}
-              >
-                <svg viewBox="0 0 24 24" aria-hidden="true">
-                  <path d="M12 4v9M7.5 6.8a7.5 7.5 0 1 0 9 0" />
-                </svg>
-              </button>
-            )}
-            <button
-              type="button"
-              className="composer-trigger composer-settings"
-              aria-haspopup="menu"
-              aria-label={t('conversation.settings')}
-              title={t('conversation.settings')}
-              onClick={(event) => {
-                const trigger = event.currentTarget
-                openSessionMenu({
-                  conversationId,
-                  anchor: trigger.getBoundingClientRect(),
-                  trigger,
-                })
-              }}
-            >
-              <svg viewBox="0 0 24 24" aria-hidden="true">
-                <path d="M4 7h9M17 7h3M4 17h3M11 17h9M15 4v6M8 14v6" />
-              </svg>
-            </button>
             {/*
             One button, and what it does is decided by what you have typed.
 

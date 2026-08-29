@@ -234,6 +234,92 @@ export const MIGRATIONS: readonly Migration[] = [
       ON CONFLICT (name) DO UPDATE SET last_seq = excluded.last_seq;
     `,
   },
+  {
+    version: 4,
+    name: 'project-as-domain',
+    /*
+     * Phase 2's Project, and the table is **recreated rather than altered**.
+     *
+     * `projects` has existed since migration 1 and has never been written: there
+     * is no INSERT, UPDATE or SELECT against it anywhere in this repository, and
+     * it is not in PROJECTION_NAMES, so nothing rebuilds it either. It was a
+     * placeholder for the domain this migration finally supplies.
+     *
+     * That is what makes DROP the honest option rather than the destructive one.
+     * `canonical_root` cannot be derived in SQL — resolving a path means asking
+     * the filesystem, and copying `root_path` into it would record a value that
+     * nobody resolved and that every uniqueness check downstream would then
+     * trust. ALTER TABLE also cannot add a NOT NULL column to an existing table
+     * without a default, so altering would leave the two columns the domain most
+     * depends on permanently nullable to preserve rows that do not exist.
+     *
+     * If a row somehow did exist, `migrate()` snapshots the database before any
+     * upgrade from a non-zero version, so this is recoverable rather than final.
+     *
+     * `permission_profile_id` is carried across although the Phase 2 domain does
+     * not name it. Nothing reads it, it costs one nullable column, and dropping a
+     * field this change was not asked to remove is the more expensive mistake.
+     */
+    up: `
+      DROP TABLE projects;
+
+      CREATE TABLE projects (
+        id                    TEXT    PRIMARY KEY,
+        name                  TEXT    NOT NULL,
+        root                  TEXT    NOT NULL,
+        -- The filesystem's own answer for 'root', symlinks resolved. Supplied by
+        -- the caller because only main can ask; this package never touches disk.
+        canonical_root        TEXT    NOT NULL,
+        -- What uniqueness is actually enforced on: canonical_root folded for a
+        -- case-insensitive filesystem, or identical to it on a case-sensitive
+        -- one. Stored rather than computed in the index because the fold is a
+        -- property of the volume the project lives on, which SQL cannot know.
+        canonical_key         TEXT    NOT NULL,
+        workspace_file        TEXT,
+        permission_profile_id TEXT,
+        created_at            INTEGER NOT NULL,
+        last_opened_at        INTEGER NOT NULL
+      );
+
+      -- The invariant the domain rests on: one project per real directory. A
+      -- second Add Project on the same folder must find the first, not shadow it.
+      CREATE UNIQUE INDEX projects_canonical_key ON projects (canonical_key);
+      -- The rail's order, and the only ordering anything asks for.
+      CREATE INDEX projects_last_opened ON projects (last_opened_at DESC);
+    `,
+  },
+  {
+    version: 5,
+    name: 'project-owns-its-settings',
+    /*
+     * The permission profile and the cast move up to the Project.
+     *
+     * They were per-conversation, which put the same three questions in front of
+     * a person once per conversation and let two conversations in one directory
+     * disagree about what may be run there. A profile is an answer about a
+     * *place* — "agents may write in this repository" — and it was only ever
+     * conversation-scoped because the conversation was the top-level thing.
+     *
+     * `permission_profile_id` already exists: migration 4 carried it across
+     * without a reader, on the argument that dropping a field it was not asked
+     * to remove was the more expensive mistake. This is the migration that
+     * proves that call, and it needs no DDL for that column at all.
+     *
+     * `agent_ids` is a JSON array and **nullable on purpose**. Null is not an
+     * empty cast; it is "this project has never been asked", which is what every
+     * row migrated from before this change is. The distinction matters because
+     * an empty array is a legitimate answer — a project with no agents in it —
+     * and collapsing the two would silently re-add the default cast to a project
+     * somebody had deliberately emptied.
+     *
+     * ALTER rather than a recreate, unlike migration 4: this table now holds
+     * real rows that nothing can reconstruct, and the column is nullable, which
+     * is the one shape ALTER TABLE ADD COLUMN accepts without a default.
+     */
+    up: `
+      ALTER TABLE projects ADD COLUMN agent_ids TEXT;
+    `,
+  },
 ]
 
 export interface MigrationResult {

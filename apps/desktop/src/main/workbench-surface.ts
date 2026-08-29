@@ -17,6 +17,8 @@ import {
   WORKBENCH_CONNECTION_CHANNEL,
   WORKBENCH_SHELL_CHANNELS,
   WORKBENCH_SHELL_CONTRACT,
+  WORKBENCH_CONTEXT_CHANNEL,
+  WorkbenchContext,
   WORKBENCH_USER_SETTINGS_READ_CHANNEL,
   WORKBENCH_USER_SETTINGS_WRITE_CHANNEL,
   type WorkbenchConnection,
@@ -30,10 +32,7 @@ import {
   releaseWorkbenchRuntime,
   type WorkbenchRuntime,
 } from './workbench-host.js'
-import {
-  readWorkbenchUserSettings,
-  writeWorkbenchUserSettings,
-} from './workbench-user-settings.js'
+import { readWorkbenchUserSettings, writeWorkbenchUserSettings } from './workbench-user-settings.js'
 
 /**
  * The isolated workbench surfaces of preflight §4.1a.
@@ -328,6 +327,161 @@ async function mintProjectGrant(
 }
 
 /**
+ * Two independent reasons a surface can be invisible, and they must not clobber
+ * each other.
+ *
+ * They arrive from different places and mean different things. An **overlay** is
+ * window-wide and momentary — a dialog is up, so every surface in this window
+ * steps aside until it closes. The **Editor switch** is per project and
+ * durable — this one editor is off, and it stays off across a hover card, a
+ * dialog, a relaunch.
+ *
+ * A single boolean could not hold both, and the bug was exactly that: the switch
+ * hid one view, then the next hover card opened and closed and its restore said
+ * "show everything this window owns", which turned the editor back on. Worse, it
+ * came back at *stale bounds* — the region had left the layout, so nothing had
+ * moved the view — and it was composited over the Chorus column that had grown
+ * into its place. The chat was not hidden; it was behind the editor.
+ *
+ * So each reason gets its own set and a surface is visible only when it is in
+ * neither. Neither caller has to know the other exists.
+ */
+/**
+ * Keyed by **project root**, not by view id, and that is what makes it hold.
+ *
+ * One project is not guaranteed to be one surface. `StrictMode` mounts,
+ * unmounts and mounts again while the open is in flight — the `live` flag in
+ * `WorkbenchFrame` exists because that can leak a whole `WebContents` nobody
+ * tracks any more — and a leaked surface sits at the same bounds painting the
+ * same project. By id, hiding "the" surface leaves the other one on screen,
+ * which is precisely the symptom this fixes: the region left the layout, Chorus
+ * grew into it, and an editor that should have gone dark was still composited
+ * over the top.
+ *
+ * By root it also survives a surface being *created* while the switch is off. A
+ * new view for a hidden project is hidden the moment it is parented, rather than
+ * flashing on until the shell gets around to telling it.
+ */
+const editorHidden = new Set<string>()
+const overlayHidden = new Set<WebContents>()
+
+function applyVisibility(surface: Surface): void {
+  surface.view.setVisible(
+    !editorHidden.has(surface.projectRoot) && !overlayHidden.has(surface.owner)
+  )
+}
+
+/**
+ * Hide or show surfaces — one, or every one this window owns.
+ *
+ * **Scoped to the caller's own surfaces**, by the same `byOwner` set that tears
+ * them down on reload: a window may not blank another window's workbench, for
+ * the same reason it may not resize or close one. Naming a surface it does not
+ * own is indistinguishable from naming one that does not exist — both are an
+ * empty list and a silent success, because a view id reaches the shell's React
+ * state and is therefore not a secret to authorise on.
+ *
+ * `setVisible` and not bounds: the surface keeps its rectangle, so nothing has
+ * to be restored afterwards and the workbench inside is never told its window
+ * changed size. An overlay that opens and closes leaves no trace in the editor's
+ * own layout — and neither does the Editor switch.
+ */
+async function setSurfacesVisible(
+  caller: WebContents,
+  visible: boolean,
+  only?: string
+): Promise<{ viewId: string; dataUrl: string }[]> {
+  const owned = [...(byOwner.get(caller) ?? [])]
+
+  /*
+   * The id names a surface only so main can read its project off it — **and only
+   * if the caller owns it**. Resolving the root before that check would let a
+   * window name someone else's surface and learn, by the effect, which project
+   * it holds. Same rule `ownedSurface` applies to bounds and close: a view id is
+   * not a secret, so it may never be the thing that authorises.
+   */
+  const root =
+    only !== undefined && owned.includes(only) ? (byId.get(only)?.projectRoot ?? null) : null
+  const ids = only === undefined ? owned : owned.filter((id) => byId.get(id)?.projectRoot === root)
+
+  /*
+   * Which reason is being set is decided by whether a surface was named, and
+   * that is the whole of the distinction: the shell's overlay code names none
+   * because it does not know which surfaces its dialog covers, and the Editor
+   * switch always names one because it must not touch the three beside it.
+   */
+  const mark = (): void => {
+    if (only === undefined) {
+      if (visible) overlayHidden.delete(caller)
+      else overlayHidden.add(caller)
+      return
+    }
+    if (root === null) return
+    if (visible) editorHidden.delete(root)
+    else editorHidden.add(root)
+  }
+
+  if (visible) {
+    mark()
+    for (const id of owned) {
+      const surface = byId.get(id)
+      if (surface !== undefined) applyVisibility(surface)
+    }
+    return []
+  }
+
+  /*
+   * Captured while still up, then hidden — the order is the whole point.
+   *
+   * A hidden view has no compositor surface to read, so capturing after the hide
+   * yields either the last frame, a blank, or nothing depending on the platform.
+   * Doing both here rather than in two channels also means the shell cannot get
+   * them out of order: there is no window in which a caller has hidden the views
+   * but not yet been handed what to draw instead.
+   *
+   * Only for the overlay, which is the caller that has somewhere to paint one.
+   * The Editor switch removes the region from the layout entirely, so there is
+   * no rectangle left to hold a still and capturing one would be pure cost.
+   *
+   * A capture that fails is not a failure of the hide. The still is a courtesy;
+   * losing one costs an empty rectangle for the life of one overlay, and taking
+   * the dialog down with it would cost the whole interaction. A surface already
+   * dark for the other reason is skipped — it would capture a blank.
+   */
+  const stills: { viewId: string; dataUrl: string }[] = []
+  if (only === undefined) {
+    for (const id of ids) {
+      const surface = byId.get(id)
+      if (surface === undefined || editorHidden.has(surface.projectRoot)) continue
+      try {
+        const image = await surface.view.webContents.capturePage()
+        if (!image.isEmpty()) {
+          stills.push({
+            viewId: id,
+            dataUrl: `data:image/jpeg;base64,${image.toJPEG(85).toString('base64')}`,
+          })
+        }
+      } catch {
+        /* no still for this one; the region will simply be empty */
+      }
+    }
+  }
+
+  /*
+   * Marked and applied after the await. Captures take tens of milliseconds and a
+   * pane can close inside that, so `owned` may name a surface that is gone —
+   * `byId.get` returning undefined is how that is handled rather than a held
+   * reference that outlives it.
+   */
+  mark()
+  for (const id of owned) {
+    const surface = byId.get(id)
+    if (surface !== undefined) applyVisibility(surface)
+  }
+  return stills
+}
+
+/**
  * The root `caller` is entitled to open, or a refusal.
  *
  * A forged path fails here for the reason that matters: it is not a capability
@@ -340,12 +494,25 @@ async function mintProjectGrant(
 function redeem(caller: WebContents, target: WorkbenchTarget): string {
   if ('projectId' in target) {
     /*
-     * Fail-closed and on purpose. ProjectService owns the id → root table and
-     * does not exist yet, so there is nothing to resolve an id against; the arm
-     * is admitted by the schema so that the channel's shape is settled while it
-     * is cheap, and refused here so that "settled" never means "open".
+     * **Authorised by adoption rather than by this document**, and that is a
+     * deliberate widening rather than a hole.
+     *
+     * A grant answers "did somebody just pick this folder, in this window". An id
+     * answers "is this one of the projects the person has adopted", which is a set
+     * bounded by every dialog they ever accepted and is exactly what Phase 1's E2
+     * asked for. The renderer still cannot name a *path*: an id it invents
+     * resolves to nothing, which is what `resolveProjectRoot` refuses. Requiring
+     * a per-window grant on top would mean re-choosing every project on every
+     * launch, which is the product failure E2 was filed about.
+     *
+     * Still fail-closed when nothing was injected. A build that forgot to wire the
+     * registry must refuse rather than fall through to the grant branch, where
+     * `target.grant` is not even present.
      */
-    throw new Error(`No workbench project "${target.projectId}" is known to this window`)
+    if (resolveProjectRoot === null) {
+      throw new Error(`No project registry is wired, so "${target.projectId}" cannot be opened`)
+    }
+    return resolveProjectRoot(target.projectId)
   }
   const held = grants.get(target.grant)
   if (held?.owner !== caller) {
@@ -409,6 +576,8 @@ function watchOwner(owner: WebContents): Set<string> {
 /** Every surface this shell owns, torn down without asking it — and every grant. */
 function releaseOwner(owner: WebContents): void {
   for (const id of [...(byOwner.get(owner) ?? [])]) destroySurface(id)
+  /* The overlay flag is keyed by the document, and this one is gone. */
+  overlayHidden.delete(owner)
   /*
    * The grants go with them. A capability is an authorisation the person gave to
    * one document; the document that replaces it after a reload is not that
@@ -502,6 +671,14 @@ export async function openSurface(
    */
   view.setBounds({ x: 0, y: 0, width: 0, height: 0 })
   parent.contentView.addChildView(view)
+  /*
+   * Applied before the shell says anything, because a project whose Editor
+   * switch is off must not flash on while the frame's effect is still queued.
+   * The set is keyed by root, so a second surface for the same project — the
+   * `StrictMode` remount this file already guards against — inherits the state
+   * rather than arriving visible.
+   */
+  applyVisibility(surface)
 
   /*
    * Pushed on the view's own load, not on its creation. Electron makes no promise
@@ -532,6 +709,12 @@ function destroySurface(viewId: string): void {
   byId.delete(viewId)
   byContents.delete(surface.view.webContents)
   byOwner.get(surface.owner)?.delete(viewId)
+  /*
+   * `editorHidden` is **not** pruned here, and that is deliberate: it is keyed by
+   * project root, and a project whose editor is off should still be off when its
+   * pane is reopened. It is bounded by the number of projects, and the shell
+   * re-asserts the switch from `WorkbenchFrame`'s own effect on every mount.
+   */
 
   const parent = BrowserWindow.getAllWindows().find((window) =>
     window.contentView.children.includes(surface.view)
@@ -597,7 +780,21 @@ export function closeAllSurfaces(): void {
  * request/response validation is the same discipline, deliberately repeated
  * rather than shared through a weaker registrar.
  */
-export function registerWorkbenchHandlers(devServerUrl: string | undefined): void {
+/**
+ * Turns an adopted project id into its root, or throws.
+ *
+ * Injected rather than imported. `project-service.ts` already imports
+ * `approveProjectRoot` from this file, so importing the service back would close
+ * a cycle — and a function is the whole of what this file needs, so taking the
+ * service would be taking a registry in order to call one method on it.
+ */
+let resolveProjectRoot: ((projectId: string) => string) | null = null
+
+export function registerWorkbenchHandlers(
+  devServerUrl: string | undefined,
+  resolveRoot?: (projectId: string) => string
+): void {
+  resolveProjectRoot = resolveRoot ?? null
   for (const channel of WORKBENCH_SHELL_CHANNELS) {
     ipcMain.handle(channel, async (event, rawRequest: unknown) => {
       /*
@@ -651,6 +848,13 @@ export function registerWorkbenchHandlers(devServerUrl: string | undefined): voi
             closeSurface(event.sender, viewId)
             return { ok: true }
           }
+          case 'workbench:setVisible': {
+            const { visible, viewId } = parsedRequest.data as {
+              visible: boolean
+              viewId?: string
+            }
+            return { ok: true, stills: await setSurfacesVisible(event.sender, visible, viewId) }
+          }
         }
       })()
 
@@ -700,4 +904,53 @@ export function registerWorkbenchHandlers(devServerUrl: string | undefined): voi
     if (typeof text !== 'string') throw new Error('Workbench settings must be text')
     writeWorkbenchUserSettings(app.getPath('userData'), text)
   })
+
+  /*
+   * What the editor is looking at — Phase 6 slice 6a.
+   *
+   * `on` rather than `handle`, matching the preload's `send`: this fires on
+   * cursor movement, and a reply would put a round trip inside every keystroke
+   * for a value the next movement supersedes.
+   *
+   * **The project comes from `byContents`, never from the message.** The surface
+   * reports a relative path and a position and nothing else; main attaches the
+   * root it opened that surface for. That is the same rule `redeem` applies in
+   * the other direction, and it is what stops a compromised surface — which runs
+   * third-party extension code by design — attributing its cursor to a project
+   * it was not opened for.
+   *
+   * **A bad frame is dropped, not thrown.** There is no reply for a throw to
+   * reach, and an unparsed report is corrected by the next one; the failure this
+   * must not have is a malformed payload reaching a listener.
+   */
+  ipcMain.on(WORKBENCH_CONTEXT_CHANNEL, (event, raw: unknown) => {
+    const surface = byContents.get(event.sender)
+    if (surface === undefined) return
+    const parsed = WorkbenchContext.safeParse(raw)
+    if (!parsed.success) return
+    onContext?.({ projectRoot: surface.projectRoot, context: parsed.data })
+  })
+}
+
+/**
+ * Where a surface's editor state goes, injected rather than imported.
+ *
+ * The same shape as `resolveProjectRoot`: this file already sits below
+ * `project-service.ts`, and reaching up to a consumer from here would close a
+ * cycle. It also keeps this module's job unchanged — it owns surfaces, not what
+ * anybody does with what they report.
+ *
+ * Held, never logged. `CLAUDE.md`'s rule is that a cursor position read back a
+ * week later is worse than none, so there is no event type for this and there
+ * must not be one.
+ */
+let onContext:
+  ((report: { readonly projectRoot: string; readonly context: WorkbenchContext }) => void) | null =
+  null
+
+export function setWorkbenchContextSink(
+  sink:
+    ((report: { readonly projectRoot: string; readonly context: WorkbenchContext }) => void) | null
+): void {
+  onContext = sink
 }

@@ -58,7 +58,7 @@ const reply = (text: string): string => {
 beforeEach(async () => {
   dataPath = mkdtempSync(join(tmpdir(), 'chorus-aside-'))
   runtime = ChorusRuntime.open(dataPath, silent, adapters())
-  const started = await runtime.startConversation({ agents: ['claude'], cwd: process.cwd() })
+  const started = await runtime.startConversationIn({ agents: ['claude'], cwd: process.cwd() })
   conversationId = started.conversationId
 })
 
@@ -205,54 +205,6 @@ describe('openAside refuses what it cannot verify', () => {
     // Nothing has come back yet, so there is no latest answer to point at — and
     // explaining the question the user just typed would be nonsense.
     await expect(runtime.restateAside(asideId, 'translation')).rejects.toThrow(/not answered yet/)
-  })
-
-  /**
-   * A side task, and the conversation it must not disturb.
-   *
-   * The reason this exists at all: an aside is read-only by construction, so
-   * "open an aside and promote it" was a way of obtaining a room rather than of
-   * asking a question. This forks the parent directly. The assertion that
-   * matters is the last one — the parent's log is exactly as long afterwards as
-   * it was before, because a side task that appends to the conversation you
-   * were protecting has failed at its only job.
-   */
-  it('branches a side task without touching the conversation it came from', async () => {
-    reply('The projection lags behind the log.')
-    const before = runtime.store.read(conversationId).length
-
-    const task = await runtime.spinOffTask({
-      conversationId,
-      agentId: 'claude',
-      brief: 'Fix the typo in the header',
-      profileId: 'workspace-write',
-    })
-
-    expect(task.conversationId).not.toBe(conversationId)
-    // Able to act, which is the whole difference from an aside.
-    expect(task.profileId).toBe('workspace-write')
-    // The brief names the room, so the tab is readable before it has answered.
-    expect(task.title).toContain('Fix the typo')
-    // The brief is in the new room's log as an ordinary message.
-    expect(
-      runtime.store
-        .read(task.conversationId)
-        .some((e) => e.payload.type === 'user.message' && e.payload.text.includes('typo'))
-    ).toBe(true)
-    // And the parent is untouched.
-    expect(runtime.store.read(conversationId).length).toBe(before)
-  })
-
-  it('refuses a side task with nothing to do', async () => {
-    reply('anything')
-    await expect(
-      runtime.spinOffTask({
-        conversationId,
-        agentId: 'claude',
-        brief: '   ',
-        profileId: 'workspace-write',
-      })
-    ).rejects.toThrow(/needs something to do/)
   })
 
   it('refuses a conversation that is not open', async () => {
@@ -486,7 +438,7 @@ describe('opening a recap', () => {
         silent,
         new Map<AgentId, AgentAdapter>([['claude', adapter]])
       )
-      const started = await runtime.startConversation({ agents: ['claude'], cwd: process.cwd() })
+      const started = await runtime.startConversationIn({ agents: ['claude'], cwd: process.cwd() })
       conversationId = started.conversationId
     })
 
