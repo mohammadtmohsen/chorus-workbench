@@ -3,6 +3,7 @@ import { subscribeWithSelector } from 'zustand/middleware'
 import type {
   ActivityPush,
   ContextUsagePush,
+  IdeContextPush,
   TasksPush,
   TranscriptEvent,
 } from '../../../shared/ipc.js'
@@ -150,6 +151,24 @@ export interface WorkspaceRuntime {
   readonly hydrated: boolean
   readonly pulses: Readonly<Record<string, SessionPulse>>
   /**
+   * What each conversation's editor is showing, by source — Phase 6.
+   *
+   * **Here rather than in `Session`, and that is the whole point.** Only the
+   * active tab of each group is mounted, so a `Session` holding this in its own
+   * `useState` lost it on every switch: the remount initialised both slots to
+   * `null`, and any push that arrived while it was unmounted had nowhere to
+   * land. `runtime.subscribe` in main does not fire because a React component
+   * mounted, so nothing ever put it back — and `ideAttached` was false again for
+   * a reason that had nothing to do with the editor.
+   *
+   * It is state, not history: held in memory, never logged, and rebuilt from the
+   * next push. `CLAUDE.md`'s own rule — everything a session needs to survive
+   * unmounting has to live outside the component.
+   */
+  readonly ideByConversation: Readonly<
+    Record<string, { workbench: IdeContextPush | null; external: IdeContextPush | null }>
+  >
+  /**
    * Which conversations are reading and reasoning only.
    *
    * It used to live inside the toggle that set it, which was fine while the
@@ -286,6 +305,7 @@ export interface WorkspaceActions {
   ingestContextUsage: (usage: ContextUsagePush) => void
   ingestTasks: (push: TasksPush) => void
   ingestActivity: (push: ActivityPush) => void
+  ingestIdeContext: (push: IdeContextPush) => void
 }
 
 export type WorkspaceStore = WorkspaceSnapshot & WorkspaceRuntime & WorkspaceActions
@@ -529,6 +549,7 @@ export const useWorkspaceStore = create<WorkspaceStore>()(
       ...EMPTY_WORKSPACE,
       hydrated: false,
       pulses: {},
+      ideByConversation: {},
       planning: {},
       hydrate: (
         saved,
@@ -927,6 +948,36 @@ export const useWorkspaceStore = create<WorkspaceStore>()(
        * often: a thinking tick can arrive several times a second, and every one
        * of them would otherwise be a store write and a re-render of every pane.
        */
+      /*
+       * Kept per source. Two forwarders write to one channel — the embedded
+       * workbench and the external VS Code bridge — and the external one reports
+       * `unavailable` for every conversation on every runtime event when no VS
+       * Code is connected. Folded together, that overwrote a live workbench
+       * context within milliseconds of it arriving.
+       *
+       * A workbench `unavailable` clears the slot instead of filling it: it means
+       * the surface has gone, and holding it would keep the external bridge
+       * suppressed behind an editor that no longer exists.
+       */
+      ingestIdeContext: (push) => {
+        set((state) => {
+          const current = state.ideByConversation[push.conversationId] ?? {
+            workbench: null,
+            external: null,
+          }
+          const next =
+            push.editor === 'workbench'
+              ? { ...current, workbench: push.status === 'unavailable' ? null : push }
+              : { ...current, external: push }
+          if (next.workbench === current.workbench && next.external === current.external) {
+            return state
+          }
+          return {
+            ideByConversation: { ...state.ideByConversation, [push.conversationId]: next },
+          }
+        })
+      },
+
       ingestActivity: (push) => {
         set((state) => {
           const current = state.pulses[push.conversationId]

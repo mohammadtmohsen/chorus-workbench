@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import type { TranscriptEvent } from '../../../shared/ipc.js'
+import type { IdeContextPush, TranscriptEvent } from '../../../shared/ipc.js'
 import {
   CLOSED_TERMINAL_PANEL,
   WorkspaceSnapshot,
@@ -326,5 +326,65 @@ describe('the terminal roster, through the store', () => {
     useWorkspaceStore.getState().addGlobalTerminal()
     expect(session().tabs).toHaveLength(1)
     expect(globalPanel().tabs).toHaveLength(1)
+  })
+})
+
+/**
+ * Editor context has to outlive an unmounted tab — Phase 6.
+ *
+ * The defect this locks: the context was `useState` inside `Session`, and only
+ * the active tab of each group is mounted. Switching away and back reinitialised
+ * it to nothing, and any push that arrived while unmounted had nowhere to land —
+ * so the composer's `ideAttached` went false and Send stopped attaching the
+ * editor, for a reason that had nothing to do with the editor.
+ *
+ * Reducing rather than rendering, because the judgement is in the store: what a
+ * remount does is read the store again, and a store that still holds the value
+ * is the whole property.
+ */
+describe('ide context survives a remount', () => {
+  const push = (over: Partial<IdeContextPush> = {}): IdeContextPush => ({
+    conversationId: 'c1',
+    editor: 'workbench',
+    status: 'ready',
+    file: null,
+    ...over,
+  })
+
+  it('is still there after the component that drew it has gone', () => {
+    const store = useWorkspaceStore.getState()
+    store.ingestIdeContext(push())
+    // A remount reads the store; it does not re-receive the push.
+    expect(useWorkspaceStore.getState().ideByConversation['c1']?.workbench?.status).toBe('ready')
+  })
+
+  /*
+   * The overwrite that caused this bug in the first place. The external bridge
+   * pushes `unavailable` for every conversation on every runtime event when no
+   * VS Code is connected, and folded into one slot it erased a live workbench
+   * context within milliseconds.
+   */
+  it('an external unavailable does not displace a workbench ready', () => {
+    const store = useWorkspaceStore.getState()
+    store.ingestIdeContext(push())
+    store.ingestIdeContext(push({ editor: 'external', status: 'unavailable' }))
+    const entry = useWorkspaceStore.getState().ideByConversation['c1']
+    expect(entry?.workbench?.status).toBe('ready')
+    expect(entry?.external?.status).toBe('unavailable')
+  })
+
+  /*
+   * And the lifecycle edge: once the surface is gone the workbench must stop
+   * winning, or the external bridge stays suppressed behind an editor that no
+   * longer exists.
+   */
+  it('a workbench unavailable clears the slot so the external one shows through', () => {
+    const store = useWorkspaceStore.getState()
+    store.ingestIdeContext(push())
+    store.ingestIdeContext(push({ editor: 'external', status: 'unmatched' }))
+    store.ingestIdeContext(push({ status: 'unavailable' }))
+    const entry = useWorkspaceStore.getState().ideByConversation['c1']
+    expect(entry?.workbench).toBeNull()
+    expect(entry?.external?.status).toBe('unmatched')
   })
 })

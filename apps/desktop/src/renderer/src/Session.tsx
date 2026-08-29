@@ -19,9 +19,14 @@ import {
   type PaneAnchor,
   type SourceEntry,
 } from './quote.js'
-import type { ActivityPush, IdeContextPush, TranscriptEvent } from '../../shared/ipc.js'
+import type { ActivityPush, TranscriptEvent } from '../../shared/ipc.js'
 import { askableQuestion, questionText } from '../../shared/question-text.js'
-import { useSessionActivity, useWorkbenchShown, useWorkspaceActions } from './workspace/hooks.js'
+import {
+  useSessionActivity,
+  useWorkbenchShown,
+  useWorkspaceActions,
+  useIdeContext,
+} from './workspace/hooks.js'
 import {
   answersThinking,
   groupedWith,
@@ -1286,26 +1291,16 @@ export function Session(props: {
    * once, when Send is pressed.
    */
   /*
-   * Both sources, kept apart — and keeping them apart is the fix.
+   * Read from the store, not held here — Phase 6.
    *
-   * Two forwarders write to this one channel: the embedded workbench, and the
-   * external VS Code bridge. They were folded into a single `ide` state, so
-   * whichever pushed last won — and the external one pushes for *every* open
-   * conversation on every runtime event, reporting `unavailable` when no VS Code
-   * is connected, which is almost always. So a workbench `ready` was overwritten
-   * within milliseconds, the composer's `ideAttached` went false, and Send never
-   * asked for a snapshot. Four rounds of fixes downstream of this never ran.
-   *
-   * The workbench wins whenever it has said anything at all, including
-   * `unmatched`: it is the editor in this window, and "the embedded editor has
-   * no file open" is a better answer than "an editor that may not be running is
-   * unavailable".
+   * It was `useState` in this component, and only the active tab of each group
+   * is mounted: switching away and back reinitialised both slots to `null`, and
+   * every push that arrived while unmounted had nowhere to land. Nothing put it
+   * back, because main's replay fires on runtime events and not on a React
+   * component mounting. The composer's `ideAttached` was false again for a
+   * reason that had nothing to do with the editor.
    */
-  const [ideByEditor, setIdeByEditor] = useState<{
-    workbench: IdeContextPush | null
-    external: IdeContextPush | null
-  }>({ workbench: null, external: null })
-  const ide = ideByEditor.workbench ?? ideByEditor.external
+  const ide = useIdeContext(conversationId)
 
   /*
    * What must survive the pane being unmounted.
@@ -1429,27 +1424,11 @@ export function Session(props: {
     }
   }, [])
 
-  useEffect(() => {
-    return window.chorus.onIdeContext((payload) => {
-      // Main scopes this per conversation already; the pane checks anyway,
-      // because a pane showing another project's file is the one failure this
-      // feature must never have.
-      if (payload.conversationId !== conversationId) return
-      setIdeByEditor((current) => {
-        if (payload.editor !== 'workbench') return { ...current, external: payload }
-        /*
-         * `unavailable` from the workbench means there is no embedded editor —
-         * its last surface closed. Held as a push it would keep winning over the
-         * external bridge for ever, which is the opposite of what main sent it
-         * for, so it clears the slot instead.
-         *
-         * Every other workbench status, `unmatched` included, is a real answer
-         * from a real editor and does win.
-         */
-        return { ...current, workbench: payload.status === 'unavailable' ? null : payload }
-      })
-    })
-  }, [conversationId])
+  /*
+   * The subscription moved to `App`. One listener for the app, writing into the
+   * store, is what makes the context outlive an unmounted tab — a listener per
+   * `Session` can only ever feed a component that is on screen.
+   */
 
   const decide = useCallback(
     (

@@ -259,6 +259,26 @@ export function App(): React.JSX.Element {
     []
   )
 
+  /*
+   * The editor's context, on the same footing and for the same reason — Phase 6.
+   *
+   * It was a listener inside `Session`, and only the active tab of each group is
+   * mounted: a push for a conversation in a background tab reached nothing, and
+   * switching back re-created the component with both slots empty. Nothing put
+   * it back, because main replays on runtime events and not on a React component
+   * mounting — so the composer's `ideAttached` was false for a reason that had
+   * nothing to do with the editor.
+   *
+   * Context is state, not history. It belongs where the pulse lives.
+   */
+  useEffect(
+    () =>
+      window.chorus.onIdeContext((push) => {
+        useWorkspaceStore.getState().ingestIdeContext(push)
+      }),
+    []
+  )
+
   /* What each agent left running, on its own channel and for the same reason. */
   useEffect(
     () =>
@@ -369,6 +389,15 @@ export function App(): React.JSX.Element {
       .catch(() => {
         setAppVersion(null)
       })
+    /*
+     * One listener for the app, writing into the store — Phase 6.
+     *
+     * It was a listener per `Session`, and only the active tab of each group is
+     * mounted: a push for a conversation whose tab was in the background reached
+     * nothing, and switching back re-created the component with empty state. The
+     * editor context is state rather than an event, so it belongs where the
+     * pulse does — outside the component that draws it.
+     */
     window.chorus.probeAgents().then(setProbes).catch(fail(setError))
     window.chorus.profiles().then(setProfiles).catch(fail(setError))
     window.chorus

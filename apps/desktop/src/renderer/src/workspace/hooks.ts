@@ -1,3 +1,4 @@
+import type { IdeContextPush } from '../../../shared/ipc.js'
 import { useMemo } from 'react'
 import { useShallow } from 'zustand/react/shallow'
 import type { AgentId } from '@chorus/shared'
@@ -89,6 +90,7 @@ function selectActions(state: WorkspaceStore): WorkspaceActions {
     ingestContextUsage,
     ingestTasks,
     ingestActivity,
+    ingestIdeContext,
   } = state
   return {
     hydrate,
@@ -135,6 +137,7 @@ function selectActions(state: WorkspaceStore): WorkspaceActions {
     ingestContextUsage,
     ingestTasks,
     ingestActivity,
+    ingestIdeContext,
   }
 }
 
@@ -495,4 +498,20 @@ export function useEveryPlanning(conversationIds: readonly string[]): boolean {
 /** Reading and reasoning only. Runtime state; it never survives a relaunch. */
 export function usePlanning(conversationId: string): boolean {
   return useWorkspaceStore((state) => state.planning[conversationId] ?? false)
+}
+
+/**
+ * What a conversation's editor is showing, preferring the embedded workbench.
+ *
+ * The preference is not a tie-break between equals: the workbench is the editor
+ * in this window, and "the embedded editor has no file open" is a better answer
+ * than "an editor that may not be running is unavailable". A workbench
+ * `unavailable` never reaches here — the store clears the slot on it, because it
+ * means the surface has gone.
+ */
+export function useIdeContext(conversationId: string): IdeContextPush | null {
+  return useWorkspaceStore((state) => {
+    const entry = state.ideByConversation[conversationId]
+    return entry?.workbench ?? entry?.external ?? null
+  })
 }
