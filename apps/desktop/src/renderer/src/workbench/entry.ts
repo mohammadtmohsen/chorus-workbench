@@ -1,6 +1,7 @@
 import { initialize } from '@codingame/monaco-vscode-api'
 import { prepareWorkbench } from './services.js'
 import { reportEditorContext } from './context.js'
+import { serveWorkbenchEdits } from './edit.js'
 import { announceSharedExtensionScope } from './extension-scope.js'
 import { registerWorkbenchWorkers } from './workers.js'
 import { persistUserSettings, restoreUserSettings } from './user-settings.js'
@@ -88,6 +89,13 @@ async function main(): Promise<void> {
    * to main.
    */
   await reportEditorContext(connection.projectRoot)
+  /*
+   * Phase 6d. Registered after the workbench is initialized, because resolving a
+   * model needs the services to exist — but before anything can ask, since main
+   * has no way to know when this document became ready and a request that
+   * arrives early would simply have no listener.
+   */
+  serveWorkbenchEdits(connection.projectRoot)
 }
 
 /*

@@ -53,6 +53,8 @@ export const USER_SETTINGS_READ_CHANNEL = 'workbench:userSettings:read'
 export const USER_SETTINGS_WRITE_CHANNEL = 'workbench:userSettings:write'
 /* Phase 6 slice 6a, spelled out here for the same reason and under the same test. */
 export const CONTEXT_CHANNEL = 'workbench:context'
+export const EDIT_CHANNEL = 'workbench:edit'
+export const EDIT_RESULT_CHANNEL = 'workbench:edit:result'
 
 /**
  * A hand-written check instead of a schema, for the reason above — and it is now
@@ -174,6 +176,40 @@ const api: ChorusWorkbenchApi = {
    */
   reportContext: (context) => {
     ipcRenderer.send(CONTEXT_CHANNEL, context)
+  },
+
+  /*
+   * The one channel that runs the other way — main asks, this document answers.
+   *
+   * Electron has no `webContents.invoke`, so the request/response pair is built
+   * by hand: main sends with a `requestId` and the reply carries it back. The
+   * correlation lives in main, which is the side that can time out; this side's
+   * only job is to answer every request it is given, exactly once.
+   *
+   * A handler that throws still replies. An unanswered request is indisting-
+   * uishable from a hung surface, and main would sit on it until its timeout —
+   * so the failure is converted into a result here rather than escaping.
+   */
+  onEditRequest: (handler) => {
+    ipcRenderer.on(EDIT_CHANNEL, (_event, request: unknown) => {
+      void (async () => {
+        const requestId =
+          typeof request === 'object' && request !== null && 'requestId' in request
+            ? String(request.requestId)
+            : ''
+        try {
+          ipcRenderer.send(EDIT_RESULT_CHANNEL, await handler(request))
+        } catch (error) {
+          ipcRenderer.send(EDIT_RESULT_CHANNEL, {
+            requestId,
+            ok: false,
+            refusal: 'failed',
+            message: error instanceof Error ? error.message : String(error),
+            version: null,
+          })
+        }
+      })()
+    })
   },
 }
 

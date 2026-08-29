@@ -18,10 +18,14 @@ import {
   WORKBENCH_SHELL_CHANNELS,
   WORKBENCH_SHELL_CONTRACT,
   WORKBENCH_CONTEXT_CHANNEL,
+  WORKBENCH_EDIT_CHANNEL,
+  WORKBENCH_EDIT_RESULT_CHANNEL,
   WorkbenchContext,
   WORKBENCH_USER_SETTINGS_READ_CHANNEL,
   WORKBENCH_USER_SETTINGS_WRITE_CHANNEL,
   type WorkbenchConnection,
+  type WorkbenchEditRequest,
+  type WorkbenchEditResult,
   type WorkbenchRect,
   type WorkbenchShellResponse,
   type WorkbenchTarget,
@@ -930,6 +934,26 @@ export function registerWorkbenchHandlers(
     if (!parsed.success) return
     onContext?.({ projectRoot: surface.projectRoot, context: parsed.data })
   })
+
+  /*
+   * The other half of `requestWorkbenchEdit` — Phase 6d.
+   *
+   * The sender is checked the same way everything else from a surface is: an
+   * unknown `WebContents` is a refusal, never a default. That matters more here
+   * than for context, because a forged reply would settle a real request with a
+   * result the agent then believes.
+   *
+   * An id nobody is waiting for is dropped silently. It is what a late reply
+   * after a timeout looks like, and there is nothing to do about it — the
+   * request has already been answered.
+   */
+  ipcMain.on(WORKBENCH_EDIT_RESULT_CHANNEL, (event, raw: unknown) => {
+    if (byContents.get(event.sender) === undefined) return
+    if (typeof raw !== 'object' || raw === null) return
+    const result = raw as WorkbenchEditResult
+    if (typeof result.requestId !== 'string') return
+    pendingEdits.get(result.requestId)?.(result)
+  })
 }
 
 /**
@@ -953,4 +977,68 @@ export function setWorkbenchContextSink(
     ((report: { readonly projectRoot: string; readonly context: WorkbenchContext }) => void) | null
 ): void {
   onContext = sink
+}
+
+/**
+ * Edits in flight, by request id — Phase 6d.
+ *
+ * A map rather than a single pending promise, because two agents in one project
+ * can both be mid-edit and a turn can issue several. The id is what makes the
+ * replies distinguishable; without it the second result would settle the first
+ * request and one edit would be reported with another's outcome.
+ */
+const pendingEdits = new Map<string, (result: WorkbenchEditResult) => void>()
+
+/**
+ * How long a surface has to answer before the edit is called a failure.
+ *
+ * Generous, because the far side may be resolving a model for a file that is not
+ * open, and mean because an edit nobody answers must not hang a turn for ever.
+ */
+const EDIT_TIMEOUT_MS = 15_000
+
+/**
+ * Asks the surface showing this project to apply an edit, and waits.
+ *
+ * **Refuses rather than opening one.** If the project has no surface — the
+ * Editor switch is off, or the project is not on screen — there is no model to
+ * edit and no undo stack to join, and silently writing the file instead would
+ * be exactly the behaviour Phase 6d exists to replace. The caller is told, and
+ * can fall back to a filesystem write with the person's approval if that is
+ * what it wants.
+ */
+export async function requestWorkbenchEdit(
+  projectRoot: string,
+  edit: Omit<WorkbenchEditRequest, 'requestId'>
+): Promise<WorkbenchEditResult> {
+  const surface = [...byId.values()].find((s) => s.projectRoot === projectRoot)
+  const requestId = randomUUID()
+  if (surface === undefined || surface.view.webContents.isDestroyed()) {
+    return {
+      requestId,
+      ok: false,
+      refusal: 'unopenable',
+      message: 'This project has no editor open, so there is no model to edit.',
+      version: null,
+    }
+  }
+
+  return new Promise<WorkbenchEditResult>((resolve) => {
+    const settle = (result: WorkbenchEditResult): void => {
+      if (!pendingEdits.delete(requestId)) return
+      clearTimeout(timer)
+      resolve(result)
+    }
+    const timer = setTimeout(() => {
+      settle({
+        requestId,
+        ok: false,
+        refusal: 'failed',
+        message: `The editor did not answer within ${String(EDIT_TIMEOUT_MS / 1000)}s.`,
+        version: null,
+      })
+    }, EDIT_TIMEOUT_MS)
+    pendingEdits.set(requestId, settle)
+    surface.view.webContents.send(WORKBENCH_EDIT_CHANNEL, { ...edit, requestId })
+  })
 }

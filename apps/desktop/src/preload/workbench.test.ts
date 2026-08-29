@@ -4,6 +4,8 @@ import {
   WORKBENCH_USER_SETTINGS_READ_CHANNEL,
   WORKBENCH_USER_SETTINGS_WRITE_CHANNEL,
   WORKBENCH_CONTEXT_CHANNEL,
+  WORKBENCH_EDIT_CHANNEL,
+  WORKBENCH_EDIT_RESULT_CHANNEL,
 } from '../shared/workbench-ipc.js'
 
 /**
@@ -52,6 +54,8 @@ const {
   USER_SETTINGS_READ_CHANNEL,
   USER_SETTINGS_WRITE_CHANNEL,
   CONTEXT_CHANNEL,
+  EDIT_CHANNEL,
+  EDIT_RESULT_CHANNEL,
   asConnection,
 } = await import('./workbench.js')
 
@@ -61,9 +65,11 @@ describe('the workbench preload', () => {
     expect(USER_SETTINGS_READ_CHANNEL).toBe(WORKBENCH_USER_SETTINGS_READ_CHANNEL)
     expect(USER_SETTINGS_WRITE_CHANNEL).toBe(WORKBENCH_USER_SETTINGS_WRITE_CHANNEL)
     expect(CONTEXT_CHANNEL).toBe(WORKBENCH_CONTEXT_CHANNEL)
+    expect(EDIT_CHANNEL).toBe(WORKBENCH_EDIT_CHANNEL)
+    expect(EDIT_RESULT_CHANNEL).toBe(WORKBENCH_EDIT_RESULT_CHANNEL)
   })
 
-  it('exposes exactly four methods, and no fifth', () => {
+  it('exposes exactly five methods, and no sixth', () => {
     // The list, not the count: a method named here is a capability a document
     // running extension code is handed, so which ones they are is the assertion.
     expect(Object.keys(exposed ?? {})).toEqual([
@@ -76,6 +82,16 @@ describe('the workbench preload', () => {
        * main derives that from the sender.
        */
       'reportContext',
+      /*
+       * Phase 6d. The only method that lets main *ask this document for
+       * something*, and the one worth the most scrutiny in this list: it hands a
+       * document running third-party extension code a channel that mutates the
+       * person's open files. What bounds it is that the handler is registered by
+       * Chorus's own module, the request is validated there, and the project root
+       * is closed over rather than carried — a surface cannot be told to edit
+       * another project's file, because it has no way to name one.
+       */
+      'onEditRequest',
     ])
   })
 

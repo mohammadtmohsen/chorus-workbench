@@ -136,6 +136,76 @@ export const WORKBENCH_USER_SETTINGS_WRITE_CHANNEL = 'workbench:userSettings:wri
  */
 export const WORKBENCH_CONTEXT_CHANNEL = 'workbench:context'
 
+/**
+ * Phase 6d — an agent asking to change a file *in the editor*, not on disk.
+ *
+ * **Two channels rather than an `invoke`, and the direction is why.** Every
+ * other workbench channel is renderer→main: the surface asks and main answers,
+ * so `ipcRenderer.invoke` fits. This one originates in main and has to be
+ * answered by the surface, and Electron has no `webContents.invoke`. So main
+ * sends a request carrying a `requestId` and the surface sends the result back
+ * on a second channel; main correlates and times out.
+ *
+ * **Why an editor edit is not a file write.** The model in the editor may be
+ * dirty — the person has unsaved changes — and writing the file underneath it
+ * either loses their work or is silently overwritten when they next save.
+ * Applying to the *model* means the edit joins their undo stack, shows in the
+ * dirty indicator, and is theirs to reject with one keystroke.
+ */
+export const WORKBENCH_EDIT_CHANNEL = 'workbench:edit'
+export const WORKBENCH_EDIT_RESULT_CHANNEL = 'workbench:edit:result'
+
+/**
+ * The edit, as the surface receives it.
+ *
+ * **Project-relative, never absolute.** The root lives in the surface and does
+ * not cross this boundary in either direction — `context.ts` already relativises
+ * on the way out for the same reason, and a request naming an absolute path
+ * would be a claim about the filesystem that main would then have to re-check.
+ * A path that escapes the project is refused rather than resolved.
+ *
+ * **`baseVersion` is the whole safety property.** It is the model version the
+ * agent's view of the file was taken from. If the model has moved on — the
+ * person typed, another edit landed — the versions disagree and the edit is
+ * refused as a conflict. Without it, an agent working from a stale read silently
+ * clobbers whatever happened in between.
+ *
+ * Lines and columns are 1-based, which is what the editor's own API uses; making
+ * them 0-based here would put a conversion at every call site instead of none.
+ */
+export interface WorkbenchEditRequest {
+  readonly requestId: string
+  readonly path: string
+  readonly baseVersion: number
+  readonly range: {
+    readonly startLine: number
+    readonly startColumn: number
+    readonly endLine: number
+    readonly endColumn: number
+  }
+  readonly newText: string
+}
+
+/**
+ * Why an edit was refused, and each of these is a different thing to tell a
+ * person.
+ *
+ * `conflict` is the interesting one: it means the file is open and fine and
+ * somebody else changed it, so the agent should re-read rather than retry.
+ */
+export type WorkbenchEditRefusal = 'conflict' | 'outside-project' | 'unopenable' | 'failed'
+
+export type WorkbenchEditResult =
+  | { readonly requestId: string; readonly ok: true; readonly version: number }
+  | {
+      readonly requestId: string
+      readonly ok: false
+      readonly refusal: WorkbenchEditRefusal
+      readonly message: string
+      /** The version the model is actually at, when there is one. Lets a caller re-read. */
+      readonly version: number | null
+    }
+
 export const WorkbenchContext = z
   .object({
     /** Project-relative, POSIX separators, or null when nothing is open. */
@@ -351,6 +421,15 @@ export interface ChorusWorkbenchApi {
    * be the wrong trade for a value that changes on every keystroke.
    */
   readonly reportContext: (context: WorkbenchContext) => void
+  /**
+   * Answers main's edit requests for the life of the document.
+   *
+   * Registered once, not per edit: `ipcRenderer.on` accumulates listeners, and a
+   * subscription per request would answer the second edit twice and the tenth
+   * ten times. The handler is given the raw payload because it arrived from
+   * outside this document and validating it is the handler's job.
+   */
+  readonly onEditRequest: (handler: (request: unknown) => Promise<WorkbenchEditResult>) => void
   /** Hands main the current text of the user's settings file, to store as-is. */
   readonly writeUserSettings: (text: string) => Promise<void>
 }
