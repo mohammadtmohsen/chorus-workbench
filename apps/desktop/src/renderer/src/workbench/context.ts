@@ -199,6 +199,21 @@ export async function reportEditorContext(projectRoot: string): Promise<void> {
     window.chorusWorkbench.reportContext(context)
   }
 
+  /*
+   * Once, now, before any subscription — and its absence was a real gap.
+   *
+   * Every source below is a *change*. A workbench that restores an editor from
+   * the last session has already had its `onDidActiveEditorChange`, and it fired
+   * before this function was reached, so nothing here would report until the
+   * person happened to move the cursor. The pill therefore started blank on a
+   * restored session, and `ideAttached` starts false with it — which means Send
+   * asks for no snapshot at all.
+   *
+   * Reporting the current state first makes the subscriptions what they claim to
+   * be: updates to a state that has already been established.
+   */
+  report()
+
   editors.onDidActiveEditorChange(report)
   /*
    * Selection as well as position: a drag-select never moves the caret's line

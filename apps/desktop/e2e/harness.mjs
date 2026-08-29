@@ -112,8 +112,12 @@ export async function launch({ userData, keepData = false, executable, env: extr
    * bundle, "the app never opened a window" was the entire diagnosis.
    */
   let socket
+  // Declared without a seed: the try below assigns it before anything reads it,
+  // and a `0` here would only read as a port that could be meaningful.
+  let debugPort
   try {
-    socket = await connect(await announcedPort())
+    debugPort = await announcedPort()
+    socket = await connect(debugPort)
   } catch (error) {
     child.kill('SIGKILL')
     /*
@@ -163,6 +167,12 @@ export async function launch({ userData, keepData = false, executable, env: extr
      * heap sampled through CDP cannot see any of them. Only the process tree can.
      */
     pid: child.pid,
+    /**
+     * The port the child chose, so a caller can list and attach to its *other*
+     * targets — a workbench surface is its own page and the harness's own socket
+     * only ever addresses the shell.
+     */
+    debugPort,
     ...session,
     output: () => output,
     async quit() {
