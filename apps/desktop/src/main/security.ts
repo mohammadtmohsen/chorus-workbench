@@ -161,6 +161,26 @@ export function workbenchPolicy(isDev: boolean, remoteAuthority: string | null):
   ].join('; ')
 }
 
+/**
+ * Is this the REH's own resource endpoint, on the server Chorus started.
+ *
+ * Exported for its test, because the whole safety of the header it guards rests
+ * on being exact: an origin comparison rather than a prefix, and one path rather
+ * than a subtree.
+ */
+export function isOwnRemoteResource(url: string, remoteAuthority: string | null): boolean {
+  if (remoteAuthority === null) return false
+  let parsed: URL
+  try {
+    parsed = new URL(url)
+  } catch {
+    return false
+  }
+  return (
+    parsed.origin === `http://${remoteAuthority}` && parsed.pathname === '/vscode-remote-resource'
+  )
+}
+
 export function applyWorkbenchContentSecurityPolicy(
   session: Session,
   isDev: boolean,
@@ -169,11 +189,54 @@ export function applyWorkbenchContentSecurityPolicy(
   const policy = workbenchPolicy(isDev, remoteAuthority)
 
   session.webRequest.onHeadersReceived((details, callback) => {
+    const responseHeaders: Record<string, string[]> = {
+      ...details.responseHeaders,
+      'Content-Security-Policy': [policy],
+    }
+
+    /*
+     * The one response Chorus adds a CORS header to, and why it has to.
+     *
+     * An installed theme lives on the remote extension host, so applying it ends
+     * in `FileIconThemeLoader -> readExtensionResource ->
+     * http://<authority>/vscode-remote-resource`. VS Code's server sends
+     * `Access-Control-Allow-Origin` only when the request's origin matches
+     * `product.webEndpointUrlTemplate`, and VSCodium's bundled product defines
+     * no such template — so no origin ever matches, the browser refuses the
+     * response, and it surfaces as a bare "Failed to fetch" toast naming nothing.
+     *
+     * **Scoped to one origin and one path**, both compared exactly: the origin is
+     * the server Chorus itself spawned and read the port back from, and the path
+     * is the single resource endpoint. Not a prefix, not a subtree — the same
+     * narrowness the CSP above is written for, because this session runs
+     * third-party extension code.
+     *
+     * `*` is defensible *here* rather than in general: the endpoint is
+     * authenticated by the connection token, which nothing without it can
+     * supply, and CORS forbids `*` together with credentials. What it grants is
+     * the ability to *read* a response somebody was already entitled to request.
+     *
+     * Existing spellings are dropped rather than appended to: two
+     * `Access-Control-Allow-Origin` headers are treated as none.
+     */
+    if (!isOwnRemoteResource(details.url, remoteAuthority)) {
+      callback({ responseHeaders })
+      return
+    }
+
+    /*
+     * Rebuilt without any existing spelling rather than deleting keys: header
+     * names are case-insensitive, so a server-sent `access-control-allow-origin`
+     * beside ours would be two values for one header, which browsers treat as
+     * none.
+     */
+    const withCors = Object.fromEntries(
+      Object.entries(responseHeaders).filter(
+        ([name]) => name.toLowerCase() !== 'access-control-allow-origin'
+      )
+    )
     callback({
-      responseHeaders: {
-        ...details.responseHeaders,
-        'Content-Security-Policy': [policy],
-      },
+      responseHeaders: { ...withCors, 'Access-Control-Allow-Origin': ['*'] },
     })
   })
 
