@@ -51,6 +51,7 @@ import { readSettings, writeSettings, type Settings } from './settings.js'
 import { applyTheme } from './theme.js'
 import { previewFile, stashFile } from './stash.js'
 import { setWorkbenchContextSink } from './workbench-surface.js'
+import type { WorkbenchContext } from '../shared/workbench-ipc.js'
 
 type Handlers = { [C in IpcChannel]: (request: never) => Promise<IpcResponse<C>> }
 
@@ -671,10 +672,48 @@ export function buildHandlers(runtime: ChorusRuntime): Handlers {
     },
 
     'ide:snapshot': async (request: { conversationId: string }) => {
+      const cwd = runtime.projectDirectory(request.conversationId)
+
+      /*
+       * The embedded editor first, and the external bridge only if there is none.
+       *
+       * "The editor owns what the editor owns" — the workbench in this window is
+       * the one the person is actually looking at, and losing to a VS Code that
+       * may not even be open would be the wrong way round. The external bridge
+       * stays as the fallback until Phase 8 deletes it.
+       */
+      const embedded = lastWorkbenchContext.get(cwd)
+      if (embedded !== undefined) {
+        if (
+          embedded.relativePath === null ||
+          embedded.startLine === null ||
+          embedded.endLine === null
+        ) {
+          return { outcome: 'unavailable', reason: 'unmatched' } as const
+        }
+        return {
+          outcome: 'ok',
+          relativePath: embedded.relativePath,
+          startLine: embedded.startLine,
+          endLine: embedded.endLine,
+          isEmpty: embedded.isEmpty,
+          isDirty: embedded.isDirty,
+          languageId: embedded.languageId,
+          /*
+           * No text. The push carries a byte count and not the selection itself,
+           * deliberately — see `WorkbenchContext` — and inventing an empty string
+           * here would tell the agent the selection was empty rather than that it
+           * was not sent.
+           */
+          text: '',
+          ...(embedded.version === null ? {} : { modelVersion: embedded.version }),
+          provenance: { kind: 'worktree' as const },
+        } as const
+      }
+
       const bridge = ideBridge
       if (bridge === null) return { outcome: 'unavailable', reason: 'unavailable' } as const
 
-      const cwd = runtime.projectDirectory(request.conversationId)
       const root = bridge.rootFor(cwd)
       const result = await bridge.requestSnapshot(root)
       if (result.outcome !== 'ok') return result
@@ -941,8 +980,25 @@ export function forwardTerminalToRenderer(runtime: ChorusRuntime): () => void {
  * **Held, never logged.** No `ChorusEventPayload` exists for any of this and none
  * may be added: a cursor position read back a week later is worse than none.
  */
+/**
+ * The last thing each project's editor reported, held so `ide:snapshot` can
+ * answer from it.
+ *
+ * **Held, and still never logged.** The rule is unchanged — a cursor position
+ * read back a week later is worse than none, so this is memory and there is no
+ * `ChorusEventPayload` for it. What changed is that pushing it to the renderer
+ * and dropping it was not enough: the composer's pill said "ready" from the
+ * push, and Send then asked the *external* bridge, which knows nothing about the
+ * embedded editor. The pill was right and the send was blind, so an agent was
+ * told nothing was open while a file sat open in front of the person.
+ *
+ * Keyed by canonical project root, because that is what a surface belongs to.
+ */
+const lastWorkbenchContext = new Map<string, WorkbenchContext>()
+
 export function forwardWorkbenchContextToRenderer(runtime: ChorusRuntime): () => void {
   setWorkbenchContextSink(({ projectRoot, context }) => {
+    lastWorkbenchContext.set(projectRoot, context)
     const conversations = runtime.conversationsForRoot(projectRoot)
     if (conversations.length === 0) return
 

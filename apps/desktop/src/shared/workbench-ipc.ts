@@ -229,6 +229,19 @@ export const WorkbenchContext = z
      * the text is, so nothing downstream has to hold the text to size it.
      */
     selectedBytes: z.number().int().min(0),
+    /**
+     * The model version of the open file — Phase 6e.
+     *
+     * Reported so an agent can quote it as `base_version` without a round trip.
+     * Without it `editor_edit` is close to unusable: the agent has no way to
+     * learn a version except by attempting an edit and being refused, so every
+     * first edit to a file costs a wasted turn.
+     *
+     * `null` when nothing is open, which is the same condition `relativePath`
+     * reports — kept as its own nullable field rather than folded in, because a
+     * version of `0` is a real value and a falsy check would drop it.
+     */
+    version: z.number().int().nullable(),
   })
   .strict()
 export type WorkbenchContext = z.infer<typeof WorkbenchContext>

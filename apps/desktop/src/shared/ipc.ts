@@ -284,6 +284,20 @@ export const IdeSnapshotResult = z.discriminatedUnion('outcome', [
     isDirty: z.boolean(),
     languageId: z.string(),
     text: z.string(),
+    /**
+     * The editor's model version for this file — Phase 6e.
+     *
+     * **`modelVersion`, not `version`.** The compose path already has a
+     * `version`, and it means something else entirely: which *revision* these
+     * lines came from, working tree or a ref. Two fields called `version` in one
+     * message, meaning "which commit" and "which buffer state", is a collision
+     * that would be discovered by an agent quoting the wrong one.
+     *
+     * Absent from the external bridge, which has no notion of it. Optional
+     * rather than nullable so the field simply is not there when it cannot be
+     * known — a `null` would invite a caller to send it as `base_version`.
+     */
+    modelVersion: z.number().int().optional(),
     provenance: IdeProvenanceShape,
   }),
   z.object({ outcome: z.literal('unavailable'), reason: IdeStatusShape }),

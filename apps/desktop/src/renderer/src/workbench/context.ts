@@ -109,6 +109,15 @@ export async function reportEditorContext(projectRoot: string): Promise<void> {
       isDirty: uri === undefined ? false : workingCopies.isDirty(uri),
       languageId: model?.getLanguageId() ?? '',
       selectedBytes,
+      /*
+       * The version an `editor_edit` must quote as `base_version`.
+       *
+       * Read from the same model the rest of this snapshot describes, so the
+       * version and the lines cannot disagree — taken separately they could,
+       * and an agent quoting a version that never went with those lines is the
+       * conflict this field exists to avoid.
+       */
+      version: model?.getVersionId() ?? null,
     }
 
     const rendered = JSON.stringify(context)

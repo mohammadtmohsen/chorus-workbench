@@ -29,6 +29,14 @@ export interface EditorBlock extends EditorReference {
   readonly isDirty: boolean
   /** Which version of the file these lines are. */
   readonly provenance: IdeProvenanceShape
+  /**
+   * The editor's model version, when an embedded editor reported one.
+   *
+   * Distinct from `provenance`, which answers "which revision". This answers
+   * "which buffer state", and it is what `editor_edit` requires as
+   * `base_version`. Optional because the external bridge has no such notion.
+   */
+  readonly modelVersion?: number | undefined
 }
 
 /**
@@ -105,7 +113,20 @@ export function formatContextBlock(block: EditorBlock, labels: ContextLabels): s
    */
   const qualifier = labels.version === '' ? '' : ` (${labels.version})`
   const suffix = block.isDirty ? ` (${labels.unsaved})` : qualifier
-  const head = `${labels.heading}: \`${reference}\`${suffix}`
+  /*
+   * The model version, when there is one — Phase 6e.
+   *
+   * Appended to the reference line rather than given a line of its own, because
+   * it belongs to the file the way the line range does. An agent reading this is
+   * being handed the `base_version` that `editor_edit` requires; without it the
+   * only way to learn a version is to attempt an edit and be refused, so every
+   * first edit to a file costs a wasted turn.
+   *
+   * Only for an embedded editor. The external bridge has no model version, the
+   * field is absent, and nothing is claimed.
+   */
+  const at = block.modelVersion === undefined ? '' : ` \`v${String(block.modelVersion)}\``
+  const head = `${labels.heading}: \`${reference}\`${at}${suffix}`
   if (block.isEmpty || block.text === '') return head
   // The quoted lines are mandatory once the document is not the working tree:
   // there, the text is the only copy of what the user is actually looking at.
