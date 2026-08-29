@@ -509,6 +509,19 @@ export function prepareWorkbench(connection: WorkbenchConnection): WorkbenchSetu
       'editor.inlineSuggest.enabled': false,
       'window.title': '${rootName}',
       'workbench.colorTheme': 'Default Dark Modern',
+      /*
+       * Selected, not merely registered — and the distinction is the bug.
+       *
+       * Importing `theme-seti` contributes the theme; nothing chooses it. VS
+       * Code's own default settings pick `vs-seti`, and without that line here
+       * the explorer draws no icons at all: every row is a name and a chevron,
+       * which is what "the icons are missing" turned out to mean.
+       *
+       * A person can change it — this is a *default*, seeded into the settings
+       * file they own — and installing another icon theme from the marketplace
+       * overrides it in the ordinary way.
+       */
+      'workbench.iconTheme': 'vs-seti',
       'editor.minimap.enabled': false,
       'workbench.startupEditor': 'none',
       'telemetry.telemetryLevel': 'off',
