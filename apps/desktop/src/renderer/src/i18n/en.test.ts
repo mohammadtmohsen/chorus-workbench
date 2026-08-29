@@ -1,3 +1,5 @@
+import { readFileSync, readdirSync } from 'node:fs'
+import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 
 import en from './en.json'
@@ -83,5 +85,54 @@ describe('en.json', () => {
   it('resolves both forms at runtime', () => {
     expect(i18n.t('mcp.tools', { count: 1 })).toBe('1 tool')
     expect(i18n.t('mcp.tools', { count: 16 })).toBe('16 tools')
+  })
+})
+
+/**
+ * Every key a component asks for exists — the reader nothing had.
+ *
+ * A missing translation is invisible to the typechecker: `t('ide.headingWorkbench')`
+ * is a string, and i18next answers a key it does not know by returning the key
+ * itself. So the failure ships as a message reading `ide.headingWorkbench:
+ * .env.local:8-22` in front of a user, which is exactly how this was found —
+ * after a shell `&&` short-circuited the command that was supposed to add it and
+ * nothing anywhere noticed.
+ *
+ * Literal calls only. `t(cond ? 'a' : 'b')` is covered because both arms are
+ * literals in the source text; `t(someVariable)` is not, and cannot be — this
+ * reads source rather than running it. Partial coverage of a class the
+ * typechecker covers not at all.
+ */
+describe('every literal t() key resolves', () => {
+  it('finds no key a component asks for and the catalogue lacks', () => {
+    const root = join(import.meta.dirname, '..')
+    const known = new Set(leaves(en as Catalogue).map(([path]) => path))
+
+    const sources: string[] = []
+    const walk = (dir: string): void => {
+      for (const entry of readdirSync(dir, { withFileTypes: true })) {
+        const full = join(dir, entry.name)
+        if (entry.isDirectory()) walk(full)
+        else if (/\.tsx?$/.test(entry.name) && !entry.name.includes('.test.')) sources.push(full)
+      }
+    }
+    walk(root)
+
+    const missing: string[] = []
+    for (const file of sources) {
+      const text = readFileSync(file, 'utf8')
+      for (const match of text.matchAll(/\bt\(\s*'([a-zA-Z][\w.]*)'/g)) {
+        const key = match[1]
+        if (key === undefined) continue
+        /*
+         * Plurals are stored as `key_one` / `key_other` and asked for as `key`,
+         * so a bare miss is only a miss when neither suffix is there either.
+         */
+        if (known.has(key) || known.has(`${key}_one`) || known.has(`${key}_other`)) continue
+        missing.push(`${key}  (${file.slice(root.length + 1)})`)
+      }
+    }
+
+    expect(missing).toEqual([])
   })
 })

@@ -319,7 +319,8 @@
     },
     "editorWorkbench": "Editor",
     "showEditor": "Show the editor",
-    "hideEditor": "Hide the editor"
+    "hideEditor": "Hide the editor",
+    "headingWorkbench": "Editor context"
   },
   "notice": {
     "omitted": "{{bytes}} bytes omitted — the output was too large to keep",
@@ -542,7 +543,8 @@
     "chooseFolder": "Choose folder…",
     "closeSurface": "Close this workbench",
     "noFolder": "No folder yet",
-    "dismiss": "Dismiss"
+    "dismiss": "Dismiss",
+    "opening": "Starting the editor… the first run downloads and unpacks it, which takes a few minutes."
   },
   "dock": {
     "conversations": "Conversations in this project"
