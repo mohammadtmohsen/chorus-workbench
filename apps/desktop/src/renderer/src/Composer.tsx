@@ -873,6 +873,13 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(
      * their own window — so the trade is deliberate, not an oversight.
      */
     const ideAttached = props.ide !== null && props.ide.status === 'ready'
+    /*
+     * The last segment of a project-relative path, POSIX separators only.
+     *
+     * Not `node:path` — this runs in the renderer, and the paths it is given are
+     * already normalised to `/` by the surface that reported them.
+     */
+    const basename = (path: string): string => path.slice(path.lastIndexOf('/') + 1)
     /* `12` for a single line, `12-18` for a range — a `12-12` reads as a mistake. */
     const lineLabel = (file: { startLine: number; endLine: number }): string =>
       file.startLine === file.endLine
@@ -1080,7 +1087,15 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(
                 lines: lineLabel(props.ide.file),
               })}
             >
-              <span className="path">{props.ide.file.relativePath}</span>
+              {/*
+                The name, not the path. A composer row is narrow and a nested
+                path spends all of it on directories that are the same for every
+                file in the project — `apps/desktop/src/renderer/src/Composer.tsx`
+                truncates to the part that identifies nothing. The full path is
+                on the title, which is where a person goes when the name is
+                ambiguous.
+              */}
+              <span className="path">{basename(props.ide.file.relativePath)}</span>
               <span className="composer-ide-lines">:{lineLabel(props.ide.file)}</span>
             </span>
           )}
