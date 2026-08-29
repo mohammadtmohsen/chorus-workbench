@@ -226,7 +226,14 @@ export const ChorusEventPayload = z.discriminatedUnion('type', [
   z.object({
     type: z.literal('approval.requested'),
     approvalId: z.string(),
-    kind: z.enum(['command', 'fileChange', 'permissionGrant', 'mcpToolCall']),
+    /*
+     * Widened for `editorEdit` (Phase 6e). Appending is the only safe direction:
+     * this schema parses rows written by every earlier build, so a value may be
+     * added but never removed or renamed — an old row naming a kind this enum no
+     * longer knows would fail to parse, and the log is append-only precisely so
+     * that cannot happen.
+     */
+    kind: z.enum(['command', 'fileChange', 'permissionGrant', 'mcpToolCall', 'editorEdit']),
     request: z.unknown(),
     expiresAt: z.number().int(),
   }),

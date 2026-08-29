@@ -183,6 +183,8 @@ export interface WorkbenchEditRequest {
     readonly endLine: number
     readonly endColumn: number
   }
+  /** What the agent believes is in that range. Checked before anything moves. */
+  readonly oldText: string
   readonly newText: string
 }
 

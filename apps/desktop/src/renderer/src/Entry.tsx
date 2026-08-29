@@ -165,7 +165,14 @@ function EntryHead({
  * every streamed delta, and re-parsing every visible diff on each one would make
  * typing next to a long turn cost more than the turn did.
  */
-const ToolPatch = memo(function ToolPatch({
+/**
+ * Exported for the approval card — Phase 6e.
+ *
+ * Deliberately not copied. The transcript and an approval showing the same diff
+ * must look the same, and two renderers agreeing today are two that disagree
+ * after the next change to either.
+ */
+export const ToolPatch = memo(function ToolPatch({
   patch,
   omittedLines,
   nested,

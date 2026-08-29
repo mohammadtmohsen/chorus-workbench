@@ -1,3 +1,4 @@
+import { EDITOR_EDIT_TOOL, editorEditApproval } from './editor-tool.js'
 import {
   toEpochMs,
   type AgentActivity,
@@ -1441,6 +1442,27 @@ export function mapToolPermission(
 ): ApprovalRequest {
   const expiresAt = ctx.now + ctx.approvalTtlMs
   const said = stated(prompt)
+
+  /*
+   * Chorus's own editor tool, before the generic MCP branch — Phase 6e.
+   *
+   * It arrives as an MCP call because that is how it is offered, but rendering
+   * it as one would show "chorus_editor: editor_edit" and a bag of JSON. A person
+   * being asked to let an agent change the buffer they are typing in needs the
+   * path, the version they were looking at, the range, and the diff — which is
+   * exactly what `editorEdit` carries and what the plan asks the approval to
+   * show.
+   *
+   * Ahead of the MCP branch rather than inside it, for the reason the comment
+   * below already records about `Task`: whichever branch runs first wins, and a
+   * more specific kind that sits after a general one never runs at all.
+   */
+  if (toolName === EDITOR_EDIT_TOOL) {
+    const editor = editorEditApproval(input)
+    if (editor !== null) {
+      return { id, agentId: AGENT, kind: 'editorEdit', expiresAt, ...said, ...editor }
+    }
+  }
 
   const mcp = /^mcp__([^_]+(?:_[^_]+)*?)__(.+)$/.exec(toolName)
   if (mcp !== null) {

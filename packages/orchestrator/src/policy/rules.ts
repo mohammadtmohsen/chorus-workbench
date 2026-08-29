@@ -294,6 +294,15 @@ export function subjectOf(request: ApprovalRequest): { command: string; paths: s
       return { command: '', paths: [...(request.requested.filesystem ?? [])] }
     case 'mcpToolCall':
       return { command: `${request.serverName} ${request.toolName}`, paths: [] }
+    /*
+     * The path, so a deny rule over a directory still covers an editor edit into
+     * it. A rule cannot *allow* one — `requiresExplicitUserDecision` refuses that
+     * before rules are consulted — but rule 2 says a deny is absolute, and a
+     * subject of `[]` here would have quietly exempted this kind from every
+     * path-scoped deny in the profile.
+     */
+    case 'editorEdit':
+      return { command: '', paths: [request.path] }
   }
 }
 
@@ -307,6 +316,9 @@ export function requestNeedsNetwork(request: ApprovalRequest): boolean {
     // can never be auto-allowed (plan §2.6).
     case 'mcpToolCall':
       return true
+    // An edit into the user's own editor reaches nothing outside the machine.
+    case 'editorEdit':
+      return false
     case 'fileChange':
       return false
   }

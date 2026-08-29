@@ -4,7 +4,8 @@ import type { AgentId, ApprovalId } from '@chorus/shared'
  * The four things an agent can ask permission for. Both providers' native
  * approval shapes collapse onto this so one card renders all of them (plan §4.2).
  */
-export type ApprovalKind = 'command' | 'fileChange' | 'permissionGrant' | 'mcpToolCall'
+export type ApprovalKind =
+  'command' | 'fileChange' | 'permissionGrant' | 'mcpToolCall' | 'editorEdit'
 
 export interface ApprovalRequestBase {
   readonly id: ApprovalId
@@ -77,8 +78,43 @@ export interface McpToolCallApproval extends ApprovalRequestBase {
   readonly input: Readonly<Record<string, unknown>>
 }
 
+/**
+ * An agent changing a file in the user's open editor — Phase 6e.
+ *
+ * **Its own kind rather than a `fileChange` with a patch**, because a person
+ * answering this needs two things a file change cannot express. The **version**
+ * says which state of the file the agent was looking at, which is what makes a
+ * conflict comprehensible rather than mysterious. And the **range** says where,
+ * which for a one-line change in a thousand-line file is the difference between
+ * an answerable question and a shrug.
+ *
+ * The patch is a unified diff over the replaced range only, so the existing
+ * `parseDiff` renders it exactly as it renders every other diff in the
+ * transcript. That is why `FileDiff` survived Phase 9 — it is a decision
+ * surface, answerable with the editor switched off, and not a review surface.
+ */
+export interface EditorEditApproval extends ApprovalRequestBase {
+  readonly kind: 'editorEdit'
+  /** Project-relative. An absolute path is not expressible upstream. */
+  readonly path: string
+  /** The editor model version the agent wrote this against. */
+  readonly version: number
+  readonly range: {
+    readonly startLine: number
+    readonly startColumn: number
+    readonly endLine: number
+    readonly endColumn: number
+  }
+  /** Unified diff of the replaced range, for `parseDiff`. */
+  readonly patch: string
+}
+
 export type ApprovalRequest =
-  CommandApproval | FileChangeApproval | PermissionGrantApproval | McpToolCallApproval
+  | CommandApproval
+  | FileChangeApproval
+  | PermissionGrantApproval
+  | McpToolCallApproval
+  | EditorEditApproval
 
 /**
  * How long an answer lasts.
@@ -108,5 +144,13 @@ export type ApprovalDecision =
 
 /** True for approval kinds that a permission profile is forbidden from auto-allowing. */
 export function requiresExplicitUserDecision(kind: ApprovalKind): boolean {
-  return kind === 'mcpToolCall'
+  /*
+   * `editorEdit` joins `mcpToolCall` here, and for a sharper reason than the
+   * general "outward-facing" one. This kind changes what is on the person's
+   * screen, in a buffer they may be typing in. A profile that could pre-approve
+   * it would mean opening a file and finding it already different — and the
+   * whole argument for editing the model rather than the file is that the person
+   * stays in control of their own editor. Being asked is that control.
+   */
+  return kind === 'mcpToolCall' || kind === 'editorEdit'
 }

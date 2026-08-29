@@ -45,6 +45,7 @@ export function asEditRequest(value: unknown): WorkbenchEditRequest | null {
   if (typeof v['requestId'] !== 'string' || v['requestId'] === '') return null
   if (typeof v['path'] !== 'string') return null
   if (typeof v['baseVersion'] !== 'number' || !Number.isInteger(v['baseVersion'])) return null
+  if (typeof v['oldText'] !== 'string') return null
   if (typeof v['newText'] !== 'string') return null
   return {
     requestId: v['requestId'],
@@ -56,6 +57,7 @@ export function asEditRequest(value: unknown): WorkbenchEditRequest | null {
       endLine: range['endLine'] as number,
       endColumn: range['endColumn'] as number,
     },
+    oldText: v['oldText'],
     newText: v['newText'],
   }
 }
@@ -149,6 +151,31 @@ export async function applyWorkbenchEdit(
         ok: false,
         refusal: 'conflict',
         message: `"${request.path}" has changed since it was read (version ${String(version)}, edit was written against ${String(request.baseVersion)}).`,
+        version,
+      }
+    }
+
+    /*
+     * The second check, and it catches what the version cannot.
+     *
+     * A version says *when*; it says nothing about *where*. An edit written
+     * against the right version with a range that is one line out passes the
+     * version check and then replaces the wrong text — silently, because
+     * nothing downstream knows what was supposed to be there. Comparing the
+     * range's actual contents is the only thing that catches it.
+     */
+    const actual = model.getValueInRange({
+      startLineNumber: request.range.startLine,
+      startColumn: request.range.startColumn,
+      endLineNumber: request.range.endLine,
+      endColumn: request.range.endColumn,
+    })
+    if (actual !== request.oldText) {
+      return {
+        requestId: request.requestId,
+        ok: false,
+        refusal: 'conflict',
+        message: `The text at that range in "${request.path}" is not what the edit expected. Re-read the file and use the range and text you find.`,
         version,
       }
     }

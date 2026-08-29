@@ -165,6 +165,27 @@ export interface PendingApproval {
   readonly summary: string
   readonly detail: string | null
   readonly expiresAt: number
+  /**
+   * An editor edit's diff, rendered rather than printed — Phase 6e.
+   *
+   * Approvals have always been able to *contain* a patch: `detailOf` joins the
+   * `fileChange` ones into the detail string, where they arrive as preformatted
+   * text. That is readable and it is not a diff — no colour, no gutter, nothing
+   * distinguishing a removed line from an added one at a glance. A person being
+   * asked to let an agent change the buffer they are typing in should see the
+   * change the way the transcript already shows every other change.
+   *
+   * Optional because only this kind carries one today. `fileChange` could join
+   * it, and deliberately has not here: that would change how every existing
+   * approval looks, which is a separate decision from adding a new kind.
+   */
+  readonly patch?: string
+  /** Project-relative path, for the editor-edit card's own line. */
+  readonly path?: string
+  /** The model version the agent wrote against — what makes a conflict legible. */
+  readonly version?: number
+  /** 1-based, `startLine:startColumn`-ish, already formatted for display. */
+  readonly where?: string
 }
 
 /**
@@ -365,6 +386,7 @@ export function applyTranscriptState(
       kind: a.kind,
       summary: summarize(payload),
       detail: detailOf(payload),
+      ...editorEditFields(payload),
       expiresAt: a.expiresAt,
     }
   })
@@ -750,6 +772,7 @@ function apply(view: Mutable, event: TranscriptEvent): void {
         agentId: event.actor,
         kind: str('kind'),
         summary: summarize(p),
+        ...editorEditFields(p),
         detail: detailOf(p),
         expiresAt: typeof p['expiresAt'] === 'number' ? p['expiresAt'] : 0,
       })
@@ -1365,6 +1388,43 @@ function appendStreamed(
 }
 
 /** The diff or arguments behind an approval, shown under the summary line. */
+/**
+ * The extra fields an `editorEdit` approval shows, read defensively.
+ *
+ * Read off the logged event rather than imported from the protocol, which is
+ * this file's standing rule: the renderer only ever sees a logged event, and a
+ * replayed log from an older build must not be able to break the UI by lacking
+ * a field a newer type promises. Anything missing simply does not render.
+ */
+function editorEditFields(payload: Record<string, unknown>): {
+  patch?: string
+  path?: string
+  version?: number
+  where?: string
+} {
+  if (payload['kind'] !== 'editorEdit') return {}
+  const request = payload['request']
+  if (typeof request !== 'object' || request === null) return {}
+  const r = request as Record<string, unknown>
+  const range = r['range']
+  const where =
+    typeof range === 'object' && range !== null
+      ? (() => {
+          const g = range as Record<string, unknown>
+          const a = g['startLine']
+          const b = g['endLine']
+          if (typeof a !== 'number' || typeof b !== 'number') return undefined
+          return a === b ? `line ${String(a)}` : `lines ${String(a)}-${String(b)}`
+        })()
+      : undefined
+  return {
+    ...(typeof r['patch'] === 'string' ? { patch: r['patch'] } : {}),
+    ...(typeof r['path'] === 'string' ? { path: r['path'] } : {}),
+    ...(typeof r['version'] === 'number' ? { version: r['version'] } : {}),
+    ...(where === undefined ? {} : { where }),
+  }
+}
+
 function detailOf(payload: Record<string, unknown>): string | null {
   const request = payload['request']
   if (typeof request !== 'object' || request === null) return null

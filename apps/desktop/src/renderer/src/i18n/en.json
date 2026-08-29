@@ -236,7 +236,8 @@
     "enterHint": "Enter to allow once",
     "enterHintSession": "Enter allows for this session",
     "allowAlways": "Allow for this session",
-    "allowRemembered": "Always allow this tool"
+    "allowRemembered": "Always allow this tool",
+    "atVersion": "version {{version}}"
   },
   "question": {
     "asking": "{{agent}} is asking",
@@ -536,7 +537,12 @@
     "removeProject": "Remove project"
   },
   "workbench": {
-    "opening": "Starting the editor… the first run downloads and unpacks it, which takes a few minutes."
+    "probeTitle": "Workbench containment probe",
+    "probeHint": "Open two folders, then close one. The other must keep working.",
+    "chooseFolder": "Choose folder…",
+    "closeSurface": "Close this workbench",
+    "noFolder": "No folder yet",
+    "dismiss": "Dismiss"
   },
   "dock": {
     "conversations": "Conversations in this project"
@@ -579,13 +585,5 @@
     "hint": "Drag a session by its grip to reorder. Escape leaves Arrange.",
     "notWhileSearching": "Clear the search to arrange sessions",
     "moved": "{{title}} moved to position {{position}} of {{count}}"
-  },
-  "workbench": {
-    "probeTitle": "Workbench containment probe",
-    "probeHint": "Open two folders, then close one. The other must keep working.",
-    "chooseFolder": "Choose folder…",
-    "closeSurface": "Close this workbench",
-    "noFolder": "No folder yet",
-    "dismiss": "Dismiss"
   }
 }

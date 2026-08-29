@@ -3360,6 +3360,28 @@ body {
 }
 
 /*
+ * Where an editor edit lands, above its diff — Phase 6e.
+ *
+ * One quiet line: the path, the range and the version the agent wrote against.
+ * The diff below it is drawn by the transcript's own `ToolPatch`, so it needs no
+ * styling here — bounded rather than restyled, because an approval is a card and
+ * a hundred-line hunk must not push its own buttons off screen.
+ */
+.approval-where {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+  word-break: break-word;
+}
+
+.approval .tool-patch {
+  flex: 0 1 auto;
+  min-height: 0;
+  max-height: 220px;
+  overflow-y: auto;
+}
+
+/*
  * A question, which is not an alarm.
  *
  * Built as a sibling of the approval card and deliberately not in its colour.

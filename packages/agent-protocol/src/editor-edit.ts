@@ -56,6 +56,21 @@ export interface EditorEditRequest {
    */
   readonly baseVersion: number
   readonly range: EditorEditRange
+  /**
+   * What the agent believes is currently in that range.
+   *
+   * Two jobs, and the second is the one that made it necessary. It is checked
+   * against the model before anything moves, so a request with the right version
+   * but the wrong *range* — an off-by-one line, a stale column — is refused
+   * instead of replacing the wrong text. Version alone cannot catch that: the
+   * version is right.
+   *
+   * And it is what makes an approval showable. The request otherwise carries
+   * only the replacement, and "here is what it will say afterwards" is not a
+   * diff — there is nothing to compare it against, so a person is asked to
+   * approve a change they cannot see.
+   */
+  readonly oldText: string
   readonly newText: string
 }
 

@@ -56,6 +56,11 @@ const EDIT_SCHEMA = {
   start_column: z.number().int().min(1).describe('First column of the range to replace (1-based).'),
   end_line: z.number().int().min(1).describe('Last line of the range to replace (1-based).'),
   end_column: z.number().int().min(1).describe('Column just past the end of the range (1-based).'),
+  old_text: z
+    .string()
+    .describe(
+      'The exact text currently in that range. Checked before anything is replaced, so a right-version-wrong-range edit is refused instead of overwriting the wrong lines. It is also what the user is shown as the "before" side of the diff.'
+    ),
   new_text: z.string().describe('Text to put in place of that range. May be empty to delete.'),
 }
 
@@ -67,7 +72,8 @@ const DESCRIPTION = [
   'dirty instead of saving it, and appears in source control and diagnostics as if',
   'the user had typed it. Nothing is saved on their behalf.',
   '',
-  'Requires base_version. Read the file first and pass the version you were given.',
+  'Requires base_version and old_text. Read the file first, pass the version you',
+  'were given, and quote the exact text you are replacing.',
   'If it does not match, the edit is refused with the current version — re-read and',
   'try again rather than retrying the same edit.',
 ].join('\n')
@@ -102,6 +108,7 @@ export function editorMcpServer(
               endLine: args.end_line,
               endColumn: args.end_column,
             },
+            oldText: args.old_text,
             newText: args.new_text,
           })
 
@@ -135,5 +142,70 @@ export function editorMcpServer(
         }),
       ],
     }),
+  }
+}
+
+/** How the tool arrives in `canUseTool` once the SDK has namespaced it. */
+export const EDITOR_EDIT_TOOL = 'mcp__chorus_editor__editor_edit'
+
+/**
+ * Turns the tool's arguments into what the approval card needs to show.
+ *
+ * **A unified diff over the replaced range only**, not the whole file. The
+ * transcript already renders patches with `parseDiff`, so producing one here
+ * means the editor-edit card is drawn by the same code as every other diff in
+ * the app rather than by a second implementation that would drift from it.
+ *
+ * The hunk header counts lines rather than guessing: an agent deleting three
+ * lines and adding one has to produce `-N,3 +N,1`, and a header that disagrees
+ * with the body is a patch every renderer draws differently.
+ *
+ * Returns `null` when the arguments are not the shape the schema promises. The
+ * caller then falls through to the generic MCP approval, which is worse to look
+ * at but is never wrong — better than a card built from half-read values.
+ */
+export function editorEditApproval(input: Readonly<Record<string, unknown>>): {
+  path: string
+  version: number
+  range: { startLine: number; startColumn: number; endLine: number; endColumn: number }
+  patch: string
+} | null {
+  const path = input['path']
+  const version = input['base_version']
+  const oldText = input['old_text']
+  const newText = input['new_text']
+  const nums = ['start_line', 'start_column', 'end_line', 'end_column'] as const
+  if (typeof path !== 'string' || path === '') return null
+  if (typeof version !== 'number' || typeof oldText !== 'string' || typeof newText !== 'string') {
+    return null
+  }
+  if (!nums.every((k) => typeof input[k] === 'number')) return null
+
+  const startLine = input['start_line'] as number
+  /*
+   * A trailing newline would otherwise produce a phantom empty line on both
+   * sides of the diff, which reads as a change nobody made.
+   */
+  const split = (text: string): string[] => (text === '' ? [] : text.split('\n'))
+  const before = split(oldText)
+  const after = split(newText)
+  const patch = [
+    `--- a/${path}`,
+    `+++ b/${path}`,
+    `@@ -${String(startLine)},${String(before.length)} +${String(startLine)},${String(after.length)} @@`,
+    ...before.map((line) => `-${line}`),
+    ...after.map((line) => `+${line}`),
+  ].join('\n')
+
+  return {
+    path,
+    version,
+    range: {
+      startLine,
+      startColumn: input['start_column'] as number,
+      endLine: input['end_line'] as number,
+      endColumn: input['end_column'] as number,
+    },
+    patch,
   }
 }

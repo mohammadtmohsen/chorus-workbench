@@ -4,7 +4,7 @@ import type { Attachment } from './Attachments.js'
 import { formatDiagnosticBlock } from './editor-context.js'
 import { fitCard, type AsidePurpose } from './aside.js'
 import { Composer, type ComposerHandle, type ComposerState } from './Composer.js'
-import { Entry } from './Entry.js'
+import { Entry, ToolPatch } from './Entry.js'
 import { ErrorNotice } from './ErrorNotice.js'
 import { focusedNow, mayTakeCaret } from './focus.js'
 import { profileHas, profileMark, profileMarkAfterPaint } from './profile-marks.js'
@@ -2573,7 +2573,25 @@ export function ApprovalCard({
         )}
       </header>
       <pre className="approval-summary">{approval.summary}</pre>
-      {approval.detail !== null && <pre className="approval-detail">{approval.detail}</pre>}
+      {/*
+        An editor edit says where and against what, above the diff.
+        The version is the field that makes a later conflict comprehensible —
+        "it moved on from 7" means nothing if nobody was told it was 7.
+      */}
+      {approval.path !== undefined && (
+        <p className="approval-where">
+          <span className="path">{approval.path}</span>
+          {approval.where !== undefined && <span> · {approval.where}</span>}
+          {approval.version !== undefined && (
+            <span> · {t('approval.atVersion', { version: approval.version })}</span>
+          )}
+        </p>
+      )}
+      {approval.patch !== undefined ? (
+        <ToolPatch patch={approval.patch} nested={false} />
+      ) : (
+        approval.detail !== null && <pre className="approval-detail">{approval.detail}</pre>
+      )}
       <div className="approval-actions">
         <button
           ref={defaultsToSession ? undefined : allow}

@@ -221,5 +221,7 @@ export function describeRequest(request: ApprovalRequest): string {
       ].join(', ')
     case 'mcpToolCall':
       return `${request.serverName}: ${request.toolName}`
+    case 'editorEdit':
+      return `${request.path}:${String(request.range.startLine)}`
   }
 }
