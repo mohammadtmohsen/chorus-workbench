@@ -165,6 +165,65 @@ import '@codingame/monaco-vscode-markdown-basics-default-extension'
 import '@codingame/monaco-vscode-yaml-default-extension'
 import '@codingame/monaco-vscode-shellscript-default-extension'
 import '@codingame/monaco-vscode-python-default-extension'
+
+/*
+ * The rest of what VS Code bundles, so an unfamiliar file is still a file.
+ *
+ * The nine above were the languages worked in here, chosen to keep the bundle
+ * honest. That is the wrong trade for an editor: the file you cannot read is
+ * always the one you did not expect to open — a `Dockerfile` in someone else's
+ * repository, a `.travis.yml`, a `soa.cd.cjs`. Measured before and after, the
+ * whole set costs 0.7 MB on the workbench chunk, because the grammars are lazy
+ * and only the language *declarations* load at startup. At that price there is
+ * no argument for choosing.
+ */
+import '@codingame/monaco-vscode-bat-default-extension'
+import '@codingame/monaco-vscode-clojure-default-extension'
+import '@codingame/monaco-vscode-coffeescript-default-extension'
+import '@codingame/monaco-vscode-cpp-default-extension'
+import '@codingame/monaco-vscode-csharp-default-extension'
+import '@codingame/monaco-vscode-dart-default-extension'
+import '@codingame/monaco-vscode-diff-default-extension'
+import '@codingame/monaco-vscode-docker-default-extension'
+import '@codingame/monaco-vscode-fsharp-default-extension'
+import '@codingame/monaco-vscode-go-default-extension'
+import '@codingame/monaco-vscode-groovy-default-extension'
+import '@codingame/monaco-vscode-handlebars-default-extension'
+import '@codingame/monaco-vscode-hlsl-default-extension'
+import '@codingame/monaco-vscode-ini-default-extension'
+import '@codingame/monaco-vscode-java-default-extension'
+import '@codingame/monaco-vscode-julia-default-extension'
+import '@codingame/monaco-vscode-latex-default-extension'
+import '@codingame/monaco-vscode-less-default-extension'
+import '@codingame/monaco-vscode-log-default-extension'
+import '@codingame/monaco-vscode-lua-default-extension'
+import '@codingame/monaco-vscode-make-default-extension'
+import '@codingame/monaco-vscode-objective-c-default-extension'
+import '@codingame/monaco-vscode-perl-default-extension'
+import '@codingame/monaco-vscode-php-default-extension'
+import '@codingame/monaco-vscode-powershell-default-extension'
+import '@codingame/monaco-vscode-pug-default-extension'
+import '@codingame/monaco-vscode-r-default-extension'
+import '@codingame/monaco-vscode-razor-default-extension'
+import '@codingame/monaco-vscode-restructuredtext-default-extension'
+import '@codingame/monaco-vscode-ruby-default-extension'
+import '@codingame/monaco-vscode-rust-default-extension'
+import '@codingame/monaco-vscode-scss-default-extension'
+import '@codingame/monaco-vscode-shaderlab-default-extension'
+import '@codingame/monaco-vscode-sql-default-extension'
+import '@codingame/monaco-vscode-swift-default-extension'
+import '@codingame/monaco-vscode-vb-default-extension'
+import '@codingame/monaco-vscode-xml-default-extension'
+
+/*
+ * File icons, which is a different kind of not-knowing.
+ *
+ * Without it every row in the explorer is the same grey page, so a folder of
+ * mixed sources reads as a list of names and nothing else. Seti is the theme VS
+ * Code ships as its default, so this restores the expected appearance rather
+ * than inventing one.
+ */
+import '@codingame/monaco-vscode-theme-seti-default-extension'
 // Registers the local extension host. Nothing in this slice activates an
 // extension, but the extension service resolves a host at startup either way.
 import '@codingame/monaco-vscode-extension-api/localExtensionHost'
