@@ -55,7 +55,11 @@ import type { WorkspaceSnapshot } from '../shared/workspace-layout.js'
 import { readSettings, writeSettings, type Settings } from './settings.js'
 import { applyTheme } from './theme.js'
 import { previewFile, stashFile } from './stash.js'
-import { requestWorkbenchSnapshot, setWorkbenchContextSink } from './workbench-surface.js'
+import {
+  requestWorkbenchSnapshot,
+  setWorkbenchContextSink,
+  setWorkbenchSurfaceGoneSink,
+} from './workbench-surface.js'
 import type { WorkbenchContext } from '../shared/workbench-ipc.js'
 
 type Handlers = { [C in IpcChannel]: (request: never) => Promise<IpcResponse<C>> }
@@ -1115,11 +1119,33 @@ export function forwardWorkbenchContextToRenderer(runtime: ChorusRuntime): () =>
   const replay = (): void => {
     for (const [projectRoot, context] of lastWorkbenchContext) send({ projectRoot, context })
   }
+  /*
+   * When a project's last surface goes, its held context goes with it and the
+   * conversations are told the embedded editor has nothing — which is what lets
+   * the external bridge become visible again, since the shell prefers a
+   * workbench push only while one exists.
+   */
+  setWorkbenchSurfaceGoneSink((projectRoot) => {
+    lastWorkbenchContext.delete(projectRoot)
+    for (const conversationId of runtime.conversationsForRoot(projectRoot)) {
+      for (const window of BrowserWindow.getAllWindows()) {
+        if (window.isDestroyed()) continue
+        window.webContents.send(IDE_PUSH_CHANNEL, {
+          conversationId,
+          editor: 'workbench' as const,
+          status: 'unavailable' as const,
+          file: null,
+        })
+      }
+    }
+  })
+
   const unsubscribe = runtime.subscribe(replay)
   replay()
 
   return () => {
     unsubscribe()
+    setWorkbenchSurfaceGoneSink(null)
     setWorkbenchContextSink(null)
   }
 }

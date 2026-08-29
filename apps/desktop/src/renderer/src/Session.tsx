@@ -1435,11 +1435,19 @@ export function Session(props: {
       // because a pane showing another project's file is the one failure this
       // feature must never have.
       if (payload.conversationId !== conversationId) return
-      setIdeByEditor((current) =>
-        payload.editor === 'workbench'
-          ? { ...current, workbench: payload }
-          : { ...current, external: payload }
-      )
+      setIdeByEditor((current) => {
+        if (payload.editor !== 'workbench') return { ...current, external: payload }
+        /*
+         * `unavailable` from the workbench means there is no embedded editor —
+         * its last surface closed. Held as a push it would keep winning over the
+         * external bridge for ever, which is the opposite of what main sent it
+         * for, so it clears the slot instead.
+         *
+         * Every other workbench status, `unmatched` included, is a real answer
+         * from a real editor and does win.
+         */
+        return { ...current, workbench: payload.status === 'unavailable' ? null : payload }
+      })
     })
   }, [conversationId])
 

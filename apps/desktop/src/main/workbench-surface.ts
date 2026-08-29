@@ -717,6 +717,14 @@ function destroySurface(viewId: string): void {
   byContents.delete(surface.view.webContents)
   byOwner.get(surface.owner)?.delete(viewId)
   /*
+   * Only when this was the project's *last* surface. Two panes on one project
+   * share a root, and telling the shell the editor is gone while another is
+   * still showing it would drop a context that is still true.
+   */
+  if (![...byId.values()].some((other) => other.projectRoot === surface.projectRoot)) {
+    onSurfaceGone?.(surface.projectRoot)
+  }
+  /*
    * `editorHidden` is **not** pruned here, and that is deliberate: it is keyed by
    * project root, and a project whose editor is off should still be off when its
    * pane is reopened. It is bounded by the number of projects, and the shell
@@ -982,6 +990,20 @@ export function registerWorkbenchHandlers(
 let onContext:
   ((report: { readonly projectRoot: string; readonly context: WorkbenchContext }) => void) | null =
   null
+
+/**
+ * Told when a project's last surface goes, so a held context can be dropped.
+ *
+ * Without it "the workbench wins once it has ever reported" outlives the
+ * workbench: close the editor and the shell keeps preferring a context from a
+ * surface that no longer exists, while the external bridge — which may now be
+ * the only editor there is — stays suppressed behind it.
+ */
+let onSurfaceGone: ((projectRoot: string) => void) | null = null
+
+export function setWorkbenchSurfaceGoneSink(sink: ((projectRoot: string) => void) | null): void {
+  onSurfaceGone = sink
+}
 
 export function setWorkbenchContextSink(
   sink:

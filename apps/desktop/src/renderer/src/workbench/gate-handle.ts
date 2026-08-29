@@ -28,21 +28,43 @@ export async function installGateHandle(projectRoot: string): Promise<void> {
   const editors = await getService(IEditorService)
   const root = projectRoot.endsWith('/') ? projectRoot.slice(0, -1) : projectRoot
 
+  /*
+   * The control from the pane `openEditor` returned, not whatever is active now.
+   *
+   * The first version rediscovered it through `activeTextEditorControl`, and that
+   * reintroduces the race the open had just resolved: the pane is ready when the
+   * promise settles, and the *active* control catches up on its own schedule. It
+   * returned `false` in the probe for exactly that reason.
+   */
+  let opened: unknown = null
+
   const handle = {
-    /** Opens a project-relative file as the active editor. */
+    /** Opens a project-relative file and keeps the pane it produced. */
     open: async (relativePath: string): Promise<boolean> => {
-      await editors.openEditor({ resource: URI.file(`${root}/${relativePath}`) })
-      return true
+      const pane = await editors.openEditor({ resource: URI.file(`${root}/${relativePath}`) })
+      /*
+       * The pane resolves before its control does. Codex is right that
+       * rediscovering the editor through `activeTextEditorControl` reintroduces
+       * a race — this keeps the *pane* and waits for that one pane's control,
+       * which is a different thing: it can only ever settle on the editor the
+       * open produced, never on whatever happens to be active.
+       */
+      for (let attempt = 0; attempt < 40; attempt += 1) {
+        opened = pane?.getControl() ?? null
+        if (isCodeEditor(opened)) return true
+        await new Promise((resolve) => setTimeout(resolve, 50))
+      }
+      return false
     },
     /**
-     * Selects a line range in the active editor.
+     * Selects a line range in the editor that was opened.
      *
      * Through the editor's own `setSelection` rather than by synthesising drag
      * events: the point is to reach the state a selection produces, and a
      * synthetic drag tests the input stack instead of the thing under test.
      */
     select: (startLine: number, endLine: number): boolean => {
-      const control = editors.activeTextEditorControl
+      const control = opened
       if (!isCodeEditor(control)) return false
       const model = control.getModel()
       if (model === null) return false

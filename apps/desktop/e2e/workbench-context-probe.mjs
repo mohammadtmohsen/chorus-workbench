@@ -69,6 +69,26 @@ async function main() {
   try {
     await app.until(`document.querySelector('#root') !== null`, { timeout: 120_000 })
 
+    /*
+     * Isolation, asserted rather than assumed — and it is asserted because it was
+     * violated. A run whose store already held a real project reported 28 routed
+     * contexts that had nothing to do with the scratch repo, and every number in
+     * it was meaningless. `CHORUS_USER_DATA` is set and `app.setPath` runs before
+     * anything reads a path, so the environment *looks* right; the only honest
+     * check is what Electron actually resolved and what the store actually holds.
+     */
+    const projects = JSON.parse(
+      await app.evaluate('window.chorus.listProjects({}).then(JSON.stringify)')
+    )
+    const roots = projects.projects.map((project) => project.root)
+    const strayRoots = roots.filter((r) => !r.includes('chorus-ctx-'))
+    console.log(`  projects in store: ${roots.length === 0 ? '(none)' : roots.join(', ')}`)
+    if (strayRoots.length > 0) {
+      throw new Error(
+        `probe is not isolated: the store holds ${strayRoots.join(', ')} — every measurement below would describe another project.`
+      )
+    }
+
     const { chosen } = JSON.parse(
       await app.evaluate('window.chorus.chooseWorkbenchProject().then(JSON.stringify)')
     )
