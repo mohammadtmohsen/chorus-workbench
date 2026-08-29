@@ -273,6 +273,9 @@ importers:
       '@chorus/shared':
         specifier: workspace:*
         version: link:../shared
+      zod:
+        specifier: ^4.4.3
+        version: 4.4.3
     devDependencies:
       '@types/node':
         specifier: ^22.20.1
@@ -1339,6 +1342,7 @@ packages:
   '@xmldom/xmldom@0.8.13':
     resolution: {integrity: sha512-KRYzxepc14G/CEpEGc3Yn+JKaAeT63smlDr+vjB8jRfgTBBI9wRj/nkQEO+ucV8p8I9bfKLWp37uHgFrbntPvw==}
     engines: {node: '>=10.0.0'}
+    deprecated: this version has critical issues, please update to the latest version
 
   '@xterm/addon-clipboard@0.3.0-beta.219':
     resolution: {integrity: sha512-KKN1BFJJbHoKKd1YZaq5Fjn85hv6/nu7Sbsobd0rhK0Ei6UBCaX+Q7xO+CtxatcOT/zaRGcCFsRvwSv92Hmk0w==}

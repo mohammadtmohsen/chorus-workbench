@@ -9,6 +9,7 @@ import {
   type PermissionResult,
   type Query,
 } from '@anthropic-ai/claude-agent-sdk'
+import { editorMcpServer } from './editor-tool.js'
 import type {
   AccountSummary,
   AgentAdapter,
@@ -21,6 +22,7 @@ import type {
   AgentInput,
   AgentSession,
   ApprovalDecision,
+  EditorEditCapability,
   ForkOpts,
   HealthStatus,
   SessionOpts,
@@ -131,6 +133,15 @@ export interface ClaudeAdapterOptions {
   readonly now?: () => number
   /** Injected in tests so no real CLI is spawned. */
   readonly createQuery?: (options: Options, prompt: AsyncIterable<unknown>) => Query
+  /**
+   * Lets the agent change files in the user's open editor — Phase 6e.
+   *
+   * Optional, and its absence is meaningful: with no editor the tool is not
+   * advertised at all, rather than advertised and always refusing. Injected
+   * because implementing it reaches a `WebContentsView`, and no adapter may
+   * depend on Electron.
+   */
+  readonly editorEdit?: EditorEditCapability
 }
 
 /**
@@ -867,6 +878,8 @@ export class ClaudeAdapter implements AgentAdapter {
   private readonly now: () => number
   private readonly createQuery:
     ((options: Options, prompt: AsyncIterable<unknown>) => Query) | undefined
+  /** Undefined when the host has no editor to offer; see `editorMcpServer`. */
+  private readonly editorEdit: EditorEditCapability | undefined
   private readonly sessions: ClaudeSession[] = []
 
   constructor(options: ClaudeAdapterOptions = {}) {
@@ -876,6 +889,7 @@ export class ClaudeAdapter implements AgentAdapter {
     this.approvalTtlMs = options.approvalTtlMs ?? 5 * 60_000
     this.now = options.now ?? (() => Date.now())
     this.createQuery = options.createQuery
+    this.editorEdit = options.editorEdit
   }
 
   /** Asked once, and only when the usual locations came up empty. */
@@ -1069,9 +1083,18 @@ export class ClaudeAdapter implements AgentAdapter {
     // only invokes it once the query is running — by which point it is set.
     const holder: { session?: ClaudeSession } = {}
 
+    /*
+     * Merged, never replacing. `strictMcpConfig` is deliberately not set — it
+     * would make the SDK ignore the user's own `.mcp.json`, settings and
+     * plugins, so adding one tool of ours would silently disconnect all of
+     * theirs. Same reasoning as `settingSources` being omitted below.
+     */
+    const editorServer = editorMcpServer(this.editorEdit, opts.cwd)
+
     const options: Options = {
       cwd: opts.cwd,
       includePartialMessages: true,
+      ...(editorServer === undefined ? {} : { mcpServers: editorServer }),
       /*
        * Hook activity, which was mapped and never arrived.
        *

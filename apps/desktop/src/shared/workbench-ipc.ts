@@ -193,7 +193,8 @@ export interface WorkbenchEditRequest {
  * `conflict` is the interesting one: it means the file is open and fine and
  * somebody else changed it, so the agent should re-read rather than retry.
  */
-export type WorkbenchEditRefusal = 'conflict' | 'outside-project' | 'unopenable' | 'failed'
+export type WorkbenchEditRefusal =
+  'conflict' | 'outside-project' | 'no-editor' | 'unopenable' | 'failed'
 
 export type WorkbenchEditResult =
   | { readonly requestId: string; readonly ok: true; readonly version: number }

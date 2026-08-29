@@ -15,7 +15,9 @@ import type {
   SlashCommandInfo,
   UsageWindow,
   UserInputResponse,
+  EditorEditCapability,
 } from '@chorus/agent-protocol'
+import { requestWorkbenchEdit } from './workbench-surface.js'
 import {
   EventStore,
   openSqlite,
@@ -4163,13 +4165,32 @@ function codexOptions(): {
   }
 }
 
-function claudeOptions(): { resolveExecutable: () => Promise<ResolvedExecutable | null> } {
+function claudeOptions(): {
+  resolveExecutable: () => Promise<ResolvedExecutable | null>
+  editorEdit: EditorEditCapability
+} {
   return {
     resolveExecutable: async () => {
       if (readOnlyProfiling()) return null
       const resolved = await resolveCommand('claude')
       if (resolved === null) return null
       return { sdkPath: sdkExecutablePath(resolved), launch: spawnSpec(resolved) }
+    },
+    /*
+     * Phase 6e. The adapter offers this to the agent as `editor_edit`; main is
+     * the only layer that may implement it, because it reaches a
+     * `WebContentsView` and no adapter may depend on Electron.
+     *
+     * The two refusal unions are the same by construction — `WorkbenchEditRefusal`
+     * and `EditorEditRefusal` list the same arms — so this is a shape change and
+     * not a translation. If they ever diverge the compiler says so here, which is
+     * the point of not widening either to a string.
+     */
+    editorEdit: async (projectRoot, request) => {
+      const result = await requestWorkbenchEdit(projectRoot, request)
+      return result.ok
+        ? { ok: true, version: result.version }
+        : { ok: false, refusal: result.refusal, message: result.message, version: result.version }
     },
   }
 }

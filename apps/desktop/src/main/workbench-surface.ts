@@ -1017,7 +1017,7 @@ export async function requestWorkbenchEdit(
     return {
       requestId,
       ok: false,
-      refusal: 'unopenable',
+      refusal: 'no-editor',
       message: 'This project has no editor open, so there is no model to edit.',
       version: null,
     }

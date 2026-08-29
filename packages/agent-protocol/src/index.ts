@@ -1,5 +1,6 @@
 export * from './adapter.js'
 export * from './approval.js'
 export * from './conformance.js'
+export * from './editor-edit.js'
 export * from './events.js'
 export * from './user-input.js'
