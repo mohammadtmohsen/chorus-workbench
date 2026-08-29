@@ -13,6 +13,10 @@ apps/desktop/out/
 apps/desktop/dist/
 # Built apps and DMGs — attached to a GitHub release, never committed.
 apps/desktop/release/
+# The remote extension host, staged into the bundle by `build/stage-reh.cjs`.
+# 76 MB of third-party archive, re-fetchable and checksum-addressed, and it sits
+# under `apps/desktop/build/` which the rule above deliberately un-ignores.
+apps/desktop/build/reh/
 
 # Generated Codex protocol bindings are committed on purpose (see plan §6.1).
 # Nothing else generated should be.

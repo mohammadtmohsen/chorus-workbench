@@ -163,6 +163,25 @@ function cacheDir(): string {
   return join(app.getPath('appData'), 'chorus-workbench-runtime')
 }
 
+/**
+ * The packaged app's `Resources` directory, or nothing outside one.
+ *
+ * **A function, and that is the point rather than a style.** Electron's types
+ * declare `process.resourcesPath` as `string`; under plain Node — which is what
+ * this module is unit tested in — it does not exist. Read directly it made
+ * `join` throw `ERR_INVALID_ARG_TYPE` before any of this module's own logic ran,
+ * and fifteen tests failed for a reason none of them was about.
+ *
+ * A local annotation does not fix it: TypeScript narrows a variable by what is
+ * assigned to it, so `const p: string | undefined = process.resourcesPath` is
+ * narrowed straight back to `string` and the guard reads as dead code. A
+ * function's *declared return type* is not narrowed at the call site, so this is
+ * the honest type arriving where it is used — no cast, and nothing silenced.
+ */
+function resourcesPath(): string | undefined {
+  return process.resourcesPath
+}
+
 /** `<userData>/workbench`, per §3.5 — every temporary and quarantine sibling lives here. */
 function extractionRoot(): string {
   return join(app.getPath('userData'), 'workbench')
@@ -716,8 +735,26 @@ async function start(): Promise<WorkbenchRuntime> {
     throw new Error(`No ${manifest.server.vendor} server is published for ${key}`)
   }
 
-  const archive = join(cacheDir(), artifact.name)
-  const cached = existsSync(archive) && statSync(archive).size === artifact.size
+  /*
+   * The copy shipped inside the app, if there is one.
+   *
+   * Preferred over the cache and over the network, because it is the only one
+   * that makes a first launch work with no connection — which is the whole
+   * point of carrying 72.7 MB in the installer. Size only here; the archive is
+   * hashed against the manifest by `publishServer` a few lines below, exactly as
+   * a downloaded one is, so a truncated or substituted resource is caught by the
+   * same check rather than a weaker one.
+   *
+   * `CHORUS_SKIP_REH_BUNDLE=1` builds stage an empty placeholder, which fails
+   * the size test and falls through to the old path. That is deliberate: a build
+   * that opted out must behave exactly like one from before bundling existed.
+   */
+  const resources = resourcesPath()
+  const bundled = resources === undefined ? null : join(resources, 'workbench-server.tar.gz')
+  const hasBundled =
+    bundled !== null && existsSync(bundled) && statSync(bundled).size === artifact.size
+  const archive = hasBundled ? bundled : join(cacheDir(), artifact.name)
+  const cached = hasBundled || (existsSync(archive) && statSync(archive).size === artifact.size)
   /*
    * Announced *before* the wait, not after it. A line that arrives when the
    * download finishes cannot explain a blank region while it is still running,
@@ -726,7 +763,7 @@ async function start(): Promise<WorkbenchRuntime> {
   log.info('workbench server starting', {
     release: manifest.server.release,
     platform: key,
-    cached,
+    source: hasBundled ? 'bundled' : cached ? 'cache' : 'download',
     ...(cached ? {} : { willDownloadBytes: artifact.size }),
   })
   const startedAt = Date.now()

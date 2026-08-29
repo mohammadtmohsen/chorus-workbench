@@ -1,5 +1,5 @@
 import { fileURLToPath } from 'node:url'
-import { existsSync, readdirSync, statSync } from 'node:fs'
+import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs'
 import { join } from 'node:path'
 import { launch } from './harness.mjs'
 
@@ -95,6 +95,38 @@ function checkSpawnHelper(check) {
   )
 }
 
+/**
+ * The remote extension host ships inside the app, at the size the manifest says.
+ *
+ * Checked by **size against the manifest**, not by existence. `extraResources`
+ * fails a build when its source is missing, but `build/stage-reh.cjs` writes an
+ * empty placeholder for `CHORUS_SKIP_REH_BUNDLE=1` builds — so "the file is
+ * there" is satisfied by a zero-byte file that would send every first launch to
+ * the network. The number is the check.
+ *
+ * A release must never be cut from a skipped build, which is exactly what this
+ * catches and nothing else does: the app still works, it just quietly needs 76 MB
+ * and a connection on a stranger's first run.
+ */
+function checkBundledServer(check) {
+  const manifest = JSON.parse(readFileSync(join(APP, 'build', 'workbench-runtime.json'), 'utf8'))
+  const artifact = manifest.server.artifacts[`darwin-${process.arch}`]
+  if (artifact === undefined) {
+    check(false, `the manifest publishes no server for darwin-${process.arch}`)
+    return
+  }
+  const archive = join(ROOT, 'Contents/Resources/workbench-server.tar.gz')
+  if (!existsSync(archive)) {
+    check(false, 'the workbench server is bundled (no workbench-server.tar.gz in Resources)')
+    return
+  }
+  const size = statSync(archive).size
+  check(
+    size === artifact.size,
+    `the workbench server is bundled whole — ${String(size)} B, manifest says ${String(artifact.size)} B`
+  )
+}
+
 async function main() {
   if (!existsSync(BUNDLE)) {
     // Say which architecture was wanted and what is actually there. A bare
@@ -123,6 +155,7 @@ async function main() {
   // Before the app boots: nothing here needs a window, and a bad bundle should
   // say so in milliseconds rather than after a three-minute agent handshake.
   checkSpawnHelper(check)
+  checkBundledServer(check)
 
   const app = await launch({ executable: BUNDLE })
   try {

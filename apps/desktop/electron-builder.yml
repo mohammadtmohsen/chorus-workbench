@@ -51,6 +51,18 @@ npmRebuild: false
 # the same protocol version. Outside the asar because `code --install-extension`
 # needs a real path it can open, and an asar is not a directory.
 extraResources:
+  # The remote extension host, so a first launch does not need the network.
+  #
+  # Staged by `beforePack` (`build/stage-reh.cjs`), which is handed the target
+  # architecture and picks the matching archive out of the manifest. Shipped
+  # under a fixed name because the source filename carries a platform, an
+  # architecture and a release, and reconstructing that at runtime is three
+  # chances to be wrong.
+  #
+  # R3 says this is affordable: 412.6 MB installed against a 949.6 MB ceiling,
+  # measured on 2026-08-29 with `bf9c054` as the 316.5 MB baseline.
+  - from: build/reh/workbench-server.tar.gz
+    to: workbench-server.tar.gz
   - from: ../vscode-extension/chorus-vscode.vsix
     to: chorus-vscode.vsix
   # What that archive's version is. Main reads it rather than assuming the
@@ -154,6 +166,7 @@ mac:
 # right-click → Open, no way through. Ad-hoc signing does not make Gatekeeper
 # happy, but it does make the refusal an honest one the user can override.
 # Ad-hoc signing is a macOS concept; the hook returns early on other platforms.
+beforePack: build/stage-reh.cjs
 afterPack: build/sign-adhoc.cjs
 
 dmg:
