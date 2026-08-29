@@ -17,6 +17,24 @@ directories:
 files:
   - out/**
   - package.json
+  # The workbench manifest, read from *inside the asar* at runtime:
+  # `workbench-host.ts` resolves it as `app.getAppPath()/build/workbench-runtime.json`.
+  #
+  # It has to be named here, and the reason is not "files: is an allowlist".
+  # electron-builder injects `!<buildResources>{,/**/*}` — literally `!build` here,
+  # because `directories.buildResources` is `build` — at the *front* of the pattern
+  # list. Its `minimatchAll` is order-dependent and skips a negation while nothing
+  # has matched yet, so a positive pattern listed after it still wins. Without one,
+  # nothing under `build/` matches anything and the manifest is simply never
+  # collected.
+  #
+  # That shipped in 0.20.0 as `ENOENT, build/workbench-runtime.json not found in
+  # app.asar` on every `workbench:open` — the editor never started in a packaged
+  # build. `pnpm dev` was fine, because there `getAppPath()` is the source tree and
+  # the file is right there. Nothing caught it: `e2e/packaged.mjs` reads the
+  # manifest from the *checkout* (`APP` is `apps/desktop`), not from the bundle, so
+  # the bundle-scope gate verified a file the app cannot see.
+  - build/workbench-runtime.json
   # Bundled into out/ by electron-vite, so node_modules is mostly dead weight.
   # The three exceptions cannot be bundled: better-sqlite3 and node-pty are
   # native, and the Claude SDK resolves its own files at runtime.
