@@ -1,4 +1,4 @@
-# Chorus
+# Chorus Workbench
 
 ## Before anything: rule zero in `~/.claude/CLAUDE.md`
 
@@ -10,8 +10,42 @@ Keep the user posted step by step. Nothing in this file overrides that — every
 assuming the work had already been agreed, which is exactly the assumption that
 keeps being wrong.
 
-A local-first workspace where a developer collaborates with several coding
-agents in one shared conversation. Electron + React, pnpm workspaces, Turbo.
+A local-first **development environment**: a real Code-OSS workbench with coding
+agents in the same window. Electron + React, pnpm workspaces, Turbo.
+
+**This repository is not `chorus`.** It was split off from it on 2026-08-29.
+`mohammadtmohsen/chorus` remains the chat-based product and is still maintained;
+this one is the IDE. They share `agent-protocol`, the two adapters,
+`orchestrator`, `event-store` and `shared` **by copy**, which is a known cost —
+see "The other repo" below before fixing anything in those packages.
+
+### The unit is a Project
+
+A **Project** owns the development environment: a canonical root on disk, the
+permission profile, the cast of agents. A **Conversation** belongs to exactly one
+project and cannot own or change a directory. That hierarchy is the shape of the
+whole UI — the rail lists projects, the outer tabs are projects, and a project's
+conversations are a tree of groups _inside_ its pane.
+
+The consequence worth stating: **a setting is asked once, about the thing it is
+about.** "May agents write here" is a question about a repository, so it lives on
+the Project. Asking it per conversation both repeated the question and let two
+rooms in one directory disagree about what could be run in it.
+
+### The editor owns what the editor owns
+
+Each project pane hosts a real workbench — Code-OSS through
+`@codingame/monaco-vscode-api`, backed by a VSCodium remote extension host. It has
+an explorer, search, SCM, a terminal, debug and extensions.
+
+So Chorus does not rebuild any of that. There is no Changes panel, no review
+panel, no file tree, no diff viewer for reviewing work — those existed and were
+deleted on 2026-08-28, because two readers of one repository is two things to keep
+in step. **Reviewing what happened is the workbench's SCM view.** What Chorus
+keeps is the _approval's_ diff, which is a different thing: a decision surface,
+answerable with the editor switched off.
+
+### Agents are still driven CLIs
 
 Chorus **drives** the user's installed `claude` and `codex` CLIs — it does not
 replace them. Both run headless over stdio, with **no PTY between Chorus and an
@@ -19,11 +53,13 @@ agent**. Retiring the terminal here means retiring the _interface_, not the
 binary.
 
 That is a claim about agents, and only about agents. **The person gets a real
-shell**: `⌘J` opens one per session and the activity bar opens a global one, and
-those are PTYs (`main/terminal.ts`). Until 2026-08-12 this file said "there is no
-PTY anywhere", which is why the distinction is spelled out rather than assumed —
-read the old sentence with `node-pty` in the lockfile and the only honest
-conclusion is that someone broke the rule.
+shell** — two, in fact, and they are different things:
+
+- The **workbench terminal**, per project, running on the REH. This is the one you
+  reach for while working; it is the editor's, not Chorus's.
+- The **global terminal**, a PTY in `main/terminal.ts`, opened from the activity
+  bar. It belongs to no project, which is exactly why it survived when the
+  per-session terminal was retired in Phase 4.
 
 ## Commands
 
@@ -70,7 +106,7 @@ happens to be in a working tree, which is the bug described in step 4.
    ten-minute build. Never tag around a red gate.
 5. **Commit** as `chore(release): X.Y.Z`, touching only the changelog and the
    two `package.json` files.
-6. **Tag and push**: `git tag -a vX.Y.Z -m "Chorus X.Y.Z"`, then push `main` and
+6. **Tag and push**: `git tag -a vX.Y.Z -m "Chorus Workbench X.Y.Z"`, then push `main` and
    the tag separately. **This is the release.** Everything above was
    preparation.
 7. **Watch the run, and verify against the API rather than the exit code.**
@@ -164,14 +200,62 @@ packages/agent-protocol   the normalized AgentEvent union both providers project
 packages/adapter-claude   Claude SDK -> AgentEvent. Pure mapping in mapping.ts
 packages/adapter-codex    codex app-server JSON-RPC -> AgentEvent
 packages/orchestrator     conversation service, policy engine, catch-up, supervisor
-packages/event-store      SQLite, migrations, projections
-packages/workspace        read-only git status and diff
-apps/desktop/src/main     Electron main: runtime, IPC, windows, terminal.ts
-apps/desktop/src/renderer transcript reduction and UI
+packages/event-store      SQLite, migrations, projections, the projects registry
+packages/workspace        path helpers and `parseDiff`. **Not** a git UI any more —
+                          its seven IPC channels went with the review surfaces, and
+                          what is left is load-bearing: `parseDiff` draws the
+                          transcript's diff cards, `resolveWithinRoot`,
+                          `canonicalRoot` and `projectRelativePath` guard main.
+apps/desktop/src/main     Electron main: runtime, IPC, windows, terminal.ts,
+                          workbench-surface.ts (the views), workbench-host.ts (the REH),
+                          project-service.ts (the registry over event-store)
+apps/desktop/src/renderer transcript reduction, the project shell, and
+                          `renderer/src/workbench/` — the Code-OSS entry, services
+                          and the surface frame
 ```
 
 Nothing provider-specific may leak past an adapter except `raw`, which exists
 only for debugging.
+
+### The workbench is a native view, and that decides more than it looks like
+
+Each project's editor is a `WebContentsView` that main composites **over** the
+window, positioned from a placeholder element the renderer measures every frame
+(`WorkbenchFrame`). Preflight §4.1a chose this over an `<iframe>` because a
+workbench has to be told things the shell must never hold, and main can only
+address a context individually if it _owns_ it.
+
+Three consequences that bite, in the order they will bite you:
+
+- **Nothing the renderer draws can be on top of it.** No z-index, no portal, no
+  stacking context. A dialog over the editor region is drawn cut in half. The
+  answer is `workspace/overlay.ts`: the shell says when it has an overlay up, main
+  hides the views and hands back a JPEG still of each so the region does not go
+  black. **Anything new that draws over a pane needs `useShellOverlay`.**
+- **Layout is a two-process problem.** The view lags the shell's reflow by a frame
+  or two, which is why the Chorus divider keeps a permanent 8px gutter and why the
+  workbench region is inset 3px from the pane's rounded corner — a square native
+  view cannot be clipped by `border-radius` or `overflow: hidden`.
+- **One REH serves every project.** `workbench-host.ts` spawns a single VSCodium
+  remote extension host under a refcount lease, with one `--extensions-dir`. So
+  installing an extension in one project installs it for all of them; C-063 on
+  BOARD.md is that, and it is a real product gap rather than a bug.
+
+### The other repo
+
+`agent-protocol`, `adapter-claude`, `adapter-codex`, `orchestrator`, `event-store`
+and `shared` exist in `mohammadtmohsen/chorus` too, as copies. They _will_ drift.
+
+Add the sibling as a remote rather than reimplementing a fix twice:
+
+```bash
+git remote add chorus https://github.com/mohammadtmohsen/chorus.git
+git fetch chorus && git cherry-pick <sha>
+```
+
+**Never copy whole files between the two.** That is the same rule the worktree
+trap below states, for the same reason: the diff you would read to decide what is
+safe is the thing that misleads you.
 
 ### The second native module
 
@@ -265,9 +349,12 @@ enforces this (`UNIVERSAL_DENIES` may not carry a `pathPattern`).
   `setState` is not wrapped in `act`, so the re-render has not happened when the
   assertion runs — that one passed with the bug reinstated. Drive a re-render
   with `rerender`, and prove the test fails without the fix.
-- **Only the active tab of each pane is mounted** (max 4). Everything a session
-  needs to survive unmounting rides in `SessionCarry`; background conversations
-  stay live in the main process and report through the pulse. A terminal is the
+- **Only the active tab of each group is mounted** — and the ceiling moved. It
+  was four (one conversation per pane, four panes); a project's column is now its
+  own tree of up to four groups, so the worst case is sixteen live transcripts.
+  Everything a session needs to survive unmounting rides in `SessionCarry`;
+  background conversations stay live in the main process and report through the
+  pulse. A terminal is the
   same shape one level further out: the shell lives in main, the component is a
   _view_ onto it, and unmounting calls `detach` and never `dispose` — otherwise
   clicking another tab would kill a running build.
@@ -287,8 +374,16 @@ enforces this (`UNIVERSAL_DENIES` may not carry a `pathPattern`).
   `@xterm/headless` + `@xterm/addon-serialize` in main, because VT state is
   cumulative and a trimmed ring of raw bytes loses the alternate-screen entry
   that came before it.
-- **`monaco-editor` is the second exception, and it was measured before it was
-  accepted.** It arrived on a branch as the _default_ diff view without an
+- **`monaco-editor` is the second exception, and its reason changed.** It arrived
+  as a diff viewer (`MonacoDiff`), was priced rather than grandfathered, and that
+  measurement is preserved below because the _method_ is the point. `MonacoDiff`
+  itself was deleted on 2026-08-28 with the Changes panel — but the dependency
+  stays, and is now load-bearing for a different reason: `renderer/src/workbench/`
+  builds on it, because `@codingame/monaco-vscode-api` _is_ monaco. What follows is
+  the original argument, kept as the record of how a large dependency should be
+  admitted:
+
+  **It was measured before it was accepted.** It arrived on a branch as the _default_ diff view without an
   argument attached, which is the failure mode the xterm entry exists to
   prevent — so it was priced rather than grandfathered. Two builds from one
   tree, the second with `MonacoDiff` aliased to a stub, put it at **4.87 MB** on
@@ -309,6 +404,15 @@ enforces this (`UNIVERSAL_DENIES` may not carry a `pathPattern`).
   free one. `FileDiff.tsx` is therefore not a fallback awaiting deletion — it is
   the primary viewer, and the 7.1× DOM-node advantage that kept it is why.
   Details in `docs/plans/the-editor-you-already-know-2026-08-20/plan.md`.
+
+- **The layout algebra serves both levels, and that is not a coincidence.**
+  `layout.ts` is generic over `PaneTree` — `{ layout, panes, focusedPaneId }` — so
+  the workspace's panes and a project's conversation groups are split, moved,
+  closed and normalised by the _same functions_. "The conversation split should
+  behave exactly like the pane split" is only guaranteed if the two are one
+  behaviour; two implementations that agree today are two that disagree later.
+  A "pane" at the inner level is a conversation group; the word means "a container
+  of tabs in a tree", the same sense VS Code uses for editor groups.
 - **No hardcoded user-facing strings** — `i18n/en.json`. The reducers have no
   translator, which is why events carry keys (`notice.source`) and the renderer
   turns them into words.
@@ -346,6 +450,28 @@ enforces this (`UNIVERSAL_DENIES` may not carry a `pathPattern`).
   session the count cannot move and the assertion passes with the guard removed.
   Measure `defaultPrevented` on the key instead, and carry a control proving the
   mechanism fires when it should. This is C-027 from the inside.
+
+- **A wrong name survives a re-key where a wrong type does not.** `activeTabId`
+  changed from naming a conversation to naming a project, and five call sites went
+  on compiling against a value that had changed meaning:
+  `useActiveConversationId`, the tab strip's `onClick` and its `onPointerDown`,
+  `replaceSession` and `removeSession`. Every one failed **silently** — activating
+  an absent tab is a no-op, closing an absent tab is a no-op, and the drag's insert
+  branch cheerfully built a pane out of a conversation id. The only one that ever
+  raised was the one whose value reached `ProjectService.resolveRoot`, which
+  refuses an unknown project. **Rename the field in the same commit that changes
+  what it identifies**; the compiler cannot help here, and the symptom is a control
+  that quietly does nothing.
+
+- **Deleting a feature is not finished when the button is gone.** Nine were removed
+  on 2026-08-28–29 and each left a tail: a store slice, a schema field, an IPC
+  channel, a runtime method, a watcher with no caller, i18n keys, CSS. Two near
+  misses worth repeating — filtering `review.*` down to the keys still in use
+  dropped `diffCapped_one`/`_other`, and **typecheck cannot see a missing
+  translation** because it is a runtime string; and a dead-CSS sweep driven by grep
+  would have deleted `voice--claude` and `tok--keyword`, which are built with
+  template literals and are invisible to it. **Delete by ownership, never by
+  absence of references.**
 
 - **`git diff main...HEAD -- <file>` does not answer "does this match main".**
   Three dots compares against the **merge base**, so an empty result means _the
