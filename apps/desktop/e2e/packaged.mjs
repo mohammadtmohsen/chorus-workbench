@@ -1,5 +1,5 @@
 import { fileURLToPath } from 'node:url'
-import { existsSync, statSync } from 'node:fs'
+import { existsSync, readdirSync, statSync } from 'node:fs'
 import { join } from 'node:path'
 import { launch } from './harness.mjs'
 
@@ -33,8 +33,29 @@ import { launch } from './harness.mjs'
 // See the note in `packaged-windows.mjs`: `.pathname` keeps its leading
 // slash. This verifier is macOS-only, but the two should not differ here.
 const APP = fileURLToPath(new URL('..', import.meta.url))
-const BUNDLE = join(APP, 'release/mac-arm64/Chorus.app/Contents/MacOS/Chorus')
-const UNPACKED = join(APP, 'release/mac-arm64/Chorus.app/Contents/Resources/app.asar.unpacked')
+
+/**
+ * Which of the two macOS builds to verify, derived rather than hardcoded.
+ *
+ * electron-builder names the output directory after the architecture and does
+ * not do it uniformly: arm64 lands in `release/mac-arm64`, x64 in `release/mac`.
+ * Since Phase 7 the DMG is built for both, so a fixed `mac-arm64` here would
+ * mean the Intel job silently verified nothing of its own.
+ *
+ * `process.arch` is the right discriminator because the verifier runs on the
+ * machine that built it — the release matrix puts the Intel job on an Intel
+ * runner precisely so the app it launches is native rather than translated.
+ *
+ * **Deliberately not "whichever mac* directory exists".** That fallback would
+ * let a job verify a leftover bundle from another architecture and report a
+ * pass for a build it never made — the same failure as the e2e harness that
+ * attached to whatever owned port 9800, which took hours to see because every
+ * assertion described a real app that was the wrong one.
+ */
+const MAC_DIR = process.arch === 'arm64' ? 'mac-arm64' : 'mac'
+const ROOT = join(APP, 'release', MAC_DIR, 'Chorus.app')
+const BUNDLE = join(ROOT, 'Contents/MacOS/Chorus')
+const UNPACKED = join(ROOT, 'Contents/Resources/app.asar.unpacked')
 
 /**
  * How much of this the machine can honestly answer. Mirrors the Windows
@@ -76,7 +97,20 @@ function checkSpawnHelper(check) {
 
 async function main() {
   if (!existsSync(BUNDLE)) {
-    console.error(`no packaged app at ${BUNDLE}\n  run: pnpm package`)
+    // Say which architecture was wanted and what is actually there. A bare
+    // "not found" on a two-architecture build reads as "the package step
+    // failed" when the likely cause is that it built the other one.
+    const release = join(APP, 'release')
+    const present = existsSync(release)
+      ? readdirSync(release)
+          .filter((e) => e.startsWith('mac'))
+          .join(', ') || 'nothing matching mac*'
+      : 'no release/ directory at all'
+    console.error(
+      `no packaged app at ${BUNDLE}\n` +
+        `  wanted the ${process.arch} build; release/ holds: ${present}\n` +
+        `  run: pnpm package`
+    )
     process.exit(1)
   }
 

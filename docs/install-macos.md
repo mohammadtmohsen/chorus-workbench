@@ -10,7 +10,8 @@ path produces no warnings, because the warning is about downloads.
 
 ## Before you start
 
-- **An Apple Silicon Mac** (M1 or newer). There is no Intel build.
+- **An Apple Silicon or Intel Mac.** There is a build for each; step 1 below
+  says which one to take.
 - **macOS 12 Monterey or later.**
 - **The `claude` and `codex` command-line tools, installed and logged in.**
   Chorus drives the ones already on your machine rather than shipping its own,
@@ -20,7 +21,16 @@ path produces no warnings, because the warning is about downloads.
 
 ### 1. Install
 
-1. Download `Chorus-<version>-arm64.dmg`.
+1. Download the one that matches your Mac:
+
+   | Your Mac                       | File                         |
+   | ------------------------------ | ---------------------------- |
+   | Apple Silicon — M1, M2, M3, M4 | `Chorus-<version>-arm64.dmg` |
+   | Intel                          | `Chorus-<version>-x64.dmg`   |
+
+   Not sure? **Apple menu → About This Mac**. A line reading _Chip_ means Apple
+   Silicon; one reading _Processor_ means Intel.
+
 2. Open the `.dmg` and drag **Chorus** into **Applications**.
 3. Eject the disk image.
 

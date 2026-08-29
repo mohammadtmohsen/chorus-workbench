@@ -84,17 +84,35 @@ jobs:
     needs: gate
     runs-on: ${{ matrix.os }}
     strategy:
-      # One platform failing must not cancel the other. Knowing that Windows
+      # One platform failing must not cancel the others. Knowing that Windows
       # built and macOS did not is worth more than one cancelled job.
       fail-fast: false
       matrix:
+        # Each job builds exactly one architecture, and the runner matches it.
+        #
+        # `packageArgs` is not an optimisation. `electron-builder.yml` lists both
+        # macOS architectures, so without it every mac runner would build both —
+        # and the Apple Silicon runner would then produce an x64 DMG it cannot
+        # verify, because GitHub's arm64 images do not ship Rosetta. An unverified
+        # artifact that uploads successfully is the failure that looks like a pass.
+        #
+        # Which is also why the Intel build runs on `macos-13`: it is the last
+        # Intel image GitHub offers, and `verify:package` launches the app it just
+        # built. Cross-building x64 on arm64 would package fine and prove nothing.
         include:
           - os: macos-latest
-            label: macOS installer
+            label: macOS installer (Apple Silicon)
+            packageArgs: --arm64
             artifact: Chorus-${{ needs.gate.outputs.version }}-arm64.dmg
+            verify: verify:package
+          - os: macos-13
+            label: macOS installer (Intel)
+            packageArgs: --x64
+            artifact: Chorus-${{ needs.gate.outputs.version }}-x64.dmg
             verify: verify:package
           - os: windows-latest
             label: Windows installer
+            packageArgs: --x64
             artifact: Chorus-${{ needs.gate.outputs.version }}-windows-x64-setup.exe
             verify: verify:package:windows
     steps:
@@ -110,8 +128,10 @@ jobs:
         env:
           ELECTRON_SKIP_BINARY_DOWNLOAD: 0
 
+      # pnpm appends these to the end of the script string, so they land on
+      # `electron-builder` rather than on the `electron-vite build` before it.
       - name: Package
-        run: pnpm package
+        run: pnpm package ${{ matrix.packageArgs }}
         env:
           ELECTRON_SKIP_BINARY_DOWNLOAD: 0
 
@@ -237,8 +257,13 @@ jobs:
           [ -z "$TAG" ] && TAG="${GITHUB_REF#refs/tags/}"
           gh release view "$TAG" --json assets \
             --jq '.assets[] | "\(.name)  \(.size) bytes"'
-          COUNT=$(gh release view "$TAG" --json assets --jq '[.assets[] | select(.name|test("dmg$|exe$"))] | length')
-          if [ "$COUNT" -ne 2 ]; then
-            echo "::error::expected a .dmg and an .exe, found $COUNT"
+          # Counted per extension rather than as one total. A single total of
+          # three passes when two DMGs shipped and the Windows job failed, which
+          # is exactly the case this step exists to catch.
+          DMG=$(gh release view "$TAG" --json assets --jq '[.assets[] | select(.name|endswith(".dmg"))] | length')
+          EXE=$(gh release view "$TAG" --json assets --jq '[.assets[] | select(.name|endswith(".exe"))] | length')
+          echo "found $DMG .dmg and $EXE .exe"
+          if [ "$DMG" -ne 2 ] || [ "$EXE" -ne 1 ]; then
+            echo "::error::expected 2 .dmg (arm64, x64) and 1 .exe, found $DMG and $EXE"
             exit 1
           fi

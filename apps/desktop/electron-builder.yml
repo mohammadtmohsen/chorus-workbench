@@ -105,11 +105,24 @@ nsis:
   deleteAppDataOnUninstall: false
   artifactName: Chorus-${version}-windows-${arch}-setup.${ext}
 
+# macOS: both architectures, and they are two separate DMGs rather than a
+# universal one.
+#
+# A universal binary would be one download that runs anywhere, and it was not
+# chosen: it lipo's two copies of Electron into one bundle, so every user pays
+# for the architecture they are not running — on a build whose installed size
+# already has a pre-registered ceiling (preflight §8.5 R3, ≤ 3x the 133.8 MB
+# arm64 baseline). Two named DMGs cost a choice on the download page instead,
+# and `docs/install-macos.md` makes that choice for the reader.
+#
+# The REH is fetched per platform at runtime from the pinned manifest
+# (`build/workbench-runtime.json`), which already carries `darwin-x64`, so an
+# Intel build has a server to talk to without anything else changing here.
 mac:
   category: public.app-category.developer-tools
   target:
     - target: dmg
-      arch: [arm64]
+      arch: [arm64, x64]
   # No identity to sign with. This makes electron-builder skip signing
   # altogether, which `afterPack` then puts right.
   identity: null
@@ -131,3 +144,8 @@ afterPack: build/sign-adhoc.cjs
 
 dmg:
   title: Chorus ${version}
+  # Explicit, because the default omits the suffix for x64 and two DMGs that
+  # differ only by architecture must not be able to collide on one name. This
+  # keeps the arm64 name exactly as it was — `docs/install-macos.md` and the
+  # preflight's size baseline both quote it — and gives x64 the matching one.
+  artifactName: Chorus-${version}-${arch}.${ext}
