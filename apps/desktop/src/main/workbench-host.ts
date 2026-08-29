@@ -919,6 +919,38 @@ async function start(): Promise<WorkbenchRuntime> {
       '--user-data-dir',
       join(data, 'data'),
       '--accept-server-license-terms',
+      /*
+       * C-065. The server forks an extension host per connection and hands it the
+       * socket; from then on that process decides when to die. It has two paths,
+       * and they are three hours apart. A graceful protocol `Disconnect` disposes
+       * it at once — "the client has disconnected gracefully". A socket that
+       * merely closes arms a timer instead, because a dropped connection is
+       * supposed to mean a flaky network and a client that will come back.
+       *
+       * The default for that timer is `ReconnectionGraceTime`, 3 hours. Ten
+       * open/close cycles left two extension hosts alive, which read like a
+       * missing teardown and is not one: it is the graceful frame losing a race
+       * with the view being destroyed. When it wins the host goes immediately,
+       * when it loses the host waits three hours, and R11's 60 s settle window
+       * can never see the difference.
+       *
+       * Three hours is the wrong default *here* specifically. It is sized for a
+       * laptop that slept on a train; our client is a `WebContentsView` on the
+       * other end of a loopback socket that main itself owns, and the only
+       * reconnect that can genuinely happen is a renderer crash-reload. Thirty
+       * seconds covers that with room to spare, and bounds a leaked host to
+       * thirty seconds instead of a working day.
+       *
+       * Seconds, not milliseconds — the server multiplies by 1000. It also
+       * exports the result as `VSCODE_RECONNECTION_GRACE_TIME` into the forked
+       * host's environment, which is the only reason setting it on the server
+       * reaches the process that actually leaks.
+       *
+       * This bounds the damage; it does not remove the race. Closing a project
+       * still usually reaps at once and sometimes takes thirty seconds.
+       */
+      '--reconnection-grace-time',
+      '30',
       '--telemetry-level',
       'off',
       // Never `trace`: full request URLs, token included, are logged at that level.

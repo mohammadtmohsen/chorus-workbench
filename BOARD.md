@@ -30,7 +30,7 @@ Nothing here can be finished by me alone.
 
 ## Open
 
-### C-065 · Two extension hosts survive ten open/close cycles — R11's inventory half fails
+### C-065 · Two extension hosts survive ten open/close cycles — cause found, bounded, race still open
 
 **Measured 2026-08-29** by `pnpm --filter @chorus/desktop run gate:memory`, on
 macOS arm64. R11 has two halves and they disagree: memory returns to within
@@ -56,21 +56,43 @@ costs a process every time, and the four-pane ceiling stops bounding anything. I
 is also the shape of leak that is invisible until a machine is short of memory,
 because each one is small.
 
-**What is not yet known, and must not be assumed.** Ten cycles left **two**, not
-ten. So most hosts are reaped and some are not — which reads more like a race or
-a timeout than a missing teardown, but nobody has looked. It is also possible
-they exit later than the 60 s settle window and the check is simply impatient.
-Both readings fit the evidence and they have different fixes.
+**Cause, found 2026-08-29 by reading the server rather than measuring it.** The
+entry used to offer two readings — a reaping bug, or a settle window that is
+merely impatient — and say they had different fixes. They are the same fact.
 
-**Done means**: the cause is identified rather than inferred — a longer settle
-window that clears it makes this a threshold problem, and one that does not makes
-it a reaping bug — and `gate:memory` passes both halves of R11 on two independent
-runs.
+A forked extension host is handed its socket and from then on decides for itself
+when to die, and `remoteExtensionManagement.js` gives it two paths three hours
+apart. A graceful protocol `Disconnect` disposes it at once: _"the client has
+disconnected gracefully, so the connection will be disposed."_ A socket that
+merely closes arms a timer instead — _"will wait for reconnection …"_ — because a
+dropped connection is meant to be a flaky network. That timer defaults to
+`ReconnectionGraceTime`, **`108e5` — three hours**.
 
-**Where to start.** `workbench-host.ts` owns the server and its lease;
-`reap.ts` owns orphan cleanup after a crash, which is a different path and is not
-this. The connection belongs to the surface's `WebContents`, so the question is
-what the REH does when that socket closes.
+So two of ten is not "most are reaped and some are not". It is the graceful frame
+usually winning a race with the view being destroyed, and twice losing it. And
+the check was never impatient: 60 s cannot see a three-hour timer, so a run that
+waited longer would have "cleared" it while the leak was entirely real.
+
+**Fixed by bounding, 2026-08-29** — `--reconnection-grace-time 30` on the server
+spawn. The seconds→ms parse is the server's, and it re-exports the result as
+`VSCODE_RECONNECTION_GRACE_TIME` into the forked host's environment, which is the
+only reason a server flag reaches the process that leaks: the host reads it with
+`108e5` as its own fallback. Three hours is sized for a laptop that slept on a
+train; this client is a `WebContentsView` on a loopback socket main itself owns,
+where the only real reconnect is a renderer crash-reload.
+
+**What is still open.** The race itself. Closing a project usually reaps at once
+and sometimes now takes 30 s, so the inventory is bounded rather than exact —
+`gate:memory` should pass, and has **not been re-run**, so R11 is unverified
+against this change. Removing the race means the workbench sending its disconnect
+_before_ the view is destroyed and main waiting for the ack, with the 30 s as the
+crash backstop; that was deliberately not built here.
+
+**Done means**: `gate:memory` passes both halves of R11 on two independent runs.
+
+**Where to start.** `workbench-host.ts` owns the server, its lease and now the
+flag; `destroySurface` in `workbench-surface.ts` owns the teardown that loses the
+race. `reap.ts` is orphan cleanup after a crash — a different path, and not this.
 
 ### C-064 · Linux installers do not build, and the job is red in every release run
 
