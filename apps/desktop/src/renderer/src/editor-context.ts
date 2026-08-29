@@ -37,6 +37,14 @@ export interface EditorBlock extends EditorReference {
    * `base_version`. Optional because the external bridge has no such notion.
    */
   readonly modelVersion?: number | undefined
+  /**
+   * Which editor this came from. Absent for anything that does not say.
+   *
+   * It decides whether the selected text is quoted. `provenance` cannot: both
+   * sources report `worktree`, and the question is not which revision but which
+   * editor — one is in the person's own window and one may not be running.
+   */
+  readonly editor?: 'workbench' | 'external' | undefined
 }
 
 /**
@@ -128,6 +136,25 @@ export function formatContextBlock(block: EditorBlock, labels: ContextLabels): s
   const at = block.modelVersion === undefined ? '' : ` \`v${String(block.modelVersion)}\``
   const head = `${labels.heading}: \`${reference}\`${at}${suffix}`
   if (block.isEmpty || block.text === '') return head
+  /*
+   * The embedded editor always quotes its selection.
+   *
+   * The rule below was written for the external bridge, where naming the lines
+   * and letting the agent open the file is a fair trade: the file on disk says
+   * what the editor says. It is the wrong trade for the editor in this window.
+   * Reported from the app itself, the message read `eslint.config.js:13-24 v1`
+   * and the agent answered "I see the pointer but not the text of those lines" —
+   * so the person had highlighted twelve lines and shared a coordinate.
+   *
+   * It costs the selection's bytes on every send, bounded by the same
+   * `MAX_SELECTED_BYTES` cap the bridge uses. That is the price of the selection
+   * meaning something, and it is why this is scoped to the embedded editor
+   * rather than applied to both.
+   */
+  if (block.editor === 'workbench') {
+    const fence = fenceFor(block.text)
+    return `${head}\n\n${fence}${safeLanguageId(block.languageId)}\n${block.text}\n${fence}`
+  }
   // The quoted lines are mandatory once the document is not the working tree:
   // there, the text is the only copy of what the user is actually looking at.
   if (!block.isDirty && block.provenance.kind === 'worktree') return head

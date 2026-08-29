@@ -913,7 +913,12 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(
         const block = formatContextBlock(
           { ...snapshot },
           {
-            heading: t('ide.heading'),
+            /*
+             * "VS Code context" is a lie about the embedded editor, and the
+             * agent repeats it back — the reported message opened with "VS Code
+             * context:" for a file open in Chorus's own workbench.
+             */
+            heading: t(snapshot.editor === 'workbench' ? 'ide.headingWorkbench' : 'ide.heading'),
             unsaved: t('ide.unsaved'),
             version: version === null ? '' : t(version.key, version.params),
           }

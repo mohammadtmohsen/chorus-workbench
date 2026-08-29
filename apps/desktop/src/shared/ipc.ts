@@ -298,6 +298,16 @@ export const IdeSnapshotResult = z.discriminatedUnion('outcome', [
      * known — a `null` would invite a caller to send it as `base_version`.
      */
     modelVersion: z.number().int().optional(),
+    /**
+     * Which editor answered — Phase 6.
+     *
+     * The two sources want different treatment and `provenance` cannot tell them
+     * apart: both report `worktree`. The embedded workbench sends the selected
+     * text because it is the editor in the person's window; the external bridge
+     * keeps its existing behaviour of naming the lines and leaving the agent to
+     * open the file.
+     */
+    editor: z.enum(['workbench', 'external']).optional(),
     provenance: IdeProvenanceShape,
   }),
   z.object({ outcome: z.literal('unavailable'), reason: IdeStatusShape }),

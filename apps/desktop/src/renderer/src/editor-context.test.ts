@@ -263,3 +263,46 @@ describe('withEditorContext', () => {
     expect(withEditorContext('hello', '')).toBe('hello')
   })
 })
+
+/**
+ * The embedded editor quotes its selection — Phase 6.
+ *
+ * Reported from the running app: the message read `eslint.config.js:13-24 v1`
+ * and the agent answered "I see the pointer but not the text of those lines".
+ * The person had highlighted twelve lines and shared a coordinate.
+ *
+ * The rule that did it was written for the external bridge, where naming the
+ * lines and letting the agent open the file is a fair trade because the file on
+ * disk says what the editor says. It is the wrong trade for the editor in the
+ * person's own window, and `provenance` cannot tell the two apart — both report
+ * `worktree`.
+ */
+describe('an embedded editor block', () => {
+  const block = {
+    relativePath: 'eslint.config.js',
+    startLine: 13,
+    endLine: 24,
+    isEmpty: false,
+    isDirty: false,
+    text: 'const a = 1\nconst b = 2',
+    languageId: 'javascript',
+    provenance: { kind: 'worktree' } as const,
+  }
+  const labels = { heading: 'Editor context', unsaved: 'unsaved buffer', version: '' }
+
+  it('quotes the selection even for a clean worktree file', () => {
+    const out = formatContextBlock({ ...block, editor: 'workbench' }, labels)
+    expect(out).toContain('const a = 1')
+    expect(out).toContain('const b = 2')
+  })
+
+  /*
+   * The control, and it is the point of scoping the change: the external
+   * bridge's behaviour is deliberate and must not move.
+   */
+  it('leaves the external bridge naming the lines and nothing more', () => {
+    const out = formatContextBlock({ ...block, editor: 'external' }, labels)
+    expect(out).not.toContain('const a = 1')
+    expect(out).toContain('eslint.config.js:13-24')
+  })
+})

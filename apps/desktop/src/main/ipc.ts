@@ -744,6 +744,7 @@ export function buildHandlers(runtime: ChorusRuntime): Handlers {
           languageId: embedded.languageId,
           text: embedded.text,
           ...(embedded.version === null ? {} : { modelVersion: embedded.version }),
+          editor: 'workbench' as const,
           provenance: { kind: 'worktree' as const },
         } as const
       }
