@@ -109,3 +109,42 @@ describe('redactPayload', () => {
     expect(payload.command).toEqual(['cat', '.env'])
   })
 })
+
+/**
+ * A password inside a connection URL.
+ *
+ * Found by testing this module against a real `.env.local` a user had open in
+ * the editor: `SESSION_SECRET=` was caught and `postgres://user:password@host`
+ * was not caught by anything at all. Nor was `mongodb+srv://`, `redis://`, or an
+ * HTTPS remote with a token in it — every one went into the log intact, and this
+ * module is the one thing standing between hook output, notices and diffs and a
+ * credential written down forever.
+ */
+describe('url passwords', () => {
+  const cases: [string, boolean][] = [
+    ['postgres://user:s3cr3tpw@db.example.com:5432/app', true],
+    ['DATABASE_URL=postgres://user:s3cr3tpw@localhost:5432/flowdrive', true],
+    ['mongodb+srv://admin:hunter2@cluster0.mongodb.net/prod', true],
+    ['redis://:mypassword@127.0.0.1:6379', true],
+    ['https://user:token@github.com/org/repo.git', true],
+    // No password: the userinfo is just a username, and the line stays readable.
+    ['postgres://mohamadtaleb@localhost:5432/flowdrive', false],
+    ['http://localhost:3000', false],
+    // A colon in a path is not a credential — the `@` is what makes it userinfo.
+    ['see http://example.com/a:b for details', false],
+  ]
+
+  for (const [text, shouldRedact] of cases) {
+    it(`${shouldRedact ? 'redacts' : 'leaves'} ${text.slice(0, 44)}`, () => {
+      const out = redactText(text).text
+      expect(out !== text).toBe(shouldRedact)
+    })
+  }
+
+  it('keeps the scheme, user and host so the line still says what it is', () => {
+    const out = redactText('postgres://user:s3cr3tpw@db.example.com:5432/app').text
+    expect(out).toContain('postgres://user:')
+    expect(out).toContain('@db.example.com:5432/app')
+    expect(out).not.toContain('s3cr3tpw')
+  })
+})

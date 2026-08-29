@@ -320,7 +320,8 @@
     "editorWorkbench": "Editor",
     "showEditor": "Show the editor",
     "hideEditor": "Hide the editor",
-    "headingWorkbench": "Editor context"
+    "headingWorkbench": "Editor context",
+    "attachedTitle": "Sent with your message: {{path}} lines {{lines}}"
   },
   "notice": {
     "omitted": "{{bytes}} bytes omitted — the output was too large to keep",

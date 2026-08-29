@@ -873,6 +873,11 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(
      * their own window — so the trade is deliberate, not an oversight.
      */
     const ideAttached = props.ide !== null && props.ide.status === 'ready'
+    /* `12` for a single line, `12-18` for a range — a `12-12` reads as a mistake. */
+    const lineLabel = (file: { startLine: number; endLine: number }): string =>
+      file.startLine === file.endLine
+        ? String(file.startLine)
+        : `${String(file.startLine)}-${String(file.endLine)}`
     const { onError, onSending, onSendFailed } = props
 
     const send = useCallback(() => {
@@ -1088,6 +1093,33 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(
             </svg>
             {t('ide.editorWorkbench')}
           </button>
+
+          {/*
+            What will ride along with the message — restored, with a new reason.
+            
+            The pill was deleted in Phase 9 as "a read-only pill restating what
+            is already on screen two inches to the left". That was true when a
+            coordinate was all that travelled. It is not true now: the embedded
+            editor sends the selected **text**, so this names what leaves the
+            machine rather than what is visible on it — and the editor can be
+            switched off in this pane, in which case nothing is visible at all.
+            
+            Deliberately not a switch. The Included chip is still gone and
+            context is still always sent; this reports, and reporting is the
+            thing that was lost.
+          */}
+          {ideAttached && props.ide.file !== null && (
+            <span
+              className="composer-ide-pill"
+              title={t('ide.attachedTitle', {
+                path: props.ide.file.relativePath,
+                lines: lineLabel(props.ide.file),
+              })}
+            >
+              <span className="path">{props.ide.file.relativePath}</span>
+              <span className="composer-ide-lines">:{lineLabel(props.ide.file)}</span>
+            </span>
+          )}
 
           {/*
            * The way to add a file that is not the one open in the editor.

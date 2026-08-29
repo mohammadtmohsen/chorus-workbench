@@ -10087,3 +10087,36 @@ input::placeholder {
   );
   outline: none;
 }
+
+/*
+ * What rides along with the message — Phase 6.
+ *
+ * Quiet and non-interactive: it reports, it is not a switch. The Included chip
+ * that used to sit beside it is gone on purpose and context is always sent; what
+ * was missing was any statement of *what*, which matters now that the selection's
+ * text travels and not just its coordinates.
+ */
+.composer-ide-pill {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 1px;
+  min-width: 0;
+  max-width: 40ch;
+  overflow: hidden;
+  /*
+   * Italic and in the accent, so it reads as a note about the message rather
+   * than as part of it. Everything else on this row is a control; this is the
+   * only thing that is a statement, and it should not look pressable.
+   */
+  color: var(--accent-text);
+  font-size: 11px;
+  font-style: italic;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+/* The range sits back a step from the path — the file is what you scan for. */
+.composer-ide-lines {
+  color: var(--accent-text);
+  opacity: 0.75;
+}

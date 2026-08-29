@@ -53,6 +53,30 @@ const RULES: readonly RedactionRule[] = [
     keepPrefix: true,
   },
   /*
+   * A password inside a connection URL.
+   *
+   * Found by testing the redactor against a real `.env.local` a user had open:
+   * `SESSION_SECRET=` was caught by the rule below and
+   * `postgres://user:password@host` was not caught by anything. Nor were
+   * `mongodb+srv://`, `redis://` or an HTTPS remote with a token in it — every
+   * one of them went into the log intact.
+   *
+   * Keyed on the *shape* rather than a scheme list, because the userinfo form is
+   * defined by RFC 3986 and every scheme that supports it looks the same here.
+   * Only the password is replaced: the scheme, the user and the host are what
+   * make the line worth reading afterwards, and a whole-URL redaction turns a
+   * legible connection string into nothing.
+   *
+   * The `//` and the `@` are both required, so a bare `http://host/a:b` cannot
+   * match — a colon in a path is not a credential.
+   */
+  {
+    id: 'url-password',
+    pattern: /\b([a-z][a-z0-9+.-]*:\/\/[^\s:/@]*:)([^\s@/]+)(?=@)/gi,
+    keepPrefix: true,
+  },
+
+  /*
    * Assignments whose *name* claims to be a secret. Keyed on the name rather
    * than the value, because a password has no distinctive shape — this is the
    * only rule here that could plausibly over-match, so it requires the name to
