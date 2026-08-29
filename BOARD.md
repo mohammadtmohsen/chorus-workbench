@@ -1289,7 +1289,7 @@ suspect is a carry object holding thousands of entries crossing `onCarry` into
 `App`'s ref map on a path that runs during a commit. `transcript-window.ts` is
 parked in the tree with its tests for whoever picks it up.
 
-### C-048 · A setState-in-render warning at boot, unlocalised
+### C-048 · ~~A setState-in-render warning at boot, unlocalised~~ — **closed 2026-08-29**
 
 `Cannot update a component (EditorPane) while rendering a different component
 (App)` — once, on the first render, in `pnpm dev`.
@@ -1318,8 +1318,28 @@ the control-rail and editor work; the paging and virtualisation changes are in
 `Session` and below. Recorded here rather than fixed because finding it needs a
 DevTools session, and guessing at it would mean editing render paths on a hunch.
 
-**What would make it done.** The stack, then either the write moved into an
-effect or a note saying why it has to happen during render.
+**Found by reading, not by DevTools — and the entry's own reasoning is what hid
+it.** "The obvious candidates were checked and are all inside callbacks or
+promises rather than render" cleared `hydrate` because it sits in the restore
+`.then`. It does. But the `.then` only _calls_ `updateSessions`, and
+`updateSessions` passes its argument to `setSessions` as an **updater** — which
+React invokes during the render phase, not when the promise settles. So the body
+containing `hydrate` and `setPlanning` ran while `App` was rendering, and
+`EditorPane` subscribes to that store.
+
+That also explains the two facts the entry established and could not join: once,
+and at boot. Restore happens once, at boot.
+
+**Fixed** by deciding the merged session list from `sessionsRef.current` before
+touching state, doing the store writes there, and ending with
+`updateSessions(() => merged)` — an updater that computes nothing and so cannot
+have a side effect. The ref is what the updater's `current` would have been;
+`updateSessions` keeps it in step on every write, and nothing races restore.
+
+**The general lesson is worth more than the fix**: "it is inside a promise" does
+not mean "it is not inside render" when the promise's job is to hand React a
+function. Any `setState(fn)` where `fn` does more than compute a value is this
+bug waiting to be reported.
 
 ### C-047 · The control-rail redesign orphaned a drawer's worth of UI
 

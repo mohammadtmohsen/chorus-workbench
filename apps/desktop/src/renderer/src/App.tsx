@@ -406,7 +406,27 @@ export function App(): React.JSX.Element {
     window.chorus
       .restoreConversations()
       .then(({ sessions: reopened, workspace }) => {
-        updateSessions((current) => {
+        /*
+         * Merged out here, and the store written after — C-048.
+         *
+         * This whole block used to sit inside `updateSessions`, which passes its
+         * argument to `setSessions` as an **updater**. React invokes an updater
+         * during the render phase, so every store write in here was a write
+         * while `App` was rendering, and `EditorPane` subscribes to that store:
+         * "Cannot update a component (EditorPane) while rendering a different
+         * component (App)", once, at boot.
+         *
+         * The board had cleared `hydrate` on the grounds that it is "inside a
+         * promise rather than render". It is inside a promise — the promise
+         * merely *calls* `updateSessions`, and the body runs later, when React
+         * gets to it. That is the gap the entry was missing.
+         *
+         * `sessionsRef.current` is what the updater's `current` would have been:
+         * `updateSessions` keeps it in step on every write, and restore happens
+         * once at boot with nothing else racing it.
+         */
+        const current = sessionsRef.current
+        {
           const merged = [
             ...reopened.filter(
               (candidate) =>
@@ -464,8 +484,13 @@ export function App(): React.JSX.Element {
               useWorkspaceStore.getState().setPlanning(session.conversationId, true)
             }
           }
-          return merged
-        })
+          /*
+           * Last, and not through an updater. Everything above has already been
+           * decided from `current`, so this is a plain assignment of a value
+           * rather than a function React may call whenever it likes.
+           */
+          updateSessions(() => merged)
+        }
       })
       .catch(fail(setError))
       .finally(() => {
