@@ -191,6 +191,15 @@ mac:
 # has to the DMG's "download and open"; deb because that is what a Debian or
 # Ubuntu user expects to be offered beside it.
 linux:
+  # Explicit, because the default is derived from the package name and this one
+  # is scoped: `@chorus/desktop` sanitises to `@chorusdesktop`, and
+  # electron-builder refuses it — "contains characters that cannot be safely used
+  # in file paths". macOS and Windows never noticed, since both take their
+  # executable from `productName`.
+  #
+  # It is also the path `e2e/packaged-linux.mjs` looks for, so the two are one
+  # decision rather than a convention the verifier has to guess.
+  executableName: chorus
   target:
     - target: AppImage
       arch: [x64]
