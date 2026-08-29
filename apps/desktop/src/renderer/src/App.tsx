@@ -12,7 +12,6 @@ import { noticesFrom, roomsWaiting, shouldRaise, trackPending, type Notice } fro
 import { HistoryPanel } from './HistoryPanel.js'
 import { INSTALL, Settings, type Defaults } from './Settings.js'
 import { Workspace } from './workspace/Workspace.js'
-import { ConfirmSessionAction } from './workspace/ConfirmSessionAction.js'
 import { sameWorkspaceSnapshot, useWorkspaceStore, workspaceSnapshot } from './workspace/store.js'
 import { reorderSessions } from './workspace/session-row.js'
 import { setRunningPlatform } from './shortcuts.js'
@@ -835,47 +834,17 @@ export function App(): React.JSX.Element {
   )
 
   /*
-   * Both actions are confirmed, from every surface, by one dialog.
+   * End takes effect immediately — there is no confirmation.
    *
-   * They used to ask unevenly: End armed itself in the menu and the preview but
-   * only while an agent was working, Restart asked nothing anywhere, and the
-   * composer's buttons went straight through. Same key press, different amount of
-   * destruction, depending on which control was nearest.
-   *
-   * Wrapping here rather than at each call site is the point. Every surface is
-   * already handed `restart` and `endNow` — the comment further down says so —
-   * so a confirmation on the funnel cannot be routed around by a fourth caller
-   * added later.
-   *
-   * Still not `window.confirm`, for the reasons that removed it before: it is an
-   * OS dialog in an app drawn entirely in one typeface, and it blocks the
-   * renderer while three other sessions stream into it.
+   * There was one, and it asked "End this session?" with a warning when an agent
+   * was mid-turn. It went because the question it asked was not the one that
+   * mattered: the transcript is an append-only log, so ending a room destroys
+   * nothing and reopening it from history brings it back. What the dialog cost
+   * was a click on the one action people take dozens of times a day, and the
+   * habit of clicking through a confirmation without reading it — which is worth
+   * more than the keystroke, because the *other* confirmations in this app guard
+   * things that genuinely cannot be undone.
    */
-  const [confirming, setConfirming] = useState<{
-    readonly conversationId: string
-    readonly working: boolean
-  } | null>(null)
-
-  /*
-   * `working` read once, from the store, rather than subscribed to.
-   *
-   * `App` deliberately does not take a pulse subscription — that is what made
-   * the shell re-render on every delta of every streaming session. The dialog
-   * only needs the answer at the moment it opens, and a turn finishing while
-   * someone reads a sentence does not change what the sentence should have said.
-   */
-  const ask = useCallback((conversationId: string) => {
-    const pulse = useWorkspaceStore.getState().pulses[conversationId]
-    setConfirming({ conversationId, working: (pulse?.working.length ?? 0) > 0 })
-  }, [])
-
-  const askEnd = useCallback(
-    (conversationId: string) => {
-      ask(conversationId)
-    },
-    [ask]
-  )
-
   const rename = useCallback(
     (conversationId: string, title: string) => {
       window.chorus
@@ -1285,7 +1254,7 @@ export function App(): React.JSX.Element {
         onNewSession={start}
         onStartInProject={startIn}
         onRename={rename}
-        onEnd={askEnd}
+        onEnd={endNow}
         onCommitLayout={commitLayout}
         onReorderSessions={moveSession}
         onOpenSettings={() => {
@@ -1327,23 +1296,6 @@ export function App(): React.JSX.Element {
       />
 
       {sheets}
-      {/*
-        Last, so it covers the sheets as well as the workspace. End is reachable
-        from the composer, which is behind a sheet often enough.
-      */}
-      {confirming !== null && (
-        <ConfirmSessionAction
-          working={confirming.working}
-          onCancel={() => {
-            setConfirming(null)
-          }}
-          onConfirm={() => {
-            const { conversationId } = confirming
-            setConfirming(null)
-            endNow(conversationId)
-          }}
-        />
-      )}
       {badge}
     </div>
   )

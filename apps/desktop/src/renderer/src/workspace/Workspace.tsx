@@ -190,7 +190,6 @@ export function Workspace(props: WorkspaceProps): React.JSX.Element {
   const {
     placeSession,
     splitWithSession,
-    showConversation,
     closeTab,
     activateTab,
     focusPane,
@@ -545,7 +544,6 @@ export function Workspace(props: WorkspaceProps): React.JSX.Element {
         home={props.home}
         installed={props.installed}
         onRename={props.onRenameProject}
-        onShowConversation={showConversation}
         onToggleAgent={props.onToggleProjectAgent}
         onChooseProfile={props.onChooseProjectProfile}
         onRelocate={props.onRelocateProject}

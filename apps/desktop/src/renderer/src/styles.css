@@ -8924,22 +8924,6 @@ input::placeholder {
   cursor: text;
 }
 
-.project-preview-conversations {
-  display: flex;
-  flex-direction: column;
-  gap: var(--step);
-  margin: 0;
-  padding: 0;
-  list-style: none;
-}
-
-.project-preview-conversations > li {
-  display: flex;
-  align-items: center;
-  gap: var(--step);
-  min-width: 0;
-}
-
 /*
  * The name takes the room and the four actions take what they need.
  *
@@ -8948,29 +8932,6 @@ input::placeholder {
  * title would push the four buttons off the right edge of a 300px card rather
  * than truncate, and the buttons are the half you came for.
  */
-.project-preview-conversation {
-  flex: 1;
-  min-width: 0;
-  overflow: hidden;
-  text-align: left;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  background: none;
-  border: 0;
-  padding: calc(var(--step) * 0.5) 0;
-  color: var(--text-default);
-  cursor: pointer;
-}
-
-.project-preview-conversation:hover {
-  color: var(--text-strong);
-}
-
-.project-preview-conversation-actions {
-  display: flex;
-  flex: none;
-  gap: calc(var(--step) * 0.5);
-}
 
 /*
  * Icon-only, so the mark is the whole control rather than a decoration beside a
@@ -8978,24 +8939,6 @@ input::placeholder {
  * different here is that there is no label to sit next to, so the button is
  * square and the name lives in `aria-label` and `title`.
  */
-.project-preview-conversation-actions button {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 24px;
-  height: 24px;
-  padding: 0;
-  background: none;
-  border: 1px solid transparent;
-  border-radius: var(--radius-sm);
-  color: var(--text-muted);
-  cursor: pointer;
-}
-
-.project-preview-conversation-actions button:hover {
-  border-color: var(--border-default);
-  color: var(--text-default);
-}
 
 .session-preview-empty {
   margin: 0;

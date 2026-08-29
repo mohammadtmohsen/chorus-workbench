@@ -40,7 +40,6 @@ export function ProjectPreviewCard(props: {
     readonly summary: string
   }[]
   readonly onRename: (name: string) => void
-  readonly onShowConversation: (conversationId: string) => void
   readonly onToggleAgent: (agentId: AgentId, present: boolean) => Promise<void>
   readonly onChooseProfile: (profileId: string) => Promise<void>
   /** Both only reachable while the project's folder is missing — see `ProjectSettings`. */
@@ -201,42 +200,6 @@ export function ProjectPreviewCard(props: {
           onForget={props.onForget}
         />
       </div>
-
-      {/*
-        The project's conversations, which is what the rail stopped listing.
-
-        Three buttons per row and all three conversation-scoped, because that
-        is what they act on: Summary and Changes are that room's panels, End is
-        that room's lifecycle. Icon-only, since labelled buttons in a 300px card
-        are truncated words — each carries its name in `title` and `aria-label`,
-        which is what a screen reader and a hover both read.
-
-        Summary and Changes are here rather than dropped: they had no door at all
-        before the card grew one, and moving the card up a level must not close
-        it again.
-      */}
-      <p className="session-settings-label">{t('workspace.sessions')}</p>
-      {props.sessions.length === 0 ? (
-        <p className="session-preview-empty">{t('project.noConversations')}</p>
-      ) : (
-        <ul className="project-preview-conversations">
-          {props.sessions.map((session) => (
-            <li key={session.conversationId}>
-              <button
-                type="button"
-                className="project-preview-conversation"
-                title={session.title}
-                onClick={() => {
-                  props.onShowConversation(session.conversationId)
-                }}
-              >
-                {session.title}
-              </button>
-              <span className="project-preview-conversation-actions"></span>
-            </li>
-          ))}
-        </ul>
-      )}
     </div>,
     document.body
   )

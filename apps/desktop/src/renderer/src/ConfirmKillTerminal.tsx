@@ -16,7 +16,7 @@ import { useDialog } from './useDialog.js'
  * it is the reason `terminal:describe` has existed unused since the original
  * plan's Phase 1.
  *
- * Shaped after `ConfirmSessionAction`, deliberately: two destructive
+ * Shaped after the session-end dialog that used to sit beside it, deliberately: two destructive
  * confirmations that looked different would be two things to learn.
  */
 export interface ConfirmKillTerminalProps {
@@ -47,7 +47,8 @@ export function ConfirmKillTerminal(props: ConfirmKillTerminalProps): React.JSX.
             Cancel first in the DOM, so it is what `useDialog` focuses on open and
             what Enter takes. The destructive choice should never be the one a
             reflex lands on — the same ordering, and the same reason, as
-            `ConfirmSessionAction`.
+            that dialog, which was removed when ending a room stopped needing a
+            confirmation — the log is append-only, so nothing is lost.
           */}
           <button type="button" onClick={props.onCancel}>
             {t('terminal.confirmKillCancel')}

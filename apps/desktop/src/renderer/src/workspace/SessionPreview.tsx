@@ -160,7 +160,6 @@ export function ProjectPreviewHost(props: {
   readonly home: string
   readonly installed: readonly AgentId[]
   readonly onRename: (projectId: string, name: string) => void
-  readonly onShowConversation: (projectId: string, conversationId: string) => void
   readonly onToggleAgent: (projectId: string, agentId: AgentId, present: boolean) => Promise<void>
   readonly onChooseProfile: (projectId: string, profileId: string) => Promise<void>
   /** Reachable only from a project whose folder has gone. */
@@ -190,10 +189,6 @@ export function ProjectPreviewHost(props: {
       profiles={props.profiles}
       onRename={(name) => {
         props.onRename(project.id, name)
-      }}
-      onShowConversation={(conversationId) => {
-        props.controller.dismiss()
-        props.onShowConversation(project.id, conversationId)
       }}
       onToggleAgent={async (agentId, present) => {
         await props.onToggleAgent(project.id, agentId, present)
