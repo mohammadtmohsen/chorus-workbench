@@ -52,9 +52,8 @@ import getLanguagesServiceOverride from '@codingame/monaco-vscode-languages-serv
 import { StorageScope } from '@codingame/monaco-vscode-storage-service-override'
 import { SyncDescriptor } from '@codingame/monaco-vscode-api/vscode/vs/platform/instantiation/common/descriptors'
 import { IStorageService } from '@codingame/monaco-vscode-api/vscode/vs/platform/storage/common/storage.service'
-import { IRemoteAuthorityResolverService } from '@codingame/monaco-vscode-api/vscode/vs/platform/remote/common/remoteAuthorityResolver.service'
 import { ChorusStorageDatabase, ChorusStorageService } from './storage.js'
-import { ChorusRemoteAuthorityResolverService, workspaceIdFor } from './remote-authority.js'
+import { workspaceIdFor } from './remote-authority.js'
 import getLifecycleServiceOverride from '@codingame/monaco-vscode-lifecycle-service-override'
 import getEnvironmentServiceOverride from '@codingame/monaco-vscode-environment-service-override'
 import getWorkspaceTrustOverride from '@codingame/monaco-vscode-workspace-trust-service-override'
@@ -416,17 +415,6 @@ export function prepareWorkbench(connection: WorkbenchConnection): WorkbenchSetu
             new ChorusStorageDatabase(`workspace:${workspace.id}`),
         },
       ],
-      true
-    ),
-    /*
-     * And the resolver that gives a project a stable identity — see
-     * `remote-authority.ts`. Without it the trust record persists correctly and
-     * still never matches, because the URI it is keyed by carries a port that
-     * changes on every launch. Both halves or neither.
-     */
-    [IRemoteAuthorityResolverService.toString()]: new SyncDescriptor(
-      ChorusRemoteAuthorityResolverService,
-      [],
       true
     ),
     ...getSecretStorageServiceOverride(),
