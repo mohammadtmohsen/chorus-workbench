@@ -1,5 +1,10 @@
 import { describe, expect, it } from 'vitest'
-import { isOwnRemoteResource, workbenchPolicy } from './security.js'
+import {
+  isOwnRemoteResource,
+  isWebviewDocument,
+  webviewDocumentPolicy,
+  workbenchPolicy,
+} from './security.js'
 
 /**
  * What the workbench renderer may reach, named exactly.
@@ -92,6 +97,140 @@ describe('the workbench content security policy', () => {
 
   it('refuses an authority that is not host:port rather than interpolating it', () => {
     expect(() => workbenchPolicy(false, 'evil.example.com/path')).toThrow()
+  })
+})
+
+/**
+ * The second policy, and the boundary it must not blur.
+ *
+ * A webview's bootstrap document exists in order to be framed; the workbench
+ * document exists in order not to be. The base policy said `frame-ancestors
+ * 'none'` for both, so Chromium refused the webview's own response
+ * (`ERR_BLOCKED_BY_RESPONSE`) and every webview in the app was blank — markdown
+ * preview, the PDF viewer, the DOCX reader — with nothing downstream ever
+ * running.
+ *
+ * The fix is per-response, and the tests below are about the *selector* as much
+ * as the policy: the cheap wrong version of this is "sub-frames get the weaker
+ * policy", which would hand it to any frame an extension can cause to load.
+ */
+describe('the webview document policy', () => {
+  const dev = webviewDocumentPolicy(true, '127.0.0.1:51515')
+  const prod = webviewDocumentPolicy(false, '127.0.0.1:51515')
+  const directive = (policy: string, name: string): string =>
+    policy.split('; ').find((part) => part.startsWith(`${name} `)) ?? ''
+
+  it('lets this app frame the webview, and nobody else', () => {
+    expect(directive(prod, 'frame-ancestors')).toBe("frame-ancestors 'self'")
+  })
+
+  /*
+   * The whole point of two policies rather than one widened one. If this ever
+   * fails, an extension webview can frame the workbench, which is the attack the
+   * base policy's own comment names.
+   */
+  it('leaves the workbench itself unframeable', () => {
+    expect(workbenchPolicy(false, '127.0.0.1:51515')).toContain("frame-ancestors 'none'")
+    expect(workbenchPolicy(true, '127.0.0.1:51515')).toContain("frame-ancestors 'none'")
+  })
+
+  /*
+   * **This asserted the opposite until the hash was measured and failed.**
+   *
+   * The narrow version admitted only the bundled bootstrap by
+   * `sha256-2bgY7b4A…`. The console then showed inline scripts refused against
+   * that exact hash on every preview, because the inner frame is written with
+   * extension-authored HTML and a hash can only name scripts we ship.
+   *
+   * What keeps this honest is not the directive but the selector, which the
+   * tests below pin: two bundled documents, sub-frames only. The workbench's own
+   * policy is asserted free of `'unsafe-inline'` in the same breath, because
+   * that is the property this must never cost.
+   */
+  it('admits extension inline script, and never lets the workbench do the same', () => {
+    expect(directive(prod, 'script-src')).toContain("'unsafe-inline'")
+    expect(directive(dev, 'script-src')).toContain("'unsafe-inline'")
+    /*
+     * `script-src` specifically, not the whole policy. The workbench has carried
+     * `style-src 'self' 'unsafe-inline'` for as long as it has existed, because
+     * VS Code writes theme colours into inline style attributes on nearly every
+     * element it draws — a first version of this assertion tested the whole
+     * string and failed on that, which is the assertion being wrong rather than
+     * the policy.
+     */
+    expect(directive(workbenchPolicy(false, '127.0.0.1:51515'), 'script-src')).not.toContain(
+      "'unsafe-inline'"
+    )
+  })
+
+  /*
+   * Every one of these was observed refused in the packaged app before it was
+   * added — stylesheets and scripts for Markdown preview and the PDF viewer, and
+   * the base URI the preview sets to the document it is rendering. The host is a
+   * routing convention answered by the webview's service worker, not a real
+   * fetch, but CSP is applied before the worker is consulted.
+   */
+  it('reaches the resource host the service worker answers for', () => {
+    for (const name of [
+      'script-src',
+      'style-src',
+      'img-src',
+      'font-src',
+      'connect-src',
+      /*
+       * `worker-src` does not fall back to `script-src`, so a viewer whose work
+       * happens off the main thread needs it named separately. The PDF viewer
+       * loads `pdf.worker.js` through `asWebviewUri`; with this missing it
+       * rendered its own loading HTML and then stopped, while Markdown preview —
+       * which uses no worker — worked.
+       */
+      'worker-src',
+    ]) {
+      expect(directive(prod, name)).toContain('https://*.vscode-cdn.net')
+    }
+    expect(directive(prod, 'base-uri')).toBe('base-uri https://*.vscode-cdn.net')
+  })
+
+  /* The workbench must not gain that host along the way. */
+  it('does not widen the workbench to the resource host', () => {
+    expect(workbenchPolicy(false, '127.0.0.1:51515')).not.toContain('vscode-cdn.net')
+  })
+})
+
+describe('which responses are webview documents', () => {
+  const asset = (name: string): string =>
+    `file:///Applications/Chorus.app/Contents/Resources/app.asar/out/renderer/assets/${name}`
+
+  it('matches the two bundled documents a webview is built from', () => {
+    expect(isWebviewDocument(asset('index-D5H5KsJm.html'), 'subFrame')).toBe(true)
+    expect(isWebviewDocument(asset('fake-DXkbmQ09.html'), 'subFrame')).toBe(true)
+  })
+
+  /*
+   * The selector is an allowlist of exact shapes, never an exemption for
+   * sub-frames as a class. A webview renders extension-authored HTML, so "any
+   * sub-frame" would hand the weaker policy to content an extension controls.
+   */
+  it('refuses any other sub-frame, however close', () => {
+    expect(isWebviewDocument(asset('index-D5H5KsJm.html.evil'), 'subFrame')).toBe(false)
+    expect(isWebviewDocument(asset('nested/index-AAAA.html'), 'subFrame')).toBe(false)
+    expect(isWebviewDocument(asset('indexes-AAAA.html'), 'subFrame')).toBe(false)
+    expect(isWebviewDocument('https://evil.example.com/index-AAAA.html', 'subFrame')).toBe(false)
+    expect(isWebviewDocument(asset('main-AAAA.js'), 'subFrame')).toBe(false)
+  })
+
+  /*
+   * The workbench document is served from the same directory tree, so the
+   * resource type is what keeps it out — a top-level document is never one of
+   * these, whatever it is named.
+   */
+  it('never matches a top-level document', () => {
+    expect(isWebviewDocument(asset('index-D5H5KsJm.html'), 'mainFrame')).toBe(false)
+    expect(isWebviewDocument(asset('index-D5H5KsJm.html'), 'xhr')).toBe(false)
+  })
+
+  it('treats an unparseable url as not a webview document', () => {
+    expect(isWebviewDocument('not a url', 'subFrame')).toBe(false)
   })
 })
 

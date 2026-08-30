@@ -167,6 +167,142 @@ function remoteContentSource(remoteAuthority: string | null): string {
  * string is a security boundary, and it now contains a deliberate widening. A
  * test that names every origin is how the next widening has to be deliberate too.
  */
+
+/**
+ * Where a webview's own resources come from, and it is not really a CDN.
+ *
+ * `asWebviewUri` rewrites an extension's scripts, stylesheets, images and
+ * workers to `https://<encoded-authority>.vscode-resource.vscode-cdn.net/…`.
+ * Nothing is fetched from the internet: the service worker registered by the
+ * bootstrap intercepts these and answers them over `postMessage`. The host is a
+ * routing convention, not a destination.
+ *
+ * It is still named here rather than waved through, because the browser applies
+ * CSP before the service worker is consulted — a refused request never reaches
+ * the worker at all, which is exactly what was observed: every stylesheet and
+ * script of Markdown preview and the PDF viewer refused, while the DOCX reader
+ * worked because it writes inline HTML and asks for no resources.
+ *
+ * The wildcard is on the subdomain because the encoded authority is in it, and
+ * that authority contains the REH's ephemeral port.
+ */
+const WEBVIEW_RESOURCE_HOST = 'https://*.vscode-cdn.net'
+
+/**
+ * Is this response one of the two documents a webview is built from?
+ *
+ * **Exact filenames under the renderer's asset directory, and a sub-frame.**
+ * Both halves matter: the workbench document must never match this, and neither
+ * must anything else a webview loads. An extension's own HTML is *written into*
+ * the inner frame rather than fetched, so it never reaches this check — which is
+ * why matching two known bundler outputs is sufficient and a prefix is not.
+ *
+ * The hashed suffix is the bundler's, so the match is on shape rather than on a
+ * literal that would break every build.
+ */
+export function isWebviewDocument(url: string, resourceType: string): boolean {
+  if (resourceType !== 'subFrame') return false
+  let path: string
+  try {
+    path = new URL(url).pathname
+  } catch {
+    return false
+  }
+  return /\/out\/renderer\/assets\/(?:index|fake)-[A-Za-z0-9_-]+\.html$/.test(path)
+}
+
+/**
+ * What the webview's own two documents may do — and it differs from the
+ * workbench's in exactly one way that matters.
+ *
+ * **`frame-ancestors 'self'` instead of `'none'`, and that is the whole bug.**
+ * The base policy is applied to every response in this session, so the webview's
+ * bootstrap document was served `frame-ancestors 'none'` — "nothing may frame
+ * me" — while the workbench was framing it. Chromium refused the response,
+ * `ERR_BLOCKED_BY_RESPONSE`, and every webview in the app was blank. Nothing
+ * downstream of that had ever run: not the inline bootstrap, not the
+ * `vscode-cdn.net` fetches, not the service worker.
+ *
+ * **The workbench document keeps `'none'`, and widening the base policy would
+ * have been the wrong fix.** `frame-ancestors` constrains who may frame *this*
+ * document, so relaxing it session-wide would let an extension webview frame the
+ * workbench — the attack the base policy's own comment names. The distinction is
+ * per-document and can only be drawn per response.
+ *
+ * Deliberately no `https://*.vscode-cdn.net` yet. That is the *predicted* next
+ * blocker, and predicting is what produced three causes none of which turned out
+ * to be reachable. It goes in when a real request is observed being refused.
+ */
+export function webviewDocumentPolicy(isDev: boolean, remoteAuthority: string | null): string {
+  const remote = remoteConnectSources(remoteAuthority)
+  const content = remoteContentSource(remoteAuthority)
+  return [
+    "default-src 'none'",
+    `style-src 'self' 'unsafe-inline' ${WEBVIEW_RESOURCE_HOST}`,
+    `img-src 'self' data: blob: ${WEBVIEW_RESOURCE_HOST}${content}`,
+    `font-src 'self' data: ${WEBVIEW_RESOURCE_HOST}${content}`,
+    `media-src 'self' data: blob: ${WEBVIEW_RESOURCE_HOST}`,
+    /*
+     * The resource host here too, for the viewers that do their work off the main
+     * thread. `adamraichu.pdf-viewer` loads `pdf.worker.js` through
+     * `asWebviewUri`, so the worker resolves to the same host its scripts do —
+     * and `worker-src` does not fall back to `script-src`.
+     *
+     * The symptom this fixes is a viewer that renders its *own* loading HTML and
+     * then stops: the document needs no worker, the content does. Markdown
+     * preview was unaffected and started working one change earlier, which is
+     * what distinguished the two.
+     */
+    `worker-src 'self' blob: ${WEBVIEW_RESOURCE_HOST}`,
+    "child-src 'self' blob:",
+    /*
+     * `base-uri` for the resource host, which is not decoration: the webview sets
+     * its own base URI to the document being previewed —
+     * `…vscode-resource.vscode-cdn.net/…/AGENTS.md` — so that relative links in
+     * the content resolve. Observed refused as
+     * "Setting the document's base URI … violates the following Content Security
+     * Policy directive"; without it every relative reference in a preview points
+     * at the wrong place.
+     */
+    `base-uri ${WEBVIEW_RESOURCE_HOST}`,
+    "form-action 'none'",
+    "object-src 'none'",
+    /*
+     * The one document in this app that may be framed, and only by this app.
+     * `'self'` and not the parent's literal origin: they are the same origin
+     * today, and naming it would encode the `file:` scheme.
+     */
+    "frame-ancestors 'self'",
+    /*
+     * **`'unsafe-inline'`, and the hash it replaces was a prediction that failed
+     * measurement.**
+     *
+     * The narrower design — admit only the bundled bootstrap by its own
+     * `sha256-2bgY7b4AY+EULl24tUGduYOHUHUBH5EuIHGYqk8TM+k=` — was tried first,
+     * and it is right about the bootstrap. It cannot be right about
+     * everything else: the inner frame is written with *extension-authored*
+     * HTML, and the console showed inline scripts refused against that very hash
+     * on every preview. A hash can only ever name scripts we ship, and none of
+     * these are ours.
+     *
+     * This is how VS Code itself works, and the division of labour is the reason
+     * it is acceptable: the **envelope** permits inline script, and the
+     * **content** constrains it with its own `<meta>` CSP, which extensions are
+     * required to set. The two policies intersect, so an extension that sets a
+     * strict meta policy still gets it.
+     *
+     * What bounds the widening is the selector, not this directive. It reaches
+     * exactly two bundled documents in sub-frames; the workbench document keeps
+     * `script-src` with no `'unsafe-inline'` and keeps `frame-ancestors 'none'`,
+     * so this cannot be turned back on the shell.
+     */
+    isDev
+      ? `script-src 'self' 'unsafe-inline' 'unsafe-eval' blob: ${WEBVIEW_RESOURCE_HOST}`
+      : `script-src 'self' 'unsafe-inline' 'unsafe-eval' blob: ${WEBVIEW_RESOURCE_HOST}`,
+    `connect-src 'self' data: blob: ${WEBVIEW_RESOURCE_HOST}${remote}${isDev ? ' ws://localhost:* http://localhost:*' : ''}`,
+  ].join('; ')
+}
+
 export function workbenchPolicy(isDev: boolean, remoteAuthority: string | null): string {
   const remote = remoteConnectSources(remoteAuthority)
   const content = remoteContentSource(remoteAuthority)
@@ -252,11 +388,21 @@ export function applyWorkbenchContentSecurityPolicy(
   product: { readonly quality: string; readonly commit: string } | null
 ): void {
   const policy = workbenchPolicy(isDev, remoteAuthority)
+  const webviewPolicy = webviewDocumentPolicy(isDev, remoteAuthority)
 
   session.webRequest.onHeadersReceived((details, callback) => {
+    /*
+     * Two policies, chosen per response, because `frame-ancestors` is a statement
+     * about *this* document and the session holds two kinds. Everything that is
+     * not one of the two bundled webview documents keeps the restrictive policy,
+     * including any other sub-frame — the selector is an allowlist of exact
+     * shapes, not an exemption for sub-frames as a class.
+     */
     const responseHeaders: Record<string, string[]> = {
       ...details.responseHeaders,
-      'Content-Security-Policy': [policy],
+      'Content-Security-Policy': [
+        isWebviewDocument(details.url, details.resourceType) ? webviewPolicy : policy,
+      ],
     }
 
     /*
