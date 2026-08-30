@@ -1,6 +1,7 @@
 import { getService } from '@codingame/monaco-vscode-api'
 import { ICommandService } from '@codingame/monaco-vscode-api/vscode/vs/platform/commands/common/commands.service'
 import { IFileService } from '@codingame/monaco-vscode-api/vscode/vs/platform/files/common/files.service'
+import { ISCMService } from '@codingame/monaco-vscode-api/vscode/vs/workbench/contrib/scm/common/scm.service'
 
 /**
  * Keeps the SCM view current while somebody is reading the chat instead of the
@@ -56,16 +57,24 @@ const REFRESH_DEBOUNCE_MS = 1000
 /**
  * Runs `git.refresh` after file changes settle, for the life of the document.
  *
- * **Failures are swallowed on purpose.** `git.refresh` is contributed by the git
- * extension, so it is absent in a project that is not a repository and during
- * the window before the extension has activated. Neither is a fault worth
- * reporting: there is nothing for a person to do about it and nothing broken —
- * a folder with no git in it has no SCM view to keep current.
+ * **The repository check is not an optimisation, it is the whole safety of
+ * this.** A first version relied on `.catch()` to absorb the case where a
+ * project is not a repository, on the assumption that the command would reject.
+ * It does not: the git extension catches its own errors and puts up a *modal* —
+ * "Git: There are no available repositories" — so on any project whose folder is
+ * not a git checkout, this fired that dialog every time a file changed. Strictly
+ * worse than the staleness it was written to fix, and reported within minutes.
+ *
+ * So the guard asks the question the command cannot be trusted to answer
+ * quietly, through the same `IFileService` the events arrive on. It is re-asked
+ * per burst rather than cached, because `git init` in an open project is a thing
+ * people do and a cached "no" would then be wrong until the next launch.
  */
 export async function refreshScmOnFileChanges(): Promise<void> {
-  const [files, commands] = await Promise.all([
+  const [files, commands, scm] = await Promise.all([
     getService(IFileService),
     getService(ICommandService),
+    getService(ISCMService),
   ])
 
   let timer: ReturnType<typeof setTimeout> | null = null
@@ -74,8 +83,24 @@ export async function refreshScmOnFileChanges(): Promise<void> {
     if (timer !== null) clearTimeout(timer)
     timer = setTimeout(() => {
       timer = null
+      /*
+       * **Ask the question the command actually asks.** A first guard checked
+       * that `.git` existed in the project root, which is true of every real
+       * checkout and still produced the modal at startup: a `.git` directory on
+       * disk and a repository the git extension has finished *discovering* are
+       * different facts, and the command cares about the second. Firing before
+       * discovery completes is precisely the window a launch spends, so the
+       * dialog greeted every start.
+       *
+       * `ISCMService.repositories` is that second fact, held by the workbench
+       * rather than inferred from the filesystem. Empty means the command would
+       * have nothing to refresh and would say so in a modal; it also covers the
+       * folder that is not a repository at all, so the filesystem check it
+       * replaces bought nothing the service does not already know.
+       */
+      if ([...scm.repositories].length === 0) return
       void commands.executeCommand('git.refresh').catch(() => {
-        /* no repository here, or the extension has not activated yet */
+        /* a repository disappeared between the check and the call */
       })
     }, REFRESH_DEBOUNCE_MS)
   })
