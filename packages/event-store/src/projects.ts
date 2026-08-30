@@ -48,6 +48,17 @@ export interface Project {
    * two would silently re-add the default agents to the second one.
    */
   readonly agentIds: readonly string[] | null
+  /**
+   * Where the person put this tile in the rail — **an arrangement, not a fact
+   * about use.**
+   *
+   * `lastOpenedAt` still records when the project was last opened and is still
+   * written; it simply no longer decides the rail, because a list that re-sorts
+   * itself when you use it is a list you cannot arrange. Null is only reachable
+   * in a hand-edited database: migration 6 backfills every existing row and
+   * `create` assigns the next value.
+   */
+  readonly sortOrder: number | null
 }
 
 /**
@@ -140,6 +151,7 @@ interface ProjectRow {
   agent_ids: string | null
   created_at: number
   last_opened_at: number
+  sort_order: number | null
 }
 
 function toProject(row: ProjectRow): Project {
@@ -153,6 +165,7 @@ function toProject(row: ProjectRow): Project {
     lastOpenedAt: row.last_opened_at,
     profileId: row.permission_profile_id,
     agentIds: parseAgentIds(row.agent_ids),
+    sortOrder: row.sort_order,
   }
 }
 
@@ -177,7 +190,7 @@ function parseAgentIds(raw: string | null): readonly string[] | null {
   }
 }
 
-const COLUMNS = `id, name, root, canonical_root, workspace_file, permission_profile_id, agent_ids, created_at, last_opened_at`
+const COLUMNS = `id, name, root, canonical_root, workspace_file, permission_profile_id, agent_ids, created_at, last_opened_at, sort_order`
 
 /**
  * The project registry — create, find, rename, relocate, forget.
@@ -227,12 +240,23 @@ export class ProjectStore {
       if (clash !== undefined) {
         throw new DuplicateProjectRootError(parsed.canonicalRoot, clash.id as ProjectId)
       }
+      /*
+       * The end of the rail, read inside the same transaction as the insert.
+       *
+       * Appending rather than going to the top: a new project has no place in an
+       * arrangement yet, and pushing it to the front would move every tile the
+       * person has already positioned. Read here rather than as a subquery in
+       * VALUES so the row we return carries the value we actually wrote.
+       */
+      const { next } = this.db
+        .prepare(`SELECT COALESCE(MAX(sort_order), -1) + 1 AS next FROM projects`)
+        .get() as { next: number }
       this.db
         .prepare(
           `INSERT INTO projects
-             (id, name, root, canonical_root, canonical_key, workspace_file, created_at, last_opened_at)
+             (id, name, root, canonical_root, canonical_key, workspace_file, created_at, last_opened_at, sort_order)
            VALUES
-             (@id, @name, @root, @canonicalRoot, @key, @workspaceFile, @now, @now)`
+             (@id, @name, @root, @canonicalRoot, @key, @workspaceFile, @now, @now, @sortOrder)`
         )
         .run({
           id,
@@ -242,6 +266,7 @@ export class ProjectStore {
           key,
           workspaceFile: parsed.workspaceFile,
           now: parsed.now,
+          sortOrder: next,
         })
       return {
         id,
@@ -255,6 +280,7 @@ export class ProjectStore {
         // the first conversation, and `setProfile`/`setAgents` record an answer.
         profileId: null,
         agentIds: null,
+        sortOrder: next,
       }
     })
 
@@ -279,12 +305,65 @@ export class ProjectStore {
     return row === undefined ? null : toProject(row)
   }
 
-  /** Most recently opened first — the order the rail wants and the only one asked for. */
+  /**
+   * The person's own arrangement, top to bottom.
+   *
+   * This was `last_opened_at DESC`, which meant opening a project moved its tile
+   * — so no arrangement could survive being used, and the rail's own comment said
+   * a move would have nowhere to write. `sort_order` **replaces** recency rather
+   * than layering over it: two rules where one silently undoes the other is worse
+   * than either alone.
+   *
+   * The old columns stay on as tie-breakers. They are reached only by a null
+   * `sort_order`, which migration 6 and `create` between them make unreachable —
+   * they cost nothing and they keep a hand-edited database deterministic instead
+   * of letting SQLite choose.
+   */
   list(): readonly Project[] {
     const rows = this.db
-      .prepare(`SELECT ${COLUMNS} FROM projects ORDER BY last_opened_at DESC, created_at DESC`)
+      .prepare(
+        `SELECT ${COLUMNS} FROM projects
+          ORDER BY sort_order IS NULL, sort_order ASC, last_opened_at DESC, created_at DESC`
+      )
       .all() as ProjectRow[]
     return rows.map(toProject)
+  }
+
+  /**
+   * Exchanges two projects' places in the rail.
+   *
+   * **A swap, not an insert-between**, which is a product decision rather than an
+   * implementation shortcut: the two rows trade `sort_order` and nothing else
+   * moves, so a drag can never renumber a list somebody else's drag is mid-way
+   * through reading.
+   *
+   * Both ids are required to exist — a swap with a project that has been forgotten
+   * is a caller bug, and doing half of it would leave two tiles sharing a value
+   * and the rail resolving the tie by `last_opened_at`, which is the one thing
+   * this column exists to stop.
+   *
+   * One transaction, because a swap read as two updates is a swap that can be
+   * observed with both rows holding the same number.
+   */
+  swapOrder(projectId: string, otherId: string): void {
+    if (projectId === otherId) return
+    const exchange = this.db.transaction((): void => {
+      const a = this.require(projectId)
+      const b = this.require(otherId)
+      /*
+       * Resolved against `list()`'s own ordering rather than against the raw
+       * column, so a null on either side — only reachable in a hand-edited
+       * database — still swaps into a defined place instead of writing null back.
+       */
+      const order = this.list()
+      const indexOf = (id: string): number => order.findIndex((project) => project.id === id)
+      const aOrder = a.sortOrder ?? indexOf(projectId)
+      const bOrder = b.sortOrder ?? indexOf(otherId)
+      const set = this.db.prepare(`UPDATE projects SET sort_order = @order WHERE id = @projectId`)
+      set.run({ order: bOrder, projectId })
+      set.run({ order: aOrder, projectId: otherId })
+    })
+    exchange()
   }
 
   rename(projectId: string, name: string): Project {
@@ -383,7 +462,13 @@ export class ProjectStore {
     return this.require(projectId)
   }
 
-  /** Records that a project was opened, which is what the rail orders on. */
+  /**
+   * Records that a project was opened.
+   *
+   * It used to be what the rail ordered on; `sort_order` took that over, because
+   * a list that rearranges itself when you use it cannot be arranged. Still
+   * written, still true, and still the tie-break under a null `sort_order`.
+   */
   touch(projectId: string, now: number): Project {
     const changed = this.db
       .prepare(`UPDATE projects SET last_opened_at = @now WHERE id = @projectId`)

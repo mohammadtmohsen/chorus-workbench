@@ -254,9 +254,26 @@ export class ProjectService {
     return this.projects.setAgents(projectId, agentIds)
   }
 
-  /** Records an open, which is what the projects rail orders on. */
+  /**
+   * Records an open.
+   *
+   * No longer what the rail orders on — that is `sortOrder` now, so that an
+   * arrangement survives being used. This still records the fact.
+   */
   opened(projectId: string): Project {
     return this.projects.touch(projectId, this.clock())
+  }
+
+  /**
+   * Exchanges two projects' places in the rail, and answers with the new list.
+   *
+   * The list rather than the two rows, because the caller is a rail that draws
+   * every tile: handing back two projects would make the renderer patch its own
+   * copy and hold an opinion about ordering that only the store is entitled to.
+   */
+  swapOrder(projectId: string, otherId: string): readonly Project[] {
+    this.projects.swapOrder(projectId, otherId)
+    return this.projects.list()
   }
 
   /**

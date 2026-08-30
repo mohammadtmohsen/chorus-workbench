@@ -139,14 +139,77 @@ describe('create', () => {
 })
 
 describe('list', () => {
-  it('orders most recently opened first', () => {
+  /*
+   * This asserted the opposite until the rail became arrangeable: the order was
+   * `last_opened_at DESC`, so opening a project moved its tile. Both halves are
+   * kept as one test because the pair is the actual rule — new projects go to the
+   * end, and using one does not move it. Dropping the `touch` half would leave
+   * the regression that matters untested, since recency re-sorting is precisely
+   * what an arrangement has to survive.
+   */
+  it('keeps the arrangement, and opening a project does not disturb it', () => {
     const store = sensitive()
-    const older = add(store, '/a', 'A', 1_000)
-    const newer = add(store, '/b', 'B', 2_000)
-    expect(store.list().map((p) => p.id)).toEqual([newer.id, older.id])
+    const first = add(store, '/a', 'A', 1_000)
+    const second = add(store, '/b', 'B', 2_000)
+    expect(store.list().map((p) => p.id)).toEqual([first.id, second.id])
 
-    store.touch(older.id, 3_000)
-    expect(store.list().map((p) => p.id)).toEqual([older.id, newer.id])
+    store.touch(first.id, 3_000)
+    expect(store.list().map((p) => p.id)).toEqual([first.id, second.id])
+  })
+
+  it('appends a new project rather than putting it on top', () => {
+    const store = sensitive()
+    const first = add(store, '/a', 'A', 1_000)
+    const second = add(store, '/b', 'B', 2_000)
+    const third = add(store, '/c', 'C', 3_000)
+    expect(store.list().map((p) => p.id)).toEqual([first.id, second.id, third.id])
+  })
+})
+
+describe('swapOrder', () => {
+  it('exchanges two tiles and leaves the rest where they were', () => {
+    const store = sensitive()
+    const a = add(store, '/a', 'A', 1_000)
+    const b = add(store, '/b', 'B', 2_000)
+    const c = add(store, '/c', 'C', 3_000)
+
+    store.swapOrder(a.id, c.id)
+    expect(store.list().map((p) => p.id)).toEqual([c.id, b.id, a.id])
+  })
+
+  it('survives being swapped back', () => {
+    const store = sensitive()
+    const a = add(store, '/a', 'A', 1_000)
+    const b = add(store, '/b', 'B', 2_000)
+
+    store.swapOrder(a.id, b.id)
+    store.swapOrder(a.id, b.id)
+    expect(store.list().map((p) => p.id)).toEqual([a.id, b.id])
+  })
+
+  /*
+   * A no-op rather than a write that sets both sides to the same value — which is
+   * the shape that would collapse two tiles onto one `sort_order` and hand the
+   * order back to the tie-breaker this column exists to replace.
+   */
+  it('does nothing when a project is swapped with itself', () => {
+    const store = sensitive()
+    const a = add(store, '/a', 'A', 1_000)
+    const b = add(store, '/b', 'B', 2_000)
+
+    store.swapOrder(a.id, a.id)
+    expect(store.list().map((p) => p.id)).toEqual([a.id, b.id])
+  })
+
+  it('refuses an id nobody adopted, and moves nothing', () => {
+    const store = sensitive()
+    const a = add(store, '/a', 'A', 1_000)
+    const b = add(store, '/b', 'B', 2_000)
+
+    expect(() => {
+      store.swapOrder(a.id, 'nope')
+    }).toThrow(UnknownProjectError)
+    expect(store.list().map((p) => p.id)).toEqual([a.id, b.id])
   })
 })
 

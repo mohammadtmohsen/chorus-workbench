@@ -1,4 +1,4 @@
-import { Fragment, useMemo, useRef, useState } from 'react'
+import { Fragment, useEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import type { PointerEvent as ReactPointerEvent } from 'react'
 import { useTranslation } from 'react-i18next'
@@ -127,16 +127,19 @@ export function QuickRail(props: QuickRailProps): React.JSX.Element {
   }
 
   /*
-   * There is no keyboard reorder here, and that is deliberate rather than
-   * pending.
+   * There is still no keyboard reorder here, and the reason has changed.
    *
-   * `⌘⌥⇧↑/↓` moved a *conversation* in the old rail, and the list it moved
-   * within was one the app kept. The rail lists projects now, and their order is
-   * `last_opened_at DESC` — computed by main, not stored as an arrangement. A
-   * keyboard move would have nowhere to write, so it would either be lost on the
-   * next `project:list` or need a `sort_order` column nobody has asked for.
-   * `onMove` was already dead code on the old tile: it was declared, passed, and
-   * never called by the key handler.
+   * It used to be that there was nowhere to write: the order was
+   * `last_opened_at DESC`, computed by main, so a move would have been lost on
+   * the next `project:list` unless somebody added "a `sort_order` column nobody
+   * has asked for". That column now exists, and dragging writes to it — so the
+   * obstacle is gone and only the absence of a request remains. Keyboard reorder
+   * was not asked for, and a shortcut invented alongside a drag is a second way
+   * to do one thing, decided by whoever implemented it.
+   *
+   * What it would need, when it is asked for: `project:reorder` takes two ids, so
+   * a keyboard move is "swap with my neighbour" — which is exactly one call per
+   * press and needs no new IPC.
    */
 
   return (
@@ -351,16 +354,18 @@ function RailProject(props: {
         className="rail-item rail-session rail-project"
         data-rail-project={props.project.id}
         /*
-         * No `data-reorder-id`, and its absence is load-bearing.
+         * Still no `data-reorder-id`, and its absence is still load-bearing.
          *
-         * `useTabDrag` treats a drop over an element carrying that attribute as a
-         * *reorder within the rail*, and reorder writes through
-         * `onReorderSessions` — a list of conversation ids the app keeps. The
-         * rail lists projects now, whose order is `last_opened_at DESC` computed
-         * by main, so a reorder has nowhere to be written. Left in place the
-         * attribute did something worse than nothing: it claimed the drop, so a
-         * project dragged across the rail was silently swallowed instead of
-         * reaching a pane.
+         * That attribute means *conversation* reorder to `useTabDrag`, writing
+         * through `onReorderSessions` — a list of conversation ids the app keeps.
+         * Putting it back on a project tile would claim the drop for the wrong
+         * handler, which is the bug it was removed for: a project dragged across
+         * the rail was silently swallowed instead of reaching a pane.
+         *
+         * Project reorder reads `data-rail-project` below instead, and resolves
+         * to a `rail-swap` against the tile under the pointer. Two attributes
+         * because they are two operations — one names a gap in the renderer's own
+         * list, the other names two projects for main to swap in SQLite.
          */
         data-dragging={props.dragging ? 'true' : undefined}
         data-state={facts.state}
@@ -444,6 +449,34 @@ function RailUsage(): React.JSX.Element {
   useShellOverlay(detail !== null)
 
   /*
+   * The pointer can leave this button without ever saying so, and while `detail`
+   * is set this component is hiding **every editor in the window**.
+   *
+   * That is how the editor region went black about a minute after launch and
+   * stayed black: `pointerleave` is not delivered when the window loses focus
+   * with the pointer still over the button, and — the case that makes this rail
+   * special — the thing most likely to be clicked next is the workbench, which is
+   * a `WebContentsView` and not part of this document at all. Clicking into it
+   * ends no pointer sequence here, so the tip stayed open, the overlay stayed
+   * counted, and the views stayed hidden.
+   *
+   * `blur` on the window covers both of those. `pointercancel` on the button
+   * below covers the gesture being taken away by the OS. Neither replaces main's
+   * deadline — they close the path that was actually hit, and the deadline covers
+   * the ones nobody has found yet.
+   */
+  useEffect(() => {
+    if (detail === null) return undefined
+    const dismiss = (): void => {
+      setDetail(null)
+    }
+    window.addEventListener('blur', dismiss)
+    return () => {
+      window.removeEventListener('blur', dismiss)
+    }
+  }, [detail])
+
+  /*
    * The same four readings, grouped for the two rotated account labels. Grouped
    * from the reading order rather than from a second list of agents, so the
    * column can only ever draw what `useUsage` decided.
@@ -512,6 +545,9 @@ function RailUsage(): React.JSX.Element {
          */
         onPointerEnter={show}
         onPointerLeave={() => {
+          setDetail(null)
+        }}
+        onPointerCancel={() => {
           setDetail(null)
         }}
         onFocus={show}

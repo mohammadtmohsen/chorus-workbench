@@ -376,6 +376,53 @@ const TranscriptStateShape = z.object({
 
 export type TranscriptStatePayload = z.infer<typeof TranscriptStateShape>
 
+/**
+ * One project as the rail receives it.
+ *
+ * Named rather than written inline because two channels answer with it now —
+ * `project:list` and `project:reorder`, the second so a drag redraws from the
+ * same shape the first established rather than from a patch the renderer
+ * assembles. Two inline copies of this object would be two schemas free to
+ * disagree the next time a field is added, and the field most likely to be added
+ * is one the rail draws.
+ */
+export const ListedProject = z.object({
+  id: z.string(),
+  name: z.string(),
+  root: z.string(),
+  lastOpenedAt: z.number(),
+  /** How many of this project's conversations are open right now. */
+  openConversations: z.number().int().min(0),
+  /**
+   * What agents in this project may do — one answer for every conversation in
+   * it. Null means the project has never been asked and the renderer should show
+   * whatever the app's default profile is, rather than inventing one of its own.
+   */
+  profileId: z.string().nullable(),
+  /**
+   * The cast. **Null is not an empty cast** — it is "never asked", which is every
+   * project that predates the setting. An empty array is a project somebody
+   * deliberately emptied, and the two must render differently or the second one
+   * silently regains its agents.
+   */
+  agentIds: z.array(z.enum(['codex', 'claude'])).nullable(),
+  /**
+   * The folder is not on disk right now — renamed, deleted, or on a volume that
+   * is not mounted.
+   *
+   * Carried on the listing so the renderer can *draw* the state instead of
+   * discovering it by failing. Before this existed, the first thing that touched
+   * a vanished root threw `ProjectRootMissingError`, and on launch that thing was
+   * the auto-start — so one stale project replaced the whole app with an error
+   * screen that had no way back to the project it was complaining about.
+   *
+   * Read fresh on every list rather than stored: it is a fact about the world and
+   * not about the project, so remounting the volume makes it false again with
+   * nothing written.
+   */
+  missing: z.boolean(),
+})
+
 export const IPC_CONTRACT = {
   'app:getInfo': { request: z.void(), response: AppInfo },
   /**
@@ -861,53 +908,30 @@ export const IPC_CONTRACT = {
 
   'project:list': {
     request: z.object({}).strict(),
-    response: z.object({
-      projects: z.array(
-        z.object({
-          id: z.string(),
-          name: z.string(),
-          root: z.string(),
-          lastOpenedAt: z.number(),
-          /** How many of this project's conversations are open right now. */
-          openConversations: z.number().int().min(0),
-          /**
-           * What agents in this project may do — one answer for every
-           * conversation in it. Null means the project has never been asked and
-           * the renderer should show whatever the app's default profile is,
-           * rather than inventing one of its own.
-           */
-          profileId: z.string().nullable(),
-          /**
-           * The cast. **Null is not an empty cast** — it is "never asked", which
-           * is every project that predates the setting. An empty array is a
-           * project somebody deliberately emptied, and the two must render
-           * differently or the second one silently regains its agents.
-           */
-          agentIds: z.array(z.enum(['codex', 'claude'])).nullable(),
-          /**
-           * The folder is not on disk right now — renamed, deleted, or on a
-           * volume that is not mounted.
-           *
-           * Carried on the listing so the renderer can *draw* the state instead
-           * of discovering it by failing. Before this existed, the first thing
-           * that touched a vanished root threw `ProjectRootMissingError`, and on
-           * launch that thing was the auto-start — so one stale project replaced
-           * the whole app with an error screen that had no way back to the
-           * project it was complaining about.
-           *
-           * Read fresh on every list rather than stored: it is a fact about the
-           * world and not about the project, so remounting the volume makes it
-           * false again with nothing written.
-           */
-          missing: z.boolean(),
-        })
-      ),
-    }),
+    response: z.object({ projects: z.array(ListedProject) }),
   },
 
   'project:rename': {
     request: z.object({ projectId: z.string(), name: z.string() }),
     response: z.object({ name: z.string() }),
+  },
+
+  /**
+   * Two projects trade places in the rail.
+   *
+   * **Two ids and no index**, which is what makes it safe to send from a
+   * renderer holding a list that a push may already have replaced: a position
+   * would be the shell's opinion about an order main owns, and a stale one would
+   * move the wrong tile in silence. Naming both projects means the worst a stale
+   * drag can do is swap two tiles that both still exist.
+   *
+   * Answers with the whole list rather than an acknowledgement, so one gesture
+   * costs one round trip and the rail redraws from the store's order rather than
+   * from its own guess at what the swap did.
+   */
+  'project:reorder': {
+    request: z.object({ projectId: z.string(), otherId: z.string() }),
+    response: z.object({ projects: z.array(ListedProject) }),
   },
 
   /**
@@ -1763,6 +1787,9 @@ export interface ChorusApi extends WorkbenchShellApi {
   readonly renameProject: (
     request: IpcRequest<'project:rename'>
   ) => Promise<IpcResponse<'project:rename'>>
+  readonly reorderProjects: (
+    request: IpcRequest<'project:reorder'>
+  ) => Promise<IpcResponse<'project:reorder'>>
   readonly forgetProject: (
     request: IpcRequest<'project:forget'>
   ) => Promise<IpcResponse<'project:forget'>>

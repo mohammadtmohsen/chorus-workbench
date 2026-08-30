@@ -393,6 +393,16 @@ export function buildHandlers(runtime: ChorusRuntime): Handlers {
     'project:rename': (request: { projectId: string; name: string }) =>
       Promise.resolve(runtime.renameProject(request.projectId, request.name)),
 
+    /*
+     * Two ids and no positions, which is what makes this safe to send from a
+     * renderer. An index would be the shell's opinion about a list main owns, and
+     * a stale one — the rail redraws from a pushed list — would move the wrong
+     * tile silently. Naming both projects means the worst a stale drag can do is
+     * swap two tiles that are both still there.
+     */
+    'project:reorder': (request: { projectId: string; otherId: string }) =>
+      Promise.resolve({ projects: runtime.reorderProjects(request.projectId, request.otherId) }),
+
     'project:forget': (request: { projectId: string }) =>
       Promise.resolve(runtime.forgetProject(request.projectId)),
 
@@ -1130,7 +1140,17 @@ export function forwardWorkbenchContextToRenderer(runtime: ChorusRuntime): () =>
     lastWorkbenchContext.delete(projectRoot)
     for (const conversationId of runtime.conversationsForRoot(projectRoot)) {
       for (const window of BrowserWindow.getAllWindows()) {
-        if (window.isDestroyed()) continue
+        /*
+         * **Both objects, because they die separately.** `window.isDestroyed()`
+         * alone was the guard here and it is not enough: this sink is reached
+         * during quit — the shell's WebContents is destroyed, which releases its
+         * surfaces, which lands here — and in that window the `BrowserWindow`
+         * still reports alive while the `webContents` underneath it has already
+         * gone. `send` then throws `Object has been destroyed` out of a
+         * `WebContents` event handler, where nothing catches it, and Electron
+         * shows the person a main-process error dialog on every single quit.
+         */
+        if (window.isDestroyed() || window.webContents.isDestroyed()) continue
         window.webContents.send(IDE_PUSH_CHANNEL, {
           conversationId,
           editor: 'workbench' as const,

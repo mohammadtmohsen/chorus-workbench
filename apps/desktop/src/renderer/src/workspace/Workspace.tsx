@@ -62,6 +62,8 @@ interface WorkspaceProps {
   readonly onCommitLayout: () => void
   /** A card dropped at a new place in the rail's order. */
   readonly onReorderSessions: (conversationId: string, slot: number) => void
+  /** Two rail tiles trading places. Written by main; nothing here is optimistic. */
+  readonly onSwapProjects: (projectId: string, otherId: string) => void
   readonly onOpenSettings: () => void
   /** Opens the list of every conversation the log holds, not only the open ones. */
   readonly onOpenHistory: () => void
@@ -224,6 +226,7 @@ export function Workspace(props: WorkspaceProps): React.JSX.Element {
       [splitWithSession, commit]
     ),
     onReorder: props.onReorderSessions,
+    onSwapProjects: props.onSwapProjects,
   })
 
   /*
@@ -1320,9 +1323,14 @@ function DragFeedback({ drag }: { drag: ActiveTabDrag | null }): React.JSX.Eleme
         }}
       >
         <span>
+          {/* `rail-swap` washes the tile it would trade with, rather than drawing
+              a line in a gap: the gesture moves two tiles, and a line between two
+              others would describe an insertion that does not happen. */}
           {target.kind === 'move'
             ? t('workspace.moveHere')
-            : t(`workspace.dropSplit.${target.direction}`)}
+            : target.kind === 'rail-swap'
+              ? t('workspace.swapHere')
+              : t(`workspace.dropSplit.${target.direction}`)}
         </span>
       </div>
     ) : null

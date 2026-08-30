@@ -19,10 +19,21 @@ interface PaneGeometry {
   readonly tabCount: number
 }
 
-/** The rail's scrollport and the cards in it, in the order they are drawn. */
+/**
+ * The rail's scrollport and what is in it, in the order they are drawn.
+ *
+ * **Two lists, because the rail holds two different things and only one of them
+ * is there today.** `cards` are conversation cards addressed by
+ * `data-reorder-id`, which the rail stopped drawing when it became a list of
+ * projects — the gap-based `rail-insert` path below is reached only if something
+ * draws them again. `tiles` are the project tiles it draws now, and they reorder
+ * by *swapping* rather than by insertion, so they need the tile under the pointer
+ * rather than the gap nearest it.
+ */
 interface RailGeometry {
   readonly rect: DOMRect
   readonly cards: readonly { readonly conversationId: string; readonly rect: DOMRect }[]
+  readonly tiles: readonly { readonly projectId: string; readonly rect: DOMRect }[]
 }
 
 interface DragGeometry {
@@ -44,6 +55,24 @@ export type TabDropTarget =
       kind: 'rail-insert'
       slot: number
       line: { left: number; top: number; width: number }
+      disabled: false
+    }
+  | {
+      /**
+       * Two project tiles trading places.
+       *
+       * A swap rather than an insertion, which is the product's choice and not a
+       * simplification: the tile under the pointer is the one that will move, so
+       * the whole gesture is described by two ids and nothing has to agree about
+       * indices. `rect` is that tile, drawn as the thing being traded with rather
+       * than as a line in a gap.
+       *
+       * Like `rail-insert`, only ever resolved for a gesture that began in the
+       * rail — dragging a pane tab across the rail must not rearrange it.
+       */
+      kind: 'rail-swap'
+      otherId: string
+      rect: DOMRect
       disabled: false
     }
   | {
@@ -140,6 +169,14 @@ function geometry(): DragGeometry {
                 : [{ conversationId, rect: card.getBoundingClientRect() }]
             }
           ),
+          tiles: [...scroller.querySelectorAll<HTMLElement>('[data-rail-project]')].flatMap(
+            (tile) => {
+              const projectId = tile.dataset['railProject']
+              return projectId === undefined
+                ? []
+                : [{ projectId, rect: tile.getBoundingClientRect() }]
+            }
+          ),
         }
   return { panes, paneCount: panes.length, sourceTabCount: 0, rail }
 }
@@ -209,6 +246,21 @@ function resolveTarget(
    * take over unchanged.
    */
   const rail = dragGeometry.rail
+  if (fromRail && rail !== null && contains(rail.rect, x, y) && rail.tiles.length > 0) {
+    /*
+     * The tile under the pointer is the one being traded with — tested on `y`
+     * alone, because the rail is one column wide and an `x` test would only add a
+     * way for a drag that is plainly over a tile to resolve to nothing.
+     *
+     * Returning null rather than falling through when the pointer is over the
+     * rail but over no tile, or over the dragged tile itself: the rail overlaps no
+     * pane, so a fall-through could only ever reach `null` anyway, and a swap with
+     * yourself should end quietly instead of writing.
+     */
+    const over = rail.tiles.find((tile) => y >= tile.rect.top && y <= tile.rect.bottom)
+    if (over === undefined || over.projectId === conversationId) return null
+    return { kind: 'rail-swap', otherId: over.projectId, rect: over.rect, disabled: false }
+  }
   if (fromRail && rail !== null && contains(rail.rect, x, y) && rail.cards.length > 0) {
     const slot = railSlotAt(
       rail.cards.map((card) => card.rect.top + card.rect.height / 2),
@@ -298,6 +350,14 @@ export function useTabDrag(options: {
   onSplit: (conversationId: string, paneId: string, direction: SplitDirection) => void
   /** A card dropped back into the rail, at a gap in its own order. */
   onReorder: (conversationId: string, slot: number) => void
+  /**
+   * Two project tiles trading places in the rail.
+   *
+   * Separate from `onReorder` rather than a mode of it, because they are not the
+   * same operation described twice: one names a gap in a list the renderer keeps,
+   * the other names two projects and is written to the database by main.
+   */
+  onSwapProjects: (projectId: string, otherId: string) => void
 }): {
   drag: ActiveTabDrag | null
   onPointerDown: (
@@ -343,7 +403,9 @@ export function useTabDrag(options: {
             event.clientY,
             current.fromRail
           )
-          if (target?.kind === 'rail-insert') {
+          if (target?.kind === 'rail-swap') {
+            options.onSwapProjects(current.conversationId, target.otherId)
+          } else if (target?.kind === 'rail-insert') {
             options.onReorder(current.conversationId, target.slot)
           } else if (target?.kind === 'insert' || target?.kind === 'move') {
             options.onInsert(current.conversationId, target.paneId, target.slot)

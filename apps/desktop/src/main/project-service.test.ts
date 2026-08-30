@@ -227,14 +227,28 @@ describe('the rest of the registry', () => {
     expect(service.forget(project.id)).toBe(false)
   })
 
-  it('orders the rail by most recently opened', () => {
+  /*
+   * This asserted recency ordering until the rail became arrangeable. `opened` is
+   * still the interesting half: it still records the open, and the regression to
+   * guard is that recording it stops moving the tile.
+   */
+  it('keeps the arrangement when a project is opened', () => {
     const first = service.adopt(dir('one')).project
     clock = 2_000
     const second = service.adopt(dir('two')).project
-    expect(service.list().map((p) => p.id)).toEqual([second.id, first.id])
+    expect(service.list().map((p) => p.id)).toEqual([first.id, second.id])
 
     clock = 3_000
     service.opened(first.id)
     expect(service.list().map((p) => p.id)).toEqual([first.id, second.id])
+  })
+
+  it('swaps two projects and answers with the new order', () => {
+    const first = service.adopt(dir('one')).project
+    clock = 2_000
+    const second = service.adopt(dir('two')).project
+
+    expect(service.swapOrder(first.id, second.id).map((p) => p.id)).toEqual([second.id, first.id])
+    expect(service.list().map((p) => p.id)).toEqual([second.id, first.id])
   })
 })

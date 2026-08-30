@@ -108,6 +108,7 @@
     "end": "End Session",
     "endConfirm": "An agent is still working. End this session?",
     "moveHere": "Move here",
+    "swapHere": "Swap",
     "split": {
       "up": "Split Up",
       "down": "Split Down",

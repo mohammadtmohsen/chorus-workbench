@@ -118,6 +118,7 @@ const api: ChorusApi = {
   adoptProject: invoke('project:adopt'),
   listProjects: invoke('project:list'),
   renameProject: invoke('project:rename'),
+  reorderProjects: invoke('project:reorder'),
   forgetProject: invoke('project:forget'),
   relocateProject: invoke('project:relocate'),
   setProjectProfile: invoke('project:setProfile'),

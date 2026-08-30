@@ -604,6 +604,24 @@ export function App(): React.JSX.Element {
   }, [])
 
   /*
+   * Two rail tiles trading places.
+   *
+   * Sets the list main answers with rather than calling `refreshProjects`: the
+   * reply is already a full `project:list`, counts included, so a second round
+   * trip would only let the rail redraw twice for one gesture. Nothing is applied
+   * optimistically — the order lives in SQLite, and a rail that moved before the
+   * write landed would be showing an arrangement that might not exist.
+   */
+  const swapProjects = useCallback(async (projectId: string, otherId: string) => {
+    try {
+      const { projects: listed } = await window.chorus.reorderProjects({ projectId, otherId })
+      setProjects(listed)
+    } catch (error) {
+      fail(setError)(error)
+    }
+  }, [])
+
+  /*
    * Starting a session, now in a project rather than in a directory.
    *
    * `defaults.cwd` used to decide this, which meant a session could be created
@@ -1275,6 +1293,9 @@ export function App(): React.JSX.Element {
         onEnd={endNow}
         onCommitLayout={commitLayout}
         onReorderSessions={moveSession}
+        onSwapProjects={(projectId, otherId) => {
+          void swapProjects(projectId, otherId)
+        }}
         onOpenSettings={() => {
           setShowingSettings(true)
         }}

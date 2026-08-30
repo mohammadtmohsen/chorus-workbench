@@ -320,6 +320,47 @@ export const MIGRATIONS: readonly Migration[] = [
       ALTER TABLE projects ADD COLUMN agent_ids TEXT;
     `,
   },
+  {
+    version: 6,
+    name: 'projects-keep-an-arrangement',
+    /*
+     * The rail's order becomes something the person owns.
+     *
+     * It was `last_opened_at DESC` — computed, never stored, and `QuickRail.tsx`
+     * said in a comment that a move "would have nowhere to write". This is the
+     * column that comment named. Recency no longer decides the rail: opening a
+     * project stops moving its tile, which is the whole point of being able to
+     * arrange them.
+     *
+     * **Backfilled in the order the person is looking at right now.** An added
+     * column defaulting to null would put every existing project in one
+     * undifferentiated bucket and let SQLite pick, so the first launch after the
+     * upgrade would shuffle a rail somebody already knows. Counting how many rows
+     * sort above each row reproduces exactly today's `last_opened_at DESC,
+     * created_at DESC` as 0..n-1, so the upgrade is invisible until the first
+     * drag — which is the only acceptable outcome for a list people navigate by
+     * muscle memory.
+     *
+     * Nullable rather than `NOT NULL DEFAULT 0`: ALTER TABLE ADD COLUMN takes a
+     * nullable column without rewriting the table, and `create` assigns
+     * `MAX(sort_order) + 1` from here on, so null is unreachable for new rows.
+     * `list` still orders on the old columns after it, which is what keeps a null
+     * — from a hand-edited database — deterministic instead of arbitrary.
+     *
+     * `last_opened_at` is kept and still written by `touch`. It stopped being the
+     * rail's sort key; it did not stop being true, and nothing else that reads it
+     * was asked to change.
+     */
+    up: `
+      ALTER TABLE projects ADD COLUMN sort_order INTEGER;
+      UPDATE projects SET sort_order = (
+        SELECT COUNT(*) FROM projects AS ahead
+         WHERE ahead.last_opened_at > projects.last_opened_at
+            OR (ahead.last_opened_at = projects.last_opened_at
+                AND ahead.created_at > projects.created_at)
+      );
+    `,
+  },
 ]
 
 export interface MigrationResult {

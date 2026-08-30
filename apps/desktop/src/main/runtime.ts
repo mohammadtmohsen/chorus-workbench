@@ -3334,6 +3334,21 @@ export class ChorusRuntime {
   }
 
   /**
+   * Exchanges two projects' places in the rail.
+   *
+   * Answers with the same shape `listProjects` does, rather than with the two
+   * rows or with nothing. The rail redraws from one array, and a caller that had
+   * to merge a partial answer into its own copy would be deciding the order in
+   * the renderer — which is exactly the split `listProjects` exists to prevent,
+   * since the open-conversation counts are the runtime's and the order is the
+   * store's.
+   */
+  reorderProjects(projectId: string, otherId: string): ReturnType<ChorusRuntime['listProjects']> {
+    this.projects.swapOrder(projectId, otherId)
+    return this.listProjects()
+  }
+
+  /**
    * Changes what agents may do in a project, and in everything running in it.
    *
    * A profile is an answer about a *place* — "agents may write in this
