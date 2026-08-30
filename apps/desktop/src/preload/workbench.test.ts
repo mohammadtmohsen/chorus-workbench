@@ -1,6 +1,9 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import {
   WORKBENCH_CONNECTION_CHANNEL,
+  WORKBENCH_SECRET_DELETE_CHANNEL,
+  WORKBENCH_SECRET_READ_CHANNEL,
+  WORKBENCH_SECRET_WRITE_CHANNEL,
   WORKBENCH_STORAGE_READ_CHANNEL,
   WORKBENCH_STORAGE_WRITE_CHANNEL,
   WORKBENCH_USER_SETTINGS_READ_CHANNEL,
@@ -58,6 +61,9 @@ const {
   USER_SETTINGS_WRITE_CHANNEL,
   STORAGE_READ_CHANNEL,
   STORAGE_WRITE_CHANNEL,
+  SECRET_READ_CHANNEL,
+  SECRET_WRITE_CHANNEL,
+  SECRET_DELETE_CHANNEL,
   CONTEXT_CHANNEL,
   SNAPSHOT_CHANNEL,
   EDIT_CHANNEL,
@@ -72,13 +78,16 @@ describe('the workbench preload', () => {
     expect(USER_SETTINGS_WRITE_CHANNEL).toBe(WORKBENCH_USER_SETTINGS_WRITE_CHANNEL)
     expect(STORAGE_READ_CHANNEL).toBe(WORKBENCH_STORAGE_READ_CHANNEL)
     expect(STORAGE_WRITE_CHANNEL).toBe(WORKBENCH_STORAGE_WRITE_CHANNEL)
+    expect(SECRET_READ_CHANNEL).toBe(WORKBENCH_SECRET_READ_CHANNEL)
+    expect(SECRET_WRITE_CHANNEL).toBe(WORKBENCH_SECRET_WRITE_CHANNEL)
+    expect(SECRET_DELETE_CHANNEL).toBe(WORKBENCH_SECRET_DELETE_CHANNEL)
     expect(CONTEXT_CHANNEL).toBe(WORKBENCH_CONTEXT_CHANNEL)
     expect(SNAPSHOT_CHANNEL).toBe(WORKBENCH_SNAPSHOT_CHANNEL)
     expect(EDIT_CHANNEL).toBe(WORKBENCH_EDIT_CHANNEL)
     expect(EDIT_RESULT_CHANNEL).toBe(WORKBENCH_EDIT_RESULT_CHANNEL)
   })
 
-  it('exposes exactly nine methods, and no tenth', () => {
+  it('exposes exactly thirteen methods, and no fourteenth', () => {
     // The list, not the count: a method named here is a capability a document
     // running extension code is handed, so which ones they are is the assertion.
     expect(Object.keys(exposed ?? {})).toEqual([
@@ -97,7 +106,19 @@ describe('the workbench preload', () => {
        * click through — and the reason the pair is worth this much scrutiny.
        */
       'readStorage',
-      'writeStorage',
+      'applyStorageDelta',
+      'onStorageChanged',
+      /*
+       * The credential trio, and the three names most worth arguing about in
+       * this list. They exist because `BrowserSecretStorageService` hardcodes
+       * in-memory storage, so every sign-in died at quit. Main encrypts through
+       * the OS keychain rather than writing a token as text — the file is
+       * useless on another machine or another account — and a profile with no
+       * keychain stores nothing rather than storing plaintext.
+       */
+      'readSecret',
+      'writeSecret',
+      'deleteSecret',
       /*
        * An OAuth callback, pushed in by main. It cannot be asked for and cannot
        * be enumerated: a surface is told about exactly one URL, exactly once, and

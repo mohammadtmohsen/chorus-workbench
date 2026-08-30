@@ -1,6 +1,13 @@
-import { Event } from '@codingame/monaco-vscode-api/vscode/vs/base/common/event'
+import {
+  BrowserStorageService,
+  Storage,
+  StorageScope,
+} from '@codingame/monaco-vscode-storage-service-override'
+import { Emitter } from '@codingame/monaco-vscode-api/vscode/vs/base/common/event'
+import type { IStorage } from '@codingame/monaco-vscode-api/vscode/vs/base/parts/storage/common/storage'
 import type {
   IStorageDatabase,
+  IStorageItemsChangeEvent,
   IUpdateRequest,
 } from '@codingame/monaco-vscode-api/vscode/vs/base/parts/storage/common/storage'
 
@@ -31,16 +38,20 @@ import type {
  */
 export class ChorusStorageDatabase implements IStorageDatabase {
   /**
-   * Nothing else writes this file while the workbench is up, so there is no
-   * external change to report.
+   * A real emitter, because other surfaces really do change this file.
    *
-   * `Event.None` rather than an emitter nobody fires: a live emitter would imply
-   * a watcher exists, and the next person to add one would reasonably assume the
-   * plumbing behind it worked. If two surfaces ever share a scope this becomes
-   * wrong and has to become a real event — main is the only place that would
-   * know, which is where the watch would have to live.
+   * This was `Event.None` with a comment claiming "nothing else writes this file
+   * while the workbench is up" — true of one surface and false of five, which is
+   * the normal case. The same comment predicted its own failure: *"if two
+   * surfaces ever share a scope this becomes wrong."* They always did.
+   *
+   * It was `Event.None`, which was honest at the time — nothing could report an
+   * external change — and became a lie the moment several surfaces shared a
+   * scope. `IStorageDatabase` uses this event to tell the service its cache is
+   * stale; without it every project drifted from the file until relaunch.
    */
-  readonly onDidChangeItemsExternal = Event.None
+  private readonly external = new Emitter<IStorageItemsChangeEvent>()
+  readonly onDidChangeItemsExternal = this.external.event
 
   /**
    * The authority while the workbench is running.
@@ -51,8 +62,46 @@ export class ChorusStorageDatabase implements IStorageDatabase {
    */
   private items = new Map<string, string>()
   private loaded = false
+  /**
+   * Deltas that arrived before the snapshot did.
+   *
+   * **The handshake, and it is not decoration.** Subscribing happens in the
+   * constructor and the snapshot is fetched asynchronously, so another surface
+   * can write in between — and applying its delta *before* the snapshot lands
+   * would see it overwritten by older data a moment later. Buffering and
+   * replaying after the snapshot makes the order deterministic rather than
+   * dependent on how fast an IPC round trip happened to be.
+   */
+  private pending: { insert: Record<string, string>; remove: readonly string[] }[] = []
 
-  constructor(private readonly scope: string) {}
+  constructor(private readonly scope: string) {
+    window.chorusWorkbench.onStorageChanged((scope, insert, remove) => {
+      if (scope !== this.scope) return
+      if (!this.loaded) {
+        this.pending.push({ insert, remove })
+        return
+      }
+      this.applyExternal(insert, remove)
+    })
+  }
+
+  /** Applies another surface's delta and tells the service its cache moved. */
+  private applyExternal(insert: Record<string, string>, remove: readonly string[]): void {
+    // `changed` carries the values, not just the keys — the service applies the
+    // map directly rather than reading back through `getItems`.
+    const changed = new Map<string, string>()
+    const deleted = new Set<string>()
+    for (const [key, value] of Object.entries(insert)) {
+      if (this.items.get(key) === value) continue
+      this.items.set(key, value)
+      changed.set(key, value)
+    }
+    for (const key of remove) {
+      if (this.items.delete(key)) deleted.add(key)
+    }
+    if (changed.size === 0 && deleted.size === 0) return
+    this.external.fire({ changed, deleted })
+  }
 
   /**
    * **A copy, and returning the live map instead was a real bug.**
@@ -61,10 +110,8 @@ export class ChorusStorageDatabase implements IStorageDatabase {
    * place on every `set` and `delete`. Handing back `this.items` therefore made
    * the service's cache and this one the same object, so by the time
    * `updateItems` arrived with the delta the "has anything actually changed?"
-   * test below already saw the new value, concluded nothing had changed, and
-   * skipped the write — every time, for the life of the app. The symptom was a
-   * storage file that was never created at all, with the factories provably
-   * running and the IPC provably working.
+   * test already saw the new value, concluded nothing had changed, and skipped
+   * the write — every time, for the life of the app.
    */
   async getItems(): Promise<Map<string, string>> {
     await this.load()
@@ -92,35 +139,40 @@ export class ChorusStorageDatabase implements IStorageDatabase {
       }
     }
     this.loaded = true
+    // Replayed in arrival order, after the snapshot they raced.
+    const queued = this.pending
+    this.pending = []
+    for (const delta of queued) this.applyExternal(delta.insert, delta.remove)
   }
 
+  /**
+   * Sends **only what changed**, never the whole map.
+   *
+   * Sending the map was a data-loss bug: every surface holds its own cache of the
+   * shared scopes, so one surface's write replaced the scope with its own view of
+   * it and deleted whatever another surface had stored since. Two projects open
+   * was enough to lose a GitLab account or a trust decision; five made it
+   * constant. Main merges deltas onto the authoritative copy, so a surface can no
+   * longer say "and delete everything I have not heard about" by accident.
+   */
   async updateItems(request: IUpdateRequest): Promise<void> {
-    /*
-     * The load has to have happened, or the first write would persist a map
-     * containing only this delta and silently forget everything stored before it.
-     * The service does call `getItems` first in practice; relying on that is the
-     * kind of ordering assumption this codebase has been bitten by.
-     */
     await this.load()
 
-    let changed = false
+    const insert: Record<string, string> = {}
+    const remove: string[] = []
     for (const [key, value] of request.insert ?? new Map<string, string>()) {
       if (this.items.get(key) === value) continue
       this.items.set(key, value)
-      changed = true
+      insert[key] = value
     }
     for (const key of request.delete ?? new Set<string>()) {
-      if (this.items.delete(key)) changed = true
+      if (this.items.delete(key)) remove.push(key)
     }
     // A flush that changed nothing is most of them: the service flushes on a
-    // timer as well as on a real write, and rewriting an identical file on a
-    // timer is pure disk churn for the life of the app.
-    if (!changed) return
+    // timer as well as on a real write.
+    if (Object.keys(insert).length === 0 && remove.length === 0) return
 
-    await window.chorusWorkbench.writeStorage(
-      this.scope,
-      JSON.stringify(Object.fromEntries(this.items))
-    )
+    await window.chorusWorkbench.applyStorageDelta(this.scope, insert, remove)
   }
 
   /** Nothing to compact: the file holds exactly the live map and no tombstones. */
@@ -137,5 +189,49 @@ export class ChorusStorageDatabase implements IStorageDatabase {
    */
   close(): Promise<void> {
     return Promise.resolve()
+  }
+}
+
+/**
+ * Adds the one storage scope the override package cannot reach.
+ *
+ * **`APPLICATION_SHARED` is not in `DatabaseFactories`.** That interface accepts
+ * `APPLICATION`, `PROFILE` and `WORKSPACE` and nothing else, so a fourth scope —
+ * `StorageScope.APPLICATION_SHARED`, numerically `-2` — falls through to the base
+ * class's `createApplicationSharedStorage`, which is IndexedDB
+ * `vscode-web-state-db-global-shared`. On this surface's in-memory partition that
+ * database does not survive a quit.
+ *
+ * **It matters because that is where workspace trust lives.**
+ * `WorkspaceTrustManagementService` reads and writes `content.trust.model.key` at
+ * `StorageScope.APPLICATION_SHARED`, so every "yes, I trust this folder" was
+ * being written to a database destroyed on exit — which is why the prompt
+ * returned on every launch and every window opened in Restricted Mode, even
+ * after the other three scopes were made durable. An earlier comment in
+ * `workbench-storage.ts` claimed trust was already covered; it was not, and this
+ * is the change that makes the claim true.
+ *
+ * `getStorage` and `doInitialize` are `protected` on the base class, so this is
+ * an intended extension point rather than a reach-in — but it is still a
+ * dependency on a shape `@codingame` could move in a version bump, which is why
+ * it is one small subclass in one file rather than spread across the wiring.
+ */
+export class ChorusStorageService extends BrowserStorageService {
+  private sharedStorage: Storage | undefined
+
+  protected override getStorage(scope: StorageScope): IStorage | undefined {
+    if (scope === StorageScope.APPLICATION_SHARED) return this.sharedStorage
+    return super.getStorage(scope)
+  }
+
+  protected override async doInitialize(): Promise<void> {
+    /*
+     * Created and initialised alongside the base scopes rather than lazily. The
+     * trust service reads its key during startup, and a scope that initialises
+     * after that read answers "nothing stored" — which is exactly the bug being
+     * fixed, arriving by a different route.
+     */
+    this.sharedStorage = new Storage(new ChorusStorageDatabase('application-shared'))
+    await Promise.all([this.sharedStorage.init(), super.doInitialize()])
   }
 }

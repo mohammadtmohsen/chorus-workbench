@@ -137,7 +137,31 @@ export const WORKBENCH_USER_SETTINGS_WRITE_CHANNEL = 'workbench:userSettings:wri
  * live surface.
  */
 export const WORKBENCH_STORAGE_READ_CHANNEL = 'workbench:storage:read'
+/**
+ * A **delta**, never a whole map — and the difference is a data-loss bug.
+ *
+ * Every project surface is its own document with its own cache of the shared
+ * scopes. When the write carried a full map, surface A's write replaced the
+ * scope with A's view of it, silently deleting everything surface B had stored
+ * since A last read. Two projects open was enough; five made it constant, and
+ * the symptom was a GitLab account or a trust decision that saved correctly and
+ * vanished a moment later with nothing in any log.
+ *
+ * A surface can now only say what it changed. It has no way to express "delete
+ * everything I have not heard about", which is what a full map said by accident.
+ */
 export const WORKBENCH_STORAGE_WRITE_CHANNEL = 'workbench:storage:write'
+/**
+ * Main telling the *other* surfaces what one of them just changed.
+ *
+ * The delta above fixes destruction; this fixes staleness. Without it every
+ * surface still holds a cache that silently drifts from the file, and the editor
+ * would render decisions that are no longer true until it was relaunched. It is
+ * also what makes `IStorageDatabase.onDidChangeItemsExternal` honest — that
+ * event exists precisely to say "someone else changed this", and it was
+ * `Event.None` because, at the time, nothing could.
+ */
+export const WORKBENCH_STORAGE_CHANGED_CHANNEL = 'workbench:storage:changed'
 
 /**
  * An OAuth callback coming back into the app through its own URL scheme.
@@ -150,6 +174,23 @@ export const WORKBENCH_STORAGE_WRITE_CHANNEL = 'workbench:storage:write'
  * the person to a browser in the last few minutes.
  */
 export const WORKBENCH_URL_CHANNEL = 'workbench:url'
+
+/**
+ * Credentials, kept apart from `workbench:storage:*` on purpose.
+ *
+ * Same shape, different stakes. The storage channels carry which notifications
+ * you dismissed; these carry an `api`-scoped access token. Separate channels
+ * mean separate handlers, a separate file, and separate encryption — and mean a
+ * future change to one cannot widen the other by accident.
+ *
+ * Needed at all because `BrowserSecretStorageService` is constructed with
+ * `_useInMemoryStorage` hardcoded true, so secrets never reach `IStorageService`
+ * and every sign-in was lost on quit. The client supplies these as
+ * `options.secretStorageProvider`, which that same service prefers when present.
+ */
+export const WORKBENCH_SECRET_READ_CHANNEL = 'workbench:secret:read'
+export const WORKBENCH_SECRET_WRITE_CHANNEL = 'workbench:secret:write'
+export const WORKBENCH_SECRET_DELETE_CHANNEL = 'workbench:secret:delete'
 
 /**
  * What the editor is looking at — Phase 6 slice 6a.
@@ -541,8 +582,25 @@ export interface ChorusWorkbenchApi {
    * the state a fresh profile has anyway.
    */
   readonly readStorage: (scope: string) => Promise<string | null>
-  /** Replaces one storage scope's items. Other scopes in the file are untouched. */
-  readonly writeStorage: (scope: string, text: string) => Promise<void>
+  /**
+   * Applies a delta to one storage scope. **Never sends a whole map** — see
+   * `WORKBENCH_STORAGE_WRITE_CHANNEL` for the data loss that caused.
+   */
+  readonly applyStorageDelta: (
+    scope: string,
+    insert: Record<string, string>,
+    remove: readonly string[]
+  ) => Promise<void>
+  /**
+   * Learns what another surface changed in a scope this one also holds.
+   *
+   * Registered once for the life of the document, like the other push
+   * subscriptions: `ipcRenderer.on` accumulates listeners, and one per scope
+   * would deliver the second change twice.
+   */
+  readonly onStorageChanged: (
+    handler: (scope: string, insert: Record<string, string>, remove: readonly string[]) => void
+  ) => void
   /**
    * Receives an OAuth callback main has decided belongs to this surface.
    *
@@ -551,4 +609,15 @@ export interface ChorusWorkbenchApi {
    * deliver the second callback twice.
    */
   readonly onUrl: (handler: (url: string) => void) => void
+  /**
+   * One credential, decrypted, or `null` when absent or undecryptable.
+   *
+   * The two cases are deliberately indistinguishable to the caller: a secret
+   * written on another machine, or under a keychain since reset, means exactly
+   * what an absent one means — ask the person to sign in again.
+   */
+  readonly readSecret: (key: string) => Promise<string | null>
+  /** Stores one credential, encrypted. Rejects if no OS keychain is available. */
+  readonly writeSecret: (key: string, value: string) => Promise<void>
+  readonly deleteSecret: (key: string) => Promise<void>
 }

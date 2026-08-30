@@ -54,8 +54,13 @@ export const USER_SETTINGS_WRITE_CHANNEL = 'workbench:userSettings:write'
 /* The storage pair, under the same test and drifting the same silent way. */
 export const STORAGE_READ_CHANNEL = 'workbench:storage:read'
 export const STORAGE_WRITE_CHANNEL = 'workbench:storage:write'
+export const STORAGE_CHANGED_CHANNEL = 'workbench:storage:changed'
 /* The OAuth callback push, under the same test as every other name here. */
 export const URL_CHANNEL = 'workbench:url'
+/* Credentials. Separate from the storage pair because the stakes are. */
+export const SECRET_READ_CHANNEL = 'workbench:secret:read'
+export const SECRET_WRITE_CHANNEL = 'workbench:secret:write'
+export const SECRET_DELETE_CHANNEL = 'workbench:secret:delete'
 /* Phase 6 slice 6a, spelled out here for the same reason and under the same test. */
 export const CONTEXT_CHANNEL = 'workbench:context'
 export const SNAPSHOT_CHANNEL = 'workbench:snapshot'
@@ -179,8 +184,37 @@ const api: ChorusWorkbenchApi = {
     return typeof raw === 'string' ? raw : null
   },
 
-  writeStorage: async (scope: string, text: string) => {
-    await ipcRenderer.invoke(STORAGE_WRITE_CHANNEL, scope, text)
+  applyStorageDelta: async (
+    scope: string,
+    insert: Record<string, string>,
+    remove: readonly string[]
+  ) => {
+    await ipcRenderer.invoke(STORAGE_WRITE_CHANNEL, scope, insert, remove)
+  },
+
+  /*
+   * One listener for the life of the document. The payload is re-checked here
+   * because it crossed a process boundary, and a malformed frame is dropped
+   * rather than thrown: the alternative is taking down a workbench over another
+   * surface's bad write.
+   */
+  onStorageChanged: (
+    handler: (scope: string, insert: Record<string, string>, remove: readonly string[]) => void
+  ) => {
+    ipcRenderer.on(STORAGE_CHANGED_CHANNEL, (_event, scope, insert, remove) => {
+      if (typeof scope !== 'string') return
+      if (typeof insert !== 'object' || insert === null || Array.isArray(insert)) return
+      if (!Array.isArray(remove)) return
+      const inserted: Record<string, string> = {}
+      for (const [key, value] of Object.entries(insert as Record<string, unknown>)) {
+        if (typeof value === 'string') inserted[key] = value
+      }
+      handler(
+        scope,
+        inserted,
+        remove.filter((k): k is string => typeof k === 'string')
+      )
+    })
   },
 
   /*
@@ -189,6 +223,24 @@ const api: ChorusWorkbenchApi = {
    * passed on: the handler parses it as a URI, and `URI.parse(undefined)` fails
    * somewhere far less obvious than this line.
    */
+  /*
+   * Same narrowing as the reads above: anything that is not a string means "no
+   * secret", which is what an absent one means and what an undecryptable one
+   * means. All three lead the extension to the same correct place — ask again.
+   */
+  readSecret: async (key: string) => {
+    const raw: unknown = await ipcRenderer.invoke(SECRET_READ_CHANNEL, key)
+    return typeof raw === 'string' ? raw : null
+  },
+
+  writeSecret: async (key: string, value: string) => {
+    await ipcRenderer.invoke(SECRET_WRITE_CHANNEL, key, value)
+  },
+
+  deleteSecret: async (key: string) => {
+    await ipcRenderer.invoke(SECRET_DELETE_CHANNEL, key)
+  },
+
   onUrl: (handler: (url: string) => void) => {
     ipcRenderer.on(URL_CHANNEL, (_event, url: unknown) => {
       if (typeof url === 'string') handler(url)

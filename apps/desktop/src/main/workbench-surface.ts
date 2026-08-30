@@ -23,6 +23,10 @@ import {
   WORKBENCH_SNAPSHOT_RESULT_CHANNEL,
   WORKBENCH_EDIT_RESULT_CHANNEL,
   WorkbenchContext,
+  WORKBENCH_SECRET_DELETE_CHANNEL,
+  WORKBENCH_SECRET_READ_CHANNEL,
+  WORKBENCH_SECRET_WRITE_CHANNEL,
+  WORKBENCH_STORAGE_CHANGED_CHANNEL,
   WORKBENCH_STORAGE_READ_CHANNEL,
   WORKBENCH_STORAGE_WRITE_CHANNEL,
   WORKBENCH_URL_CHANNEL,
@@ -42,7 +46,12 @@ import {
   releaseWorkbenchRuntime,
   type WorkbenchRuntime,
 } from './workbench-host.js'
-import { readWorkbenchStorage, writeWorkbenchStorage } from './workbench-storage.js'
+import {
+  deleteWorkbenchSecret,
+  readWorkbenchSecret,
+  writeWorkbenchSecret,
+} from './workbench-secrets.js'
+import { applyWorkbenchStorageDelta, readWorkbenchStorage } from './workbench-storage.js'
 import { readWorkbenchUserSettings, writeWorkbenchUserSettings } from './workbench-user-settings.js'
 
 /**
@@ -1108,11 +1117,76 @@ export function registerWorkbenchHandlers(
     return readWorkbenchStorage(app.getPath('userData'), scope)
   })
 
-  ipcMain.handle(WORKBENCH_STORAGE_WRITE_CHANNEL, (event, scope: unknown, text: unknown) => {
+  ipcMain.handle(
+    WORKBENCH_STORAGE_WRITE_CHANNEL,
+    (event, scope: unknown, insert: unknown, remove: unknown) => {
+      if (!byContents.has(event.sender)) throw new Error('unknown workbench surface')
+      if (typeof scope !== 'string' || scope === '') throw new Error('Storage scope must be text')
+      if (typeof insert !== 'object' || insert === null || Array.isArray(insert)) {
+        throw new Error('Storage insert must be an object')
+      }
+      if (!Array.isArray(remove)) throw new Error('Storage remove must be an array')
+
+      const inserted: Record<string, string> = {}
+      for (const [key, value] of Object.entries(insert as Record<string, unknown>)) {
+        if (typeof value !== 'string') throw new Error('Storage values must be text')
+        inserted[key] = value
+      }
+      const removed = remove.filter((key): key is string => typeof key === 'string')
+
+      applyWorkbenchStorageDelta(app.getPath('userData'), scope, inserted, removed)
+
+      /*
+       * Then tell every *other* surface, because they hold their own cache of
+       * the shared scopes and would otherwise drift from the file until relaunch.
+       *
+       * Not the sender: it already applied this delta locally, and echoing it
+       * back would fire `onDidChangeItemsExternal` for a change that was not
+       * external — which is how a service concludes it has been raced and
+       * re-reads state it already has.
+       *
+       * Every other surface rather than only those on the same scope: main does
+       * not track which scopes a surface holds, and a surface that does not know
+       * the scope ignores it. Broadcasting a name is cheaper than maintaining a
+       * registry that can go stale.
+       */
+      for (const [id, surface] of byId) {
+        if (surface.view.webContents === event.sender) continue
+        if (surface.view.webContents.isDestroyed()) continue
+        void id
+        surface.view.webContents.send(WORKBENCH_STORAGE_CHANGED_CHANNEL, scope, inserted, removed)
+      }
+    }
+  )
+
+  /*
+   * Credentials, on the same authorisation as everything else here and with one
+   * extra property: **main never returns a secret it cannot decrypt, and never
+   * stores one it cannot encrypt.** Both degrade to "no secret", which is the
+   * state a fresh profile is in and which every caller already handles by asking
+   * the person to sign in.
+   *
+   * The key is a string from the surface, exactly as with storage scopes, and it
+   * is a property name in a JSON object rather than a path — the same mitigation,
+   * for the same reason, in a file where the stakes are higher.
+   */
+  ipcMain.handle(WORKBENCH_SECRET_READ_CHANNEL, (event, key: unknown) => {
     if (!byContents.has(event.sender)) throw new Error('unknown workbench surface')
-    if (typeof scope !== 'string' || scope === '') throw new Error('Storage scope must be text')
-    if (typeof text !== 'string') throw new Error('Workbench storage must be text')
-    writeWorkbenchStorage(app.getPath('userData'), scope, text)
+    if (typeof key !== 'string' || key === '') throw new Error('Secret key must be text')
+    return readWorkbenchSecret(app.getPath('userData'), key)
+  })
+
+  ipcMain.handle(WORKBENCH_SECRET_WRITE_CHANNEL, (event, key: unknown, value: unknown) => {
+    if (!byContents.has(event.sender)) throw new Error('unknown workbench surface')
+    if (typeof key !== 'string' || key === '') throw new Error('Secret key must be text')
+    if (typeof value !== 'string') throw new Error('Secret must be text')
+    writeWorkbenchSecret(app.getPath('userData'), key, value)
+  })
+
+  ipcMain.handle(WORKBENCH_SECRET_DELETE_CHANNEL, (event, key: unknown) => {
+    if (!byContents.has(event.sender)) throw new Error('unknown workbench surface')
+    if (typeof key !== 'string' || key === '') throw new Error('Secret key must be text')
+    deleteWorkbenchSecret(app.getPath('userData'), key)
   })
 
   /*

@@ -49,10 +49,12 @@ import getDialogsServiceOverride from '@codingame/monaco-vscode-dialogs-service-
 import getTextmateServiceOverride from '@codingame/monaco-vscode-textmate-service-override'
 import getThemeServiceOverride from '@codingame/monaco-vscode-theme-service-override'
 import getLanguagesServiceOverride from '@codingame/monaco-vscode-languages-service-override'
-import getStorageServiceOverride, {
-  StorageScope,
-} from '@codingame/monaco-vscode-storage-service-override'
-import { ChorusStorageDatabase } from './storage.js'
+import { StorageScope } from '@codingame/monaco-vscode-storage-service-override'
+import { SyncDescriptor } from '@codingame/monaco-vscode-api/vscode/vs/platform/instantiation/common/descriptors'
+import { IStorageService } from '@codingame/monaco-vscode-api/vscode/vs/platform/storage/common/storage.service'
+import { IRemoteAuthorityResolverService } from '@codingame/monaco-vscode-api/vscode/vs/platform/remote/common/remoteAuthorityResolver.service'
+import { ChorusStorageDatabase, ChorusStorageService } from './storage.js'
+import { ChorusRemoteAuthorityResolverService, workspaceIdFor } from './remote-authority.js'
 import getLifecycleServiceOverride from '@codingame/monaco-vscode-lifecycle-service-override'
 import getEnvironmentServiceOverride from '@codingame/monaco-vscode-environment-service-override'
 import getWorkspaceTrustOverride from '@codingame/monaco-vscode-workspace-trust-service-override'
@@ -388,15 +390,45 @@ export function prepareWorkbench(connection: WorkbenchConnection): WorkbenchSetu
      * The keys are namespaced by scope so a workspace whose id collides with a
      * profile's cannot share a slot in the file.
      */
-    ...getStorageServiceOverride({
-      databaseFactories: {
-        [StorageScope.APPLICATION]: () => new ChorusStorageDatabase('application'),
-        [StorageScope.PROFILE]: (_accessor, profile) =>
-          new ChorusStorageDatabase(`profile:${profile.id}`),
-        [StorageScope.WORKSPACE]: (_accessor, workspace) =>
-          new ChorusStorageDatabase(`workspace:${workspace.id}`),
-      },
-    }),
+    /*
+     * **Registered directly rather than through `getStorageServiceOverride`**,
+     * and the package's own call is deliberately absent.
+     *
+     * That helper does exactly one thing — register
+     * `InjectedBrowserStorageService` for `IStorageService` with these two
+     * arguments — so calling it as well would only race this entry for the same
+     * key, decided by spread order rather than by intent. `ChorusStorageService`
+     * is that class plus the `APPLICATION_SHARED` scope, which `DatabaseFactories`
+     * has no slot for and which is where workspace trust is stored.
+     *
+     * The `true` is delayed instantiation, matching the helper: nothing should
+     * pay for storage before something asks for it.
+     */
+    [IStorageService.toString()]: new SyncDescriptor(
+      ChorusStorageService,
+      [
+        undefined,
+        {
+          [StorageScope.APPLICATION]: () => new ChorusStorageDatabase('application'),
+          [StorageScope.PROFILE]: (_accessor: unknown, profile: { id: string }) =>
+            new ChorusStorageDatabase(`profile:${profile.id}`),
+          [StorageScope.WORKSPACE]: (_accessor: unknown, workspace: { id: string }) =>
+            new ChorusStorageDatabase(`workspace:${workspace.id}`),
+        },
+      ],
+      true
+    ),
+    /*
+     * And the resolver that gives a project a stable identity — see
+     * `remote-authority.ts`. Without it the trust record persists correctly and
+     * still never matches, because the URI it is keyed by carries a port that
+     * changes on every launch. Both halves or neither.
+     */
+    [IRemoteAuthorityResolverService.toString()]: new SyncDescriptor(
+      ChorusRemoteAuthorityResolverService,
+      [],
+      true
+    ),
     ...getSecretStorageServiceOverride(),
     ...getLifecycleServiceOverride(),
     ...getEnvironmentServiceOverride(),
@@ -439,9 +471,61 @@ export function prepareWorkbench(connection: WorkbenchConnection): WorkbenchSetu
      */
     enableWorkspaceTrust: connection.workspaceTrust !== 'waived',
     developmentOptions: { logLevel: LogLevel.Info },
+    /*
+     * Where a credential goes, and why one is needed at all.
+     *
+     * `BrowserSecretStorageService` is constructed `super(true, …)` —
+     * `_useInMemoryStorage` hardcoded — so `BaseSecretStorageService` always
+     * takes its `new InMemoryStorageService()` branch and secrets never reach
+     * `IStorageService`. Making storage durable did not and could not help: a
+     * GitLab token was gone on every quit, and signing in was a thing you did
+     * once per launch. This is the escape hatch the same constructor checks for,
+     * and `get`/`set`/`delete` prefer it whenever it is present.
+     *
+     * `type: 'persisted'` is a claim to the workbench that these outlive the
+     * session, which is only true because main encrypts them through the OS
+     * keychain — see `workbench-secrets.ts`. Claiming it while storing plaintext
+     * would be the same sentence with a much worse meaning.
+     */
+    secretStorageProvider: {
+      type: 'persisted' as const,
+      /*
+       * `null` becomes `undefined` here and nowhere else. The provider's
+       * contract wants `undefined` for "no secret", while `null` is what
+       * survives an IPC round trip — JSON has no `undefined`, so a preload that
+       * tried to return one would hand back `null` regardless. Converting at
+       * this boundary keeps the wire honest and the service happy.
+       */
+      get: async (key: string) => (await window.chorusWorkbench.readSecret(key)) ?? undefined,
+      set: (key: string, value: string) => window.chorusWorkbench.writeSecret(key, value),
+      delete: (key: string) => window.chorusWorkbench.deleteSecret(key),
+    },
     workspaceProvider: {
+      /*
+       * **Inert, and kept only because removing it is a separate decision.**
+       * Nothing in the shipped workbench reads `trusted`: it is an
+       * embedder-to-embedder field that upstream VS Code Web round-trips through
+       * `open`'s payload. Trust is decided by `IWorkspaceTrustManagementService`
+       * from the stored URI list, which is why this line sat here looking
+       * load-bearing while every window opened in Restricted Mode.
+       */
       trusted: true,
-      workspace: { folderUri },
+      /*
+       * **An explicit id, so a project's workspace storage survives a relaunch.**
+       *
+       * Without one, `getSingleFolderWorkspaceIdentifier` falls back to
+       * `hash(folderUri.toString())` — and that URI carries the REH's ephemeral
+       * port, so every launch minted a brand-new workspace identity. Measured:
+       * all 35 `workspace:*` scopes in the storage file resolved to seven
+       * launches of five projects, each launch abandoning the previous set.
+       * Everything scoped to a workspace was affected — view state, "don't show
+       * again", the trust startup prompt.
+       *
+       * The canonical root is the stable fact about a project: it is what the
+       * registry keys on, it survives a relaunch, and unlike the project id it
+       * is the same thing the folder URI already names.
+       */
+      workspace: { folderUri, id: workspaceIdFor(root) },
       // A surface may not open windows. `lockDownNavigation` on this view's own
       // `webContents` denies it anyway; refusing here means the workbench never
       // renders an affordance that cannot work.

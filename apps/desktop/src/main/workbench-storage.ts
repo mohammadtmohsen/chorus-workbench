@@ -121,27 +121,45 @@ export function readWorkbenchStorage(userData: string, scope: string): string | 
  * nothing, and here that would silently forget every scope at once rather than
  * the one being written.
  */
-export function writeWorkbenchStorage(userData: string, scope: string, text: string): void {
-  if (text.length > STORAGE_SCOPE_MAX_BYTES) {
-    throw new Error(`Workbench storage for "${scope}" is too large (${String(text.length)})`)
-  }
-  const parsed: unknown = JSON.parse(text)
-  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
-    throw new Error('Workbench storage must be an object of strings')
-  }
-  const items: Record<string, string> = {}
-  for (const [key, value] of Object.entries(parsed)) {
-    if (typeof value !== 'string') {
-      throw new Error('Workbench storage must be an object of strings')
-    }
-    items[key] = value
+export function applyWorkbenchStorageDelta(
+  userData: string,
+  scope: string,
+  insert: Record<string, string>,
+  remove: readonly string[]
+): void {
+  /*
+   * **A delta, because a whole map is a race with a knife in it.**
+   *
+   * This took a full map and replaced the scope with it. That is correct for one
+   * writer and catastrophic for several: every project surface is its own
+   * document with its own cache of the *shared* scopes, so surface A writing its
+   * map erased whatever surface B had written since A last read. With five
+   * projects open, `application` and `application-shared` were being clobbered
+   * constantly — which is how a GitLab account and a trust decision could be
+   * saved correctly and be gone a moment later, with nothing in any log.
+   *
+   * Main holds the authoritative copy and applies deltas onto it. A surface can
+   * now only say what *it* changed, so it cannot express "and delete everything
+   * I have not heard about", which is what the old shape said accidentally on
+   * every write.
+   */
+  const merged = readAll(userData)
+  const items = { ...merged[scope] }
+  for (const [key, value] of Object.entries(insert)) items[key] = value
+  for (const key of remove) {
+    // eslint-disable-next-line @typescript-eslint/no-dynamic-delete
+    delete items[key]
   }
 
+  const size = JSON.stringify(items).length
+  if (size > STORAGE_SCOPE_MAX_BYTES) {
+    throw new Error(`Workbench storage for "${scope}" is too large (${String(size)})`)
+  }
+
+  merged[scope] = items
   const path = workbenchStoragePath(userData)
-  const all = readAll(userData)
-  all[scope] = items
   mkdirSync(dirname(path), { recursive: true })
   const staging = `${path}.tmp`
-  writeFileSync(staging, JSON.stringify(all), 'utf8')
+  writeFileSync(staging, JSON.stringify(merged), 'utf8')
   renameSync(staging, path)
 }
