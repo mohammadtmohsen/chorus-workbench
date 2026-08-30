@@ -1,4 +1,6 @@
-import { initialize } from '@codingame/monaco-vscode-api'
+import { getService, initialize } from '@codingame/monaco-vscode-api'
+import { IURLService } from '@codingame/monaco-vscode-api/vscode/vs/platform/url/common/url.service'
+import { URI } from '@codingame/monaco-vscode-api/vscode/vs/base/common/uri'
 import { prepareWorkbench } from './services.js'
 import { reportEditorContext } from './context.js'
 import { serveWorkbenchEdits, serveWorkbenchSnapshot } from './edit.js'
@@ -76,6 +78,20 @@ async function main(): Promise<void> {
    * reaches the same failure element as everything else through `main`'s catch.
    */
   await persistUserSettings((text) => window.chorusWorkbench.writeUserSettings(text))
+
+  /*
+   * OAuth callbacks, handed in by main.
+   *
+   * After `initialize` for the same reason as everything else here — the service
+   * does not exist before it. `IURLService.open` is what VS Code's own protocol
+   * handler calls, so an extension that registered a URI handler receives this
+   * exactly as it would in a desktop VS Code; nothing here knows or cares which
+   * extension is waiting.
+   */
+  const urls = await getService(IURLService)
+  window.chorusWorkbench.onUrl((url) => {
+    void urls.open(URI.parse(url))
+  })
 
   /*
    * C-063's disclosure, and the condition on which the shared scope was accepted.

@@ -10,6 +10,22 @@ appId: dev.chorus.desktop
 productName: Chorus
 copyright: Chorus
 
+# The scheme an OAuth callback comes home on.
+#
+# An extension builds its redirect URI from `vscode.env.uriScheme`, which is
+# `productConfiguration.urlProtocol` in `services.ts` — `chorus`. This is what
+# tells the OS that `chorus://` belongs to this bundle; without it the browser
+# finishes authenticating and the return trip has nowhere to go, which is exactly
+# how GitLab sign-in hung forever. `index.ts` handles the delivery.
+#
+# Registration happens at *install* time on macOS, from the bundle's
+# `CFBundleURLTypes`, so a build that has never been installed will not answer a
+# `chorus://` URL no matter what this file says.
+protocols:
+  - name: Chorus
+    schemes:
+      - chorus
+
 directories:
   output: release
   buildResources: build

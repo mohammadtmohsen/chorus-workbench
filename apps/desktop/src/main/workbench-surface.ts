@@ -25,6 +25,7 @@ import {
   WorkbenchContext,
   WORKBENCH_STORAGE_READ_CHANNEL,
   WORKBENCH_STORAGE_WRITE_CHANNEL,
+  WORKBENCH_URL_CHANNEL,
   WORKBENCH_USER_SETTINGS_READ_CHANNEL,
   WORKBENCH_USER_SETTINGS_WRITE_CHANNEL,
   type WorkbenchConnection,
@@ -678,6 +679,60 @@ function watchOwner(owner: WebContents): Set<string> {
   return owned
 }
 
+/**
+ * Which surface sent someone to a browser, and when.
+ *
+ * **The callback cannot address itself, so this is the address.** An OAuth
+ * return arrives as `chorus://<extension>/…` with no project in it, and one REH
+ * serves up to five surfaces. Delivering to all of them would hand one project's
+ * access token to every open workbench, which is a credential leak dressed up as
+ * a convenience; delivering to the focused one guesses, and the person is by
+ * definition in a browser at that moment, so "focused" means whatever they
+ * clicked on the way back.
+ *
+ * The surface that opened the browser is the only claimant with evidence behind
+ * it, and `lockDownNavigation`'s external hook is where that evidence exists.
+ */
+let awaitingCallback: { viewId: string; at: number } | null = null
+
+/**
+ * How long an opened browser stays a plausible origin for a callback.
+ *
+ * Long enough for a real login — a password manager, a 2FA prompt, an account
+ * chooser, a consent screen — and short enough that a `chorus://` URL arriving
+ * an hour later, from a link in a mail or from another application, is not
+ * silently handed to whichever project happened to open a browser that morning.
+ */
+const CALLBACK_ORIGIN_TTL_MS = 5 * 60 * 1000
+
+/**
+ * Hands an incoming `chorus://` URL to the surface that started the flow.
+ *
+ * **Dropped rather than guessed when there is no claimant.** A callback with no
+ * recent external open is either stale or was not started here, and there is no
+ * safe default: every fallback available — the focused surface, the first, all
+ * of them — routes somebody's credential to a project that did not ask for it.
+ * Doing nothing leaves the extension waiting, which is the visible failure the
+ * person can act on, rather than the invisible one they cannot.
+ */
+export function deliverUrl(url: string): boolean {
+  const pending = awaitingCallback
+  if (pending === null || Date.now() - pending.at > CALLBACK_ORIGIN_TTL_MS) return false
+  const surface = byId.get(pending.viewId)
+  if (surface === undefined || surface.view.webContents.isDestroyed()) {
+    awaitingCallback = null
+    return false
+  }
+  /*
+   * Consumed on delivery. A callback is answered once; leaving the claim standing
+   * would let a second, unrelated `chorus://` URL inside the same five minutes
+   * ride in on the first one's evidence.
+   */
+  awaitingCallback = null
+  surface.view.webContents.send(WORKBENCH_URL_CHANNEL, url)
+  return true
+}
+
 /** Every surface this shell owns, torn down without asking it — and every grant. */
 function releaseOwner(owner: WebContents): void {
   for (const id of [...(byOwner.get(owner) ?? [])]) destroySurface(id)
@@ -775,7 +830,9 @@ export async function openSurface(
   // the window's is a different object. One entry, exactly — this document may
   // reload itself and may go nowhere else, least of all onto the shell's own
   // `index.html`, which a `file://` prefix rule admitted.
-  lockDownNavigation(view.webContents, [entry.href])
+  lockDownNavigation(view.webContents, [entry.href], () => {
+    awaitingCallback = { viewId: id, at: Date.now() }
+  })
 
   /*
    * Zero-sized until the shell reports where its placeholder is. A view added at

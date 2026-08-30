@@ -140,6 +140,18 @@ export const WORKBENCH_STORAGE_READ_CHANNEL = 'workbench:storage:read'
 export const WORKBENCH_STORAGE_WRITE_CHANNEL = 'workbench:storage:write'
 
 /**
+ * An OAuth callback coming back into the app through its own URL scheme.
+ *
+ * Push, not request: the surface never asks for this, the OS delivers it to main
+ * and main decides which surface it belongs to. That decision is the whole of
+ * the security here — see `awaitingCallback` in `workbench-surface.ts`. A
+ * surface cannot ask for a callback and cannot ask which callbacks exist; it is
+ * told about exactly one, exactly once, and only if it is the surface that sent
+ * the person to a browser in the last few minutes.
+ */
+export const WORKBENCH_URL_CHANNEL = 'workbench:url'
+
+/**
  * What the editor is looking at — Phase 6 slice 6a.
  *
  * **The surface does not say which project this is**, and that is the same rule
@@ -531,4 +543,12 @@ export interface ChorusWorkbenchApi {
   readonly readStorage: (scope: string) => Promise<string | null>
   /** Replaces one storage scope's items. Other scopes in the file are untouched. */
   readonly writeStorage: (scope: string, text: string) => Promise<void>
+  /**
+   * Receives an OAuth callback main has decided belongs to this surface.
+   *
+   * Registered once for the life of the document, like `onEditRequest`:
+   * `ipcRenderer.on` accumulates listeners, so a subscription per flow would
+   * deliver the second callback twice.
+   */
+  readonly onUrl: (handler: (url: string) => void) => void
 }

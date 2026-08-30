@@ -569,6 +569,17 @@ export function prepareWorkbench(connection: WorkbenchConnection): WorkbenchSetu
       nameShort: 'Chorus',
       nameLong: 'Chorus Workbench',
       /*
+       * What `vscode.env.uriScheme` becomes, and therefore the scheme an
+       * extension builds its OAuth callback out of.
+       *
+       * Without it the GitLab extension sent a person to a browser, authenticated
+       * fine, and had the return trip land on a scheme nothing had declared — the
+       * flow simply never came back and the extension waited forever. Declaring
+       * it here is only one of three halves: `electron-builder.yml` registers the
+       * scheme with the OS and `index.ts` handles `open-url`. All three or none.
+       */
+      urlProtocol: 'chorus',
+      /*
        * Open VSX, and it is a licence decision before it is a product one.
        *
        * The Microsoft Marketplace's terms permit its use only from Microsoft's

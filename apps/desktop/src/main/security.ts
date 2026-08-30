@@ -375,7 +375,18 @@ function entryKey(url: string): string | null {
  * simply absent, which is the dead-control failure the comment further down
  * already records once.
  */
-export function lockDownNavigation(contents: WebContents, allowedEntries: readonly string[]): void {
+export function lockDownNavigation(
+  contents: WebContents,
+  allowedEntries: readonly string[],
+  /**
+   * Called when this document sends a URL to the OS browser.
+   *
+   * Optional because the shell window uses this too and has no callback to
+   * route: only a workbench surface can be the origin of a flow that comes back
+   * through the app's URL scheme.
+   */
+  onExternal?: (url: string) => void
+): void {
   const allowed = new Set<string>()
   for (const entry of allowedEntries) {
     const key = entryKey(entry)
@@ -407,7 +418,21 @@ export function lockDownNavigation(contents: WebContents, allowedEntries: readon
    * the OS browser and denies the window, which is unchanged.
    */
   contents.setWindowOpenHandler(({ url }) => {
-    if (isSafeHref(url)) void shell.openExternal(url)
+    if (isSafeHref(url)) {
+      void shell.openExternal(url)
+      /*
+       * Reported, not merely done — this is the only moment main can know *which*
+       * surface sent a person to a browser.
+       *
+       * An OAuth callback comes back as a `chorus://` URL with no project in it,
+       * and one REH serves up to five surfaces, so "who was this for?" has no
+       * answer in the callback itself. Answering it by delivering to every
+       * surface would hand one project's token to all of them. The surface that
+       * opened the browser is the only honest claimant, and this is where that
+       * fact exists.
+       */
+      onExternal?.(url)
+    }
     return { action: 'deny' }
   })
 

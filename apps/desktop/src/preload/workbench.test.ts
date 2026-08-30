@@ -78,7 +78,7 @@ describe('the workbench preload', () => {
     expect(EDIT_RESULT_CHANNEL).toBe(WORKBENCH_EDIT_RESULT_CHANNEL)
   })
 
-  it('exposes exactly eight methods, and no ninth', () => {
+  it('exposes exactly nine methods, and no tenth', () => {
     // The list, not the count: a method named here is a capability a document
     // running extension code is handed, so which ones they are is the assertion.
     expect(Object.keys(exposed ?? {})).toEqual([
@@ -98,6 +98,14 @@ describe('the workbench preload', () => {
        */
       'readStorage',
       'writeStorage',
+      /*
+       * An OAuth callback, pushed in by main. It cannot be asked for and cannot
+       * be enumerated: a surface is told about exactly one URL, exactly once, and
+       * only when main has evidence — a browser this surface opened in the last
+       * few minutes — that the callback is its own. That evidence lives in
+       * `awaitingCallback`, not here.
+       */
+      'onUrl',
       /*
        * Phase 6 slice 6a. It reports and cannot ask: no reply, no path — the
        * value is already project-relative — and no way to name a project, since

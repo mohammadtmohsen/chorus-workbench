@@ -54,6 +54,8 @@ export const USER_SETTINGS_WRITE_CHANNEL = 'workbench:userSettings:write'
 /* The storage pair, under the same test and drifting the same silent way. */
 export const STORAGE_READ_CHANNEL = 'workbench:storage:read'
 export const STORAGE_WRITE_CHANNEL = 'workbench:storage:write'
+/* The OAuth callback push, under the same test as every other name here. */
+export const URL_CHANNEL = 'workbench:url'
 /* Phase 6 slice 6a, spelled out here for the same reason and under the same test. */
 export const CONTEXT_CHANNEL = 'workbench:context'
 export const SNAPSHOT_CHANNEL = 'workbench:snapshot'
@@ -179,6 +181,18 @@ const api: ChorusWorkbenchApi = {
 
   writeStorage: async (scope: string, text: string) => {
     await ipcRenderer.invoke(STORAGE_WRITE_CHANNEL, scope, text)
+  },
+
+  /*
+   * One listener for the life of the document, and the payload is checked here
+   * because it arrived from outside it. A non-string is dropped rather than
+   * passed on: the handler parses it as a URI, and `URI.parse(undefined)` fails
+   * somewhere far less obvious than this line.
+   */
+  onUrl: (handler: (url: string) => void) => {
+    ipcRenderer.on(URL_CHANNEL, (_event, url: unknown) => {
+      if (typeof url === 'string') handler(url)
+    })
   },
 
   /*

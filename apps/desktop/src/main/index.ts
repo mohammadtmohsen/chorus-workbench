@@ -27,7 +27,7 @@ import { reapOrphanedAgents } from './reap.js'
 import { ChorusRuntime } from './runtime.js'
 import { applyContentSecurityPolicy, lockDownNavigation } from './security.js'
 import { reapedOrphanedServers, setWorkbenchHostLog, stopWorkbenchHost } from './workbench-host.js'
-import { closeAllSurfaces, registerWorkbenchHandlers } from './workbench-surface.js'
+import { closeAllSurfaces, deliverUrl, registerWorkbenchHandlers } from './workbench-surface.js'
 import { adoptShellPath } from './which.js'
 
 const devServerUrl = process.env['ELECTRON_RENDERER_URL']
@@ -365,6 +365,40 @@ if (dataDir !== null) {
    */
   app.setPath('sessionData', dataDir)
 }
+
+/*
+ * The other two thirds of the OAuth return trip.
+ *
+ * `electron-builder.yml` puts `chorus://` in the bundle so the OS knows who owns
+ * the scheme, `services.ts` sets `urlProtocol` so an extension builds its
+ * redirect out of it, and this claims the scheme at runtime and receives the
+ * result. All three or none: any one missing and a person authenticates in a
+ * browser and comes back to an extension still waiting, which is what GitLab
+ * sign-in did.
+ *
+ * `setAsDefaultProtocolClient` matters most **unpackaged** — a `pnpm dev` build
+ * has no `CFBundleURLTypes` to register from, so without this the flow could only
+ * ever be tested from an installed app.
+ *
+ * `preventDefault` because the default is to do nothing visible: without it the
+ * URL is dropped and the failure looks identical to having no handler at all.
+ */
+app.setAsDefaultProtocolClient('chorus')
+
+app.on('open-url', (event, url) => {
+  event.preventDefault()
+  /*
+   * Main does not parse it and does not decide what it means. Routing is
+   * `deliverUrl`'s question — which surface, if any, has a claim on this — and
+   * the URL's contents are the waiting extension's business, reached through
+   * `IURLService` exactly as they would be in a desktop VS Code.
+   *
+   * A URL nobody claims is dropped, deliberately: see `deliverUrl`. There is no
+   * safe fallback surface, because every one of them routes a credential to a
+   * project that did not ask for it.
+   */
+  deliverUrl(url)
+})
 
 app.on('window-all-closed', () => {
   // Chorus supervises agent child processes; on macOS the app staying resident
