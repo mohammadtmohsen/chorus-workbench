@@ -848,17 +848,22 @@ body {
 }
 
 /*
- * A long message, held to a quarter of the view.
+ * Your own message, held to a single line.
  *
- * A fraction rather than a line count: what makes a message too tall is how
- * much of the view it takes, and a line count would mean something different on
- * every window. The fade says the text is cut rather than finished — without it
- * a clamp reads as a message that happens to end mid-sentence.
+ * It was a fraction of the pane's height, on the argument that what makes a
+ * message too tall is how much of the *view* it takes. That holds for something
+ * you are reading and not for something you wrote: your own message is a label
+ * for the answer beneath it, so the space it earns is the space needed to
+ * recognise it — one line — and everything past that is the transcript spending
+ * room on the one thing in it you already know.
  *
- * `--clamp-max` is measured in `Entry.tsx` against the *pane's* scroller, not
- * the window: with four conversations tiled, a fifth of the window is most of
- * the pane the message is in. The `20vh` here is only the fallback for the
- * frame before that measurement lands.
+ * The fade still says the text is cut rather than finished; at one line it sits
+ * over that line rather than below several, which is why it stays a fade and did
+ * not become an ellipsis.
+ *
+ * `--clamp-max` is measured in `Entry.tsx` from the element's own computed
+ * `line-height`, so it follows the type scale instead of guessing at it. The
+ * `20vh` here is only the fallback for the frame before that measurement lands.
  */
 .clamp {
   position: relative;

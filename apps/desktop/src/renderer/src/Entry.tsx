@@ -400,9 +400,26 @@ function Clamped(props: { children: React.ReactNode }): React.JSX.Element {
      * place and this only supplies the number.
      */
     const measure = (): void => {
-      const scroller = element.closest('.score')
-      const within = scroller === null ? window.innerHeight : scroller.clientHeight
-      const limit = Math.round(within * LIMIT)
+      /*
+       * One line, measured from the element's own type rather than assumed.
+       *
+       * This was a fraction of the pane's height, on the reasoning that what
+       * makes a message too tall is how much of the *view* it takes. That is
+       * true of a message you are reading and wrong for one you wrote: your own
+       * message is a label for the answer under it, and a quarter of the pane
+       * spent restating what you just typed is a quarter of the pane spent on
+       * the one thing in the transcript you already know.
+       *
+       * `lineHeight` computes to `normal` when nothing sets it, which parses as
+       * `NaN` — hence the fallback rather than a bare `parseFloat`. Getting that
+       * wrong would set a limit of `NaN` px, which clamps nothing at all and
+       * would look like the feature simply not working.
+       */
+      const styles = getComputedStyle(element)
+      const line = Number.parseFloat(styles.lineHeight)
+      const limit = Number.isFinite(line)
+        ? Math.ceil(line)
+        : Math.ceil(Number.parseFloat(styles.fontSize) * 1.5)
       box.style.setProperty('--clamp-max', `${String(limit)}px`)
       setTall(element.scrollHeight > limit + 1)
     }
@@ -439,23 +456,6 @@ function Clamped(props: { children: React.ReactNode }): React.JSX.Element {
     </div>
   )
 }
-
-/**
- * A fifth of the pane: enough to recognise, not enough to bury.
- *
- * **A fifth of the *pane*, not of the window**, and that is the whole of the
- * 2026-08-19 change. It was measured against `window.innerHeight`, which is the
- * same number whether one conversation fills the screen or four are tiled in
- * it — so in a split workspace a "quarter of the view" was most of the pane the
- * message was actually in. Reported against a pasted editor selection that took
- * around half of its own pane.
- *
- * Four panes is the case that decides the fraction, not the one-pane case: a
- * quarter of a quarter-height pane is a couple of lines, but so is anything
- * else, and a message you cannot recognise is worth no more room than one you
- * cannot get past.
- */
-const LIMIT = 0.2
 
 /**
  * How much was dropped across a folded run of notices.
