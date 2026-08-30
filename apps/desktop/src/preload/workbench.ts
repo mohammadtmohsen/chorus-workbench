@@ -51,6 +51,9 @@ export const CONNECTION_CHANNEL = 'workbench:connection'
  */
 export const USER_SETTINGS_READ_CHANNEL = 'workbench:userSettings:read'
 export const USER_SETTINGS_WRITE_CHANNEL = 'workbench:userSettings:write'
+/* The storage pair, under the same test and drifting the same silent way. */
+export const STORAGE_READ_CHANNEL = 'workbench:storage:read'
+export const STORAGE_WRITE_CHANNEL = 'workbench:storage:write'
 /* Phase 6 slice 6a, spelled out here for the same reason and under the same test. */
 export const CONTEXT_CHANNEL = 'workbench:context'
 export const SNAPSHOT_CHANNEL = 'workbench:snapshot'
@@ -161,6 +164,21 @@ const api: ChorusWorkbenchApi = {
 
   writeUserSettings: async (text: string) => {
     await ipcRenderer.invoke(USER_SETTINGS_WRITE_CHANNEL, text)
+  },
+
+  /*
+   * Same narrowing as `readUserSettings` above, and the same reason: anything
+   * that is not a string reads as "this scope has stored nothing", which the
+   * storage service starts from anyway. A malformed reply must degrade to an
+   * empty database rather than to a database of whatever arrived.
+   */
+  readStorage: async (scope: string) => {
+    const raw: unknown = await ipcRenderer.invoke(STORAGE_READ_CHANNEL, scope)
+    return typeof raw === 'string' ? raw : null
+  },
+
+  writeStorage: async (scope: string, text: string) => {
+    await ipcRenderer.invoke(STORAGE_WRITE_CHANNEL, scope, text)
   },
 
   /*

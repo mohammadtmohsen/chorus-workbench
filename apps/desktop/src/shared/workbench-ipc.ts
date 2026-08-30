@@ -114,6 +114,32 @@ export const WORKBENCH_USER_SETTINGS_READ_CHANNEL = 'workbench:userSettings:read
 export const WORKBENCH_USER_SETTINGS_WRITE_CHANNEL = 'workbench:userSettings:write'
 
 /**
+ * What the workbench *remembers*, as opposed to what it is configured with.
+ *
+ * The same trade as the settings pair above and for the same reason — the
+ * partition is in-memory, so the storage service starts empty every launch — but
+ * a separate pair of channels because it is a different kind of state. Settings
+ * are one document a person edits; this is a key-value store per scope that the
+ * editor and its extensions write to constantly.
+ *
+ * **A scope key crosses, and it is never a path.** Unlike the settings channels,
+ * this one has to carry an argument: the storage service keeps three scopes and
+ * a workspace scope per folder, so main cannot derive which one is meant. The
+ * key is used only as a property name inside a single JSON file — see
+ * `workbench-storage.ts` — so a surface running third-party extension code
+ * cannot turn it into a filename. That is the whole of why one file was chosen
+ * over a file per scope.
+ *
+ * **This is where a workspace-trust decision is remembered.** Persisting it is
+ * the point — being asked on every launch is how a person is trained to click
+ * through a security prompt — but it also means this file records "this folder
+ * may run code", which is why the write handler refuses any sender that is not a
+ * live surface.
+ */
+export const WORKBENCH_STORAGE_READ_CHANNEL = 'workbench:storage:read'
+export const WORKBENCH_STORAGE_WRITE_CHANNEL = 'workbench:storage:write'
+
+/**
  * What the editor is looking at — Phase 6 slice 6a.
  *
  * **The surface does not say which project this is**, and that is the same rule
@@ -357,7 +383,30 @@ export const WORKBENCH_SHELL_CONTRACT = {
      * a sibling. The **Editor switch** is the opposite: it turns off one
      * project's editor and must not touch the three beside it.
      */
-    request: z.object({ visible: z.boolean(), viewId: z.string().min(1).optional() }).strict(),
+    /*
+     * `heartbeat` says "the overlay I told you about is still up".
+     *
+     * The shell's overlay count is a module-level integer incremented by an
+     * effect and decremented by its cleanup, and a cleanup that never runs — a
+     * `pointerleave` the browser skips when the pointer leaves fast or the window
+     * loses focus — hides every editor in the window **permanently**, with
+     * nothing in the system able to recover. Observed: about a minute after
+     * launch the editor region went black and stayed black until an unrelated
+     * dialog happened to run a clean cycle.
+     *
+     * So a hide now expires unless it is renewed, which moves the guarantee off
+     * the most careless caller and onto a deadline. A heartbeat skips the capture
+     * — the shell already has its stills and re-encoding a JPEG per surface every
+     * few seconds to say "still here" would make an idle hover cost more than the
+     * thing it is protecting.
+     */
+    request: z
+      .object({
+        visible: z.boolean(),
+        viewId: z.string().min(1).optional(),
+        heartbeat: z.boolean().optional(),
+      })
+      .strict(),
     /*
      * **A hide returns a still of what it hid**, one JPEG per surface, captured
      * while the view was up and in the same step that took it down. Hiding alone
@@ -474,4 +523,12 @@ export interface ChorusWorkbenchApi {
   readonly onEditRequest: (handler: (request: unknown) => Promise<WorkbenchEditResult>) => void
   /** Hands main the current text of the user's settings file, to store as-is. */
   readonly writeUserSettings: (text: string) => Promise<void>
+  /**
+   * One storage scope's items as JSON text, or `null` when nothing has been
+   * stored for it — which the storage service reads as an empty database, i.e.
+   * the state a fresh profile has anyway.
+   */
+  readonly readStorage: (scope: string) => Promise<string | null>
+  /** Replaces one storage scope's items. Other scopes in the file are untouched. */
+  readonly writeStorage: (scope: string, text: string) => Promise<void>
 }

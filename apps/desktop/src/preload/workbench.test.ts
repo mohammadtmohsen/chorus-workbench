@@ -1,6 +1,8 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import {
   WORKBENCH_CONNECTION_CHANNEL,
+  WORKBENCH_STORAGE_READ_CHANNEL,
+  WORKBENCH_STORAGE_WRITE_CHANNEL,
   WORKBENCH_USER_SETTINGS_READ_CHANNEL,
   WORKBENCH_USER_SETTINGS_WRITE_CHANNEL,
   WORKBENCH_CONTEXT_CHANNEL,
@@ -54,6 +56,8 @@ const {
   CONNECTION_CHANNEL,
   USER_SETTINGS_READ_CHANNEL,
   USER_SETTINGS_WRITE_CHANNEL,
+  STORAGE_READ_CHANNEL,
+  STORAGE_WRITE_CHANNEL,
   CONTEXT_CHANNEL,
   SNAPSHOT_CHANNEL,
   EDIT_CHANNEL,
@@ -66,19 +70,34 @@ describe('the workbench preload', () => {
     expect(CONNECTION_CHANNEL).toBe(WORKBENCH_CONNECTION_CHANNEL)
     expect(USER_SETTINGS_READ_CHANNEL).toBe(WORKBENCH_USER_SETTINGS_READ_CHANNEL)
     expect(USER_SETTINGS_WRITE_CHANNEL).toBe(WORKBENCH_USER_SETTINGS_WRITE_CHANNEL)
+    expect(STORAGE_READ_CHANNEL).toBe(WORKBENCH_STORAGE_READ_CHANNEL)
+    expect(STORAGE_WRITE_CHANNEL).toBe(WORKBENCH_STORAGE_WRITE_CHANNEL)
     expect(CONTEXT_CHANNEL).toBe(WORKBENCH_CONTEXT_CHANNEL)
     expect(SNAPSHOT_CHANNEL).toBe(WORKBENCH_SNAPSHOT_CHANNEL)
     expect(EDIT_CHANNEL).toBe(WORKBENCH_EDIT_CHANNEL)
     expect(EDIT_RESULT_CHANNEL).toBe(WORKBENCH_EDIT_RESULT_CHANNEL)
   })
 
-  it('exposes exactly six methods, and no seventh', () => {
+  it('exposes exactly eight methods, and no ninth', () => {
     // The list, not the count: a method named here is a capability a document
     // running extension code is handed, so which ones they are is the assertion.
     expect(Object.keys(exposed ?? {})).toEqual([
       'connection',
       'readUserSettings',
       'writeUserSettings',
+      /*
+       * The storage pair. Unlike the settings pair these carry an argument — the
+       * storage scope — because there are several scopes and main cannot derive
+       * which is meant. It is a property name inside one JSON file and never a
+       * filename, which is what keeps "a document running extension code can name
+       * something" from becoming path traversal.
+       *
+       * This is also where a workspace-trust answer is remembered, which is the
+       * point — a security prompt re-asked on every launch is one people learn to
+       * click through — and the reason the pair is worth this much scrutiny.
+       */
+      'readStorage',
+      'writeStorage',
       /*
        * Phase 6 slice 6a. It reports and cannot ask: no reply, no path — the
        * value is already project-relative — and no way to name a project, since

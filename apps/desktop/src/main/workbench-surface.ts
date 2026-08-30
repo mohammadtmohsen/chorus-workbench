@@ -23,6 +23,8 @@ import {
   WORKBENCH_SNAPSHOT_RESULT_CHANNEL,
   WORKBENCH_EDIT_RESULT_CHANNEL,
   WorkbenchContext,
+  WORKBENCH_STORAGE_READ_CHANNEL,
+  WORKBENCH_STORAGE_WRITE_CHANNEL,
   WORKBENCH_USER_SETTINGS_READ_CHANNEL,
   WORKBENCH_USER_SETTINGS_WRITE_CHANNEL,
   type WorkbenchConnection,
@@ -39,6 +41,7 @@ import {
   releaseWorkbenchRuntime,
   type WorkbenchRuntime,
 } from './workbench-host.js'
+import { readWorkbenchStorage, writeWorkbenchStorage } from './workbench-storage.js'
 import { readWorkbenchUserSettings, writeWorkbenchUserSettings } from './workbench-user-settings.js'
 
 /**
@@ -383,6 +386,59 @@ async function mintProjectGrant(
 const editorHidden = new Set<string>()
 const overlayHidden = new Set<WebContents>()
 
+/**
+ * An overlay hide expires unless the shell keeps saying it is still up.
+ *
+ * **Because the shell's own bookkeeping cannot be trusted, and must not have to
+ * be.** `overlay.ts` counts overlays in a module-level integer, incremented by an
+ * effect and decremented by its cleanup; one cleanup that never runs leaves every
+ * editor in the window hidden for the rest of the session, and there is no path
+ * back — no timeout, no reconcile, nothing a person can press. It was reached by
+ * hovering the rail's usage meter, whose restore hangs on a `pointerleave` that
+ * browsers routinely skip when the pointer leaves fast or the window blurs. The
+ * editor went black about a minute after launch and stayed black.
+ *
+ * Making the counter more careful was the alternative and it is not a fix: the
+ * count is only ever as reliable as its least careful caller, including callers
+ * nobody has written yet. A deadline is indifferent to who was careless.
+ *
+ * **Generous on purpose.** This is a safety net, not a scheduler: the cost of
+ * firing late is a few extra seconds of a frozen-looking editor under a dialog,
+ * and the cost of firing early is a dialog cut in half by a view that came back
+ * underneath it. Only the second is a bug, so the interval is far longer than any
+ * heartbeat gap a busy renderer could produce.
+ */
+const OVERLAY_HIDE_TTL_MS = 10_000
+const overlayDeadlines = new Map<WebContents, ReturnType<typeof setTimeout>>()
+
+function armOverlayExpiry(caller: WebContents): void {
+  clearOverlayExpiry(caller)
+  overlayDeadlines.set(
+    caller,
+    setTimeout(() => {
+      overlayDeadlines.delete(caller)
+      if (!overlayHidden.delete(caller)) return
+      /*
+       * Restores only what this caller hid. `editorHidden` is a different reason
+       * with a different lifetime — a project whose Editor switch is off must
+       * stay off through this, which is the same clobbering `applyVisibility`
+       * exists to prevent.
+       */
+      for (const id of byOwner.get(caller) ?? []) {
+        const surface = byId.get(id)
+        if (surface !== undefined) applyVisibility(surface)
+      }
+    }, OVERLAY_HIDE_TTL_MS)
+  )
+}
+
+function clearOverlayExpiry(caller: WebContents): void {
+  const timer = overlayDeadlines.get(caller)
+  if (timer === undefined) return
+  clearTimeout(timer)
+  overlayDeadlines.delete(caller)
+}
+
 function applyVisibility(surface: Surface): void {
   surface.view.setVisible(
     !editorHidden.has(surface.projectRoot) && !overlayHidden.has(surface.owner)
@@ -407,7 +463,8 @@ function applyVisibility(surface: Surface): void {
 async function setSurfacesVisible(
   caller: WebContents,
   visible: boolean,
-  only?: string
+  only?: string,
+  heartbeat = false
 ): Promise<{ viewId: string; dataUrl: string }[]> {
   const owned = [...(byOwner.get(caller) ?? [])]
 
@@ -430,8 +487,15 @@ async function setSurfacesVisible(
    */
   const mark = (): void => {
     if (only === undefined) {
-      if (visible) overlayHidden.delete(caller)
-      else overlayHidden.add(caller)
+      if (visible) {
+        overlayHidden.delete(caller)
+        clearOverlayExpiry(caller)
+      } else {
+        overlayHidden.add(caller)
+        // Every hide renews the deadline, so an overlay that keeps saying it is
+        // up keeps the views down and one that stops saying so releases them.
+        armOverlayExpiry(caller)
+      }
       return
     }
     if (root === null) return
@@ -466,6 +530,29 @@ async function setSurfacesVisible(
    * the dialog down with it would cost the whole interaction. A surface already
    * dark for the other reason is skipped — it would capture a blank.
    */
+  /*
+   * A heartbeat does the marking and nothing else.
+   *
+   * It must still reach `mark()` — that is the whole renewal, and returning above
+   * it would leave the deadline running down while the shell believed it was
+   * saying "still up", so the watchdog would fire *during* a legitimate dialog
+   * and restore the views underneath it. What it skips is the capture: the shell
+   * already holds its stills, and re-encoding a JPEG per surface every few
+   * seconds for a hover that is not moving is the one way this safety net could
+   * cost more than the bug it prevents.
+   *
+   * Visibility is re-applied anyway, so a surface created since the last hide is
+   * caught by the next beat rather than sitting bright under the overlay.
+   */
+  if (heartbeat) {
+    mark()
+    for (const id of owned) {
+      const surface = byId.get(id)
+      if (surface !== undefined) applyVisibility(surface)
+    }
+    return []
+  }
+
   const stills: { viewId: string; dataUrl: string }[] = []
   if (only === undefined) {
     for (const id of ids) {
@@ -596,6 +683,14 @@ function releaseOwner(owner: WebContents): void {
   for (const id of [...(byOwner.get(owner) ?? [])]) destroySurface(id)
   /* The overlay flag is keyed by the document, and this one is gone. */
   overlayHidden.delete(owner)
+  /*
+   * And its deadline with it. Deleting the flag without cancelling the timer
+   * leaves a `setTimeout` holding a destroyed `WebContents` that fires up to
+   * `OVERLAY_HIDE_TTL_MS` later and calls `applyVisibility` on surfaces this
+   * function has just torn down — `Object has been destroyed`, out of a timer,
+   * where there is no caller to blame and nothing to catch it.
+   */
+  clearOverlayExpiry(owner)
   /*
    * The grants go with them. A capability is an authorisation the person gave to
    * one document; the document that replaces it after a reload is not that
@@ -875,11 +970,15 @@ export function registerWorkbenchHandlers(
             return { ok: true }
           }
           case 'workbench:setVisible': {
-            const { visible, viewId } = parsedRequest.data as {
+            const { visible, viewId, heartbeat } = parsedRequest.data as {
               visible: boolean
               viewId?: string
+              heartbeat?: boolean
             }
-            return { ok: true, stills: await setSurfacesVisible(event.sender, visible, viewId) }
+            return {
+              ok: true,
+              stills: await setSurfacesVisible(event.sender, visible, viewId, heartbeat ?? false),
+            }
           }
         }
       })()
@@ -929,6 +1028,34 @@ export function registerWorkbenchHandlers(
     if (!byContents.has(event.sender)) throw new Error('unknown workbench surface')
     if (typeof text !== 'string') throw new Error('Workbench settings must be text')
     writeWorkbenchUserSettings(app.getPath('userData'), text)
+  })
+
+  /*
+   * The storage pair, on the same authorisation as the settings pair: the sender
+   * must be a live surface, and `byContents` is the one membership test.
+   *
+   * **These two do take an argument, and it is not a path.** The scope key names
+   * one of the storage service's scopes, and main cannot derive which is meant —
+   * unlike the settings file, there are several and one of them is per workspace.
+   * It is used only as a property name inside a single JSON file, so a surface
+   * running third-party extension code cannot steer it at the filesystem; the
+   * shape of that file is the mitigation, not a filter here.
+   *
+   * A non-string scope is refused rather than coerced: `String(x)` on an object
+   * would put `[object Object]` in the file as a real scope that a later honest
+   * caller could collide with.
+   */
+  ipcMain.handle(WORKBENCH_STORAGE_READ_CHANNEL, (event, scope: unknown) => {
+    if (!byContents.has(event.sender)) throw new Error('unknown workbench surface')
+    if (typeof scope !== 'string' || scope === '') throw new Error('Storage scope must be text')
+    return readWorkbenchStorage(app.getPath('userData'), scope)
+  })
+
+  ipcMain.handle(WORKBENCH_STORAGE_WRITE_CHANNEL, (event, scope: unknown, text: unknown) => {
+    if (!byContents.has(event.sender)) throw new Error('unknown workbench surface')
+    if (typeof scope !== 'string' || scope === '') throw new Error('Storage scope must be text')
+    if (typeof text !== 'string') throw new Error('Workbench storage must be text')
+    writeWorkbenchStorage(app.getPath('userData'), scope, text)
   })
 
   /*

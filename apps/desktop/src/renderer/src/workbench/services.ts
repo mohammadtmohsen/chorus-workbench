@@ -49,7 +49,10 @@ import getDialogsServiceOverride from '@codingame/monaco-vscode-dialogs-service-
 import getTextmateServiceOverride from '@codingame/monaco-vscode-textmate-service-override'
 import getThemeServiceOverride from '@codingame/monaco-vscode-theme-service-override'
 import getLanguagesServiceOverride from '@codingame/monaco-vscode-languages-service-override'
-import getStorageServiceOverride from '@codingame/monaco-vscode-storage-service-override'
+import getStorageServiceOverride, {
+  StorageScope,
+} from '@codingame/monaco-vscode-storage-service-override'
+import { ChorusStorageDatabase } from './storage.js'
 import getLifecycleServiceOverride from '@codingame/monaco-vscode-lifecycle-service-override'
 import getEnvironmentServiceOverride from '@codingame/monaco-vscode-environment-service-override'
 import getWorkspaceTrustOverride from '@codingame/monaco-vscode-workspace-trust-service-override'
@@ -369,7 +372,31 @@ export function prepareWorkbench(connection: WorkbenchConnection): WorkbenchSetu
     ...getSearchServiceOverride(),
     ...getMarkersServiceOverride(),
     ...getAccessibilityServiceOverride(),
-    ...getStorageServiceOverride(),
+    /*
+     * Backed by Chorus, not by the browser — see `workbench/storage.ts`.
+     *
+     * Without these factories the service falls back to IndexedDB, which on this
+     * surface's in-memory partition is gone at quit: every launch re-asked the
+     * folder's workspace-trust question and re-showed every extension's one-time
+     * greeting.
+     *
+     * All three scopes, because the two symptoms live in different ones — trust
+     * is per workspace, an extension's "don't show again" is usually profile or
+     * application — and a partial fix here is indistinguishable from none for
+     * whichever one was left out.
+     *
+     * The keys are namespaced by scope so a workspace whose id collides with a
+     * profile's cannot share a slot in the file.
+     */
+    ...getStorageServiceOverride({
+      databaseFactories: {
+        [StorageScope.APPLICATION]: () => new ChorusStorageDatabase('application'),
+        [StorageScope.PROFILE]: (_accessor, profile) =>
+          new ChorusStorageDatabase(`profile:${profile.id}`),
+        [StorageScope.WORKSPACE]: (_accessor, workspace) =>
+          new ChorusStorageDatabase(`workspace:${workspace.id}`),
+      },
+    }),
     ...getSecretStorageServiceOverride(),
     ...getLifecycleServiceOverride(),
     ...getEnvironmentServiceOverride(),

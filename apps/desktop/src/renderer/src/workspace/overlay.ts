@@ -87,6 +87,41 @@ function hide(): void {
     })
 }
 
+/**
+ * Says "the overlay is still up" while one is, so main's deadline does not fire.
+ *
+ * **The counter below is not trustworthy and this is the admission of that.**
+ * `depth` is decremented by an effect cleanup, and a cleanup that never runs
+ * hides every editor in the window for the rest of the session with no way back —
+ * which is exactly what happened via the rail's usage meter, whose restore hangs
+ * on a `pointerleave` browsers skip when the pointer leaves fast or the window
+ * blurs. Main now expires an overlay hide unless it hears this; a `depth` that
+ * leaks therefore costs one interval of a frozen-looking editor instead of a
+ * black one until relaunch.
+ *
+ * Comfortably inside main's TTL, because the failure that matters is beating too
+ * *slowly* — a missed beat under load restores the views under a live dialog,
+ * while an extra beat costs one no-op IPC with no capture behind it.
+ */
+const HEARTBEAT_MS = 3_000
+let heartbeat: ReturnType<typeof setInterval> | null = null
+
+function startHeartbeat(): void {
+  if (heartbeat !== null) return
+  heartbeat = setInterval(() => {
+    // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition
+    void window.chorus?.setWorkbenchVisible({ visible: false, heartbeat: true }).catch(() => {
+      /* a missed beat is survivable; the next one renews the same deadline */
+    })
+  }, HEARTBEAT_MS)
+}
+
+function stopHeartbeat(): void {
+  if (heartbeat === null) return
+  clearInterval(heartbeat)
+  heartbeat = null
+}
+
 function show(): void {
   stills.set({})
   // Same reason as `hide()` above: the optional chain is load-bearing wherever
@@ -107,10 +142,16 @@ export function useShellOverlay(active = true): void {
   useEffect(() => {
     if (!active) return undefined
     depth += 1
-    if (depth === 1) hide()
+    if (depth === 1) {
+      hide()
+      startHeartbeat()
+    }
     return () => {
       depth -= 1
-      if (depth === 0) show()
+      if (depth === 0) {
+        stopHeartbeat()
+        show()
+      }
     }
   }, [active])
 }
