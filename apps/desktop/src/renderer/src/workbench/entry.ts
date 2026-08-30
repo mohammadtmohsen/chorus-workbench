@@ -6,6 +6,7 @@ import { reportEditorContext } from './context.js'
 import { serveWorkbenchEdits, serveWorkbenchSnapshot } from './edit.js'
 import { installGateHandle } from './gate-handle.js'
 import { announceSharedExtensionScope } from './extension-scope.js'
+import { refreshScmOnFileChanges } from './scm-refresh.js'
 import { registerWorkbenchWorkers } from './workers.js'
 import { persistUserSettings, restoreUserSettings } from './user-settings.js'
 
@@ -78,6 +79,15 @@ async function main(): Promise<void> {
    * reaches the same failure element as everything else through `main`'s catch.
    */
   await persistUserSettings((text) => window.chorusWorkbench.writeUserSettings(text))
+
+  /*
+   * Keeps SCM current while the person is in the chat rather than the editor.
+   *
+   * After `initialize` like everything else here. See `scm-refresh.ts` for why
+   * the git extension stops refreshing the moment this view loses keyboard focus
+   * to a sibling `WebContentsView` in the same window.
+   */
+  await refreshScmOnFileChanges()
 
   /*
    * OAuth callbacks, handed in by main.
