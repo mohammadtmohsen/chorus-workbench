@@ -55,6 +55,8 @@ import getStorageServiceOverride, {
 import { SyncDescriptor } from '@codingame/monaco-vscode-api/vscode/vs/platform/instantiation/common/descriptors'
 import { IStorageService } from '@codingame/monaco-vscode-api/vscode/vs/platform/storage/common/storage.service'
 import { ChorusStorageDatabase, ChorusStorageService } from './storage.js'
+import { IClipboardService } from '@codingame/monaco-vscode-api/vscode/vs/platform/clipboard/common/clipboardService.service'
+import { ChorusClipboardService } from './clipboard.js'
 import { workspaceIdFor } from './remote-authority.js'
 import getLifecycleServiceOverride from '@codingame/monaco-vscode-lifecycle-service-override'
 import getEnvironmentServiceOverride from '@codingame/monaco-vscode-environment-service-override'
@@ -452,6 +454,18 @@ export function prepareWorkbench(connection: WorkbenchConnection): WorkbenchSetu
     ...getRemoteAgentServiceOverride({ scanRemoteExtensions: true }),
     ...getWorkbenchServiceOverride(),
     ...getQuickAccessServiceOverride(),
+    /*
+     * **Last, and that placement is the whole registration.**
+     *
+     * `IClipboardService` is an eager `registerSingleton` in the library's
+     * `standaloneServices`, not something an override package contributes — so
+     * nothing above competes for the key and this map simply wins. It still goes
+     * at the end, because the rule that bit twice already in this file is that a
+     * later spread replaces an earlier entry: `IRemoteAuthorityResolverService`
+     * registered before `getRemoteAgentServiceOverride()` never ran, and neither
+     * did the first `IStorageService`.
+     */
+    [IClipboardService.toString()]: new SyncDescriptor(ChorusClipboardService, [], true),
   }
 
   const options: IWorkbenchConstructionOptions = {

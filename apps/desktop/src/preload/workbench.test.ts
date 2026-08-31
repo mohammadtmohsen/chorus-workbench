@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import {
   WORKBENCH_CONNECTION_CHANNEL,
+  WORKBENCH_CLIPBOARD_READ_CHANNEL,
   WORKBENCH_SECRET_DELETE_CHANNEL,
   WORKBENCH_SECRET_READ_CHANNEL,
   WORKBENCH_SECRET_WRITE_CHANNEL,
@@ -68,6 +69,7 @@ const {
   SNAPSHOT_CHANNEL,
   EDIT_CHANNEL,
   EDIT_RESULT_CHANNEL,
+  CLIPBOARD_READ_CHANNEL,
   asConnection,
 } = await import('./workbench.js')
 
@@ -85,9 +87,10 @@ describe('the workbench preload', () => {
     expect(SNAPSHOT_CHANNEL).toBe(WORKBENCH_SNAPSHOT_CHANNEL)
     expect(EDIT_CHANNEL).toBe(WORKBENCH_EDIT_CHANNEL)
     expect(EDIT_RESULT_CHANNEL).toBe(WORKBENCH_EDIT_RESULT_CHANNEL)
+    expect(CLIPBOARD_READ_CHANNEL).toBe(WORKBENCH_CLIPBOARD_READ_CHANNEL)
   })
 
-  it('exposes exactly thirteen methods, and no fourteenth', () => {
+  it('exposes exactly fourteen methods, and no fifteenth', () => {
     // The list, not the count: a method named here is a capability a document
     // running extension code is handed, so which ones they are is the assertion.
     expect(Object.keys(exposed ?? {})).toEqual([
@@ -119,6 +122,20 @@ describe('the workbench preload', () => {
       'readSecret',
       'writeSecret',
       'deleteSecret',
+      /*
+       * Reading the system clipboard, and it is on this list rather than in the
+       * session's permissions on purpose. `clipboard-read` granted to the
+       * partition reaches every iframe and extension webview in it; this reaches
+       * one `WebContents` main already knows it opened. It takes no argument and
+       * has no write beside it, so what a surface gains is one value it can
+       * *learn* and nothing it can change.
+       *
+       * Beside the credential trio because it is the same kind of thing — a
+       * capability the browser refuses, moved to main where the sender can be
+       * checked — and this assertion is on order as well as membership, so its
+       * position here is the position in the preload.
+       */
+      'readClipboard',
       /*
        * An OAuth callback, pushed in by main. It cannot be asked for and cannot
        * be enumerated: a surface is told about exactly one URL, exactly once, and

@@ -205,6 +205,31 @@ export const WORKBENCH_SECRET_WRITE_CHANNEL = 'workbench:secret:write'
 export const WORKBENCH_SECRET_DELETE_CHANNEL = 'workbench:secret:delete'
 
 /**
+ * Reading the system clipboard, because the browser API for it is refused.
+ *
+ * The workbench partition answers every permission request with `false`
+ * (`security.ts`), which is deliberate and stays — a surface runs third-party
+ * extension code by design, and `clipboard-read` granted to the session is
+ * granted to every iframe and extension webview in it. What that denial also
+ * refused was the *terminal's* paste: `⌘V` there is not a native paste event, it
+ * is `workbench.action.terminal.paste` calling `IClipboardService.readText()`,
+ * which is `navigator.clipboard.readText()`. Chromium refused it and the browser
+ * implementation swallows the rejection and returns `''`, so paste did nothing
+ * and said nothing.
+ *
+ * Copy was unaffected and so was pasting into a file, which is what made this
+ * look like a terminal bug rather than a permission one: writing is a different
+ * permission, and pasting into an editor is a native `paste` event that arrives
+ * carrying its own data.
+ *
+ * **Read only, and no argument.** A surface cannot name what to read and cannot
+ * write, so this widens what a surface can *learn* by exactly one value and adds
+ * nothing it can change. Write still goes through the browser API, which already
+ * works — routing it here too would be a second way to do a working thing.
+ */
+export const WORKBENCH_CLIPBOARD_READ_CHANNEL = 'workbench:clipboard:read'
+
+/**
  * What the editor is looking at — Phase 6 slice 6a.
  *
  * **The surface does not say which project this is**, and that is the same rule
@@ -665,4 +690,12 @@ export interface ChorusWorkbenchApi {
   /** Stores one credential, encrypted. Rejects if no OS keychain is available. */
   readonly writeSecret: (key: string, value: string) => Promise<void>
   readonly deleteSecret: (key: string) => Promise<void>
+  /**
+   * The system clipboard's text, since the browser API for reading it is denied
+   * to this partition — see `WORKBENCH_CLIPBOARD_READ_CHANNEL`.
+   *
+   * `''` for an empty or non-text clipboard, which is what the browser
+   * implementation returns and what the terminal's paste already handles.
+   */
+  readonly readClipboard: () => Promise<string>
 }

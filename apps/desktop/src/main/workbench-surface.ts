@@ -6,6 +6,7 @@ import {
   BrowserWindow,
   WebContentsView,
   app,
+  clipboard,
   dialog,
   ipcMain,
   session,
@@ -23,6 +24,7 @@ import {
   WORKBENCH_SNAPSHOT_RESULT_CHANNEL,
   WORKBENCH_EDIT_RESULT_CHANNEL,
   WorkbenchContext,
+  WORKBENCH_CLIPBOARD_READ_CHANNEL,
   WORKBENCH_SECRET_DELETE_CHANNEL,
   WORKBENCH_SECRET_READ_CHANNEL,
   WORKBENCH_SECRET_WRITE_CHANNEL,
@@ -1187,6 +1189,31 @@ export function registerWorkbenchHandlers(
     if (!byContents.has(event.sender)) throw new Error('unknown workbench surface')
     if (typeof key !== 'string' || key === '') throw new Error('Secret key must be text')
     deleteWorkbenchSecret(app.getPath('userData'), key)
+  })
+
+  /*
+   * The system clipboard, read on a surface's behalf.
+   *
+   * The workbench partition denies every browser permission, `clipboard-read`
+   * among them — deliberately, since that grant would reach every iframe and
+   * extension webview in the partition. The terminal's paste is the one thing
+   * that needed it: `⌘V` there is a command calling `IClipboardService.readText`,
+   * not a native paste event, and the browser implementation swallows the
+   * refusal and returns `''`.
+   *
+   * So the capability lives here instead, where it is one channel with one
+   * sender check rather than a session-wide grant. **Read only and no argument**:
+   * a surface cannot say what to read and cannot write, which is the same shape
+   * as the user-settings channels and for the same reason.
+   *
+   * The sender check is the boundary. `byContents` holds only live surfaces this
+   * process opened, so a `WebContents` that is not one of them — an extension
+   * webview's own frame, anything else in the session — is refused rather than
+   * defaulted, exactly as every other channel here treats an unknown sender.
+   */
+  ipcMain.handle(WORKBENCH_CLIPBOARD_READ_CHANNEL, (event) => {
+    if (!byContents.has(event.sender)) throw new Error('unknown workbench surface')
+    return clipboard.readText()
   })
 
   /*

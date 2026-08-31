@@ -61,6 +61,8 @@ export const URL_CHANNEL = 'workbench:url'
 export const SECRET_READ_CHANNEL = 'workbench:secret:read'
 export const SECRET_WRITE_CHANNEL = 'workbench:secret:write'
 export const SECRET_DELETE_CHANNEL = 'workbench:secret:delete'
+/* Clipboard *read* only — the partition denies the browser API for it. */
+export const CLIPBOARD_READ_CHANNEL = 'workbench:clipboard:read'
 /* Phase 6 slice 6a, spelled out here for the same reason and under the same test. */
 export const CONTEXT_CHANNEL = 'workbench:context'
 export const SNAPSHOT_CHANNEL = 'workbench:snapshot'
@@ -239,6 +241,18 @@ const api: ChorusWorkbenchApi = {
 
   deleteSecret: async (key: string) => {
     await ipcRenderer.invoke(SECRET_DELETE_CHANNEL, key)
+  },
+
+  /*
+   * Narrowed the same way the secret reads are: anything that is not a string
+   * means "nothing to paste", which is what an empty clipboard means and what an
+   * image-only one means. Both lead the terminal to the same correct place —
+   * insert nothing — and it already handles `''` because that is what the
+   * browser implementation returns when the read is refused.
+   */
+  readClipboard: async () => {
+    const raw: unknown = await ipcRenderer.invoke(CLIPBOARD_READ_CHANNEL)
+    return typeof raw === 'string' ? raw : ''
   },
 
   onUrl: (handler: (url: string) => void) => {
