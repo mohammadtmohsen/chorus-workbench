@@ -2,6 +2,21 @@ import { getService } from '@codingame/monaco-vscode-api'
 import { ICommandService } from '@codingame/monaco-vscode-api/vscode/vs/platform/commands/common/commands.service'
 import { IFileService } from '@codingame/monaco-vscode-api/vscode/vs/platform/files/common/files.service'
 import { ISCMService } from '@codingame/monaco-vscode-api/vscode/vs/workbench/contrib/scm/common/scm.service'
+/*
+ * Its own module because it is the only decision here that can be tested — this
+ * file's `@codingame` imports pull CSS, which the `environment: 'node'` suite
+ * cannot load. Same split as `editor-tracking.ts` and `context.ts`.
+ */
+import { openGate, refreshSettled, refreshStarted, shouldRefresh } from './scm-gate.js'
+
+/**
+ * A `URI`'s path, as a free function so the mapping needs no `URI` import.
+ *
+ * The gate takes strings on purpose: it is the testable half, and importing
+ * `URI` there would drag in the `@codingame` graph this split exists to keep out
+ * of it.
+ */
+const uriPath = (uri: { readonly path: string }): string => uri.path
 
 /**
  * Keeps the SCM view current while somebody is reading the chat instead of the
@@ -78,8 +93,33 @@ export async function refreshScmOnFileChanges(): Promise<void> {
   ])
 
   let timer: ReturnType<typeof setTimeout> | null = null
+  /*
+   * What we know about a refresh of our own, so its index write can be told from
+   * somebody's `git add`. The two are the same write; only the cause differs.
+   */
+  let gate = openGate
 
-  files.onDidFilesChange(() => {
+  files.onDidFilesChange((event) => {
+    /*
+     * Filtered before the debounce, not inside it — so a burst of nothing but
+     * `.git/index` writes does not keep pushing the timer out and then fire
+     * anyway.
+     *
+     * **The deprecated getters are the only ones that can answer this.**
+     * `contains` and `affects` are the replacements and they ask "does this
+     * event touch resource X"; the question here is whether it touches anything
+     * *other* than a set of paths, which needs the list rather than a membership
+     * test. `createWatcher`, which takes an `excludes` and would have made the
+     * question disappear, is documented `recursive: false` only and cannot watch
+     * a project tree. Checked before suppressing, not after.
+     *
+     * What the deprecation is about is cost — a `TernarySearchTree` lookup per
+     * resource — and this makes none: one pass over an array that is a handful
+     * of entries outside a formatter run.
+     */
+    // eslint-disable-next-line @typescript-eslint/no-deprecated -- the replacements answer membership, not exclusion; see above
+    const touched = [...event.rawAdded, ...event.rawUpdated, ...event.rawDeleted]
+    if (!shouldRefresh(gate, touched.map(uriPath), Date.now())) return
     if (timer !== null) clearTimeout(timer)
     timer = setTimeout(() => {
       timer = null
@@ -99,9 +139,23 @@ export async function refreshScmOnFileChanges(): Promise<void> {
        * replaces bought nothing the service does not already know.
        */
       if ([...scm.repositories].length === 0) return
-      void commands.executeCommand('git.refresh').catch(() => {
-        /* a repository disappeared between the check and the call */
-      })
+      /*
+       * The gate opens *before* the command and closes after it settles, so the
+       * index write `git status` makes while running is inside the window
+       * whatever order the two land in. Marking it after the call returned would
+       * leave the write that arrives during the run unclaimed, which is the
+       * common case rather than the rare one — that write is what the run is
+       * doing.
+       */
+      gate = refreshStarted()
+      void commands
+        .executeCommand('git.refresh')
+        .catch(() => {
+          /* a repository disappeared between the check and the call */
+        })
+        .finally(() => {
+          gate = refreshSettled(Date.now())
+        })
     }, REFRESH_DEBOUNCE_MS)
   })
 }
