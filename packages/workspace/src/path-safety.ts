@@ -1,6 +1,10 @@
 import { realpathSync } from 'node:fs'
 import { resolve } from 'node:path'
-import { hasRoot, isInside, relativeInside } from '@chorus/ide-protocol'
+import {
+  hasRoot as hasRootOn,
+  isInside as isInsideOn,
+  relativeInside as relativeInsideOn,
+} from '@chorus/ide-protocol/paths'
 import { err, ok, type Result } from '@chorus/shared'
 
 /**
@@ -17,8 +21,27 @@ import { err, ok, type Result } from '@chorus/shared'
  * `ide-protocol` rather than here, because the extension cannot import this
  * package: `safeRealpath` below needs `node:fs`, and the extension bundles for
  * a VS Code host.
+ *
+ * **This is also where "which platform" stops being a default.** The three
+ * functions used to take `platform?: NodeJS.Platform = process.platform`, which
+ * made them read as Node-only while being bundled for a browser as well — and
+ * in that bundle the default is a `ReferenceError` and the `node:path` under it
+ * is an empty object. They now require the platform, and these three wrappers
+ * are where a Node caller's `process.platform` is supplied, once. This package
+ * already needs `node:fs` and `node:path`, so it is the right place to assume a
+ * Node process; `ide-protocol` is not.
  */
-export { hasRoot, isInside as isWithin, relativeInside as relativeWithin }
+export function hasRoot(candidate: string): boolean {
+  return hasRootOn(candidate, process.platform)
+}
+
+export function isWithin(root: string, target: string): boolean {
+  return isInsideOn(root, target, process.platform)
+}
+
+export function relativeWithin(root: string, target: string): string | null {
+  return relativeInsideOn(root, target, process.platform)
+}
 
 export class PathEscapeError extends Error {
   constructor(
@@ -65,7 +88,7 @@ export function resolveWithinRoot(
   const resolved = hasRoot(candidate) ? resolve(candidate) : resolve(realRoot, candidate)
   const real = safeRealpath(resolved)
 
-  if (!isInside(realRoot, real)) return err(new PathEscapeError(candidate, root))
+  if (!isWithin(realRoot, real)) return err(new PathEscapeError(candidate, root))
   return ok(real)
 }
 
@@ -94,7 +117,7 @@ export function safeRealpath(p: string): string {
        * with `roj`. UNC makes that the common case rather than the exotic one,
        * since every project on a share sits directly beneath it.
        */
-      const segment = relativeInside(parent, current)
+      const segment = relativeWithin(parent, current)
       if (segment === null || segment === '') return p
       trailing.push(segment)
       current = parent

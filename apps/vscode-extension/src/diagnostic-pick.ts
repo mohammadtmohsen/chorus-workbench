@@ -1,11 +1,17 @@
 import {
   MAX_DIAGNOSTIC_MESSAGE,
   MAX_DIAGNOSTIC_TEXT,
-  isInside,
   type DiagnosticParams,
   type DiagnosticSeverity,
   type Provenance,
 } from '@chorus/ide-protocol'
+/*
+ * Containment through `editor-context.ts`, which is where this extension
+ * supplies `process.platform` to the shared rule. The rule itself no longer
+ * defaults it — see that file — and importing it raw here would mean a second
+ * place deciding what platform this is.
+ */
+import { isInside } from './editor-context.js'
 
 /**
  * Choosing which problem the user meant, and what may be said about it.

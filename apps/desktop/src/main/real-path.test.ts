@@ -4,7 +4,12 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { canonicalPath } from './real-path.js'
-import { isInside } from '@chorus/ide-protocol'
+/*
+ * `isWithin` rather than `ide-protocol`'s `isInside`, which is what `ipc.ts`
+ * calls now: the shared rule stopped defaulting its platform, and this test
+ * asserts the decision main actually makes rather than a re-derivation of it.
+ */
+import { isWithin as isInside } from '@chorus/workspace'
 
 /**
  * The failure this was written for, reproduced rather than described.

@@ -29,13 +29,15 @@ import {
   type IpcResponse,
   type TranscriptEvent,
 } from '../shared/ipc.js'
-import {
-  MAX_SELECTED_BYTES,
-  isInside,
-  toDisplayRange,
-  type EditorMetadata,
-} from '@chorus/ide-protocol'
-import { projectRelativePath, type CanonicalRoot } from '@chorus/workspace'
+import { MAX_SELECTED_BYTES, toDisplayRange, type EditorMetadata } from '@chorus/ide-protocol'
+/*
+ * `isWithin` is `ide-protocol`'s `isInside` with this process's platform already
+ * supplied. The shared rule stopped defaulting its platform — it is bundled into
+ * the workbench renderer, where `process` does not exist — and `path-safety.ts`
+ * is main's one place for that assumption. Importing the raw rule here would be
+ * a second.
+ */
+import { isWithin, projectRelativePath, type CanonicalRoot } from '@chorus/workspace'
 import type { IdeBridge } from './ide-bridge.js'
 import {
   defaultDeps,
@@ -646,7 +648,7 @@ export function buildHandlers(runtime: ChorusRuntime): Handlers {
      * so this is the boundary that decides whether `code -g` may be pointed at
      * it. `resolve` against the conversation's own directory makes a relative
      * path meaningful (Codex reports them) and an absolute one unchanged;
-     * `isInside` is the check, and it is segment-wise because `/a/project-old`
+     * `isWithin` is the check, and it is segment-wise because `/a/project-old`
      * must not count as inside `/a/project`.
      *
      * A conversation that is no longer open throws from `projectDirectory` —
@@ -680,7 +682,7 @@ export function buildHandlers(runtime: ChorusRuntime): Handlers {
        * the linked dependencies above, so it is a change to what the boundary
        * means rather than a repair of it. Left as a decision, on the board.
        */
-      const contained = isInside(cwd, target) || isInside(canonicalPath(cwd), canonicalPath(target))
+      const contained = isWithin(cwd, target) || isWithin(canonicalPath(cwd), canonicalPath(target))
       if (cwd === '' || !contained) {
         // The path and the folder travel with the refusal: the message used to
         // name neither, so "not inside this session's project folder" could not
@@ -755,7 +757,17 @@ export function buildHandlers(runtime: ChorusRuntime): Handlers {
           text: embedded.text,
           ...(embedded.version === null ? {} : { modelVersion: embedded.version }),
           editor: 'workbench' as const,
-          provenance: { kind: 'worktree' as const },
+          /*
+           * The surface's own answer, not an assertion.
+           *
+           * This was `{ kind: 'worktree' }` for every embedded report — true of
+           * an ordinary file and false of a GitLab merge-request pane, which
+           * shows one side of a diff at a specific commit. Telling an agent it
+           * was the worktree pointed it at a file whose current contents are not
+           * what the person was looking at. `context.ts` resolves it with the
+           * same `resolveDocument` the VS Code extension uses.
+           */
+          provenance: embedded.provenance,
         } as const
       }
 
@@ -1063,6 +1075,16 @@ export function forwardWorkbenchContextToRenderer(runtime: ChorusRuntime): () =>
       projectRoot,
       conversations: conversations.length,
       path: context.relativePath,
+      /*
+       * Why the path is what it is. A null used to mean three different bugs —
+       * unknown scheme, a review URI that failed validation, or a real file
+       * outside this project — and the log could not tell them apart.
+       * The scheme only; a `gl-review` query carries repository and merge-request
+       * metadata and never reaches a log line.
+       */
+      scheme: context.scheme,
+      editorTypeId: context.editorTypeId,
+      reason: context.reason,
       lines:
         context.startLine === null
           ? null
@@ -1088,7 +1110,8 @@ export function forwardWorkbenchContextToRenderer(runtime: ChorusRuntime): () =>
             isDirty: context.isDirty,
             languageId: context.languageId,
             selectedBytes: context.selectedBytes,
-            provenance: { kind: 'worktree' as const },
+            /* As reported by the surface — see the snapshot path above. */
+            provenance: context.provenance,
             /*
              * Always `current`. The external bridge can be reporting a selection
              * it remembered from before the editor lost focus; this fires from

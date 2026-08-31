@@ -99,6 +99,66 @@ describe('resolveDocument — file', () => {
   })
 })
 
+/**
+ * The embedded workbench's own scheme, and the one shape that had no test.
+ *
+ * Chorus opens every project through a remote extension host, so an ordinary
+ * file in the workbench is `vscode-remote://<authority>/<path>` — this is the
+ * common case, not an exotic one, and the fixtures below are what
+ * `URI.parse(...).fsPath` actually produces for each platform rather than what
+ * the shape looks like it should be.
+ */
+describe('resolveDocument — vscode-remote', () => {
+  it('is the working tree on posix', () => {
+    expect(
+      resolve(
+        uri({
+          scheme: 'vscode-remote',
+          path: `${REPO}/src/app.ts`,
+          fsPath: `${REPO}/src/app.ts`,
+        })
+      )
+    ).toEqual({ filePath: `${REPO}/src/app.ts`, provenance: { kind: 'worktree' } })
+  })
+
+  /*
+   * **`path` carries the drive letter behind a leading slash, and `fsPath` does
+   * not.** `uriToFsPath` only builds a UNC `//authority/path` when the scheme is
+   * `file`, so a remote URI takes the drive branch instead and comes back as
+   * `c:/Users/…`. Reading `path` here gave `/C:/Users/…`, which no root matches
+   * — so on Windows every file in every project reported `outside-root`, which
+   * is indistinguishable from having no editor open.
+   */
+  it('strips the leading slash from a Windows drive path', () => {
+    expect(
+      resolveDocument(
+        {
+          scheme: 'vscode-remote',
+          path: '/C:/Users/me/repo/src/app.ts',
+          query: '',
+          fsPath: 'c:/Users/me/repo/src/app.ts',
+        },
+        'win32'
+      )
+    ).toEqual({ filePath: 'c:/Users/me/repo/src/app.ts', provenance: { kind: 'worktree' } })
+  })
+
+  /*
+   * Validated, not merely non-empty. A remote URI with no path at all, or a
+   * Windows one naming no drive, cannot be located — and a path that cannot be
+   * located is the same answer as a scheme we cannot read.
+   */
+  it('refuses a path that names no location', () => {
+    expect(resolve(uri({ scheme: 'vscode-remote', path: '', fsPath: '' }))).toBeNull()
+    expect(
+      resolveDocument(
+        { scheme: 'vscode-remote', path: '/src/app.ts', query: '', fsPath: '/src/app.ts' },
+        'win32'
+      )
+    ).toBeNull()
+  })
+})
+
 describe('resolveDocument — git', () => {
   it('reads the absolute path out of the query, not the path', () => {
     expect(resolve(git('HEAD'))).toEqual({

@@ -57,6 +57,20 @@ describe('relativeWithin', () => {
     expect(relativeWithin('C:\\', 'C:\\file.ts', 'win32')).toBe('file.ts')
   })
 
+  /*
+   * The trailing-separator check used to be `root.endsWith('\\')`, which is only
+   * half of what Windows accepts. `isWithin` folds `/` to `\` before comparing,
+   * so a root written `C:/proj/` is legitimately contained — and then this took
+   * the `+ 1` branch and ate the first character of the filename. Roots arrive
+   * here from `Uri.fsPath`, from settings and from an agent's own output, and
+   * VS Code emits forward slashes on Windows in all three.
+   */
+  it('does not eat a character when a Windows root is written with forward slashes', () => {
+    expect(relativeWithin('C:/proj/', 'C:\\proj\\file.ts', 'win32')).toBe('file.ts')
+    expect(relativeWithin('C:/', 'C:/file.ts', 'win32')).toBe('file.ts')
+    expect(relativeWithin('C:/proj', 'C:/proj/src/x.ts', 'win32')).toBe('src/x.ts')
+  })
+
   it('does not eat a character at a UNC share root', () => {
     expect(relativeWithin('\\\\server\\share\\', '\\\\server\\share\\file.ts', 'win32')).toBe(
       'file.ts'

@@ -1,6 +1,6 @@
 import {
   MAX_SELECTED_BYTES,
-  isInside,
+  isInside as isInsideOn,
   utf8ByteLength,
   type EditorMetadata,
   type IdeStatus,
@@ -86,8 +86,17 @@ export function isSupported(editor: EditorLike | null): editor is ReferenceableE
  * What has not changed is the *authority*: this check exists to avoid
  * disclosing a path at all, main's exists because a client cannot be trusted.
  * Sharing the rule does not make main trust the answer.
+ *
+ * It is a wrapper rather than a bare re-export because the shared rule stopped
+ * defaulting its platform. `@chorus/ide-protocol` is bundled into the workbench
+ * renderer as well as into this extension host, and a `process.platform` default
+ * is a `ReferenceError` there — so the Node assumption now lives at each Node
+ * consumer instead of inside the shared package. This file is that consumer for
+ * the extension; `@chorus/workspace`'s `path-safety.ts` is the one for main.
  */
-export { isInside }
+export function isInside(root: string, target: string): boolean {
+  return isInsideOn(root, target, process.platform)
+}
 
 export function metadataFor(
   editor: ReferenceableEditor,

@@ -55,7 +55,7 @@ Three things, and the ordering is the point: each one hides the next.
 the outer one loads a bundled `pre/index.html` whose entire bootstrap is a single
 inline `<script type="module">`. Production's policy is
 `script-src 'self' 'unsafe-eval' blob:` with no `'unsafe-inline'` and no hash, so
-that script never runs. Dev's policy *does* carry `'unsafe-inline'`. **A webview
+that script never runs. Dev's policy _does_ carry `'unsafe-inline'`. **A webview
 therefore behaves differently in `pnpm dev` and in a packaged build, and dev is
 the permissive one.**
 
@@ -99,7 +99,7 @@ allowed to be here" is expressed in terms of the entry URL:
 - `entryKey` parses the entry and refuses anything with a query string.
 - `lockDownNavigation` allowlists the entry and denies every other navigation.
 - Every CSP directive's `'self'` resolves against the entry's origin.
-- `applyWorkbenchContentSecurityPolicy` *decorates* response headers, which a
+- `applyWorkbenchContentSecurityPolicy` _decorates_ response headers, which a
   protocol handler must instead **synthesise**, because there are none to
   decorate.
 
@@ -126,7 +126,7 @@ Markdown, PDF and DOCX are recorded. No implementation starts before this point.
 
 **Phase 2 — the sub-frame policy.** `applyWorkbenchContentSecurityPolicy` already
 branches per response; add a branch matching `resourceType === 'subFrame'` and an
-exact match on the two bundled webview documents, serving those a *second*
+exact match on the two bundled webview documents, serving those a _second_
 policy that allows `'unsafe-inline'` script and `https://*.vscode-cdn.net` for
 script, style, img, font, media and connect.
 

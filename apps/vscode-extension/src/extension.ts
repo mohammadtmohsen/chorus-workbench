@@ -19,7 +19,7 @@ import {
   type ConnectionCounts,
   type WindowDiagnostics,
 } from './diagnostics.js'
-import { resolveDocument } from './document-identity.js'
+import { resolveDocument } from '@chorus/ide-protocol'
 import { pidIsAlive, readDescriptors } from './discovery.js'
 import {
   isInside,
@@ -413,12 +413,22 @@ function currentEditor(): EditorLike | null {
   const editor = vscode.window.activeTextEditor
   if (editor === undefined) return null
   const { document, selection } = editor
-  const resolved = resolveDocument({
-    scheme: document.uri.scheme,
-    path: document.uri.path,
-    query: document.uri.query,
-    fsPath: document.uri.fsPath,
-  })
+  const resolved = resolveDocument(
+    {
+      scheme: document.uri.scheme,
+      path: document.uri.path,
+      query: document.uri.query,
+      fsPath: document.uri.fsPath,
+    },
+    /*
+     * Named, because the resolver stopped defaulting it. `@chorus/ide-protocol`
+     * is bundled into the workbench renderer too, where `process.platform` is a
+     * `ReferenceError`, so the Node assumption belongs at each Node call site.
+     * Here it is genuinely this host's platform: the extension and the files it
+     * is resolving are on the same machine.
+     */
+    process.platform
+  )
   return {
     uriScheme: document.uri.scheme,
     // `canonical` resolves as far as the path exists, so a review document

@@ -10,6 +10,18 @@
     ".": {
       "types": "./dist/index.d.ts",
       "default": "./dist/index.js"
+    },
+    "./protocol": {
+      "types": "./dist/protocol.d.ts",
+      "default": "./dist/protocol.js"
+    },
+    "./paths": {
+      "types": "./dist/paths.d.ts",
+      "default": "./dist/paths.js"
+    },
+    "./document-identity": {
+      "types": "./dist/document-identity.d.ts",
+      "default": "./dist/document-identity.js"
     }
   },
   "scripts": {

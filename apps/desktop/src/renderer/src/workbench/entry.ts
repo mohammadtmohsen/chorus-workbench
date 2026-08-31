@@ -1,5 +1,6 @@
 import { getService, initialize } from '@codingame/monaco-vscode-api'
 import { IURLService } from '@codingame/monaco-vscode-api/vscode/vs/platform/url/common/url.service'
+import { ILogService } from '@codingame/monaco-vscode-api/vscode/vs/platform/log/common/log.service'
 import { URI } from '@codingame/monaco-vscode-api/vscode/vs/base/common/uri'
 import { prepareWorkbench } from './services.js'
 import { reportEditorContext } from './context.js'
@@ -111,19 +112,52 @@ async function main(): Promise<void> {
   await announceSharedExtensionScope()
 
   /*
-   * Phase 6 slice 6a. After `initialize` like the two above, and given the root
-   * from the descriptor so the relativising happens here — no path crosses back
-   * to main.
-   */
-  await reportEditorContext(connection.projectRoot)
-  /*
    * Phase 6d. Registered after the workbench is initialized, because resolving a
    * model needs the services to exist — but before anything can ask, since main
    * has no way to know when this document became ready and a request that
    * arrives early would simply have no listener.
+   *
+   * **Before the reporting setup, and that ordering is defensive.** These two
+   * were registered after it, so anything thrown while establishing the push —
+   * a service that will not resolve, a Node global reached from a browser bundle,
+   * which has happened — took the Send-time handlers down with it. The two
+   * failures then compound: no context is pushed *and* no snapshot can be
+   * requested, which reads as "the editor is not connected" rather than as one
+   * thing being broken.
    */
   serveWorkbenchEdits(connection.projectRoot)
   serveWorkbenchSnapshot(connection.projectRoot)
+
+  /*
+   * Phase 6 slice 6a. After `initialize` like the two above, and given the root
+   * from the descriptor so the relativising happens here — no path crosses back
+   * to main.
+   *
+   * Not awaited into the startup path: a failure to establish the push must not
+   * stop a workbench that is otherwise up, and — since the handlers above are
+   * already registered — Send still works from the snapshot alone.
+   */
+  /*
+   * **Caught so the surface survives it, logged so it is not invisible.**
+   *
+   * The catch is deliberate and stays: the handlers above are already
+   * registered, so a failure here costs the live pill and leaves Send working
+   * from the snapshot. What it must not do is cost the *evidence* — this was
+   * `.catch(() => undefined)`, and a `ReferenceError` thrown while establishing
+   * the push then looked exactly like an editor with nothing open. Two separate
+   * investigations began by re-deriving from a symptom what one line would have
+   * said outright.
+   *
+   * `ILogService`, not `console`: it is the workbench's own channel, it reaches
+   * the Output view and the log file, and the renderer is not allowed `console`.
+   * Stringified here rather than passed as an argument, so the stack survives
+   * whichever logger is attached.
+   */
+  const logs = await getService(ILogService)
+  await reportEditorContext(connection.projectRoot).catch((error: unknown) => {
+    const detail = error instanceof Error ? (error.stack ?? error.message) : String(error)
+    logs.error(`Chorus: editor context reporting failed to start — ${detail}`)
+  })
 
   /*
    * A driver's handle on this editor, and **only** under the gate's own

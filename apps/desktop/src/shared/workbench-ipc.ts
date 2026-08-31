@@ -1,4 +1,16 @@
 import { z } from 'zod'
+/*
+ * The `/protocol` subpath, never the package's barrel.
+ *
+ * This file is `shared/`, so it is compiled into main *and* into both renderer
+ * bundles. The barrel re-exports `endpoint.js`, which imports `node:path` — and
+ * a bundler asked to resolve that for browser code substitutes an empty object
+ * rather than failing, so the breakage surfaces as a `TypeError` at some later
+ * call site instead of at build time. `paths.ts` records what that cost. The
+ * subpaths are the Node-free half of the package, and the renderer build now
+ * refuses Node built-ins outright so this cannot regress quietly.
+ */
+import { provenance } from '@chorus/ide-protocol/protocol'
 
 /**
  * The workbench IPC surface — two audiences, deliberately separated.
@@ -314,6 +326,39 @@ export const WorkbenchContext = z
   .object({
     /** Project-relative, POSIX separators, or null when nothing is open. */
     relativePath: z.string().nullable(),
+    /**
+     * Where the content on screen came from — **not always the working tree.**
+     *
+     * Main used to assert `{ kind: 'worktree' }` for every embedded report, which
+     * is true of an ordinary file and false of the panes people most want to ask
+     * about. A GitLab merge-request pane shows one side of a diff at a specific
+     * commit; telling an agent it is the worktree points it at a file whose
+     * current contents are not what the person is looking at.
+     *
+     * Resolved by `resolveDocument` in `@chorus/ide-protocol`, the same resolver
+     * the VS Code extension uses, so the two surfaces cannot disagree about what
+     * a `gl-review:` or `git:` document means.
+     */
+    provenance,
+    /*
+     * **Diagnostics, and they exist because a null path had no explanation.**
+     *
+     * `relativePath: null` is reported for an unknown scheme, a review URI whose
+     * query failed validation, and a real file outside this project — three
+     * different bugs with three different fixes, indistinguishable in the log.
+     * The file's own comment records three rounds lost to guessing between them.
+     *
+     * `scheme` is the document's URI scheme and nothing more; the rest of the
+     * URI — a `gl-review` query carries `repositoryRoot` and merge-request
+     * metadata — never crosses this boundary. `editorTypeId` is the editor
+     * input's type, which is what distinguishes "no text editor was found" from
+     * "there was no editor at all": `workbench.editors.diffEditorInput` with no
+     * editor found inside it is the exact line that diagnosed the merge-request
+     * case, and neither field is a path.
+     */
+    scheme: z.string(),
+    editorTypeId: z.string(),
+    reason: z.enum(['ok', 'no-editor', 'unresolved', 'outside-root']),
     /** 1-based and inclusive, matching what the editor shows. */
     startLine: z.number().int().min(1).nullable(),
     endLine: z.number().int().min(1).nullable(),

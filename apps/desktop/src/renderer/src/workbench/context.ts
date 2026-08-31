@@ -1,12 +1,31 @@
 import { getService } from '@codingame/monaco-vscode-api'
 import { IEditorService } from '@codingame/monaco-vscode-api/vscode/vs/workbench/services/editor/common/editorService.service'
 import { ICodeEditorService } from '@codingame/monaco-vscode-api/vscode/vs/editor/browser/services/codeEditorService.service'
-import {
-  isCodeEditor,
-  isDiffEditor,
-  type ICodeEditor,
-} from '@codingame/monaco-vscode-api/vscode/vs/editor/browser/editorBrowser'
+import type { ICodeEditor } from '@codingame/monaco-vscode-api/vscode/vs/editor/browser/editorBrowser'
 import { IWorkingCopyService } from '@codingame/monaco-vscode-api/vscode/vs/workbench/services/workingCopy/common/workingCopyService.service'
+import {
+  activeInputChanged,
+  addEditor,
+  emptyTracker,
+  hydrationTarget,
+  promote,
+  readable,
+  removeEditor,
+  type TrackerState,
+} from './editor-tracking.js'
+/*
+ * The two Node-free subpaths, never `@chorus/ide-protocol` itself.
+ *
+ * The barrel re-exports `endpoint.js`, which imports `node:path`. This module is
+ * browser code, and Vite answers an unresolvable built-in with an *empty object*
+ * rather than an error — so the import succeeded, `posix` was `undefined`, and
+ * every `git:` and `gl-review:` document threw `TypeError` from inside a VS Code
+ * event listener where nothing surfaced it. Merge-request selections reached no
+ * agent for days with not one line in any log. See `paths.ts` for the whole of
+ * it; the renderer build now rejects Node built-ins so it cannot recur silently.
+ */
+import { resolveDocument, type Provenance } from '@chorus/ide-protocol/document-identity'
+import { relativeInside, type Platform } from '@chorus/ide-protocol/paths'
 import type { WorkbenchContext } from '../../../shared/workbench-ipc.js'
 
 /**
@@ -42,12 +61,127 @@ import type { WorkbenchContext } from '../../../shared/workbench-ipc.js'
  * settings file, a diff from another tree — reports `null` rather than a `../`
  * path: an agent cannot be told to look at something the project does not
  * contain, and a traversal is not a thing that can be expressed.
+ *
+ * **`relativeInside`, not a fourth copy of the arithmetic.** This used to be
+ * written out here — `startsWith(root + '/')` and a `slice` — which is the same
+ * rule `@chorus/ide-protocol` already owns and which main re-checks against.
+ * Three implementations of one rule is how the extension and main came to
+ * disagree on Windows in the first place, and this one understood only POSIX
+ * separators: on Windows a project at `C:\repo` never matched a path the editor
+ * reported as `c:/repo/...`, so every file in every project reported
+ * `outside-root`.
+ *
+ * The result is normalised to `/` because the value is a *wire* path — it goes
+ * into an agent mention and into `editor_edit` — and both ends have always
+ * treated it as POSIX. `relativeInside` returns the platform's own separator,
+ * which is `\` on Windows.
  */
-function relativeTo(root: string, uriPath: string): string | null {
-  const normalisedRoot = root.endsWith('/') ? root.slice(0, -1) : root
-  if (uriPath === normalisedRoot) return null
-  if (!uriPath.startsWith(`${normalisedRoot}/`)) return null
-  return uriPath.slice(normalisedRoot.length + 1)
+function relativeTo(root: string, filePath: string, platform: Platform): string | null {
+  const relative = relativeInside(root, filePath, platform)
+  /*
+   * An empty string means the path *is* the root — a directory, not a file.
+   * `relativeInside` reports that as containment, correctly; there is nothing
+   * here an agent could open, so it is the same answer as being outside.
+   */
+  if (relative === null || relative === '') return null
+  return relative.replace(/\\/g, '/')
+}
+
+/**
+ * What document this editor is showing, and where its content came from.
+ *
+ * **Not `uri.path`, which is what this used to be.** That works for an ordinary
+ * file and silently fails for every virtual one. A GitLab merge-request pane is
+ * `gl-review:/src/app.ts?{…}` — a *repository*-relative path with a leading
+ * slash — so `relativeTo` found it outside the project, reported `null`, and the
+ * chain did the rest: the push went unmatched, `ideAttached` went false, and the
+ * composer stopped asking for a snapshot at all. The agent was told nothing and
+ * the log stayed silent, which is why this looked like two unrelated bugs.
+ *
+ * `resolveDocument` is the resolver the VS Code extension already used for
+ * exactly this, moved into `@chorus/ide-protocol` rather than reimplemented. It
+ * validates the query, refuses traversal, and reconstructs the real path — and
+ * it returns **provenance**, which is the half that matters: a review pane shows
+ * a specific commit, not the working tree, and reporting it as worktree would
+ * point an agent at a file whose current contents are not what is on screen.
+ */
+function resolveActive(
+  root: string,
+  /** The active input's `typeId`, so a `no-editor` report says what the pane was. */
+  editorTypeId: string,
+  uri: { scheme: string; path: string; query: string; fsPath: string } | undefined
+): {
+  relativePath: string | null
+  provenance: Provenance
+  scheme: string
+  editorTypeId: string
+  reason: WorkbenchContext['reason']
+} {
+  const worktree: Provenance = { kind: 'worktree' }
+  if (uri === undefined) {
+    return {
+      relativePath: null,
+      provenance: worktree,
+      scheme: '',
+      editorTypeId,
+      reason: 'no-editor',
+    }
+  }
+  /*
+   * **The platform is named, and there is no longer a default to fall back on.**
+   *
+   * `resolveDocument` used to default to `process.platform`, which is right in
+   * the VS Code extension and fatal here: this bundle runs in a sandboxed
+   * renderer with no Node integration, so `process` is undefined and evaluating
+   * the default throws `ReferenceError` before the body runs. The default is
+   * gone from the shared package now — a browser-safe module may not reach for a
+   * Node global even in a branch nobody expects to take.
+   *
+   * The failure had no shape to it. The throw took out the whole context report,
+   * so nothing was pushed, `ideAttached` stayed false, the composer never asked
+   * for a snapshot, and an agent was told there was no selection — with nothing
+   * in any log, because the log line lives past the point that threw.
+   *
+   * Inferred from the root rather than reported by the server: a POSIX root
+   * begins with `/`, a Windows one does not. The value only decides what counts
+   * as an absolute path and which separator a relative one is written with, and
+   * the root is the very path being compared against.
+   */
+  const platform: Platform = root.startsWith('/') ? 'darwin' : 'win32'
+  const resolved = resolveDocument(uri, platform)
+  /*
+   * An unresolvable scheme reports no path rather than guessing one. `untitled:`
+   * and notebook cells land here by design — there is nothing an agent could
+   * open — and so does any scheme nobody has taught this resolver yet, which is
+   * the honest answer for those too.
+   */
+  if (resolved === null) {
+    return {
+      relativePath: null,
+      provenance: worktree,
+      scheme: uri.scheme,
+      editorTypeId,
+      reason: 'unresolved',
+    }
+  }
+  const relativePath = relativeTo(root, resolved.filePath, platform)
+  return {
+    relativePath,
+    provenance: resolved.provenance,
+    scheme: uri.scheme,
+    editorTypeId,
+    /*
+     * **`outside-root` is the distinction three rounds were spent guessing at.**
+     *
+     * A null path has two entirely different causes with two different fixes:
+     * the resolver refused the document (`unresolved` — an unknown scheme, or a
+     * review URI whose query did not validate), or it resolved to a real file
+     * that simply is not under this project's root (`outside-root` — a
+     * `repositoryRoot` naming a different checkout, a monorepo sibling, a global
+     * settings file). The log said `path: null` for both.
+     */
+    reason: relativePath === null ? 'outside-root' : 'ok',
+  }
 }
 
 /**
@@ -62,41 +196,48 @@ function relativeTo(root: string, uriPath: string): string | null {
  */
 
 /**
- * The editor the person is working in — **active**, not focused.
+ * The editor the person last worked in, remembered rather than looked up.
  *
- * `ICodeEditorService.getFocusedCodeEditor()` was the first reading of this and
- * it is wrong here in a way that only shows up in the product. The workbench is
- * its own `WebContentsView`; the moment somebody clicks into the Chorus composer
- * to type a message, the editor is not focused and never will be at the instant
- * that matters. So the focused editor is `null` exactly when a snapshot is taken,
- * the selection reads as nothing, and the agent is told no file is open — while
- * a file sits open with lines highlighted.
+ * **Looking it up is the bug.** `activeTextEditorControl` was asked at the
+ * moment a report was needed, and for a diff it answers with neither child — so
+ * a GitLab merge-request file, which is a standard diff over `gl-review:`
+ * models, reported `no-editor`. The log named it exactly:
+ * `scheme: "workbench.editors.diffEditorInput", reason: "no-editor"` — a real
+ * diff input with no editor found inside it.
  *
- * It broke the push as well as the pull, and the push failing is what hid the
- * pull: with no selection reported the pill leaves `ready`, `ideAttached` goes
- * false, and Send never asks for a snapshot at all. Two symptoms, one cause.
+ * Two earlier readings of this are worth keeping, because both were right about
+ * their own symptom and neither was the cause.
+ * `ICodeEditorService.getFocusedCodeEditor()` fails because the workbench holds
+ * no focus at the instant a snapshot is taken — the person is typing in Chorus.
+ * `activeTextEditorControl` fixed that and could not see inside a diff.
+ * Unwrapping to `getModifiedEditor()` fixed *that* and silently reported the
+ * wrong side whenever somebody selected on the original.
  *
- * `activeTextEditorControl` answers "which editor is showing" rather than "which
- * has keyboard focus", which is the question both paths meant to ask.
- *
- * **A diff editor is unwrapped to its modified side, not skipped.** It was
- * skipped, on the reasoning that its model is a pair and reading a selection off
- * it would describe one side without saying which. That is true and it made the
- * common case report nothing: opening a file from Source Control gives a
- * `(Working Tree)` diff, and a person selecting lines in one and asking about
- * them got "nothing came through with your message".
- *
- * The modified side *is* the working tree — the same file the path names and the
- * same content on disk — so reporting it is honest rather than a coercion. What
- * is genuinely lost is a selection made on the **original** side, which reports
- * the modified editor's own selection instead. That is a real limitation and the
- * alternative was reporting nothing at all.
+ * A retained reference answers all three. It survives focus leaving, it is a
+ * child editor rather than a parent control, and it is the child that was
+ * actually interacted with — so the side is a fact instead of a guess. What it
+ * costs is state, and `editor-tracking.ts` holds the transitions where they can
+ * be tested.
  */
-function activeCodeEditor(editors: { activeTextEditorControl: unknown }): ICodeEditor | null {
-  const control = editors.activeTextEditorControl
-  if (isCodeEditor(control)) return control
-  if (isDiffEditor(control)) return control.getModifiedEditor()
-  return null
+
+/**
+ * The one tracker for this surface.
+ *
+ * Module-level because the two readers are separate entry points — the push
+ * subscribes at startup, the snapshot is called when a message is sent — and
+ * they must agree about which editor is meant. Two trackers would reproduce the
+ * original defect in a subtler form: a pill describing one editor and a sent
+ * message quoting another.
+ *
+ * One workbench is one surface is one JavaScript realm (`entry.ts` explains why
+ * that is structural rather than incidental), so a module-level singleton is
+ * exactly one surface's worth of state.
+ */
+let tracker: TrackerState<ICodeEditor, unknown> = emptyTracker()
+
+/** Whatever the tracker will still vouch for, given what is on screen now. */
+function trackedEditor(editors: { activeEditor?: unknown }): ICodeEditor | null {
+  return readable(tracker, editors.activeEditor ?? null)
 }
 
 /**
@@ -120,7 +261,7 @@ export async function readEditorSnapshot(
     getService(IEditorService),
     getService(IWorkingCopyService),
   ])
-  const editor = activeCodeEditor(editors)
+  const editor = trackedEditor(editors)
   const model = editor?.getModel() ?? null
   /*
    * The path comes from the model we are reading, not from `activeEditor`.
@@ -131,13 +272,18 @@ export async function readEditorSnapshot(
    * quoting another.
    */
   const uri = model?.uri ?? editors.activeEditor?.resource
+  const document = resolveActive(projectRoot, editors.activeEditor?.typeId ?? '', uri)
   const selection = editor?.getSelection() ?? null
   const text =
     selection === null || model === null || selection.isEmpty()
       ? ''
       : model.getValueInRange(selection)
   return {
-    relativePath: uri === undefined ? null : relativeTo(projectRoot, uri.path),
+    relativePath: document.relativePath,
+    provenance: document.provenance,
+    scheme: document.scheme,
+    editorTypeId: document.editorTypeId,
+    reason: document.reason,
     startLine: selection?.startLineNumber ?? null,
     endLine: selection?.endLineNumber ?? null,
     isEmpty: selection?.isEmpty() ?? true,
@@ -165,11 +311,15 @@ export async function reportEditorContext(projectRoot: string): Promise<void> {
    */
   let last = ''
 
+  /** Editors already subscribed, so no route can subscribe one twice. */
+  const watched = new Set<ICodeEditor>()
+
   const report = (): void => {
-    const editor = activeCodeEditor(editors)
+    const editor = trackedEditor(editors)
     const model = editor?.getModel() ?? null
     // Same model for the path as for the selection — see `readEditorSnapshot`.
     const uri = model?.uri ?? editors.activeEditor?.resource
+    const document = resolveActive(projectRoot, editors.activeEditor?.typeId ?? '', uri)
     const selection = editor?.getSelection() ?? null
 
     /*
@@ -187,7 +337,11 @@ export async function reportEditorContext(projectRoot: string): Promise<void> {
         : new TextEncoder().encode(model.getValueInRange(selection)).length
 
     const context: WorkbenchContext = {
-      relativePath: uri === undefined ? null : relativeTo(projectRoot, uri.path),
+      relativePath: document.relativePath,
+      provenance: document.provenance,
+      scheme: document.scheme,
+      editorTypeId: document.editorTypeId,
+      reason: document.reason,
       startLine: selection?.startLineNumber ?? null,
       endLine: selection?.endLineNumber ?? null,
       isEmpty: selection?.isEmpty() ?? true,
@@ -234,30 +388,232 @@ export async function reportEditorContext(projectRoot: string): Promise<void> {
    * Reporting the current state first makes the subscriptions what they claim to
    * be: updates to a state that has already been established.
    */
-  report()
-
-  editors.onDidActiveEditorChange(report)
-  /*
-   * Selection as well as position: a drag-select never moves the caret's line
-   * and column on its final event, so watching position alone reports a range
-   * of one character for a selection of five hundred.
+  /**
+   * Adopt whatever is already open, because every event above is a *change*.
+   *
+   * A restored session has had all of them before this ran: the editors were
+   * created, focused and given their selections while this code did not exist.
+   * Without this the tracker starts empty on exactly the case people hit most —
+   * reopening onto the file they were last reading — and reports `no-editor`
+   * while lines sit highlighted on screen. That is the original symptom
+   * surviving its own fix.
+   *
+   * Focus first, because it is a fact rather than an inference. Only when
+   * nothing holds focus does this fall back to matching open editors against the
+   * active input, which is the restored case: the workbench has laid out the
+   * editors but given focus to none of them.
    */
+  const hydrate = (): void => {
+    const input = editors.activeEditor ?? null
+    if (input === null) return
+
+    /*
+     * **Only returns when the promotion actually took.** `promote` refuses an
+     * editor the tracker has not been told about and says so by returning the
+     * state unchanged — so `tracker = promote(...); return` adopted nothing and
+     * then skipped the URI match that would have worked. `getFocusedCodeEditor`
+     * answers from `ICodeEditorService`'s whole registry, which includes editors
+     * this function has never seen: the settings editor's widgets, a peek view,
+     * anything created between `listCodeEditors()` and now. One of those holding
+     * focus would silently disable hydration for the diff the person is in.
+     */
+    const focused = codeEditors.getFocusedCodeEditor()
+    if (focused !== null) {
+      const promoted = promote(tracker, focused, input, 'focus', true)
+      if (promoted.tracked?.editor === focused) {
+        tracker = promoted
+        return
+      }
+    }
+
+    /*
+     * A diff names both of its sides; an ordinary input names one. Reading them
+     * off the input rather than the control is what makes this work for a diff
+     * at all — the control is the thing that could not answer in the first place.
+     */
+    const wanted = [
+      (input as { resource?: { toString(): string } }).resource?.toString() ?? null,
+      (
+        input as { original?: { resource?: { toString(): string } } }
+      ).original?.resource?.toString() ?? null,
+      (
+        input as { modified?: { resource?: { toString(): string } } }
+      ).modified?.resource?.toString() ?? null,
+    ]
+
+    const target = hydrationTarget(
+      codeEditors.listCodeEditors().map((editor) => ({
+        editor,
+        uri: editor.getModel()?.uri.toString() ?? null,
+        hasSelection: editor.getSelection()?.isEmpty() === false,
+      })),
+      wanted
+    )
+    if (target === null) return
+    /*
+     * Promoted as `focus` even though nothing is focused: this is a deliberate
+     * adoption, not an inference from a selection event, and the `selection` arm
+     * would refuse it for want of widget focus.
+     */
+    tracker = promote(tracker, target, input, 'focus', true)
+  }
+
+  editors.onDidActiveEditorChange(() => {
+    /*
+     * Clear before reporting. The retained editor may still be alive and still
+     * hold its old selection, so without this, opening a second file would quote
+     * the first — and nothing downstream could tell.
+     */
+    tracker = activeInputChanged(tracker, editors.activeEditor ?? null)
+    /*
+     * A microtask, because the input changes before its control and model are
+     * ready — hydrating synchronously here finds an editor with no model and
+     * adopts nothing. The following tick is the first moment the pair exists.
+     */
+    queueMicrotask(() => {
+      hydrate()
+      report()
+    })
+    report()
+  })
+
   /*
-   * Re-subscribed per editor, because `onDidChangeCursorPosition` belongs to a
-   * code editor instance rather than to the service — a new editor is a new
-   * emitter, and a subscription taken once would go quiet the first time
-   * somebody opened a second file.
+   * **Each editor promotes itself, and the report never looks one up.**
+   *
+   * The previous version subscribed each editor to `report`, which then asked
+   * the service which editor was active — discarding the one that had just
+   * emitted. That is the whole defect: a diff's children emit, and the service
+   * answers with neither of them, so a merge-request pane reported `no-editor`
+   * while the person had lines selected in it.
+   *
+   * `hasWidgetFocus()` is what keeps the *side* honest. Both children of a diff
+   * emit selection changes — synced scrolling, decorations, an extension's own
+   * edits — so promoting on any selection would let the side nobody is in claim
+   * the selection. Focus promotes unconditionally because focus is a statement
+   * of intent; selection promotes only as evidence of where that focus is.
+   */
+  const watch = (editor: ICodeEditor): void => {
+    /*
+     * Subscribed once per editor, whatever route reached it.
+     *
+     * `onCodeEditorAdd` is registered before `listCodeEditors()` is walked, and
+     * an editor created in between is in both — so its listeners would be
+     * attached twice and every cursor move would run `report` twice. Harmless
+     * today only because `report` dedupes; a guard is cheaper than depending on
+     * that staying true.
+     */
+    if (watched.has(editor)) return
+    watched.add(editor)
+    tracker = addEditor(tracker, editor)
+    const claim = (reason: 'focus' | 'selection') => (): void => {
+      const promoted = promote(
+        tracker,
+        editor,
+        editors.activeEditor ?? null,
+        reason,
+        editor.hasWidgetFocus()
+      )
+      if (promoted.tracked?.editor === editor) tracker = promoted
+      /*
+       * **A refused claim is the restored session's only remaining signal.**
+       *
+       * Restoring a session sets each editor's view state — including its
+       * selection — while nothing holds focus, so these fire with
+       * `hasWidgetFocus()` false and `promote` correctly refuses: a selection
+       * without focus is not evidence of where the person is. But it *is* the
+       * moment a diff first becomes distinguishable, because until the selection
+       * is restored both sides look identical and `hydrationTarget` refuses them
+       * both. Without this the tracker would sit empty until somebody clicked
+       * into the editor, which is the workaround this whole change exists to
+       * avoid asking for.
+       *
+       * Only when nothing is tracked, so a live claim can never be overridden by
+       * a guess.
+       */
+      else if (trackedEditor(editors) === null) hydrate()
+      report()
+    }
+    editor.onDidFocusEditorWidget(claim('focus'))
+    editor.onDidChangeCursorPosition(claim('selection'))
+    /*
+     * Selection as well as position: a drag-select never moves the caret's line
+     * and column on its final event, so watching position alone reports a range
+     * of one character for a selection of five hundred.
+     */
+    editor.onDidChangeCursorSelection(claim('selection'))
+    editor.onDidChangeModelContent(report)
+    /*
+     * **The moment hydration can actually succeed, and the one it kept missing.**
+     *
+     * A code editor is created by its pane before it has a model: the widget
+     * exists as soon as the pane does, and `input.resolve()` attaches the model
+     * afterwards. So `onCodeEditorAdd` fires with `getModel()` still null, the
+     * `queueMicrotask` hydration below runs a microtask later — still null — and
+     * the candidate is filtered out for having no URI. There is no second
+     * attempt, so the tracker stays empty for the whole life of that editor.
+     *
+     * A microtask was never going to be enough. For a `gl-review:` document the
+     * content is fetched from GitLab, and for an ordinary file it is a read on
+     * the remote extension host: both are I/O, and no number of microtasks
+     * arrives after I/O. This is the event that says the model is here.
+     *
+     * **Guarded on the tracker having nothing to say**, so this cannot steal.
+     * Once an editor is adopted, a model arriving in some *other* editor — a
+     * preview tab being reused, the far side of a diff resolving second — must
+     * not re-run the guess and hand the person's selection to the wrong pane.
+     */
+    editor.onDidChangeModel(() => {
+      if (trackedEditor(editors) === null) hydrate()
+      report()
+    })
+    /*
+     * Disposal both forgets the editor and, if it was the tracked one, forgets
+     * the tracking. Leaving it in either place would let a read describe an
+     * editor that no longer exists.
+     */
+    editor.onDidDispose(() => {
+      // Also out of `watched`, or this set is a list of every editor the surface
+      // has ever held open — and the whole point of it is that it holds editors.
+      watched.delete(editor)
+      tracker = removeEditor(tracker, editor)
+      report()
+    })
+  }
+
+  /*
+   * Both arms, because neither covers the other: `onCodeEditorAdd` misses every
+   * editor that existed before this ran — which on a restored session is all of
+   * them — and the list alone misses every editor opened afterwards, including
+   * the two a diff creates when a merge-request file is opened.
    */
   codeEditors.onCodeEditorAdd((editor) => {
-    editor.onDidChangeCursorPosition(report)
-    editor.onDidChangeCursorSelection(report)
-    editor.onDidChangeModelContent(report)
+    watch(editor)
+    /*
+     * The second half of the restored case: a diff's children are created after
+     * the input becomes active, so the hydration above ran before they existed.
+     * Same microtask reason — the model arrives after the editor does.
+     */
+    queueMicrotask(() => {
+      hydrate()
+      report()
+    })
   })
-  for (const editor of codeEditors.listCodeEditors()) {
-    editor.onDidChangeCursorPosition(report)
-    editor.onDidChangeCursorSelection(report)
-    editor.onDidChangeModelContent(report)
-  }
+  for (const editor of codeEditors.listCodeEditors()) watch(editor)
+
+  /*
+   * **After `watch`, never before.** `promote` refuses an editor the tracker has
+   * not been told about, so hydrating first adopts nothing and silently
+   * reproduces the very bug this exists to fix. The first version of this change
+   * had exactly that ordering.
+   */
+  hydrate()
+  report()
+
+  codeEditors.onCodeEditorRemove((editor) => {
+    watched.delete(editor)
+    tracker = removeEditor(tracker, editor)
+    report()
+  })
 
   report()
 }

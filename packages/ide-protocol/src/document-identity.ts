@@ -19,9 +19,10 @@
  * A scheme we have not parsed yields nothing, which the pill can explain.
  */
 
-import { CHANGE_TYPES, hasRoot, type ChangeType, type Provenance } from '@chorus/ide-protocol'
+import { hasRoot, type Platform } from './paths.js'
+import { CHANGE_TYPES, type ChangeType, type Provenance } from './protocol.js'
 
-export type { Provenance }
+export type { Platform, Provenance }
 
 /** The parts of a `vscode.Uri` this needs. `query` is already decoded there. */
 export interface DocumentUri {
@@ -65,11 +66,7 @@ function stringField(source: Record<string, unknown>, key: string): string | nul
  * result regardless — this is disclosure minimisation, not the security
  * boundary.
  */
-export function joinInside(
-  root: string,
-  relative: string,
-  platform: NodeJS.Platform = process.platform
-): string | null {
+export function joinInside(root: string, relative: string, platform: Platform): string | null {
   /*
    * `hasRoot`, not `startsWith('/')`. The old check rejected every Windows root
    * outright — `c:\repo` does not start with `/`, and neither does
@@ -117,7 +114,7 @@ function isChangeType(value: unknown): value is ChangeType {
  * reports `worktree` rather than inventing a version that would need
  * qualifying.
  */
-function resolveGit(uri: DocumentUri, platform: NodeJS.Platform): ResolvedDocument | null {
+function resolveGit(uri: DocumentUri, platform: Platform): ResolvedDocument | null {
   const query = parseQuery(uri.query)
   if (query === null) return null
   const filePath = stringField(query, 'path')
@@ -152,7 +149,7 @@ function resolveGit(uri: DocumentUri, platform: NodeJS.Platform): ResolvedDocume
  * file — GitLab's own `isEmptyFileUri` — and there is nothing there to
  * reference.
  */
-function resolveReview(uri: DocumentUri, platform: NodeJS.Platform): ResolvedDocument | null {
+function resolveReview(uri: DocumentUri, platform: Platform): ResolvedDocument | null {
   const query = parseQuery(uri.query)
   if (query === null) return null
 
@@ -188,17 +185,56 @@ function resolveReview(uri: DocumentUri, platform: NodeJS.Platform): ResolvedDoc
 export function resolveDocument(
   uri: DocumentUri,
   /*
-   * Named by the caller in tests, inherited in production.
+   * Named by the caller, always — there is no default and there must not be one.
    *
    * Everything below decides what counts as an absolute path, and that answer
    * differs by platform — so a suite using POSIX fixtures asserted its own host
    * rather than its argument, and went red the first time it ran on Windows.
+   *
+   * It used to default to `process.platform`, which is a Node global this module
+   * is no longer allowed to assume: it is bundled into the workbench renderer,
+   * where `process` does not exist and evaluating the default throws
+   * `ReferenceError` before the body runs. See `paths.ts` for the whole of what
+   * that cost.
    */
-  platform: NodeJS.Platform = process.platform
+  platform: Platform
 ): ResolvedDocument | null {
   switch (uri.scheme) {
     case 'file':
       return uri.fsPath === '' ? null : { filePath: uri.fsPath, provenance: { kind: 'worktree' } }
+    /*
+     * The embedded workbench's own scheme, and the reason this resolver moved
+     * into a shared package.
+     *
+     * Chorus opens each project through a remote extension host, so an ordinary
+     * file there is `vscode-remote://<authority>/<path>` rather than `file:`.
+     * The VS Code extension never sees this scheme — it runs inside a VS Code
+     * that already resolved it — so this arm is inert there and load-bearing
+     * here.
+     *
+     * **`fsPath`, and `path` was wrong on Windows.** This used to read `uri.path`
+     * on the reasoning that `fsPath` on a URI with an authority yields a
+     * UNC-style `//127.0.0.1:52124/Users/…`. That is true only for `file:` —
+     * `uriToFsPath` guards that branch with `uri.scheme === 'file'`, so a
+     * `vscode-remote:` URI never takes it and the authority never appears.
+     *
+     * What `path` *does* carry on Windows is the drive letter behind a leading
+     * slash: `/C:/Users/me/proj/app.ts`. No project root matches that — the root
+     * is `C:\Users\me\proj` — so every file in every project on Windows resolved
+     * to a path outside its own project and reported `outside-root`. `fsPath`
+     * strips exactly that slash, giving `c:/Users/…`, which `isInside` folds to
+     * the root's case and separators.
+     *
+     * Validated rather than trusted: `hasRoot` is what rejects the shapes that
+     * are not locatable — an empty path, and a Windows path with no drive.
+     *
+     * Worktree, unambiguously: this *is* the file on the server's disk, which is
+     * the same disk the project root names.
+     */
+    case 'vscode-remote':
+      return hasRoot(uri.fsPath, platform)
+        ? { filePath: uri.fsPath, provenance: { kind: 'worktree' } }
+        : null
     case 'git':
       return resolveGit(uri, platform)
     case 'gl-review':
