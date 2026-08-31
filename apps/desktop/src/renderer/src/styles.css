@@ -848,67 +848,85 @@ body {
 }
 
 /*
- * Your own message, held to a single line.
+ * Your own message, held to two lines and clickable to open.
  *
  * It was a fraction of the pane's height, on the argument that what makes a
  * message too tall is how much of the *view* it takes. That holds for something
  * you are reading and not for something you wrote: your own message is a label
  * for the answer beneath it, so the space it earns is the space needed to
- * recognise it — one line — and everything past that is the transcript spending
- * room on the one thing in it you already know.
+ * recognise it — and everything past that is the transcript spending room on the
+ * one thing in it you already know.
  *
- * The fade still says the text is cut rather than finished; at one line it sits
- * over that line rather than below several, which is why it stays a fade and did
- * not become an ellipsis.
+ * **Two lines, and the second is the one that fades.** One line with a 48px
+ * gradient over it was unreadable: the fade was taller than the text it covered,
+ * so its opaque end sat on the only line there was. The fix is not a smaller
+ * fade over one line — it is a second line for the fade to happen *in*. The
+ * first is at full contrast and is what you read; the second is the sentence
+ * visibly continuing, which is the whole of what the fade has to say.
  *
- * `--clamp-max` is measured in `Entry.tsx` from the element's own computed
- * `line-height`, so it follows the type scale instead of guessing at it. The
- * `20vh` here is only the fallback for the frame before that measurement lands.
+ * So the gradient is exactly one line tall and sits over the second line only.
+ * Both numbers come from `--clamp-line`, measured in `Entry.tsx` from the
+ * element's own computed `line-height`, so they follow the type scale rather
+ * than guessing at it — and the fade cannot drift out of step with the clamp,
+ * because it is the same measurement twice.
+ *
+ * The `20vh`/`3em` fallbacks cover the frame before that measurement lands.
  */
 .clamp {
   position: relative;
   min-width: 0;
 }
 
+/*
+ * The whole message is the control — see `Entry.tsx` for why that is a `div`
+ * with `role="button"` rather than a `<button>`, and for the selection guard.
+ *
+ * `cursor: pointer` on the clamped state only: expanded, it is still clickable
+ * but it is also a paragraph you might want to read without the pointer
+ * insisting it is a button.
+ */
+.clamp[data-clickable='true'] {
+  cursor: pointer;
+}
+
+.clamp[data-clickable='true']:focus-visible {
+  outline: 1px solid var(--voice, var(--border-strong));
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
 .clamp[data-open='false'] .clamp-body {
   position: relative;
-  max-height: var(--clamp-max, 20vh);
+  max-height: calc(var(--clamp-line, 1.5em) * 2);
   overflow: hidden;
 }
 
-/* Anchored to the clipped body, not to the wrapper: the wrapper includes the
-   toggle, so a fade positioned against it covers the control instead of the
-   cut. Matches the bubble it sits in rather than the page behind it. */
+/*
+ * Anchored to the clipped body, not to the wrapper, and exactly one line tall.
+ *
+ * Anchoring to the wrapper would put it over whatever follows the text; a height
+ * of anything but one line puts it over the first line, which is the defect this
+ * shape exists to avoid. `--raised` rather than the page colour, because it is
+ * the bubble this sits in.
+ */
 .clamp[data-open='false'] .clamp-body::after {
   content: '';
   position: absolute;
   right: 0;
   bottom: 0;
   left: 0;
-  height: 48px;
+  height: var(--clamp-line, 1.5em);
   background: linear-gradient(to bottom, transparent, var(--raised));
   pointer-events: none;
 }
 
-.clamp-toggle {
-  margin-top: calc(var(--step) * 1.5);
-  padding: 0;
-  border: 0;
-  background: none;
-  color: var(--text-muted);
-  font-family: var(--mono);
-  font-size: 11px;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
-  cursor: pointer;
-  transition: color 120ms ease;
-}
-
-.clamp-toggle:hover,
-.clamp-toggle:focus-visible {
-  color: var(--bone);
-  outline: none;
-}
+/*
+ * `.clamp-toggle` is gone with the `Show the rest` button it styled.
+ *
+ * The container is the control now, so a separate label under it was a second
+ * way to do one thing — and the one that cost a line of chrome under every
+ * message you have ever sent.
+ */
 
 /*
  * The offer to quote what you just selected.
@@ -3708,29 +3726,36 @@ body {
 }
 
 /*
- * Two lines to start, four at most, and then it scrolls.
+ * One line to start, four at most, and then it scrolls.
  *
- * This was `min-height: 84px` — four lines held open so the composer read as
- * ~180px of deliberate furniture rather than as an afterthought under the
- * terminal. Driven, that came out the other way: a box four lines tall with a
- * placeholder floating in it is mostly emptiness, and the height belongs to the
- * message rather than to the frame.
+ * It was 84px — four lines held open so the composer read as deliberate
+ * furniture rather than as an afterthought under the terminal. Driven, that came
+ * out the other way: a box four lines tall with a placeholder floating in it is
+ * mostly emptiness. Two lines was the first correction and one is the second,
+ * for the same reason each time — the height belongs to the message, and until
+ * there is a message there is nothing for it to belong to.
  *
  * **`flex: none`, and that is the whole fix.** `flex: 1` is `flex-basis: 0`,
  * which overrides `height` — so the autogrow in `Composer.tsx` was setting a
  * height the flex layout then ignored, and only the 84px floor was holding the
  * box open at all. Measured before the change: empty 20px, five lines typed
- * 20px. It never grew; the floor was doing all the work.
+ * 20px. It never grew; the floor was doing all the work. That is also why the
+ * floor can be lowered safely now: the autogrow is what carries the height, and
+ * `min-height` only says where it starts.
  *
- * `lh` rather than a pixel count, so the two numbers stay two *lines* if the
- * field's type ever changes.
+ * `lh`, so the two numbers stay two *lines* if the field's type ever changes.
+ * The `+ var(--step) * 2` is the textarea's own vertical padding, counted here
+ * because `box-sizing` is `border-box` app-wide and these are box heights. It
+ * used to compensate for a dead `padding-bottom` on this very rule — overridden
+ * by `.composer textarea { padding: 0 }` at equal specificity further down —
+ * and now it describes padding that is actually applied, set there rather than
+ * here so one rule owns the field's insets.
  */
 .composer-line textarea {
   flex: none;
   min-width: 0;
-  min-height: calc(2lh + var(--step) * 2);
+  min-height: calc(1lh + var(--step) * 2);
   max-height: calc(4lh + var(--step) * 2);
-  padding-bottom: calc(var(--step) * 2);
 }
 
 /* Stop and Send sit together while a turn is running. */
@@ -3745,14 +3770,39 @@ body {
  * up in the bottom right. Clipping it would have hidden the overflow rather than
  * removed it; wrapping keeps every control reachable and inside.
  */
+/*
+ * One line, always — the file truncates rather than the row growing.
+ *
+ * It wrapped, and wrapping was itself a fix: a tool row too wide for a narrow
+ * column used to push the send button outside the composer, where
+ * `.conversation-body`'s clip cut it in half. Wrapping meant nothing escaped.
+ *
+ * What made wrapping affordable was that every item was small and fixed. The
+ * file pill is neither — it is a path, so it is as wide as somebody's directory
+ * names — and with it on this row a second line appeared and disappeared as the
+ * selection changed, moving the send button under the pointer.
+ *
+ * So the row does not wrap, and the escape it used to prevent is prevented a
+ * different way: **the two icons and the send button are `flex: none`, and the
+ * three text items give in a fixed order.** The file pill goes first (shrink
+ * 100), then the two mention names (shrink 1) — flexbox freezes an item at its
+ * floor and redistributes the rest, so the weights express a priority rather
+ * than a ratio. What can never be squeezed is two 28px icons and the send
+ * button: about 100px, plus whatever the names are down to.
+ */
 .composer-tools {
   display: flex;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
   align-items: center;
-  gap: calc(var(--step) * 2);
+  /*
+   * Closer together, because the items are the row's content and the space
+   * between them was reading as separation between unrelated things. Not to
+   * zero: `@claude` and `@codex` are two buttons and have to look like two.
+   */
+  gap: calc(var(--step) * 1.5);
   flex: none;
   min-width: 0;
-  padding-top: calc(var(--step) * 2);
+  padding-top: var(--step);
   border-top: 1px solid var(--border-default);
 }
 
@@ -3797,6 +3847,34 @@ body {
   width: auto;
   padding: 0 calc(var(--step) * 1.5);
   font: 12px var(--ui-font);
+  /*
+   * Shrinkable, overriding `.composer-trigger`'s `flex: none` — this is the one
+   * trigger carrying text rather than a glyph, so it is the one with something
+   * to give.
+   *
+   * **Shrink factor 1 against the pill's 100, which is the priority order.**
+   * Flexbox distributes a shortfall in proportion to `flex-shrink × basis`, so
+   * at those weights the pill absorbs essentially all of it — and when it
+   * reaches its `min-width: 0` floor flexbox freezes it and redistributes the
+   * remainder here. That is "the path gives out first, then the names", without
+   * a media query guessing at a width.
+   */
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+}
+
+/*
+ * What actually truncates. `text-overflow` is a property of the box whose text
+ * overflows, and the button is a flex container — putting it there clips the
+ * name without ever drawing an ellipsis, which is the same mistake the file
+ * pill made one row over.
+ */
+.composer-mention-name {
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
 }
 
 /*
@@ -3850,12 +3928,22 @@ body {
  * a single place you type, and the focus ring lands on the container rather than
  * on the textarea inside it.
  */
+/*
+ * Tightened, so the box reads as one control rather than three stacked things.
+ *
+ * The old numbers were set when the composer was a tall field with a row of
+ * chrome under it, and they spaced those two apart. What is here now is a single
+ * line of input with its tools directly beneath — at that size the old gaps put
+ * more air inside the border than content, and the eye reads air as a boundary.
+ * Halved rather than removed: the row still needs to sit apart from the text
+ * being written, and its `border-top` is doing the separating.
+ */
 .composer {
   position: relative;
   display: flex;
   flex-direction: column;
-  gap: calc(var(--step) * 2);
-  padding: calc(var(--step) * 2.5) calc(var(--step) * 3);
+  gap: var(--step);
+  padding: calc(var(--step) * 2) calc(var(--step) * 2.5);
   border: 1px solid var(--line);
   border-radius: calc(var(--radius) * 2);
   background: var(--sunken);
@@ -3867,7 +3955,21 @@ body {
 }
 
 .composer textarea {
-  padding: 0;
+  /*
+   * A step above and below the text, and none at the sides.
+   *
+   * With `padding: 0` the caret sat directly on the composer's own 6px, which
+   * at one line tall put the placeholder against the top border. Vertical only:
+   * the left edge is where the text lines up with the `+` beneath it, and
+   * insetting one and not the other reads as a misalignment rather than as
+   * space.
+   *
+   * Safe for the autogrow because `box-sizing` is `border-box` app-wide, so
+   * `scrollHeight` already counts this and `height = scrollHeight` still lands
+   * on the right number. `min-height` is raised to match, or the floor would sit
+   * below the padded single line it is meant to describe.
+   */
+  padding: var(--step) 0;
   border: 0;
   border-radius: 0;
   background: transparent;
@@ -4144,11 +4246,6 @@ body {
   cursor: default;
 }
 
-/* Only the first of the pair pushes off the row's left content. */
-.composer-add {
-  margin-left: auto;
-}
-
 /*
  * The tool row's drawn icons.
  *
@@ -4166,7 +4263,7 @@ body {
   stroke-linejoin: round;
 }
 
-/* The `+` beside the paperclip: same size and quietness, different job. */
+/* The `+`, on the tool row: quiet enough not to compete with Send. */
 .composer-more svg {
   width: 16px;
   height: 16px;
@@ -4523,10 +4620,56 @@ input::placeholder {
  * Same `flex-basis: 100%` line break as `.entry-actions-go`, for the same
  * reason — no new grid area, so `.entry` keeps its three-row template.
  */
+/*
+ * Intents down the left, the arrow at the right — the first line's split again.
+ *
+ * `align-items: flex-start` rather than `baseline`, so the arrow sits level with
+ * the *first* intent instead of the last: it is under `Where are we?` on the
+ * line above, and dropping it to the bottom of a three-line stack would put it
+ * nowhere in particular.
+ */
 .entry-actions-handoff {
   flex-basis: 100%;
   display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: calc(var(--step) * 2);
   margin-top: var(--step);
+}
+
+/*
+ * One intent per line.
+ *
+ * Each names the agent taking over — `Codex implements this` — so three side by
+ * side read as a sentence rather than as three choices. Stacked, they are a
+ * short list of answers to one question, which is what they are.
+ *
+ * `align-items: flex-start` so each button is only as wide as its own label:
+ * stretched to the column's width, the hover target would extend well past the
+ * text and land on nothing.
+ */
+.entry-actions-intents {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--step);
+  min-width: 0;
+}
+
+/*
+ * The three intents, quieter than the arrow that opens the sheet.
+ *
+ * They are shortcuts through it, not siblings of it, and the arrow is what says
+ * "handing off happens here" — so they sit a step back in weight and read as its
+ * options rather than as three more separate offers. Hover brings them up to the
+ * same colour, because at the moment of pressing they are exactly as real.
+ *
+ * **Not dimmed to the point of looking disabled**: each one sends, immediately,
+ * with no sheet in between. A control that acts on one click should not be the
+ * faintest thing on the row.
+ */
+.entry-action--quick {
+  color: color-mix(in srgb, var(--voice) 45%, var(--text-muted));
 }
 
 /*
@@ -6588,30 +6731,6 @@ input::placeholder {
 }
 
 /*
- * The editor-context pill.
- *
- * Above the textarea rather than beside it: it describes what will be sent with
- * the message, so it belongs in the same column as the message, in reading
- * order before it. It occupies a line only when there is something to say —
- * `unavailable` renders nothing at all, because a permanent "not connected"
- * would be chrome telling you about software you may not even use.
- */
-/*
- * The context row above the box: what goes with the message, and how to add.
- *
- * Wraps rather than clips — a long path, a provenance mark and two controls do
- * not fit a narrow pane on one line, and the path is the part worth keeping.
- */
-.composer-context {
-  display: flex;
-  align-items: center;
-  gap: calc(var(--step) * 2);
-  flex-wrap: wrap;
-  min-width: 0;
-  padding-bottom: calc(var(--step) * 2);
-}
-
-/*
  * The selection, and it is the loudest thing in the row on purpose.
  *
  * It was a grey outline reading `--ink-dim` — a token that does not exist, so
@@ -6650,18 +6769,30 @@ input::placeholder {
  * decide, and the chip that sat here does the obvious thing instead.
  *
  */
+/*
+ * Square, because the label is gone and the border is not.
+ *
+ * The pill kept its chrome deliberately: `@claude` and `@codex` beside it are
+ * momentary — press one, it types a mention — while this one *is* something,
+ * on or off, and the border and background are what say so. A bare icon here
+ * would read as a third thing to press rather than a switch to look at.
+ *
+ * So width matches height rather than following text that no longer exists,
+ * and `gap`, `font` and `white-space` go with the label they were laying out.
+ */
 .ide-source {
   display: inline-flex;
   align-items: center;
-  gap: calc(var(--step) * 2);
+  justify-content: center;
+  /* Never squashed: the row is `nowrap`, and only the pill may give. */
+  flex: none;
+  width: 28px;
   height: 28px;
-  padding: 0 10px;
+  padding: 0;
   border: 1px solid var(--border-default);
   border-radius: 8px;
   background: var(--bg-surface);
   color: var(--text-secondary);
-  font: 12px var(--ui-font);
-  white-space: nowrap;
 }
 
 .ide-source-icon {
@@ -6698,10 +6829,13 @@ input::placeholder {
   opacity: 0.5;
 }
 
-/* The attach affordance, at the far end of the row it belongs to. */
-/* The `+` is the paperclip's neighbour, not its rival: same quiet chrome, so
-   neither reads as the primary action of the row. */
-.composer-add,
+/*
+ * The add affordance, first on the tool row.
+ *
+ * Borderless until hovered, unlike the Editor switch beside it, and the
+ * difference is the point: this one does something and is done, while that one
+ * is on or off and has to look like it holds a state even when untouched.
+ */
 .composer-more {
   display: grid;
   place-items: center;
@@ -6716,18 +6850,6 @@ input::placeholder {
   cursor: pointer;
 }
 
-.composer-add svg {
-  width: 17px;
-  height: 17px;
-  fill: none;
-  stroke: currentcolor;
-  stroke-width: 1.6;
-  stroke-linecap: round;
-  stroke-linejoin: round;
-}
-
-.composer-add:hover,
-.composer-add:focus-visible,
 .composer-more:hover,
 .composer-more:focus-visible {
   border-color: var(--border-default);
@@ -9766,8 +9888,15 @@ input::placeholder {
    * This was removed once, on the reading that it was cutting the composer's
    * send button in half. It was — but the button was *outside the composer*,
    * having overflowed a tool row too wide for a narrow column, so the clip was
-   * reporting a layout bug rather than causing one. `.composer-tools` wraps now
-   * and nothing escapes, which is what makes the clip safe to keep.
+   * reporting a layout bug rather than causing one.
+   *
+   * Nothing escapes that row now, which is what makes the clip safe to keep —
+   * but **not because it wraps any more**. It stopped wrapping when the file
+   * pill moved onto it, since a wrapping row grew and shrank a whole line as the
+   * selection changed. What holds instead is that every item is `flex: none`
+   * except the pill, which has `min-width: 0` and gives out first. If you ever
+   * add something to that row that can neither shrink nor be dropped, this clip
+   * starts cutting things in half again.
    */
   overflow: hidden;
   /*
@@ -10048,6 +10177,20 @@ input::placeholder {
   display: inline-flex;
   align-items: baseline;
   gap: 1px;
+  /*
+   * **The first thing on the row to give, by a factor of a hundred.** The two
+   * mention buttons can shrink too, but a shortfall is shared in proportion to
+   * `flex-shrink × basis` — so at 100 against their 1 this absorbs practically
+   * all of it, and only once it hits `min-width: 0` and freezes does flexbox
+   * pass the remainder to them. The path shortens to nothing before a name
+   * loses a letter, which is the order worth having: the full path is on the
+   * title, and `@claude` is who the message goes to.
+   *
+   * `min-width: 0` is what allows it to shrink past its content at all; without
+   * it a flex item refuses, and the send button would be pushed out of the
+   * composer again — see `.conversation-body`'s clip.
+   */
+  flex: 0 100 auto;
   min-width: 0;
   max-width: 40ch;
   overflow: hidden;
@@ -10063,8 +10206,29 @@ input::placeholder {
   text-overflow: ellipsis;
 }
 
-/* The range sits back a step from the path — the file is what you scan for. */
+/*
+ * The name is what gives, and the ellipsis has to be on it.
+ *
+ * `text-overflow` is a property of the box whose text overflows, and the pill is
+ * a flex container — its own `overflow: hidden` clips the children without ever
+ * drawing an ellipsis. So the truncation lives here, on the element that holds
+ * the text.
+ */
+.composer-ide-pill .path {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/*
+ * The range sits back a step from the path — the file is what you scan for.
+ *
+ * And it is `flex: none`, so shrinking eats the name rather than the numbers.
+ * `Composer…` says less than `…erQueries.ts:8-18`: the lines are what makes the
+ * report a reference to something, and the full path is on the title anyway.
+ */
 .composer-ide-lines {
+  flex: none;
   color: var(--accent-text);
   opacity: 0.75;
 }

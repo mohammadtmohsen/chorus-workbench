@@ -7,6 +7,7 @@ import { FileDiff } from './FileDiff.js'
 import { MarkdownView } from './MarkdownView.js'
 import { offersToAct } from './offer.js'
 import type { TranscriptMessage } from './transcript.js'
+import type { HandoffIntent } from './HandoffComposer.js'
 import { splitTrailingPaths } from './attach.js'
 import { SentAttachments } from './SentAttachments.js'
 import { useTypewriter } from './useTypewriter.js'
@@ -401,7 +402,8 @@ function Clamped(props: { children: React.ReactNode }): React.JSX.Element {
      */
     const measure = (): void => {
       /*
-       * One line, measured from the element's own type rather than assumed.
+       * The line height, measured from the element's own type rather than
+       * assumed — the clamp is two of these and the fade is one.
        *
        * This was a fraction of the pane's height, on the reasoning that what
        * makes a message too tall is how much of the *view* it takes. That is
@@ -417,11 +419,20 @@ function Clamped(props: { children: React.ReactNode }): React.JSX.Element {
        */
       const styles = getComputedStyle(element)
       const line = Number.parseFloat(styles.lineHeight)
-      const limit = Number.isFinite(line)
+      const height = Number.isFinite(line)
         ? Math.ceil(line)
         : Math.ceil(Number.parseFloat(styles.fontSize) * 1.5)
-      box.style.setProperty('--clamp-max', `${String(limit)}px`)
-      setTall(element.scrollHeight > limit + 1)
+      /*
+       * One line published, two lines used — and the stylesheet does the
+       * doubling.
+       *
+       * The clamp is two lines and the fade is one, so a single measurement
+       * feeds both and they cannot drift apart. Publishing `--clamp-max`
+       * instead would have the fade re-deriving the line height by halving it,
+       * which is the same number arrived at twice.
+       */
+      box.style.setProperty('--clamp-line', `${String(height)}px`)
+      setTall(element.scrollHeight > height * 2 + 1)
     }
     measure()
     const observer = new ResizeObserver(measure)
@@ -437,22 +448,69 @@ function Clamped(props: { children: React.ReactNode }): React.JSX.Element {
     }
   }, [])
 
+  /**
+   * Toggling, unless you were selecting text.
+   *
+   * A click is also how a drag-select ends, so without this, pulling a quote out
+   * of your own message collapses it under the pointer the instant you let go —
+   * and the passage you were selecting is then half hidden. `isCollapsed` is
+   * false only while a range is actually held, so a plain click still toggles.
+   *
+   * `contains` scopes it to this message: a selection somewhere else in the
+   * transcript is not a reason to refuse a click here, and refusing would make
+   * the control feel broken for a reason nothing on screen explains.
+   */
+  const toggle = (): void => {
+    if (!tall) return
+    const selection = window.getSelection()
+    const held =
+      selection !== null &&
+      !selection.isCollapsed &&
+      wrapper.current !== null &&
+      selection.anchorNode !== null &&
+      wrapper.current.contains(selection.anchorNode)
+    if (held) return
+    setOpen(!open)
+  }
+
+  /*
+   * A `div` with `role="button"`, not a `<button>`.
+   *
+   * The thing being made clickable is a whole rendered message — markdown, so it
+   * may contain links and code. Interactive content cannot nest inside a
+   * `<button>`; the HTML is invalid and browsers resolve it by unnesting, which
+   * takes the click handler somewhere unpredictable. The role and the key
+   * handler give the same semantics without the containment rule.
+   *
+   * Both keys, because the two are not interchangeable: `Enter` fires a button
+   * on keydown and `Space` on keyup, and `Space` also scrolls unless the default
+   * is refused. `t('conversation.showMore')` survives as the accessible name —
+   * the visible label is gone, but "there is more here" still has to be sayable.
+   */
   return (
-    <div className="clamp" ref={wrapper} data-open={open || !tall ? 'true' : 'false'}>
+    <div
+      className="clamp"
+      ref={wrapper}
+      data-open={open || !tall ? 'true' : 'false'}
+      data-clickable={tall ? 'true' : 'false'}
+      {...(tall
+        ? {
+            role: 'button',
+            tabIndex: 0,
+            'aria-expanded': open,
+            'aria-label': open ? t('conversation.showLess') : t('conversation.showMore'),
+            onClick: toggle,
+            onKeyDown: (event: React.KeyboardEvent) => {
+              if (event.key !== 'Enter' && event.key !== ' ') return
+              event.preventDefault()
+              setOpen(!open)
+            },
+          }
+        : {})}
+    >
       <div className="clamp-body" ref={body}>
         {props.children}
       </div>
-      {tall && (
-        <button
-          type="button"
-          className="clamp-toggle"
-          onClick={() => {
-            setOpen(!open)
-          }}
-        >
-          {open ? t('conversation.showLess') : t('conversation.showMore')}
-        </button>
-      )}
     </div>
   )
 }
@@ -474,6 +532,8 @@ export const Entry = memo(function Entry({
   message,
   cwd = '',
   onHandOff,
+  onQuickHandOff,
+  handOffTo,
   onOpenFile,
   onExplain,
   onRecap,
@@ -497,6 +557,36 @@ export const Entry = memo(function Entry({
   cwd?: string
   /** Absent when there is nobody to hand to — a one-agent conversation. */
   onHandOff?: ((message: TranscriptMessage) => void) | undefined
+  /**
+   * The same handoff without the sheet: one click, one intent, sent.
+   *
+   * **It does not include the diff, and that is the condition it was accepted
+   * on.** `HandoffComposer`'s own header states the principle — the brief *is*
+   * what the receiving agent will know, so sending one unseen is Chorus deciding
+   * that for the user, which §4.5 exists to prevent. A packet of "this reply,
+   * with this instruction" is small enough to predict without reading it; one
+   * carrying the working tree's diff is not. So the quick path is restricted to
+   * the predictable half and the sheet keeps the rest.
+   *
+   * Gated on `final` at the point of use, like `onRecap`: the offer is about the
+   * reply you are looking at, and a row of them down the whole transcript is
+   * three more things to read per message for an action almost always wanted on
+   * the newest one.
+   */
+  onQuickHandOff?: ((message: TranscriptMessage, intent: HandoffIntent) => void) | undefined
+  /**
+   * Who the quick actions would hand to, so the labels can say so.
+   *
+   * The sheet can afford `Implement this` because its header already reads
+   * `Claude → Codex`; a label on the transcript has no such header, and "who
+   * takes this over" is the one thing you need before clicking something that
+   * sends. So the name is in the label rather than in a tooltip.
+   *
+   * Passed in rather than derived, because `Entry` knows this message's speaker
+   * and nothing about the cast — the other participant is `Session`'s to name,
+   * and a conversation could one day have more than two.
+   */
+  handOffTo?: TranscriptMessage['actor'] | undefined
   /**
    * Opens a file this row names, in VS Code.
    *
@@ -1051,9 +1141,68 @@ export const Entry = memo(function Entry({
               Same mechanism as `Go ahead` below: `flex-basis: 100%` in the
               wrapping row, so `.entry` keeps its three-row grid template and
               this stays a change to one rule.
+
+              It has since become the line rather than one label on it: the three
+              quick intents stack down its left and the arrow sits at its right,
+              under `Where are we?`. Both halves are below.
             */}
             {onHandOff !== undefined && (
               <span className="entry-actions-handoff">
+                {/*
+                  The sheet's three intents, one per line, down the left.
+
+                  Stacked rather than strung along one line because each names
+                  the agent that would take the reply over — `Codex implements
+                  this` — and three of those side by side is a paragraph, not a
+                  row of controls. One per line they read as a short list of
+                  answers to the same question, which is what they are.
+
+                  `final` only. The offer is about the reply you are looking at,
+                  and three more labels under every message in the transcript is
+                  a lot of chrome for something almost always wanted on the
+                  newest one — the same rule `Recap` follows two blocks up, and
+                  for the same reason.
+
+                  **These send.** No sheet, no diff — see `onQuickHandOff` for
+                  why that pair of restrictions travels together, and why the
+                  name is in the label rather than left to be inferred.
+                */}
+                <span className="entry-actions-intents">
+                  {final &&
+                    onQuickHandOff !== undefined &&
+                    (
+                      [
+                        ['implement', 'handoff.quickImplement'],
+                        ['review', 'handoff.quickReview'],
+                        ['discuss', 'handoff.quickDiscuss'],
+                      ] as const
+                    ).map(([intent, key]) => (
+                      <button
+                        key={intent}
+                        type="button"
+                        className="entry-action entry-action--quick"
+                        data-entry-action={`handoff-${intent}`}
+                        onClick={() => {
+                          onQuickHandOff(message, intent)
+                        }}
+                      >
+                        {t(key, { to: displayName(handOffTo) })}
+                      </button>
+                    ))}
+                </span>
+                {/*
+                  The arrow, at the right — under `Where are we?` rather than
+                  under `Explain simply`.
+
+                  The first line already splits by kind: what you can ask of this
+                  reply on the left, what you can do with it on the right. The
+                  three intents are asks and the sheet is the full form behind
+                  them, so this line repeats that split rather than inventing a
+                  second arrangement. It also stops the arrow leading a line it
+                  no longer summarises — `Hand off → Codex implements this` reads
+                  as one sentence, which is the same swallowing that moved it off
+                  the first line in the first place.
+                */}
                 <button
                   type="button"
                   className="entry-action"

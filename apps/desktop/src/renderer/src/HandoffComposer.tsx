@@ -3,7 +3,14 @@ import { useDialog } from './useDialog.js'
 import { useTranslation } from 'react-i18next'
 
 type AgentId = 'codex' | 'claude'
-type Intent = 'implement' | 'review' | 'discuss'
+/**
+ * What the receiving agent is being asked to do.
+ *
+ * Exported because the transcript offers the same three as one-click actions
+ * under the newest reply, and two lists of intents would drift — the sheet would
+ * gain a fourth and the quick row would go on offering three.
+ */
+export type HandoffIntent = 'implement' | 'review' | 'discuss'
 
 /** Agents are named, not identified — copy should read like a sentence. */
 const NAME: Record<AgentId, string> = { codex: 'Codex', claude: 'Claude' }
@@ -37,7 +44,7 @@ export function HandoffComposer({
   onError: (message: string) => void
 }): React.JSX.Element {
   const { t } = useTranslation()
-  const [intent, setIntent] = useState<Intent>('implement')
+  const [intent, setIntent] = useState<HandoffIntent>('implement')
   const [includeDiff, setIncludeDiff] = useState(false)
   const [note, setNote] = useState('')
   const [brief, setBrief] = useState('')
@@ -108,7 +115,7 @@ export function HandoffComposer({
             <select
               value={intent}
               onChange={(e) => {
-                setIntent(e.target.value as Intent)
+                setIntent(e.target.value as HandoffIntent)
               }}
             >
               <option value="implement">{t('handoff.intentImplement')}</option>

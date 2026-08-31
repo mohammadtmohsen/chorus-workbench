@@ -1055,112 +1055,6 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(
           send()
         }}
       >
-        {/*
-         * The context row: what will be sent with the message, and the two ways
-         * to add to it.
-         *
-         * It was the pill alone, floating above the box on a line of its own —
-         * so the composer was a path and a field, and everything a person does
-         * before pressing Send had no home. The row is the home: the selection
-         * on the left, the ways to add on the right.
-         */}
-        <div className="composer-context">
-          {/*
-            What will ride along with the message — restored, with a new reason.
-            
-            The pill was deleted in Phase 9 as "a read-only pill restating what
-            is already on screen two inches to the left". That was true when a
-            coordinate was all that travelled. It is not true now: the embedded
-            editor sends the selected **text**, so this names what leaves the
-            machine rather than what is visible on it — and the editor can be
-            switched off in this pane, in which case nothing is visible at all.
-            
-            Deliberately not a switch. The Included chip is still gone and
-            context is still always sent; this reports, and reporting is the
-            thing that was lost.
-          */}
-          {ideAttached && props.ide.file !== null && (
-            <span
-              className="composer-ide-pill"
-              title={t('ide.attachedTitle', {
-                path: props.ide.file.relativePath,
-                lines: lineLabel(props.ide.file),
-              })}
-            >
-              {/*
-                The name, not the path. A composer row is narrow and a nested
-                path spends all of it on directories that are the same for every
-                file in the project — `apps/desktop/src/renderer/src/Composer.tsx`
-                truncates to the part that identifies nothing. The full path is
-                on the title, which is where a person goes when the name is
-                ambiguous.
-              */}
-              <span className="path">{basename(props.ide.file.relativePath)}</span>
-              <span className="composer-ide-lines">:{lineLabel(props.ide.file)}</span>
-            </span>
-          )}
-
-          {/*
-           * The way to add a file that is not the one open in the editor.
-           *
-           * A real picker behind a real button: dropping and pasting have always
-           * worked and neither is discoverable, so the affordance the approved
-           * composition shows is the one thing that says attaching is possible.
-           * The input is the control; the button is its label, because a bare
-           * `<input type="file">` cannot be styled and its own text is the
-           * browser's.
-           */}
-          <input
-            ref={picker}
-            className="sr-only"
-            type="file"
-            multiple
-            tabIndex={-1}
-            aria-hidden="true"
-            onChange={(event) => {
-              const chosen = [...(event.target.files ?? [])]
-              // Cleared so choosing the same file twice still fires a change.
-              event.target.value = ''
-              void attach(chosen)
-            }}
-          />
-          <button
-            type="button"
-            className="composer-add"
-            aria-label={t('conversation.attach')}
-            title={t('conversation.attach')}
-            onClick={() => {
-              picker.current?.click()
-            }}
-          >
-            <svg viewBox="0 0 24 24" aria-hidden="true">
-              <path d="M21 11.5 12.5 20a5 5 0 0 1-7-7l8-8a3.5 3.5 0 0 1 5 5l-8 8a2 2 0 0 1-3-3l7.5-7.5" />
-            </svg>
-          </button>
-          {/*
-            Everything else that can be added, behind one button.
-
-            The paperclip stays the one-click file picker it has always been;
-            this is the menu for the things that have no `<input type="file">` —
-            a folder, which only a native dialog can choose, and the editor's
-            selection, which is context rather than a file at all.
-          */}
-          <button
-            type="button"
-            className="composer-more"
-            aria-haspopup="menu"
-            aria-expanded={menu?.kind === 'add'}
-            aria-label={t('conversation.addContext')}
-            title={t('conversation.addContext')}
-            onClick={(event) => {
-              openMenuFrom('add', event)
-            }}
-          >
-            <svg viewBox="0 0 24 24" aria-hidden="true">
-              <path d="M12 5v14M5 12h14" />
-            </svg>
-          </button>
-        </div>
         {menuOpen &&
           /*
            * Portalled, and the reason is the dock's clip — see `menuAt` above.
@@ -1451,6 +1345,51 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(
               chair.
             */}
             {/*
+             * Everything that can be added, behind one button — and now the only
+             * one.
+             *
+             * A paperclip stood beside it and opened the file picker in one
+             * click. That was a second control for the menu's own first item:
+             * `Add file` calls the same `picker.current?.click()` this input is
+             * wired to. Two affordances for one action is a choice the person has
+             * to make before they can do the thing, so the pair became one.
+             *
+             * The hidden input travels with the `+` rather than staying on the
+             * context row it was declared in. It is `sr-only`, so where it sits
+             * changes nothing on screen — but the trigger and the control it
+             * drives being adjacent is what stops the next person deleting one
+             * and leaving the other.
+             */}
+            <input
+              ref={picker}
+              className="sr-only"
+              type="file"
+              multiple
+              tabIndex={-1}
+              aria-hidden="true"
+              onChange={(event) => {
+                const chosen = [...(event.target.files ?? [])]
+                // Cleared so choosing the same file twice still fires a change.
+                event.target.value = ''
+                void attach(chosen)
+              }}
+            />
+            <button
+              type="button"
+              className="composer-more"
+              aria-haspopup="menu"
+              aria-expanded={menu?.kind === 'add'}
+              aria-label={t('conversation.addContext')}
+              title={t('conversation.addContext')}
+              onClick={(event) => {
+                openMenuFrom('add', event)
+              }}
+            >
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M12 5v14M5 12h14" />
+              </svg>
+            </button>
+            {/*
              * The editor switch, on the same row as the cast.
              *
              * It sat above, on the context row, which is where the pill and the
@@ -1477,17 +1416,24 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(
              * about a selection, and a switch that vanishes when there is nothing
              * selected is a switch you cannot find when you want the editor back.
              */}
+            {/*
+             * Icon only, and the name moved to `aria-label` rather than being
+             * dropped. `title` would paint a tooltip, which is the thing being
+             * removed; `aria-label` is what stops an icon-only button being a
+             * button with no name at all to anyone not looking at it. The two
+             * state strings are kept because the accessible name should still
+             * say which way the click goes.
+             */}
             <button
               type="button"
               className="ide-source"
               aria-pressed={props.workbenchShown}
-              title={props.workbenchShown ? t('ide.hideEditor') : t('ide.showEditor')}
+              aria-label={props.workbenchShown ? t('ide.hideEditor') : t('ide.showEditor')}
               onClick={props.onToggleWorkbench}
             >
               <svg className="ide-source-icon" viewBox="0 0 24 24" aria-hidden="true">
                 <path d="M17 3.5 9.5 11 5 7.5 3 9l4 3-4 3 2 1.5L9.5 13l7.5 7.5 4-2v-13l-4-2Zm0 4.2v8.6L12 12l5-4.3Z" />
               </svg>
-              {t('ide.editorWorkbench')}
             </button>
             {participants.map((agent) => (
               <button
@@ -1503,10 +1449,63 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(
                 <span className="voice-dot" aria-hidden="true" />
                 {/* The `@` is part of the label, not decoration: the button
                     inserts a mention, and showing what it types is what makes
-                    that legible without a tooltip. */}
-                <span aria-hidden="true">@{agent}</span>
+                    that legible without a tooltip.
+
+                    Classed because it is what truncates when the row runs out
+                    of width — `text-overflow` belongs to the box holding the
+                    text, and the button is a flex container, so putting it on
+                    the button would clip without drawing an ellipsis. The dot
+                    beside it is `flex: none` and survives. The name a truncated
+                    label no longer gives is still on `aria-label` and on the
+                    title. */}
+                <span className="composer-mention-name" aria-hidden="true">
+                  @{agent}
+                </span>
               </button>
             ))}
+            {/*
+             * What will ride along with the message — restored, with a new
+             * reason, and now on the row it describes.
+             *
+             * The pill was deleted in Phase 9 as "a read-only pill restating what
+             * is already on screen two inches to the left". That was true when a
+             * coordinate was all that travelled. It is not true now: the embedded
+             * editor sends the selected **text**, so this names what leaves the
+             * machine rather than what is visible on it — and the editor can be
+             * switched off in this pane, in which case nothing is visible at all.
+             *
+             * Deliberately not a switch. The Included chip is still gone and
+             * context is still always sent; this reports, and reporting is the
+             * thing that was lost.
+             *
+             * **Last, after the controls.** It is the only thing here that is a
+             * statement rather than a button, so it reads as the row's result
+             * rather than as a fifth thing to press — and it is the one item that
+             * comes and goes, which at the end costs no movement to the four that
+             * do not. It had a row of its own above the box until the paperclip
+             * and the `+` left it; one line holding one italic path was chrome
+             * spending a line on what fits in a corner of this one.
+             */}
+            {ideAttached && props.ide.file !== null && (
+              <span
+                className="composer-ide-pill"
+                title={t('ide.attachedTitle', {
+                  path: props.ide.file.relativePath,
+                  lines: lineLabel(props.ide.file),
+                })}
+              >
+                {/*
+                  The name, not the path. A composer row is narrow and a nested
+                  path spends all of it on directories that are the same for every
+                  file in the project — `apps/desktop/src/renderer/src/Composer.tsx`
+                  truncates to the part that identifies nothing. The full path is
+                  on the title, which is where a person goes when the name is
+                  ambiguous.
+                */}
+                <span className="path">{basename(props.ide.file.relativePath)}</span>
+                <span className="composer-ide-lines">:{lineLabel(props.ide.file)}</span>
+              </span>
+            )}
             {/*
               What this session may do, from where the message is written.
 

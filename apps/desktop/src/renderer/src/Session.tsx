@@ -9,7 +9,7 @@ import { ErrorNotice } from './ErrorNotice.js'
 import { focusedNow, mayTakeCaret } from './focus.js'
 import { profileHas, profileMark, profileMarkAfterPaint } from './profile-marks.js'
 import { thinkingWord, offsetForActor, THINKING_WORD_MS, AWAITING_MAX_MS } from './thinking-word.js'
-import { HandoffComposer, type HandoffDraft } from './HandoffComposer.js'
+import { HandoffComposer, type HandoffDraft, type HandoffIntent } from './HandoffComposer.js'
 import { QuickQuestion } from './QuickQuestion.js'
 import {
   anchorOf,
@@ -272,6 +272,52 @@ export function Session(props: {
   const { toggleWorkbench } = useWorkspaceActions()
   const workbenchShown = useWorkbenchShown(props.session.projectId)
   const [handoff, setHandoff] = useState<HandoffDraft | null>(null)
+
+  /**
+   * A handoff with the sheet skipped — the transcript's one-click intents.
+   *
+   * **Never with the diff, and that restriction is the reason this exists at
+   * all.** `HandoffComposer`'s header states the rule it is departing from: the
+   * brief *is* what the receiving agent will know, so sending one unseen decides
+   * that for the user (§4.5). What makes an exception defensible is
+   * predictability — "this reply, with this instruction" is a packet you can
+   * picture from the button you pressed, and the working tree's diff is not. So
+   * `includeDiff` is hardcoded false rather than defaulted, and the sheet
+   * remains the only way to send one.
+   *
+   * Prepared and then sent rather than sent directly, because composing the
+   * brief is main's job and there is no channel that does both — the two calls
+   * are the same pair the sheet makes, with nothing in between.
+   *
+   * Declared here, above every use, because a `useCallback` dependency array is
+   * evaluated during render: this reads `participants`, and a callback placed
+   * above the thing it closes over throws a TDZ `ReferenceError` on first paint
+   * that the typechecker cannot see.
+   */
+  const quickHandOff = useCallback(
+    (message: TranscriptMessage, intent: HandoffIntent): void => {
+      if (message.actor !== 'claude' && message.actor !== 'codex') return
+      const from = message.actor
+      const to = participants.find((p) => p !== from)
+      if (to === undefined) return
+      const sourceEventIds = [message.eventId]
+      window.chorus
+        .prepareHandoff({ conversationId, from, to, sourceEventIds, includeDiff: false, intent })
+        .then((prepared) =>
+          window.chorus.sendHandoff({
+            conversationId,
+            from,
+            to,
+            sourceEventIds,
+            brief: prepared.brief,
+          })
+        )
+        .catch((e: unknown) => {
+          setError(e instanceof Error ? e.message : String(e))
+        })
+    },
+    [conversationId, participants]
+  )
 
   /** A passage selected in this pane's transcript, and where to offer to quote it. */
   const [selected, setSelected] = useState<{
@@ -1588,6 +1634,21 @@ export function Session(props: {
             }
           : undefined
       }
+      /* Same condition as `onHandOff`; `Entry` narrows it to the last reply. */
+      onQuickHandOff={
+        participants.length > 1 && (message.actor === 'codex' || message.actor === 'claude')
+          ? quickHandOff
+          : undefined
+      }
+      /*
+       * Who would take it over, so the quick labels can say so rather than
+       * leaving it to be inferred from the speaker.
+       *
+       * Resolved the same way `quickHandOff` resolves it — the other
+       * participant — and passed rather than derived in `Entry`, which knows
+       * this message's speaker and nothing about the cast.
+       */
+      handOffTo={participants.find((p) => p !== message.actor)}
       /*
        * Absent until a language is set, which is the gate the selection offer
        * used and the reason is unchanged: an action that cannot say which
