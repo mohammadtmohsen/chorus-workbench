@@ -49,7 +49,9 @@ import getDialogsServiceOverride from '@codingame/monaco-vscode-dialogs-service-
 import getTextmateServiceOverride from '@codingame/monaco-vscode-textmate-service-override'
 import getThemeServiceOverride from '@codingame/monaco-vscode-theme-service-override'
 import getLanguagesServiceOverride from '@codingame/monaco-vscode-languages-service-override'
-import { StorageScope } from '@codingame/monaco-vscode-storage-service-override'
+import getStorageServiceOverride, {
+  StorageScope,
+} from '@codingame/monaco-vscode-storage-service-override'
 import { SyncDescriptor } from '@codingame/monaco-vscode-api/vscode/vs/platform/instantiation/common/descriptors'
 import { IStorageService } from '@codingame/monaco-vscode-api/vscode/vs/platform/storage/common/storage.service'
 import { ChorusStorageDatabase, ChorusStorageService } from './storage.js'
@@ -355,6 +357,21 @@ export function prepareWorkbench(connection: WorkbenchConnection): WorkbenchSetu
    * Nothing in this file writes that layer, which is exactly why seeding cannot
    * destroy a preference the way `initUserConfiguration` did.
    */
+  /*
+   * One set of factories, named once and handed to both registrations.
+   *
+   * The helper and the override below must agree about where each scope is
+   * stored; two literals would be two things free to drift, and the drift would
+   * show up as a scope silently served by IndexedDB again.
+   */
+  const STORAGE_DATABASES = {
+    [StorageScope.APPLICATION]: () => new ChorusStorageDatabase('application'),
+    [StorageScope.PROFILE]: (_accessor: unknown, profile: { id: string }) =>
+      new ChorusStorageDatabase(`profile:${profile.id}`),
+    [StorageScope.WORKSPACE]: (_accessor: unknown, workspace: { id: string }) =>
+      new ChorusStorageDatabase(`workspace:${workspace.id}`),
+  }
+
   const services: IEditorOverrideServices = {
     ...getLogServiceOverride(),
     ...getExtensionServiceOverride(),
@@ -390,31 +407,36 @@ export function prepareWorkbench(connection: WorkbenchConnection): WorkbenchSetu
      * profile's cannot share a slot in the file.
      */
     /*
-     * **Registered directly rather than through `getStorageServiceOverride`**,
-     * and the package's own call is deliberately absent.
+     * **The helper first, then `IStorageService` replaced — and the order is the
+     * fix rather than a style.**
      *
-     * That helper does exactly one thing — register
-     * `InjectedBrowserStorageService` for `IStorageService` with these two
-     * arguments — so calling it as well would only race this entry for the same
-     * key, decided by spread order rather than by intent. `ChorusStorageService`
-     * is that class plus the `APPLICATION_SHARED` scope, which `DatabaseFactories`
-     * has no slot for and which is where workspace trust is stored.
+     * A previous version bypassed `getStorageServiceOverride()` entirely, on a
+     * comment claiming it "does exactly one thing — register
+     * `InjectedBrowserStorageService` for `IStorageService`". That was wrong. It
+     * registers **two** services, and the second one is
+     * `IExtensionStorageService`. Dropping the helper therefore left that service
+     * to the fallback in `missing-services.js`, whose `getExtensionState` is
+     * `() => undefined`.
      *
-     * The `true` is delayed instantiation, matching the helper: nothing should
-     * pay for storage before something asks for it.
+     * The consequence was invisible in the file and obvious in the product:
+     * every extension's global state was written to `storage.json` correctly and
+     * read back as nothing. `storage.json` held
+     * `{"hasShownWelcome":true}` for the DOCX reader while it showed its welcome
+     * on every launch, and a full `glAccounts` record for GitLab while the
+     * extension reported no account. Remote extensions do not read these mementos
+     * from the REH's own user-data dir — `MainThreadStorage.$initializeExtensionStorage`
+     * reads the *client's* `IExtensionStorageService` and sends it over RPC — so
+     * the stub answered for all of them.
+     *
+     * Spreading the helper and then overriding one key is deterministic: plain
+     * object-spread order, resolved before initialisation, with no registration
+     * race. `ChorusStorageService` is the helper's own class plus the
+     * `APPLICATION_SHARED` scope, which `DatabaseFactories` has no slot for.
      */
+    ...getStorageServiceOverride({ databaseFactories: STORAGE_DATABASES }),
     [IStorageService.toString()]: new SyncDescriptor(
       ChorusStorageService,
-      [
-        undefined,
-        {
-          [StorageScope.APPLICATION]: () => new ChorusStorageDatabase('application'),
-          [StorageScope.PROFILE]: (_accessor: unknown, profile: { id: string }) =>
-            new ChorusStorageDatabase(`profile:${profile.id}`),
-          [StorageScope.WORKSPACE]: (_accessor: unknown, workspace: { id: string }) =>
-            new ChorusStorageDatabase(`workspace:${workspace.id}`),
-        },
-      ],
+      [undefined, STORAGE_DATABASES],
       true
     ),
     ...getSecretStorageServiceOverride(),
@@ -457,7 +479,42 @@ export function prepareWorkbench(connection: WorkbenchConnection): WorkbenchSetu
      * two conditions and could be overridden by the workspace's own settings file
      * — i.e. by the very tree whose authors are in question.
      */
-    enableWorkspaceTrust: connection.workspaceTrust !== 'waived',
+    /*
+     * **Off, as a stated product policy rather than a workaround.**
+     *
+     * This was `connection.workspaceTrust !== 'waived'` — on unless main said
+     * otherwise, with the waiver reachable only under the E2E profile. Keeping
+     * the trust service on turned out to be undeliverable here rather than
+     * merely awkward, and the reason is structural: trust is keyed by folder URI
+     * and matched on authority, and this app's authority carries the REH's
+     * ephemeral port. A decision saved under one launch can never match the next.
+     *
+     * Two attempts to bridge that failed, and both are recorded rather than
+     * hidden. Canonicalising the authority (`remote-authority.ts`) made trust
+     * persist and **emptied the file explorer**, because canonical URIs are
+     * resolved elsewhere. Seeding `content.trust.model.key` through
+     * `fallbackOverride` could never fire, because a stored value always beats a
+     * fallback and the profile already held sixteen stale-port records — one per
+     * time the person had been asked.
+     *
+     * So the choice was a prompt on every launch forever, or saying plainly that
+     * this product does not use Workspace Trust. A security prompt shown on a
+     * loop is one people are trained to dismiss without reading, which protects
+     * nobody and costs something real.
+     *
+     * **What this gives up, precisely.** VS Code's Restricted Mode no longer
+     * guards any folder Chorus opens. What makes that defensible here and not in
+     * a general editor: Chorus only ever opens a folder somebody deliberately
+     * added as a Project through a directory chooser, and it does not follow
+     * links into arbitrary checkouts. Chorus's **own** permission engine is
+     * untouched and still governs what agents may do — a different question about
+     * a different executor.
+     *
+     * Deliberately not routed through the `waived` descriptor field. That exists
+     * so a *gate* can waive trust while a shipping build cannot; using it here
+     * would disguise a product decision as a test affordance.
+     */
+    enableWorkspaceTrust: false,
     developmentOptions: { logLevel: LogLevel.Info },
     /*
      * Where a credential goes, and why one is needed at all.
