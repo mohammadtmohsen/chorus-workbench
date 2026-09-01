@@ -330,40 +330,71 @@ export class ProjectStore {
   }
 
   /**
-   * Exchanges two projects' places in the rail.
+   * Moves a project to sit immediately before another, or to the end.
    *
-   * **A swap, not an insert-between**, which is a product decision rather than an
-   * implementation shortcut: the two rows trade `sort_order` and nothing else
-   * moves, so a drag can never renumber a list somebody else's drag is mid-way
-   * through reading.
+   * **This was a swap, and the swap was the wrong model.** Two rows traded
+   * `sort_order` and nothing else moved, which is cheap and is not what dragging
+   * a card means: dragging the last tile to the top swapped it with the first
+   * and left everything between untouched, so one gesture produced two moves and
+   * the list you were looking at was not the list you were arranging. Insertion
+   * is what the gesture already looks like — the cards make room, and the one
+   * you are holding goes where the gap is.
    *
-   * Both ids are required to exist — a swap with a project that has been forgotten
-   * is a caller bug, and doing half of it would leave two tiles sharing a value
-   * and the rail resolving the tie by `last_opened_at`, which is the one thing
-   * this column exists to stop.
+   * **Still named by project, never by index**, which is the property the swap
+   * had that is worth keeping. An index would be the shell's opinion about a
+   * list this store owns, and the rail redraws from a pushed array — so a drag
+   * that started before the last push would move the wrong tile in silence.
+   * `beforeId` names the neighbour; a stale one is a project that still exists
+   * and the move simply lands somewhere reasonable, or it has been forgotten and
+   * the call is refused.
    *
-   * One transaction, because a swap read as two updates is a swap that can be
-   * observed with both rows holding the same number.
+   * `null` means the end of the list, which is the one position no neighbour can
+   * name.
+   *
+   * **Renumbering the whole list, in one transaction.** The alternative — giving
+   * the moved row a fractional or midpoint value — avoids touching its
+   * neighbours and eventually runs out of room between two integers, at which
+   * point it has to renumber anyway. A rail holds a handful of projects; the
+   * write is one statement per row, and doing it whole means the column always
+   * reads `0..n-1` with no gaps for a later reader to interpret.
    */
-  swapOrder(projectId: string, otherId: string): void {
-    if (projectId === otherId) return
-    const exchange = this.db.transaction((): void => {
-      const a = this.require(projectId)
-      const b = this.require(otherId)
+  moveOrder(projectId: string, beforeId: string | null): void {
+    if (projectId === beforeId) return
+    const move = this.db.transaction((): void => {
+      this.require(projectId)
+      if (beforeId !== null) this.require(beforeId)
+
       /*
-       * Resolved against `list()`'s own ordering rather than against the raw
-       * column, so a null on either side — only reachable in a hand-edited
-       * database — still swaps into a defined place instead of writing null back.
+       * Sequenced from `list()` rather than from the raw column, so a null
+       * `sort_order` — only reachable in a hand-edited database — is resolved
+       * into a real position by the same ordering the rail sees, instead of
+       * being written back as null.
        */
-      const order = this.list()
-      const indexOf = (id: string): number => order.findIndex((project) => project.id === id)
-      const aOrder = a.sortOrder ?? indexOf(projectId)
-      const bOrder = b.sortOrder ?? indexOf(otherId)
+      /*
+       * Widened to `string`, because the ids being placed came off an IPC
+       * request and are strings until this method has proved they exist. The
+       * `require` calls above are that proof; carrying `ProjectId` through here
+       * would only mean asserting it back on the two arguments.
+       */
+      const current: string[] = this.list().map((project) => project.id)
+      const without = current.filter((id) => id !== projectId)
+      const at = beforeId === null ? without.length : without.indexOf(beforeId)
+      /*
+       * A `beforeId` that is not in the list can only mean it was forgotten
+       * between the drag starting and the drop — `require` above has already
+       * refused a truly unknown one. Appending is the safe reading: the person
+       * dragged towards something that is no longer there, and the end is where
+       * that gesture was heading.
+       */
+      const index = at === -1 ? without.length : at
+      const ordered = [...without.slice(0, index), projectId, ...without.slice(index)]
+
       const set = this.db.prepare(`UPDATE projects SET sort_order = @order WHERE id = @projectId`)
-      set.run({ order: bOrder, projectId })
-      set.run({ order: aOrder, projectId: otherId })
+      ordered.forEach((id, order) => {
+        set.run({ order, projectId: id })
+      })
     })
-    exchange()
+    move()
   }
 
   rename(projectId: string, name: string): Project {

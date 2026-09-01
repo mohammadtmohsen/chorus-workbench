@@ -63,7 +63,7 @@ interface WorkspaceProps {
   /** A card dropped at a new place in the rail's order. */
   readonly onReorderSessions: (conversationId: string, slot: number) => void
   /** Two rail tiles trading places. Written by main; nothing here is optimistic. */
-  readonly onSwapProjects: (projectId: string, otherId: string) => void
+  readonly onMoveProject: (projectId: string, beforeId: string | null) => void
   readonly onOpenSettings: () => void
   /** Opens the list of every conversation the log holds, not only the open ones. */
   readonly onOpenHistory: () => void
@@ -226,7 +226,7 @@ export function Workspace(props: WorkspaceProps): React.JSX.Element {
       [splitWithSession, commit]
     ),
     onReorder: props.onReorderSessions,
-    onSwapProjects: props.onSwapProjects,
+    onMoveProject: props.onMoveProject,
   })
 
   /*
@@ -480,6 +480,22 @@ export function Workspace(props: WorkspaceProps): React.JSX.Element {
         onProjectPointerDown={onProjectPointerDown}
         onReorderSessions={props.onReorderSessions}
         draggingId={drag.drag?.fromRail === true ? drag.drag.conversationId : null}
+        /*
+         * Where the tiles would land if you let go now.
+         *
+         * Passed as the move rather than as a reordered list, so the rail owns
+         * one reading of it — the same `moveBefore` the store uses to write it.
+         * Two places computing an order is how the preview and the result come to
+         * disagree, and the preview is the one that gets believed.
+         *
+         * Null unless a rail drag is currently over a gap, which is also what
+         * clears the offsets the moment the pointer leaves the rail.
+         */
+        pendingMove={
+          drag.drag?.fromRail === true && drag.drag.target?.kind === 'rail-move'
+            ? { projectId: drag.drag.conversationId, beforeId: drag.drag.target.beforeId }
+            : null
+        }
         consumeSuppressedClick={drag.consumeSuppressedClick}
       />
       <main className="workspace-editor" aria-label="Workspace">
@@ -1307,9 +1323,14 @@ function DragFeedback({ drag }: { drag: ActiveTabDrag | null }): React.JSX.Eleme
   if (drag === null) return null
   const target = drag.target
   const overlay =
-    /* Both insert kinds draw a line rather than a wash, so neither takes the
-       overlay branch. */
-    target !== null && target.kind !== 'insert' && target.kind !== 'rail-insert' ? (
+    /* Every insertion draws a line rather than a wash, so none of the three
+       takes the overlay branch. `rail-move` joined them when project tiles
+       stopped swapping: a wash names the tile you would trade with, and there is
+       no such tile any more — the gap is the answer. */
+    target !== null &&
+    target.kind !== 'insert' &&
+    target.kind !== 'rail-insert' &&
+    target.kind !== 'rail-move' ? (
       <div
         className="workspace-drop-overlay"
         data-disabled={target.disabled}
@@ -1323,14 +1344,9 @@ function DragFeedback({ drag }: { drag: ActiveTabDrag | null }): React.JSX.Eleme
         }}
       >
         <span>
-          {/* `rail-swap` washes the tile it would trade with, rather than drawing
-              a line in a gap: the gesture moves two tiles, and a line between two
-              others would describe an insertion that does not happen. */}
           {target.kind === 'move'
             ? t('workspace.moveHere')
-            : target.kind === 'rail-swap'
-              ? t('workspace.swapHere')
-              : t(`workspace.dropSplit.${target.direction}`)}
+            : t(`workspace.dropSplit.${target.direction}`)}
         </span>
       </div>
     ) : null
@@ -1340,9 +1356,10 @@ function DragFeedback({ drag }: { drag: ActiveTabDrag | null }): React.JSX.Eleme
         className="workspace-drop-line"
         style={{ left: target.line.left, top: target.line.top, height: target.line.height }}
       />
-    ) : target?.kind === 'rail-insert' ? (
+    ) : target?.kind === 'rail-insert' || target?.kind === 'rail-move' ? (
       /* The same line turned on its side: a rail is a column, so the gap it
-         marks is horizontal. */
+         marks is horizontal. Both rail kinds land here — the list they reorder
+         differs, the gesture and the gap do not. */
       <div
         className="workspace-drop-line workspace-drop-line--across"
         style={{ left: target.line.left, top: target.line.top, width: target.line.width }}

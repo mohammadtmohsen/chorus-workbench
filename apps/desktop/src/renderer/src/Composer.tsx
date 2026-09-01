@@ -28,6 +28,7 @@ import {
   type StampedMention,
 } from './mention-menu.js'
 import { withQuote } from './quote.js'
+import { ConfirmRestart } from './ConfirmRestart.js'
 
 /**
  * The box you type into, and everything that decides what leaves it.
@@ -90,6 +91,16 @@ export interface ComposerProps {
   readonly working: readonly string[]
   /** What VS Code is showing for this pane's project. Metadata only. */
   readonly ide: IdeContextPush | null
+  /**
+   * Ends this conversation and opens a fresh one in the same project.
+   *
+   * On the tool row rather than in a menu because it is a thing you decide while
+   * typing: the answer went sideways, the context is full of a thread you have
+   * finished with, and what you want is the same project with none of it. A menu
+   * makes that three actions — find it, read it, confirm — for something whose
+   * whole value is being one.
+   */
+  readonly onRestart: () => void
   /**
    * The session's own actions, in the row where the work happens.
    *
@@ -166,6 +177,13 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(
     const { conversationId, participants } = props
 
     const [draft, setDraftState] = useState(props.initial?.draft ?? '')
+    /**
+     * Whether the restart is waiting to be confirmed.
+     *
+     * Only ever true while a turn is running — a quiet conversation restarts on
+     * the click, because the log is append-only and nothing is lost.
+     */
+    const [confirmingRestart, setConfirmingRestart] = useState(false)
     /**
      * How many times the draft has been written, ever.
      *
@@ -1055,6 +1073,23 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(
           send()
         }}
       >
+        {confirmingRestart && (
+          /*
+           * Gated at the call site rather than behind an `isOpen` inside the
+           * component, so its `useDialog` mounts with the dialog and its focus
+           * handling has a lifecycle to hang on.
+           */
+          <ConfirmRestart
+            working={props.working.join(', ')}
+            onCancel={() => {
+              setConfirmingRestart(false)
+            }}
+            onConfirm={() => {
+              setConfirmingRestart(false)
+              props.onRestart()
+            }}
+          />
+        )}
         {menuOpen &&
           /*
            * Portalled, and the reason is the dock's clip — see `menuAt` above.
@@ -1387,6 +1422,34 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(
             >
               <svg viewBox="0 0 24 24" aria-hidden="true">
                 <path d="M12 5v14M5 12h14" />
+              </svg>
+            </button>
+            {/*
+              Start over: end this room and open a fresh one in the same project.
+
+              **Next to the `+`, and the pairing is the point.** That one adds to
+              what the agent will see; this one empties it. Both are about what
+              the next message carries, which is what the tool row is for.
+
+              It asks only when something is running. Ending a quiet conversation
+              loses nothing — the log is append-only and the transcript stays in
+              History, which is why ending stopped needing a confirmation at all.
+              A turn in flight is the exception: that work is discarded, and it is
+              the one case where a misclick costs something that cannot be read
+              back.
+            */}
+            <button
+              type="button"
+              className="composer-more"
+              aria-label={t('conversation.restart')}
+              title={t('conversation.restart')}
+              onClick={() => {
+                if (props.busy) setConfirmingRestart(true)
+                else props.onRestart()
+              }}
+            >
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M20 12a8 8 0 1 1-2.3-5.6M20 4v4h-4" />
               </svg>
             </button>
             {/*

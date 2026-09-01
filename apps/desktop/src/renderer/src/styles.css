@@ -6564,7 +6564,12 @@ input::placeholder {
   border-radius: var(--radius);
   background: var(--raised);
   box-shadow: 0 12px 28px rgb(0 0 0 / 45%);
-  pointer-events: none;
+  /*
+   * Click-through was right while this opened on hover — the pointer was on its
+   * way somewhere and the panel must not have caught it. It is opened by a click
+   * now and has a button in it, so it takes its own events; the dismissal
+   * listener excludes it by containment rather than by letting clicks fall past.
+   */
   white-space: nowrap;
 }
 
@@ -6688,12 +6693,38 @@ input::placeholder {
   color: var(--text-muted);
 }
 
+/*
+ * It was a `<p>` describing what clicking the rail button did. Click opens this
+ * panel now, so the sentence became a button and kept its place: the rule above
+ * it still separates the action from the readings, which is the job that
+ * `border-top` was already doing.
+ */
 .usage-tip-action {
+  display: block;
+  width: 100%;
   margin: calc(var(--step) * 2) 0 0;
-  padding-top: calc(var(--step) * 2);
+  padding: calc(var(--step) * 2) 0 0;
+  border: 0;
   border-top: 1px solid var(--line);
+  background: none;
   color: var(--text-muted);
+  font-family: inherit;
   font-size: 11px;
+  text-align: left;
+  cursor: pointer;
+  transition: color 120ms ease;
+}
+
+.usage-tip-action:hover:not(:disabled),
+.usage-tip-action:focus-visible {
+  color: var(--text-primary);
+  outline: none;
+}
+
+/* Mid-refresh: still readable, plainly not pressable. */
+.usage-tip-action:disabled {
+  opacity: 0.6;
+  cursor: default;
 }
 
 /*
@@ -7288,6 +7319,35 @@ input::placeholder {
   margin: 0;
   padding: 0;
   list-style: none;
+  /*
+   * One tile plus one gap — the distance a tile travels to swap places with its
+   * neighbour, declared once here and multiplied by a whole number of tiles in
+   * `QuickRail`. Written from the two values it is made of rather than as `50px`,
+   * so changing either moves the animation with it. Every tile in the rail is
+   * this size; the drag preview is exact rather than approximate because of it.
+   */
+  --rail-step: calc(44px + var(--step) * 2);
+}
+
+/*
+ * The tiles make room while a project is dragged over them.
+ *
+ * **Translated, not reordered.** Re-rendering the rail in the previewed order
+ * moves the DOM nodes, and a node that moves because its siblings changed has
+ * nothing to interpolate — it jumps. A transform is one property the browser can
+ * animate, so the tiles slide and the gap that opens is the drop.
+ *
+ * Short: this has to finish before the pointer reaches the next gap, or the rail
+ * lags the hand and reads as sluggish rather than as smooth.
+ */
+.rail-slot {
+  transition: transform 120ms ease;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .rail-slot {
+    transition: none;
+  }
 }
 
 /*

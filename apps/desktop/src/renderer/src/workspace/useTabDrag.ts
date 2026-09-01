@@ -27,8 +27,7 @@ interface PaneGeometry {
  * `data-reorder-id`, which the rail stopped drawing when it became a list of
  * projects — the gap-based `rail-insert` path below is reached only if something
  * draws them again. `tiles` are the project tiles it draws now, and they reorder
- * by *swapping* rather than by insertion, so they need the tile under the pointer
- * rather than the gap nearest it.
+ * by insertion — the same gap arithmetic, over a different list.
  */
 interface RailGeometry {
   readonly rect: DOMRect
@@ -59,20 +58,25 @@ export type TabDropTarget =
     }
   | {
       /**
-       * Two project tiles trading places.
+       * A project tile moving to a gap between two others.
        *
-       * A swap rather than an insertion, which is the product's choice and not a
-       * simplification: the tile under the pointer is the one that will move, so
-       * the whole gesture is described by two ids and nothing has to agree about
-       * indices. `rect` is that tile, drawn as the thing being traded with rather
-       * than as a line in a gap.
+       * **This was `rail-swap` and traded two tiles.** The swap was cheap and was
+       * not what the gesture means: dragging the last tile onto the first
+       * exchanged them and left everything between untouched, so one drag made
+       * two moves. The tiles make room now, which is what a drag already looks
+       * like.
+       *
+       * `beforeId` names the neighbour the tile lands in front of, `null` the
+       * end. Named rather than indexed for the reason the IPC is: the rail
+       * redraws from a pushed list, so a position is an opinion that can go
+       * stale between the drag starting and the drop.
        *
        * Like `rail-insert`, only ever resolved for a gesture that began in the
        * rail — dragging a pane tab across the rail must not rearrange it.
        */
-      kind: 'rail-swap'
-      otherId: string
-      rect: DOMRect
+      kind: 'rail-move'
+      beforeId: string | null
+      line: { left: number; top: number; width: number }
       disabled: false
     }
   | {
@@ -248,18 +252,37 @@ function resolveTarget(
   const rail = dragGeometry.rail
   if (fromRail && rail !== null && contains(rail.rect, x, y) && rail.tiles.length > 0) {
     /*
-     * The tile under the pointer is the one being traded with — tested on `y`
-     * alone, because the rail is one column wide and an `x` test would only add a
-     * way for a drag that is plainly over a tile to resolve to nothing.
+     * The gap the tile would land in, from the midpoints of the tiles that are
+     * not being dragged — the same `railSlotAt` the conversation cards below use,
+     * and for the same reason: a midpoint is where a tile stops being "above the
+     * pointer" and starts being "below" it.
      *
-     * Returning null rather than falling through when the pointer is over the
-     * rail but over no tile, or over the dragged tile itself: the rail overlaps no
-     * pane, so a fall-through could only ever reach `null` anyway, and a swap with
-     * yourself should end quietly instead of writing.
+     * **The dragged tile is removed first.** Leaving it in would make its own
+     * midpoint a boundary, so the gesture would have a dead zone the width of the
+     * tile you are holding, right where the pointer is.
+     *
+     * Tested on `y` alone, because the rail is one column wide and an `x` test
+     * would only add a way for a drag plainly over the rail to resolve to
+     * nothing.
      */
-    const over = rail.tiles.find((tile) => y >= tile.rect.top && y <= tile.rect.bottom)
-    if (over === undefined || over.projectId === conversationId) return null
-    return { kind: 'rail-swap', otherId: over.projectId, rect: over.rect, disabled: false }
+    const others = rail.tiles.filter((tile) => tile.projectId !== conversationId)
+    if (others.length === 0) return null
+    const slot = railSlotAt(
+      others.map((tile) => tile.rect.top + tile.rect.height / 2),
+      y
+    )
+    const before = others[slot]
+    const last = others.at(-1)
+    return {
+      kind: 'rail-move',
+      beforeId: before?.projectId ?? null,
+      line: {
+        left: (before ?? last)?.rect.left ?? rail.rect.left,
+        top: before?.rect.top ?? (last === undefined ? rail.rect.top : last.rect.bottom),
+        width: (before ?? last)?.rect.width ?? rail.rect.width,
+      },
+      disabled: false,
+    }
   }
   if (fromRail && rail !== null && contains(rail.rect, x, y) && rail.cards.length > 0) {
     const slot = railSlotAt(
@@ -357,7 +380,7 @@ export function useTabDrag(options: {
    * same operation described twice: one names a gap in a list the renderer keeps,
    * the other names two projects and is written to the database by main.
    */
-  onSwapProjects: (projectId: string, otherId: string) => void
+  onMoveProject: (projectId: string, beforeId: string | null) => void
 }): {
   drag: ActiveTabDrag | null
   onPointerDown: (
@@ -403,8 +426,8 @@ export function useTabDrag(options: {
             event.clientY,
             current.fromRail
           )
-          if (target?.kind === 'rail-swap') {
-            options.onSwapProjects(current.conversationId, target.otherId)
+          if (target?.kind === 'rail-move') {
+            options.onMoveProject(current.conversationId, target.beforeId)
           } else if (target?.kind === 'rail-insert') {
             options.onReorder(current.conversationId, target.slot)
           } else if (target?.kind === 'insert' || target?.kind === 'move') {

@@ -39,6 +39,13 @@ export function ProjectPreviewCard(props: {
     readonly name: string
     readonly summary: string
   }[]
+  /**
+   * Opened by a right-click rather than by a hover.
+   *
+   * It changes two things and nothing else: the pointer leaving no longer closes
+   * it (the controller refuses `leave` while pinned), and a click outside does.
+   */
+  readonly pinned: boolean
   readonly onRename: (name: string) => void
   readonly onToggleAgent: (agentId: AgentId, present: boolean) => Promise<void>
   readonly onChooseProfile: (profileId: string) => Promise<void>
@@ -62,6 +69,34 @@ export function ProjectPreviewCard(props: {
       document.removeEventListener('keydown', onKey)
     }
   }, [dismiss])
+
+  /*
+   * A click outside puts a pinned card away — and only a pinned one.
+   *
+   * A hovered card needs nothing of the sort: the pointer leaving is already
+   * what closes it. A pinned card ignores the pointer by design, so without this
+   * the only ways out would be Escape and the tile it came from, and a panel you
+   * have to aim at to dismiss is one you learn to leave open.
+   *
+   * The card excludes itself by containment; the *tile* does not need excluding,
+   * because its `contextmenu` toggle is what a second right-click there does
+   * anyway. `pointerdown` in the capture phase, so a drag beginning elsewhere in
+   * the rail dismisses on the way down rather than after it has finished
+   * somewhere else.
+   */
+  const pinned = props.pinned
+  useEffect(() => {
+    if (!pinned) return undefined
+    const onDown = (event: Event): void => {
+      const target = event.target as Node | null
+      if (target !== null && card.current?.contains(target) === true) return
+      dismiss()
+    }
+    document.addEventListener('pointerdown', onDown, true)
+    return () => {
+      document.removeEventListener('pointerdown', onDown, true)
+    }
+  }, [pinned, dismiss])
 
   /*
    * Measured once it is real, then held.

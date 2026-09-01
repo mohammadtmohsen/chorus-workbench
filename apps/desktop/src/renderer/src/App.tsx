@@ -612,14 +612,76 @@ export function App(): React.JSX.Element {
    * optimistically — the order lives in SQLite, and a rail that moved before the
    * write landed would be showing an arrangement that might not exist.
    */
-  const swapProjects = useCallback(async (projectId: string, otherId: string) => {
+  const moveProject = useCallback(async (projectId: string, beforeId: string | null) => {
     try {
-      const { projects: listed } = await window.chorus.reorderProjects({ projectId, otherId })
+      const { projects: listed } = await window.chorus.reorderProjects({ projectId, beforeId })
       setProjects(listed)
     } catch (error) {
       fail(setError)(error)
     }
   }, [])
+
+  /**
+   * A session card dropped at a new place in the rail.
+   *
+   * The order is computed once, here, and the same value is both rendered and
+   * written down. Reading it back off `sessionsRef` to persist would write the
+   * order as it was *before* React applied the update — the list would look
+   * right until the next launch and then come back as it started.
+   */
+  const moveSession = useCallback(
+    (conversationId: string, slot: number) => {
+      const current = sessionsRef.current
+      const order = reorderSessions(
+        current.map((session) => session.conversationId),
+        conversationId,
+        slot
+      )
+      const byId = new Map(current.map((session) => [session.conversationId, session]))
+      const next = order.flatMap((id) => {
+        const session = byId.get(id)
+        return session === undefined ? [] : [session]
+      })
+      updateSessions(() => next)
+      window.chorus
+        .writeConversationLayout({
+          order: [...order],
+          workspace: workspaceSnapshot(useWorkspaceStore.getState()),
+        })
+        .catch(fail(setError))
+    },
+    [updateSessions]
+  )
+
+  const endNow = useCallback(
+    (conversationId: string) => {
+      const ending = sessionsRef.current.find((s) => s.conversationId === conversationId)
+      carries.current.delete(conversationId)
+      updateSessions((current) =>
+        current.filter((session) => session.conversationId !== conversationId)
+      )
+      useWorkspaceStore.getState().removeSession(conversationId)
+      /*
+       * The project's tab closes only when its last conversation has gone, and
+       * that decision is here because this is the layer that can see the others.
+       *
+       * Ending one of three conversations used to close the tab it was in,
+       * because the tab was the conversation. Under project tabs the same call
+       * would take the other two off screen while they carried on running in
+       * main — the sharpest form of the UI disagreeing with what is actually
+       * alive.
+       */
+      if (ending !== undefined) {
+        const siblings = sessionsRef.current.some(
+          (session) => session.projectId === ending.projectId
+        )
+        if (!siblings) useWorkspaceStore.getState().removeProject(ending.projectId)
+      }
+      window.chorus.closeConversation({ conversationId }).catch(fail(setError))
+      void refreshProjects()
+    },
+    [updateSessions, refreshProjects]
+  )
 
   /*
    * Starting a session, now in a project rather than in a directory.
@@ -631,7 +693,24 @@ export function App(): React.JSX.Element {
    * Project is the affordance that fixes that.
    */
   const startIn = useCallback(
-    (projectId: string) => {
+    (
+      projectId: string,
+      /**
+       * A conversation this one replaces, ended once the new one exists.
+       *
+       * **After, never before**, and the ordering is the whole of why this is a
+       * parameter rather than two calls at the call site. `endNow` closes the
+       * project's tab when the conversation it ends was the last one in it — so
+       * ending first would tear the project down and rebuild it around the
+       * replacement, which is a visible flash and a pane that loses its place.
+       * Started first, the new conversation is the sibling that keeps the
+       * project open, and the end is a tab closing beside it.
+       *
+       * It also means a failed start ends nothing. The `catch` below is reached
+       * instead, and the person still has the conversation they were in.
+       */
+      replacing?: string
+    ) => {
       setError(null)
       setStarting(true)
       window.chorus
@@ -647,6 +726,7 @@ export function App(): React.JSX.Element {
              streams into a project that has nowhere to show it until relaunch. */
           useWorkspaceStore.getState().adoptConversation(session.projectId, session.conversationId)
           useWorkspaceStore.getState().clearConversationUnread(session.conversationId)
+          if (replacing !== undefined) endNow(replacing)
           await refreshProjects()
         })
         .catch(fail(setError))
@@ -654,7 +734,7 @@ export function App(): React.JSX.Element {
           setStarting(false)
         })
     },
-    [defaults, updateSessions, refreshProjects]
+    [defaults, updateSessions, refreshProjects, endNow]
   )
 
   /*
@@ -789,67 +869,6 @@ export function App(): React.JSX.Element {
    * nothing is appended to it and its agent is not interrupted, which is the
    * entire point of the action.
    */
-  /**
-   * A session card dropped at a new place in the rail.
-   *
-   * The order is computed once, here, and the same value is both rendered and
-   * written down. Reading it back off `sessionsRef` to persist would write the
-   * order as it was *before* React applied the update — the list would look
-   * right until the next launch and then come back as it started.
-   */
-  const moveSession = useCallback(
-    (conversationId: string, slot: number) => {
-      const current = sessionsRef.current
-      const order = reorderSessions(
-        current.map((session) => session.conversationId),
-        conversationId,
-        slot
-      )
-      const byId = new Map(current.map((session) => [session.conversationId, session]))
-      const next = order.flatMap((id) => {
-        const session = byId.get(id)
-        return session === undefined ? [] : [session]
-      })
-      updateSessions(() => next)
-      window.chorus
-        .writeConversationLayout({
-          order: [...order],
-          workspace: workspaceSnapshot(useWorkspaceStore.getState()),
-        })
-        .catch(fail(setError))
-    },
-    [updateSessions]
-  )
-
-  const endNow = useCallback(
-    (conversationId: string) => {
-      const ending = sessionsRef.current.find((s) => s.conversationId === conversationId)
-      carries.current.delete(conversationId)
-      updateSessions((current) =>
-        current.filter((session) => session.conversationId !== conversationId)
-      )
-      useWorkspaceStore.getState().removeSession(conversationId)
-      /*
-       * The project's tab closes only when its last conversation has gone, and
-       * that decision is here because this is the layer that can see the others.
-       *
-       * Ending one of three conversations used to close the tab it was in,
-       * because the tab was the conversation. Under project tabs the same call
-       * would take the other two off screen while they carried on running in
-       * main — the sharpest form of the UI disagreeing with what is actually
-       * alive.
-       */
-      if (ending !== undefined) {
-        const siblings = sessionsRef.current.some(
-          (session) => session.projectId === ending.projectId
-        )
-        if (!siblings) useWorkspaceStore.getState().removeProject(ending.projectId)
-      }
-      window.chorus.closeConversation({ conversationId }).catch(fail(setError))
-      void refreshProjects()
-    },
-    [updateSessions, refreshProjects]
-  )
 
   /*
    * End takes effect immediately — there is no confirmation.
@@ -1293,8 +1312,8 @@ export function App(): React.JSX.Element {
         onEnd={endNow}
         onCommitLayout={commitLayout}
         onReorderSessions={moveSession}
-        onSwapProjects={(projectId, otherId) => {
-          void swapProjects(projectId, otherId)
+        onMoveProject={(projectId, beforeId) => {
+          void moveProject(projectId, beforeId)
         }}
         onOpenSettings={() => {
           setShowingSettings(true)
@@ -1326,6 +1345,14 @@ export function App(): React.JSX.Element {
             carry={carries.current.get(session.conversationId)}
             onCarry={keepCarry}
             onPromoteAside={promoteAside}
+            /*
+             * Ending this room and opening a fresh one in the same project, in
+             * one gesture. `startIn`'s `replacing` argument is what orders the
+             * two — see there for why the new one has to exist first.
+             */
+            onRestart={() => {
+              startIn(session.projectId, session.conversationId)
+            }}
             /* Read once here rather than per pane: it decides whether Explain
                exists under every reply, and four panes asking the same question
                of the same file is four answers that must agree. */

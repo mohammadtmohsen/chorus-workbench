@@ -396,14 +396,15 @@ export function buildHandlers(runtime: ChorusRuntime): Handlers {
       Promise.resolve(runtime.renameProject(request.projectId, request.name)),
 
     /*
-     * Two ids and no positions, which is what makes this safe to send from a
+     * Ids and no positions, which is what makes this safe to send from a
      * renderer. An index would be the shell's opinion about a list main owns, and
      * a stale one — the rail redraws from a pushed list — would move the wrong
-     * tile silently. Naming both projects means the worst a stale drag can do is
-     * swap two tiles that are both still there.
+     * tile silently. `beforeId` names the neighbour the tile lands in front of,
+     * so the worst a stale drag can do is land beside a project that still
+     * exists; `null` is the end, the one place no neighbour can name.
      */
-    'project:reorder': (request: { projectId: string; otherId: string }) =>
-      Promise.resolve({ projects: runtime.reorderProjects(request.projectId, request.otherId) }),
+    'project:reorder': (request: { projectId: string; beforeId: string | null }) =>
+      Promise.resolve({ projects: runtime.reorderProjects(request.projectId, request.beforeId) }),
 
     'project:forget': (request: { projectId: string }) =>
       Promise.resolve(runtime.forgetProject(request.projectId)),

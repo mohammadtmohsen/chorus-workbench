@@ -40,12 +40,35 @@ export interface PreviewTarget {
   readonly projectId: string
   /** The trigger's box at the moment it was asked for; the card places itself. */
   readonly anchor: DOMRect
+  /**
+   * Opened deliberately, so nothing about a pointer may close it.
+   *
+   * A hovered card is a glance: it opens after a dwell and closes when the
+   * pointer goes elsewhere, because the pointer going elsewhere is the whole
+   * signal. A card opened by a right-click is an answer to a question that was
+   * asked, and closing it because the pointer moved would take it away while it
+   * is being read — which is exactly what a person does next, since the card is
+   * beside the tile rather than under it.
+   *
+   * So `leave` is inert while this is set, and only Escape, a click outside, or
+   * the same right-click again put it away.
+   */
+  readonly pinned: boolean
 }
 
 export interface PreviewController {
   readonly target: Signal<PreviewTarget | null>
   /** Hover or focus arrived. Opens after the dwell unless something cancels. */
   readonly open: (projectId: string, anchor: DOMRect) => void
+  /**
+   * A right-click arrived. Opens now, or closes if this project is already up.
+   *
+   * No dwell: the dwell exists so that crossing a list of tiles opens nothing,
+   * and a right-click cannot be crossed accidentally. Toggling rather than
+   * re-opening, because the gesture that opened it is the obvious one to try
+   * for putting it away.
+   */
+  readonly pin: (projectId: string, anchor: DOMRect) => void
   /** Hover or focus left. Closes after the grace unless something holds it. */
   readonly leave: () => void
   /** The pointer reached the card, or a trigger came back. Cancels the close. */
@@ -72,14 +95,28 @@ export function createPreviewController(): PreviewController {
        * should move the card, not close and reopen it.
        */
       if (target.get()?.projectId === projectId) {
-        target.set({ projectId, anchor })
+        target.set({ projectId, anchor, pinned: target.get()?.pinned ?? false })
         return
       }
       openTimer = setTimeout(() => {
-        target.set({ projectId, anchor })
+        target.set({ projectId, anchor, pinned: false })
       }, DWELL_MS)
     },
+    pin: (projectId, anchor) => {
+      clear()
+      if (target.get()?.projectId === projectId) {
+        target.set(null)
+        return
+      }
+      target.set({ projectId, anchor, pinned: true })
+    },
     leave: () => {
+      /*
+       * Inert while pinned. A pinned card was asked for, and the pointer leaving
+       * the tile it was asked from is not an answer to that — it is what happens
+       * on the way to reading it.
+       */
+      if (target.get()?.pinned === true) return
       clearTimeout(openTimer)
       clearTimeout(closeTimer)
       closeTimer = setTimeout(() => {
@@ -128,6 +165,30 @@ export function previewTriggerProps(
     },
     onBlur: () => {
       controller.leave()
+    },
+  }
+}
+
+/**
+ * The one prop a trigger needs to open the card on a right-click instead.
+ *
+ * **Separate from `previewTriggerProps`, not a replacement for it.** The rail's
+ * project tiles cannot use hover: a tile is dragged to reorder and clicked to
+ * open, so a card that appears whenever the pointer rests on one is in the way
+ * of both, and the pointer crosses the whole column on its way to anything below
+ * it. A session row has neither problem and keeps hovering.
+ *
+ * `preventDefault`, because the alternative on a right-click is the platform's
+ * own context menu appearing over this one.
+ */
+export function previewContextMenuProps(
+  controller: PreviewController,
+  projectId: string
+): { onContextMenu: (event: React.MouseEvent<HTMLElement>) => void } {
+  return {
+    onContextMenu: (event) => {
+      event.preventDefault()
+      controller.pin(projectId, event.currentTarget.getBoundingClientRect())
     },
   }
 }
@@ -182,6 +243,7 @@ export function ProjectPreviewHost(props: {
       key={project.id}
       controller={props.controller}
       anchor={target.anchor}
+      pinned={target.pinned}
       project={project}
       sessions={mine}
       home={props.home}

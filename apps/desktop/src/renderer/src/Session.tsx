@@ -207,7 +207,15 @@ export function Session(props: {
    * knows how to put it there.
    */
   /** Set when the sidenav asked for a panel this pane owns. */
-  /** Starting over and ending, offered in the composer as well as in the menu. */
+  /**
+   * Ends this conversation and opens a fresh one in the same project.
+   *
+   * The shell's, not the pane's, for the reason promotion is: it ends with a
+   * conversation that has to appear in the workspace, and only `App` knows how
+   * to put it there — and how to order the two so the project's tab survives the
+   * handover.
+   */
+  onRestart: () => void
   /*
    * Undefined is spelled out because `exactOptionalPropertyTypes` is on: the
    * caller reads this out of a Map, and a miss is a real value it has to be
@@ -2175,6 +2183,7 @@ export function Session(props: {
           busy={view.busy}
           working={view.working}
           ide={ide}
+          onRestart={props.onRestart}
           report={box}
           history={spoken}
           {...(props.carry === undefined

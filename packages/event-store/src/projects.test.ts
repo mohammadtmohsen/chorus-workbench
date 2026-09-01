@@ -166,38 +166,67 @@ describe('list', () => {
   })
 })
 
-describe('swapOrder', () => {
-  it('exchanges two tiles and leaves the rest where they were', () => {
+describe('moveOrder', () => {
+  /*
+   * The swap this replaced could not express it: dragging the last tile onto the
+   * first exchanged the two and left everything between untouched, so one
+   * gesture made two moves.
+   */
+  it('inserts before the named neighbour and shifts everything between', () => {
     const store = sensitive()
     const a = add(store, '/a', 'A', 1_000)
     const b = add(store, '/b', 'B', 2_000)
     const c = add(store, '/c', 'C', 3_000)
 
-    store.swapOrder(a.id, c.id)
-    expect(store.list().map((p) => p.id)).toEqual([c.id, b.id, a.id])
+    store.moveOrder(c.id, a.id)
+    expect(store.list().map((p) => p.id)).toEqual([c.id, a.id, b.id])
   })
 
-  it('survives being swapped back', () => {
+  it('sends a project to the end when no neighbour is named', () => {
+    const store = sensitive()
+    const a = add(store, '/a', 'A', 1_000)
+    const b = add(store, '/b', 'B', 2_000)
+    const c = add(store, '/c', 'C', 3_000)
+
+    store.moveOrder(a.id, null)
+    expect(store.list().map((p) => p.id)).toEqual([b.id, c.id, a.id])
+  })
+
+  it('survives being moved back', () => {
     const store = sensitive()
     const a = add(store, '/a', 'A', 1_000)
     const b = add(store, '/b', 'B', 2_000)
 
-    store.swapOrder(a.id, b.id)
-    store.swapOrder(a.id, b.id)
+    store.moveOrder(a.id, null)
+    store.moveOrder(a.id, b.id)
     expect(store.list().map((p) => p.id)).toEqual([a.id, b.id])
   })
 
   /*
-   * A no-op rather than a write that sets both sides to the same value — which is
-   * the shape that would collapse two tiles onto one `sort_order` and hand the
-   * order back to the tie-breaker this column exists to replace.
+   * Renumbered whole, so the column always reads 0..n-1. A gap left behind would
+   * be a value a later reader has to interpret, and the tie-break this column
+   * exists to replace is what would interpret it.
    */
-  it('does nothing when a project is swapped with itself', () => {
+  it('leaves the order dense, with no gaps for a tie-break to fill', () => {
+    const store = sensitive()
+    const a = add(store, '/a', 'A', 1_000)
+    add(store, '/b', 'B', 2_000)
+    add(store, '/c', 'C', 3_000)
+
+    store.moveOrder(a.id, null)
+    expect(store.list().map((p) => p.sortOrder)).toEqual([0, 1, 2])
+  })
+
+  /*
+   * A no-op rather than a write, which is the shape that would collapse a tile
+   * onto its own position and hand the order back to the tie-breaker.
+   */
+  it('does nothing when a project is moved before itself', () => {
     const store = sensitive()
     const a = add(store, '/a', 'A', 1_000)
     const b = add(store, '/b', 'B', 2_000)
 
-    store.swapOrder(a.id, a.id)
+    store.moveOrder(a.id, a.id)
     expect(store.list().map((p) => p.id)).toEqual([a.id, b.id])
   })
 
@@ -207,7 +236,10 @@ describe('swapOrder', () => {
     const b = add(store, '/b', 'B', 2_000)
 
     expect(() => {
-      store.swapOrder(a.id, 'nope')
+      store.moveOrder(a.id, 'nope')
+    }).toThrow(UnknownProjectError)
+    expect(() => {
+      store.moveOrder('nope', a.id)
     }).toThrow(UnknownProjectError)
     expect(store.list().map((p) => p.id)).toEqual([a.id, b.id])
   })

@@ -265,14 +265,16 @@ export class ProjectService {
   }
 
   /**
-   * Exchanges two projects' places in the rail, and answers with the new list.
+   * Moves a project before another — or to the end — and answers with the list.
    *
-   * The list rather than the two rows, because the caller is a rail that draws
-   * every tile: handing back two projects would make the renderer patch its own
+   * The list rather than the moved row, because the caller is a rail that draws
+   * every tile: handing back one project would make the renderer patch its own
    * copy and hold an opinion about ordering that only the store is entitled to.
+   * An insertion moves every tile between the two, so that matters more here
+   * than it did when this was a swap of two.
    */
-  swapOrder(projectId: string, otherId: string): readonly Project[] {
-    this.projects.swapOrder(projectId, otherId)
+  moveOrder(projectId: string, beforeId: string | null): readonly Project[] {
+    this.projects.moveOrder(projectId, beforeId)
     return this.projects.list()
   }
 

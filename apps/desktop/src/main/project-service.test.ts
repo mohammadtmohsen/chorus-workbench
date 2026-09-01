@@ -248,7 +248,7 @@ describe('the rest of the registry', () => {
     clock = 2_000
     const second = service.adopt(dir('two')).project
 
-    expect(service.swapOrder(first.id, second.id).map((p) => p.id)).toEqual([second.id, first.id])
+    expect(service.moveOrder(first.id, null).map((p) => p.id)).toEqual([second.id, first.id])
     expect(service.list().map((p) => p.id)).toEqual([second.id, first.id])
   })
 })

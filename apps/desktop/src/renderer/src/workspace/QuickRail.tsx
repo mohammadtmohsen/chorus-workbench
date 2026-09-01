@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useMemo, useRef, useState } from 'react'
+import { Fragment, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import type { PointerEvent as ReactPointerEvent } from 'react'
 import { useTranslation } from 'react-i18next'
@@ -7,7 +7,12 @@ import type { SessionInfo } from '../Session.js'
 import { useActiveProjectId, useOpenProjectKey, useProjectRowState } from './hooks.js'
 import { countRender } from './render-count.js'
 import { projectTile, monogramsForNames, type SessionPlacement } from './session-row.js'
-import { previewTriggerProps, type PreviewController } from './SessionPreview.js'
+import {
+  previewContextMenuProps,
+  previewTriggerProps,
+  type PreviewController,
+} from './SessionPreview.js'
+import { moveBefore, tileOffsets } from './reorder.js'
 import { StateMark } from './SessionRow.js'
 import { useShellOverlay } from './overlay.js'
 import { useUsage, type UsageReading } from './useUsage.js'
@@ -61,6 +66,14 @@ export interface QuickRailProps {
   readonly onReorderSessions: (conversationId: string, slot: number) => void
   /** The card currently being dragged, so it can dim while it is in flight. */
   readonly draggingId: string | null
+  /**
+   * Where a dragged project would land if the pointer were released now.
+   *
+   * The tiles it displaces slide out of the way while the drag is live, so the
+   * arrangement is visible before it is committed rather than after. Null when no
+   * rail drag is over a gap, which is what puts them back.
+   */
+  readonly pendingMove: { readonly projectId: string; readonly beforeId: string | null } | null
   readonly consumeSuppressedClick: () => boolean
 }
 
@@ -92,6 +105,30 @@ export function QuickRail(props: QuickRailProps): React.JSX.Element {
    */
   const [roving, setRoving] = useState<string | null>(null)
   const scroller = useRef<HTMLDivElement | null>(null)
+
+  /**
+   * How far each tile has to slide to show where the drag would put things.
+   *
+   * **Offsets, not a reordered list, and that is what makes it animate.**
+   * Re-rendering the rail in the previewed order moves the DOM nodes, and a node
+   * that moves because its siblings changed has no property to interpolate — it
+   * teleports. Leaving the nodes alone and translating them gives the browser one
+   * transform to transition, and the tiles visibly make room.
+   *
+   * In whole tiles rather than pixels: every tile in the rail is the same height
+   * and the same gap apart, so the multiplication is one CSS length and nothing
+   * is measured on a pointer move.
+   *
+   * Empty and cheap when nothing is being dragged, which is almost always.
+   */
+  const offsets = useMemo(() => {
+    if (props.pendingMove === null) return new Map<string, number>()
+    const ids = props.projects.map((project) => project.id)
+    return tileOffsets(
+      ids,
+      moveBefore(ids, props.pendingMove.projectId, props.pendingMove.beforeId)
+    )
+  }, [props.projects, props.pendingMove])
 
   const open = useMemo(() => new Set(openKey.split('\n')), [openKey])
   const monograms = useMemo(
@@ -137,9 +174,9 @@ export function QuickRail(props: QuickRailProps): React.JSX.Element {
    * was not asked for, and a shortcut invented alongside a drag is a second way
    * to do one thing, decided by whoever implemented it.
    *
-   * What it would need, when it is asked for: `project:reorder` takes two ids, so
-   * a keyboard move is "swap with my neighbour" — which is exactly one call per
-   * press and needs no new IPC.
+   * What it would need, when it is asked for: `project:reorder` takes the tile
+   * and the neighbour it lands before, so a keyboard move is "before the one
+   * above me" or "after the one below" — one call per press, no new IPC.
    */
 
   return (
@@ -214,6 +251,7 @@ export function QuickRail(props: QuickRailProps): React.JSX.Element {
               }
               tabIndex={(roving ?? props.projects[0]?.id) === project.id ? 0 : -1}
               dragging={props.draggingId === project.id}
+              offset={offsets.get(project.id) ?? 0}
               preview={props.preview}
               onFocusIndex={() => {
                 setRoving(project.id)
@@ -230,7 +268,14 @@ export function QuickRail(props: QuickRailProps): React.JSX.Element {
                 props.onOpenProject(project.id)
               }}
               onPointerDown={(event) => {
-                props.preview.dismiss()
+                /*
+                 * The secondary button is what opens the card, and `pointerdown`
+                 * arrives before `contextmenu` — so dismissing here would close
+                 * the card in the same gesture that asked for it, every time.
+                 * The dismissal this line exists for is a drag starting, and a
+                 * drag is the primary button.
+                 */
+                if (event.button === 0) props.preview.dismiss()
                 props.onProjectPointerDown(project.id, project.name, event)
               }}
             />
@@ -309,6 +354,15 @@ function RailProject(props: {
   readonly onJump: (to: 'first' | 'last') => void
   readonly onOpen: () => void
   readonly onPointerDown: (event: ReactPointerEvent<HTMLElement>) => void
+  /**
+   * How many tile-heights this one has to slide to make room for a drag.
+   *
+   * Zero for all of them except while a project is being dragged over the rail,
+   * and zero is written as no inline transform at all — a style set on every
+   * tile on every pointer move is a style the browser re-resolves on every tile
+   * on every pointer move.
+   */
+  readonly offset: number
 }): React.JSX.Element {
   const { t } = useTranslation()
   countRender('RailProject')
@@ -348,7 +402,22 @@ function RailProject(props: {
     .join(' — ')
 
   return (
-    <li>
+    /*
+     * The offset rides the `li`, not the button.
+     *
+     * The button carries the drag ghost's own transforms and its pressed state;
+     * putting a second transform on it would mean the two compose, and whichever
+     * is written last wins. The list item has no transform of its own and is
+     * exactly the box the rail lays out.
+     *
+     * No inline style at all when it is not moving — see `offset`.
+     */
+    <li
+      className="rail-slot"
+      {...(props.offset === 0
+        ? {}
+        : { style: { transform: `translateY(calc(var(--rail-step) * ${String(props.offset)}))` } })}
+    >
       <button
         type="button"
         className="rail-item rail-session rail-project"
@@ -374,16 +443,46 @@ function RailProject(props: {
         tabIndex={props.tabIndex}
         aria-label={name}
         aria-current={props.placement === 'active' ? 'true' : undefined}
-        title={`${props.project.name} — ${props.project.root}`}
+        /*
+         * No `title`, for the reason the usage button has none.
+         *
+         * The OS tooltip and the preview card opened from the same element on
+         * the same hover and overlapped on screen — the tooltip drawn on top of
+         * the card, saying a subset of what the card says. The card names the
+         * project and shows its folder; a second surface repeating two of those
+         * fields, in a style nothing else in the app uses, is not a fallback but
+         * a competitor. `aria-label` still carries the whole name.
+         */
         onPointerDown={props.onPointerDown}
         onClick={props.onOpen}
+        /*
+         * **Right-click opens the card; hover no longer does.** A project tile
+         * is dragged to reorder and clicked to open, so a card that appears on
+         * dwell is in the way of both — and the pointer crosses the whole rail
+         * on its way to anything under it. Focus still opens it, because a
+         * keyboard user has no other way to reach it and no drag to protect.
+         */
+        {...previewContextMenuProps(props.preview, props.project.id)}
         onFocus={(event) => {
           props.onFocusIndex()
-          triggers.onFocus(event)
+          /*
+           * **Keyboard focus only, and a drag is why.**
+           *
+           * Pressing a tile to drag it focuses the button, so this opened the
+           * card 200ms into every grab — the reorder gesture and the card that
+           * describes the tile fighting over the same press. `onPointerDown`
+           * dismisses first and focus simply re-opened it.
+           *
+           * `:focus-visible` is exactly the distinction needed: the browser
+           * already decides whether focus arrived by keyboard or by pointer, and
+           * a card that appears on Tab and stays out of the way of the mouse is
+           * what the right-click trigger was for. Reading it off the element
+           * rather than tracking the last input type ourselves means it agrees
+           * with the focus ring the person can see.
+           */
+          if (event.currentTarget.matches(':focus-visible')) triggers.onFocus(event)
         }}
         onBlur={triggers.onBlur}
-        onPointerEnter={triggers.onPointerEnter}
-        onPointerLeave={triggers.onPointerLeave}
         onKeyDown={(event) => {
           if (event.key === 'ArrowDown') {
             event.preventDefault()
@@ -441,7 +540,52 @@ function RailUsage(): React.JSX.Element {
   const readings = useUsage()
   const [refreshing, setRefreshing] = useState(false)
   const anchor = useRef<HTMLButtonElement>(null)
+  const tip = useRef<HTMLDivElement>(null)
   const [detail, setDetail] = useState<{ top: number; left: number } | null>(null)
+  /**
+   * Whether the tip has been measured and moved to where it fits.
+   *
+   * It is drawn hidden for the one commit that takes. The position it opens at
+   * is the anchor's own top, which is right whenever the card fits below it and
+   * off the bottom of the window when it does not — and a card that appears
+   * clipped and then jumps is worse than one that appears once, in place.
+   */
+  const [placed, setPlaced] = useState(false)
+
+  /**
+   * Slide it up by however much it overflows, and no further.
+   *
+   * The card opened at the anchor's top and grew downward, with nothing
+   * checking the window. Two accounts of two windows each is about 400px of
+   * card, so the last reading sat under the status bar and `runs out 16h 39m
+   * early` — the line the panel exists to show — was the one cut off.
+   *
+   * **Clamped rather than flipped.** Flipping to open upward is the usual
+   * answer and it is wrong for this anchor: the usage button is near the *top*
+   * of the rail, so bottom-anchoring it would push the card a few hundred
+   * pixels off the top of the window to save twenty at the bottom. Sliding it
+   * up by the overflow keeps it where it is pointing and adapts to a taller
+   * card — a third agent, longer reset text.
+   *
+   * A card taller than the window still clips at the bottom, deliberately: the
+   * `Math.max` floor keeps its top on screen, because a panel you can see the
+   * start of is readable and one scrolled off the top is not.
+   *
+   * The same arithmetic as `fitCard`'s last line, not a call to it —
+   * `fitCard` centres horizontally on the anchor, which is right for a card
+   * hanging off a text selection and wrong for a flyout beside a 60px rail.
+   */
+  useLayoutEffect(() => {
+    if (detail === null) return
+    const element = tip.current
+    if (element === null) return
+    const margin = 8
+    const { height } = element.getBoundingClientRect()
+    const top = Math.max(margin, Math.min(detail.top, window.innerHeight - height - margin))
+    // Guarded, or this sets state on every commit and re-runs itself forever.
+    if (top !== detail.top) setDetail({ ...detail, top })
+    else setPlaced(true)
+  }, [detail])
 
   /* The tip opens to the right of a 60px rail, which is to say directly over the
      workbench — and a native view is composited above the DOM, so it was drawn
@@ -515,12 +659,55 @@ function RailUsage(): React.JSX.Element {
       : said
   }
 
-  const show = (): void => {
+  /**
+   * Escape, and a click anywhere that is not this panel or its button.
+   *
+   * Mounted only while it is open, so nothing listens on the document for a
+   * panel that is almost never up. The anchor is excluded because its own click
+   * is the toggle: without that test the document listener would close the panel
+   * in the same gesture that opened it, and the button would look dead.
+   *
+   * `pointerdown` rather than `click`, so a drag that begins outside dismisses
+   * on the way down instead of on release somewhere else entirely.
+   */
+  useEffect(() => {
+    if (detail === null) return undefined
+    const dismiss = (event: Event): void => {
+      const target = event.target as Node | null
+      if (
+        target !== null &&
+        (anchor.current?.contains(target) === true || tip.current?.contains(target) === true)
+      )
+        return
+      setDetail(null)
+    }
+    const onKey = (event: KeyboardEvent): void => {
+      if (event.key === 'Escape') setDetail(null)
+    }
+    document.addEventListener('pointerdown', dismiss, true)
+    document.addEventListener('keydown', onKey)
+    return () => {
+      document.removeEventListener('pointerdown', dismiss, true)
+      document.removeEventListener('keydown', onKey)
+    }
+  }, [detail])
+
+  const toggle = (): void => {
+    if (detail !== null) {
+      setDetail(null)
+      return
+    }
     const box = anchor.current?.getBoundingClientRect()
     if (box === undefined) return
     // Measured at open, not tracked: the rail does not move while a pointer is
     // over it, and a listener that followed it would run on every scroll for a
     // panel that is almost never up.
+    //
+    // Unplaced until the effect above has measured the card against the window.
+    // Reset here rather than on close, so reopening after a reading changed —
+    // which changes the card's height — is measured again rather than trusting
+    // the last open's answer.
+    setPlaced(false)
     setDetail({ top: Math.round(box.top), left: Math.round(box.right + 8) })
   }
 
@@ -532,41 +719,28 @@ function RailUsage(): React.JSX.Element {
         data-rail-usage
         ref={anchor}
         data-refreshing={refreshing ? 'true' : undefined}
-        disabled={refreshing}
         /*
          * No `title`, and that is the fix rather than an omission.
          *
-         * The native tooltip and the popover below open on the same hover, from
+         * The native tooltip and the panel used to open on the same hover, from
          * the same element, saying different things — the OS one named the
-         * action while the panel gave the readings, so the thing that appeared
-         * under the pointer depended on where it settled. Reported as the
-         * tooltip not matching the panel. The action is named inside the panel
-         * now, which is the one surface this control has.
+         * action while the panel gave the readings, so what appeared under the
+         * pointer depended on where it settled. Reported as the tooltip not
+         * matching the panel. The panel is the one surface this control has, and
+         * it now names its own action as a button rather than as a caption.
          */
-        onPointerEnter={show}
-        onPointerLeave={() => {
-          setDetail(null)
-        }}
-        onPointerCancel={() => {
-          setDetail(null)
-        }}
-        onFocus={show}
-        onBlur={() => {
-          setDetail(null)
-        }}
-        onClick={() => {
-          setRefreshing(true)
-          window.chorus
-            .refreshLimits()
-            .catch(() => undefined)
-            .finally(() => {
-              // Held briefly: the read usually returns faster than a frame, and
-              // a spinner nobody sees is a click that looks like it did nothing.
-              setTimeout(() => {
-                setRefreshing(false)
-              }, 450)
-            })
-        }}
+        aria-haspopup="dialog"
+        aria-expanded={detail !== null}
+        /*
+         * **Click, not hover.** It opened on `pointerenter` and closed on
+         * `pointerleave`, which put a 400px panel over the workbench every time
+         * the pointer crossed the rail on its way somewhere else, and made the
+         * readings unreachable without holding the mouse still. Not
+         * `disabled` while refreshing any more either: refreshing is the
+         * panel's job now, and a button that cannot be pressed is a panel that
+         * cannot be closed.
+         */
+        onClick={toggle}
       >
         {/*
           The whole visual is hidden from the accessible name and said in words
@@ -742,7 +916,29 @@ function RailUsage(): React.JSX.Element {
       */}
       {detail !== null &&
         createPortal(
-          <div className="usage-tip" style={{ top: detail.top, left: detail.left }} role="tooltip">
+          <div
+            ref={tip}
+            className="usage-tip"
+            style={{
+              top: detail.top,
+              left: detail.left,
+              /*
+               * Hidden for the one commit it takes to measure, the same way the
+               * composer's mention menu is. `visibility` rather than not
+               * rendering, because the thing being measured has to be in the
+               * document to have a height.
+               */
+              ...(placed ? {} : { visibility: 'hidden' as const }),
+            }}
+            /*
+             * A dialog, not a tooltip. A tooltip is what appears while you point
+             * at something and holds nothing you can press; this is opened by a
+             * click, dismissed by Escape, and has a button in it. `role` is what
+             * tells a screen reader which of those it is about to enter.
+             */
+            role="dialog"
+            aria-label={t('activity.usageHeading')}
+          >
             <ul className="limits">
               {accounts.map((account) => (
                 <Fragment key={account.agentId}>
@@ -849,7 +1045,39 @@ function RailUsage(): React.JSX.Element {
               only line here that is not a number: the panel is opened to read
               the windows, and the action is what you learn on the way past.
             */}
-            <p className="usage-tip-action">{t('activity.refresh')}</p>
+            {/*
+              The action, as a control rather than as a caption.
+
+              It read `Re-check account usage` under the readings, describing
+              what clicking the rail button did — which was true while the panel
+              opened on hover and became a lie the moment click opened the panel
+              instead. Same string, same place, now the thing it names.
+
+              Disabled while it runs, which is where the busy state belongs: the
+              rail button used to carry it and cannot any more, because that
+              button is what closes this.
+            */}
+            <button
+              type="button"
+              className="usage-tip-action"
+              disabled={refreshing}
+              onClick={() => {
+                setRefreshing(true)
+                window.chorus
+                  .refreshLimits()
+                  .catch(() => undefined)
+                  .finally(() => {
+                    // Held briefly: the read usually returns faster than a frame,
+                    // and a spinner nobody sees is a click that looks like it did
+                    // nothing.
+                    setTimeout(() => {
+                      setRefreshing(false)
+                    }, 450)
+                  })
+              }}
+            >
+              {t('activity.refresh')}
+            </button>
           </div>,
           document.body
         )}

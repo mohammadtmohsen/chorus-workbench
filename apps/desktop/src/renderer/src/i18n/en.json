@@ -57,6 +57,11 @@
     "noAnswer": "No answer yet — the message may not have reached the agent. Try sending it again.",
     "askAboutThis": "Ask about this",
     "explainSimply": "Explain simply",
+    "restart": "Start over — end this chat and open a fresh one",
+    "confirmRestartTitle": "Start over?",
+    "confirmRestartBody": "{{agents}} is still working. Starting over ends this conversation and discards the turn in flight. The transcript stays in History.",
+    "confirmRestartCancel": "Keep going",
+    "confirmRestart": "Start over",
     "translateThis": "Translate",
     "lookingUp": "Looking…",
     "noneFound": "Nothing to offer yet",
@@ -164,7 +169,8 @@
     "week": "Week",
     "resetsIn": "in {{time}}",
     "notReported": "not reported yet",
-    "refresh": "Re-check account usage"
+    "refresh": "Re-check account usage",
+    "usageHeading": "Account usage"
   },
   "attachments": {
     "view": "Open {{name}}",

@@ -917,20 +917,29 @@ export const IPC_CONTRACT = {
   },
 
   /**
-   * Two projects trade places in the rail.
+   * A project moves to sit immediately before another, or to the end.
    *
-   * **Two ids and no index**, which is what makes it safe to send from a
-   * renderer holding a list that a push may already have replaced: a position
-   * would be the shell's opinion about an order main owns, and a stale one would
-   * move the wrong tile in silence. Naming both projects means the worst a stale
-   * drag can do is swap two tiles that both still exist.
+   * **This was a swap and is now an insertion**, because a swap is not what
+   * dragging a card means: dragging the last tile to the top exchanged it with
+   * the first and left everything between untouched, so one gesture produced two
+   * moves and the list you were looking at was not the list you were arranging.
+   *
+   * **Still ids and no index**, which is the property the swap had that was
+   * worth keeping: a position would be the shell's opinion about an order main
+   * owns, and a stale one — the rail redraws from a pushed list — would move the
+   * wrong tile in silence. `beforeId` names the neighbour instead, so the worst
+   * a stale drag can do is land beside a tile that is still there.
+   *
+   * `null` is the end of the list, which is the one position no neighbour can
+   * name.
    *
    * Answers with the whole list rather than an acknowledgement, so one gesture
    * costs one round trip and the rail redraws from the store's order rather than
-   * from its own guess at what the swap did.
+   * from its own guess at what moved. That matters more than it did for a swap:
+   * an insertion renumbers everything between the two.
    */
   'project:reorder': {
-    request: z.object({ projectId: z.string(), otherId: z.string() }),
+    request: z.object({ projectId: z.string(), beforeId: z.string().nullable() }),
     response: z.object({ projects: z.array(ListedProject) }),
   },
 
