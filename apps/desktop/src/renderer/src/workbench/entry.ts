@@ -84,7 +84,9 @@ async function main(): Promise<void> {
   await persistUserSettings((text) => window.chorusWorkbench.writeUserSettings(text))
   await synchronizeBrowserExtensions(
     (text) => window.chorusWorkbench.writeBrowserExtensions(text),
-    (handler) => window.chorusWorkbench.onBrowserExtensionsChanged(handler)
+    (handler) => {
+      window.chorusWorkbench.onBrowserExtensionsChanged(handler)
+    }
   )
 
   /*
