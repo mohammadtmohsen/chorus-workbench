@@ -251,12 +251,12 @@ describe('versionFor', () => {
 })
 
 describe('withEditorContext', () => {
-  it('puts the block above an empty draft and leaves room to type', () => {
-    expect(withEditorContext('', 'BLOCK')).toBe('BLOCK\n\n')
+  it('sends the block alone for an empty draft', () => {
+    expect(withEditorContext('', 'BLOCK')).toBe('BLOCK')
   })
 
-  it('puts the block above what was already typed', () => {
-    expect(withEditorContext('why is this slow?', 'BLOCK')).toBe('BLOCK\n\nwhy is this slow?')
+  it('puts the block below what was already typed', () => {
+    expect(withEditorContext('why is this slow?', 'BLOCK')).toBe('why is this slow?\n\nBLOCK')
   })
 
   it('adds nothing when there is no context', () => {

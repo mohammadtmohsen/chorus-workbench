@@ -244,7 +244,7 @@ export function versionFor(provenance: IdeProvenanceShape, relativePath: string)
 }
 
 /**
- * Add the block above the draft, leaving the caret under it.
+ * Add the block below the draft.
  *
  * The same shape as `withQuote` and `withPaths`: context arrives from somewhere
  * that is not the keyboard, so it is appended as its own block rather than
@@ -310,6 +310,6 @@ export function formatDiagnosticBlock(
 
 export function withEditorContext(draft: string, block: string): string {
   if (block === '') return draft
-  const body = draft.trimStart()
-  return body === '' ? `${block}\n\n` : `${block}\n\n${body}`
+  const body = draft.trimEnd()
+  return body === '' ? block : `${body}\n\n${block}`
 }
