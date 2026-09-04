@@ -115,6 +115,14 @@ export interface TranscriptMessage {
    */
   readonly noticeSource?: string
   /**
+   * Notices only: which coded notice this is, when the text is Chorus's own.
+   *
+   * A key, not a phrase, for the reason `noticeSource` is one — the reducer has
+   * no translator. A notice raised by an adapter carries provider words in
+   * `text`; one raised by Chorus carries nothing there and names itself here.
+   */
+  readonly noticeCode?: string
+  /**
    * Notices only: the rest of a run of hook notices this row stands for.
    *
    * A hook fires per matching tool call, so a repo with six talkative hooks puts
@@ -773,10 +781,25 @@ function apply(view: Mutable, event: TranscriptEvent): void {
         kind: str('kind'),
         summary: summarize(p),
         ...editorEditFields(p),
+        ...fileChangePath(p),
         detail: detailOf(p),
         expiresAt: typeof p['expiresAt'] === 'number' ? p['expiresAt'] : 0,
       })
       return
+
+    /*
+     * The agent stopped waiting, so the card goes.
+     *
+     * Nothing else clears it: `ApprovalQueue.withdraw` deletes the pending entry
+     * without resolving it, so no `approval.decided` follows. Without this the
+     * card sits there asking about work nobody is doing — which is the whole
+     * reason the event exists.
+     */
+    case 'approval.withdrawn': {
+      const withdrawn = str('approvalId')
+      view.approvals = view.approvals.filter((a) => a.approvalId !== withdrawn)
+      return
+    }
 
     case 'approval.decided': {
       const id = str('approvalId')
@@ -994,8 +1017,10 @@ function apply(view: Mutable, event: TranscriptEvent): void {
       const source = str('source')
       const detail = str('detail')
       const omitted = num('detailOmittedBytes')
+      const code = str('code')
       const line = {
         text: str('text'),
+        ...(code === '' ? {} : { noticeCode: code }),
         ...(detail === '' ? {} : { detail }),
         ...(omitted === 0 ? {} : { detailOmittedBytes: omitted }),
       }
@@ -1396,6 +1421,40 @@ function appendStreamed(
  * replayed log from an older build must not be able to break the UI by lacking
  * a field a newer type promises. Anything missing simply does not render.
  */
+/**
+ * The one file a `fileChange` is about, for the card's own sentence.
+ *
+ * Read from the request rather than parsed back out of `summary`: the summary is
+ * a display string that has been reordered once already, and a heading that says
+ * which file must not be one edit away from saying the wrong one.
+ *
+ * Absent when the request names no file or more than one — the ask card's
+ * wording is singular, and a plural case falls back to the generic heading
+ * rather than naming the first of several.
+ */
+function fileChangePath(payload: Record<string, unknown>): { path?: string } {
+  if (payload['kind'] !== 'fileChange') return {}
+  const request = payload['request']
+  if (typeof request !== 'object' || request === null) return {}
+  const files = (request as Record<string, unknown>)['files']
+  if (!Array.isArray(files) || files.length !== 1) return {}
+  const first: unknown = files[0]
+  if (typeof first !== 'object' || first === null) return {}
+  const path = (first as Record<string, unknown>)['path']
+  if (typeof path !== 'string' || path === '') return {}
+  /*
+   * The tail, because Claude sends an absolute path.
+   *
+   * The heading is a sentence — "Make this edit to X?" — and an absolute path
+   * turns it into two lines of shouting directory names, which is what it did on
+   * screen. The project root is not known here and does not need to be: the file
+   * name is what identifies the file in a question about one edit, and the whole
+   * path is a click away in the editor.
+   */
+  const tail = path.split(/[/\\]/).pop()
+  return tail === undefined || tail === '' ? { path } : { path: tail }
+}
+
 function editorEditFields(payload: Record<string, unknown>): {
   patch?: string
   path?: string

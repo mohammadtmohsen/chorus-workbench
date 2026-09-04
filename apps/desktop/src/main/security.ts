@@ -189,16 +189,35 @@ function remoteContentSource(remoteAuthority: string | null): string {
 const WEBVIEW_RESOURCE_HOST = 'https://*.vscode-cdn.net'
 
 /**
- * Is this response one of the two documents a webview is built from?
+ * Is this response a document the workbench legitimately frames?
  *
  * **Exact filenames under the renderer's asset directory, and a sub-frame.**
  * Both halves matter: the workbench document must never match this, and neither
  * must anything else a webview loads. An extension's own HTML is *written into*
  * the inner frame rather than fetched, so it never reaches this check — which is
- * why matching two known bundler outputs is sufficient and a prefix is not.
+ * why matching known bundler outputs is sufficient and a prefix is not.
  *
  * The hashed suffix is the bundler's, so the match is on shape rather than on a
  * literal that would break every build.
+ *
+ * **`webWorkerExtensionHostIframe` is the third, and it is not a webview.** It is
+ * the frame the web-worker extension host runs in, emitted once
+ * `enableWorkerExtensionHost` was turned on in `workbench/services.ts` and
+ * registered as an asset by `extensions-service-override`. It is named here
+ * because it needs the identical concession and for the identical reason: the
+ * workbench frames it, so served the base policy's `frame-ancestors 'none'`
+ * Chromium refuses the response and the host never starts. Everything assigned
+ * to that host then silently never activates — which presented as an Excalidraw
+ * file opening a custom editor that loaded forever, since the contribution was
+ * registered from the extension registry while the extension backing it was
+ * never run.
+ *
+ * That the function now covers a non-webview is why it is no longer named after
+ * "the two documents a webview is built from". The predicate is "the workbench
+ * frames this on purpose", and `frame-ancestors 'self'` is what that requires.
+ * Widening the *base* policy instead would let an extension webview frame the
+ * workbench, which is the attack the base policy's own comment names — the
+ * per-document exception is the whole point and must stay per-document.
  */
 export function isWebviewDocument(url: string, resourceType: string): boolean {
   if (resourceType !== 'subFrame') return false
@@ -208,7 +227,9 @@ export function isWebviewDocument(url: string, resourceType: string): boolean {
   } catch {
     return false
   }
-  return /\/out\/renderer\/assets\/(?:index|fake)-[A-Za-z0-9_-]+\.html$/.test(path)
+  return /\/out\/renderer\/assets\/(?:index|fake|webWorkerExtensionHostIframe)-[A-Za-z0-9_-]+\.html$/.test(
+    path
+  )
 }
 
 /**

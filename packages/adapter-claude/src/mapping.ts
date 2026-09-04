@@ -1421,6 +1421,7 @@ export interface PromptDetail {
   readonly description?: string
   readonly blockedPath?: string
   readonly decisionReason?: string
+  readonly itemRef?: string
 }
 
 /** Drops what the provider did not answer, so an absent field stays absent. */
@@ -1502,6 +1503,7 @@ export function mapToolPermission(
       kind: 'fileChange',
       expiresAt,
       ...said,
+      ...(prompt?.itemRef === undefined ? {} : { itemRef: prompt.itemRef }),
       files: typeof path === 'string' ? [{ path, patch: describePatch(input) }] : [],
     }
   }
@@ -1524,6 +1526,31 @@ export function mapToolPermission(
     requested: { network: toolName === 'WebFetch' || toolName === 'WebSearch' },
     input,
   }
+}
+
+export function proposedText(
+  toolName: string,
+  input: Record<string, unknown>,
+  currentText: string | null
+): string | null {
+  if (toolName === 'Write') {
+    return typeof input['content'] === 'string' ? input['content'] : null
+  }
+  if (toolName !== 'Edit' || currentText === null) return null
+
+  const oldText = input['old_string']
+  const newText = input['new_string']
+  const replaceAll = input['replace_all']
+  if (typeof oldText !== 'string' || oldText === '' || typeof newText !== 'string') return null
+  if (replaceAll !== undefined && typeof replaceAll !== 'boolean') return null
+
+  if (replaceAll === true) {
+    return currentText.includes(oldText) ? currentText.split(oldText).join(newText) : null
+  }
+
+  const first = currentText.indexOf(oldText)
+  if (first < 0 || currentText.includes(oldText, first + oldText.length)) return null
+  return `${currentText.slice(0, first)}${newText}${currentText.slice(first + oldText.length)}`
 }
 
 function describeTarget(input: Record<string, unknown>): string | undefined {

@@ -37,6 +37,8 @@ export function ConversationTree(props: {
   readonly onNewConversation: (groupId: string) => void
   /** End one conversation — the × on its tab. */
   readonly onEndConversation: (conversationId: string) => void
+  /** Name one conversation — a double-click on its tab. */
+  readonly onRename: (conversationId: string, title: string) => void
   readonly renderSession: (
     session: SessionInfo,
     focused: boolean,
@@ -57,6 +59,7 @@ export function ConversationTree(props: {
           props.onNewConversation(group.id)
         }}
         onEndConversation={props.onEndConversation}
+        onRename={props.onRename}
         drag={props.drag}
         renderSession={props.renderSession}
       />
@@ -98,6 +101,7 @@ export function ConversationTree(props: {
               onSizes={props.onSizes}
               onNewConversation={props.onNewConversation}
               onEndConversation={props.onEndConversation}
+              onRename={props.onRename}
               renderSession={props.renderSession}
             />
           </div>

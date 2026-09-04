@@ -1488,7 +1488,8 @@ export function Session(props: {
     (
       approval: PendingApproval,
       outcome: 'allow' | 'deny',
-      scope: 'once' | 'session' | 'always' = 'once'
+      scope: 'once' | 'session' | 'always' = 'once',
+      message?: string
     ) => {
       window.chorus
         .decideApproval({
@@ -1497,6 +1498,7 @@ export function Session(props: {
           approvalId: approval.approvalId,
           outcome,
           scope,
+          ...(message === undefined || message.trim() === '' ? {} : { message }),
         })
         .catch(fail(setError))
     },
@@ -2144,8 +2146,8 @@ export function Session(props: {
                */
               decide(current, 'allow', current.kind === 'mcpToolCall' ? 'always' : 'session')
             }}
-            onDeny={() => {
-              decide(current, 'deny')
+            onDeny={(message) => {
+              decide(current, 'deny', 'once', message)
             }}
           />
         )}
@@ -2572,7 +2574,15 @@ export function ApprovalCard({
   onAllow: () => void
   /** Grants it for the rest of the session, so the same ask stops coming back. */
   onAllowAlways: () => void
-  onDeny: () => void
+  /**
+   * Refuses it, optionally with words for the agent.
+   *
+   * The words are the point of refusing an edit: an agent told only "no" tries
+   * the same thing again, while one told what to do instead does that. The
+   * message reaches the provider, which is where a denial has always been able
+   * to carry one — it simply had nothing to carry until now.
+   */
+  onDeny: (message?: string) => void
 }): React.JSX.Element {
   const { t } = useTranslation()
   const allow = useRef<HTMLButtonElement | null>(null)
@@ -2593,7 +2603,31 @@ export function ApprovalCard({
    * rules below are written against, and the label there does not even say
    * "for this session".
    */
-  const defaultsToSession = approval.kind !== 'mcpToolCall'
+  /*
+   * Allow once is the armed default, for every kind.
+   *
+   * It was the session grant, on the argument that answering the same ask four
+   * times is what makes a queue people stop reading. Driven on 2026-09-04 that
+   * argument lost to a simpler one: the key that is already under a finger
+   * should do the *narrow* thing. A mistaken Enter on Allow once costs one
+   * action you had not read; the same mistake on the wider button costs every
+   * one of them for the rest of the session, and the person cannot see what it
+   * went on to allow.
+   *
+   * The wider button is still there for every kind that has one. It just has to
+   * be reached for, which is the whole difference.
+   */
+  /*
+   * A file edit asks in its own words, and only a file edit.
+   *
+   * `ApprovalCard` also draws commands, MCP calls and editor edits, and "Make
+   * this edit to X?" is wrong on all three. The wording matches the Claude Code
+   * extension because the act is the same one: a proposed change, shown as a
+   * diff, held until answered.
+   */
+  const [reason, setReason] = useState('')
+  const isEdit = approval.kind === 'fileChange'
+  const editPath = isEdit ? (approval.path ?? null) : null
 
   /*
    * The default button takes focus as the card appears, so Enter answers it.
@@ -2649,7 +2683,11 @@ export function ApprovalCard({
     >
       <header className="approval-head">
         <span className={`voice-dot voice--${approval.agentId}`} aria-hidden="true" />
-        <strong>{t('approval.wants', { agent: approval.agentId })}</strong>
+        <strong>
+          {isEdit && editPath !== null
+            ? t('ask.heading', { path: editPath })
+            : t('approval.wants', { agent: approval.agentId })}
+        </strong>
         {waiting > 0 && (
           <span className="approval-queue">{t('approval.waiting', { count: waiting })}</span>
         )}
@@ -2674,15 +2712,44 @@ export function ApprovalCard({
       ) : (
         approval.detail !== null && <pre className="approval-detail">{approval.detail}</pre>
       )}
+      {/*
+        What to do instead, in the person's own words.
+        
+        A denial has always reached the provider as a message; until now that
+        message was the fixed string "Denied by the user", so the one useful
+        thing a refusal could carry could not be said. An agent told only "no"
+        retries the same edit; one told why does something else.
+        
+        Enter sends it, because a box you have to leave to answer is a box people
+        type in and then lose. Empty is not special-cased here — main falls back
+        to the plain denial when nothing was typed.
+      */}
+      {isEdit && (
+        <input
+          className="approval-reason"
+          type="text"
+          value={reason}
+          placeholder={t('ask.tellInstead')}
+          aria-label={t('ask.tellInstead')}
+          onChange={(event) => {
+            setReason(event.currentTarget.value)
+          }}
+          onKeyDown={(event) => {
+            if (event.key !== 'Enter') return
+            event.preventDefault()
+            onDeny(event.currentTarget.value)
+          }}
+        />
+      )}
       <div className="approval-actions">
         <button
-          ref={defaultsToSession ? undefined : allow}
+          ref={allow}
           type="button"
-          className={`btn${defaultsToSession ? '' : ' btn--go'}`}
+          className="btn btn--go"
           onClick={onAllow}
-          onKeyDown={defaultsToSession ? undefined : guardKeys}
+          onKeyDown={guardKeys}
         >
-          {t('approval.allowOnce')}
+          {isEdit ? t('ask.yes') : t('approval.allowOnce')}
         </button>
         {/*
           Granted for the session, not remembered past it — and the default.
@@ -2705,19 +2772,34 @@ export function ApprovalCard({
           can be seen — which is exactly why `mcpToolCall`, where this button
           means `always`, keeps Allow once as its default instead.
         */}
+        {/*
+          Not offered for a file edit, and that is the whole point of the
+          feature rather than a simplification of it.
+        
+          "Allow all edits this session" stops the asking, which is what it says
+          — and what it says is the opposite of what someone turned this on for.
+          Driven for the first time on 2026-09-04, the answer was immediate:
+          press it once and no edit is ever shown again. A control whose only
+          use is to switch the feature off does not belong beside the feature.
+        
+          The wider grant still exists for every other kind, where it means what
+          it has always meant.
+        */}
+        {!isEdit && (
+          <button type="button" className="btn" onClick={onAllowAlways}>
+            {approval.kind === 'mcpToolCall'
+              ? t('approval.allowRemembered')
+              : t('approval.allowAlways')}
+          </button>
+        )}
         <button
-          ref={defaultsToSession ? allow : undefined}
           type="button"
-          className={`btn${defaultsToSession ? ' btn--go' : ''}`}
-          onClick={onAllowAlways}
-          onKeyDown={defaultsToSession ? guardKeys : undefined}
+          className="btn"
+          onClick={() => {
+            onDeny(reason)
+          }}
         >
-          {approval.kind === 'mcpToolCall'
-            ? t('approval.allowRemembered')
-            : t('approval.allowAlways')}
-        </button>
-        <button type="button" className="btn" onClick={onDeny}>
-          {t('approval.deny')}
+          {isEdit ? t('ask.no') : t('approval.deny')}
         </button>
         {/*
           Focus alone is a quiet affordance; saying it makes it discoverable —
@@ -2726,7 +2808,7 @@ export function ApprovalCard({
           telling you neither.
         */}
         <span className="approval-hint" aria-hidden="true">
-          {t(defaultsToSession ? 'approval.enterHintSession' : 'approval.enterHint')}
+          {t('approval.enterHint')}
         </span>
       </div>
     </section>

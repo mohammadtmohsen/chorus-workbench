@@ -250,6 +250,10 @@ export const ChorusEventPayload = z.discriminatedUnion('type', [
     /** Which rule auto-decided this. Null means a human chose (plan §4.4). */
     policyRuleId: z.string().nullable(),
   }),
+  z.object({
+    type: z.literal('approval.withdrawn'),
+    approvalId: z.string(),
+  }),
 
   z.object({
     type: z.literal('userinput.requested'),
@@ -425,6 +429,9 @@ export const ChorusEventPayload = z.discriminatedUnion('type', [
     level: z.enum(['info', 'warn', 'error']),
     source: z.enum(['hook', 'command', 'retry', 'denial', 'system']),
     text: z.string(),
+    code: z
+      .enum(['editWithoutApproval', 'editVisibilityUnavailable', 'staleEditPreview'])
+      .optional(),
     detail: z.string().nullable(),
     /**
      * Bytes dropped because `detail` was too large to keep whole. 0 when it

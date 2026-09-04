@@ -126,6 +126,15 @@ export const WORKBENCH_USER_SETTINGS_READ_CHANNEL = 'workbench:userSettings:read
 export const WORKBENCH_USER_SETTINGS_WRITE_CHANNEL = 'workbench:userSettings:write'
 
 /**
+ * The browser extension registry uses the same pathless boundary as settings.
+ * The changed channel keeps each workbench surface's in-memory user-data file in
+ * step with the application-scoped registry held by main.
+ */
+export const WORKBENCH_BROWSER_EXTENSIONS_READ_CHANNEL = 'workbench:browserExtensions:read'
+export const WORKBENCH_BROWSER_EXTENSIONS_WRITE_CHANNEL = 'workbench:browserExtensions:write'
+export const WORKBENCH_BROWSER_EXTENSIONS_CHANGED_CHANNEL = 'workbench:browserExtensions:changed'
+
+/**
  * What the workbench *remembers*, as opposed to what it is configured with.
  *
  * The same trade as the settings pair above and for the same reason — the
@@ -288,6 +297,60 @@ export interface WorkbenchSnapshotResult {
   readonly requestId: string
   /** Null when the surface could not read an editor at all. */
   readonly snapshot: (WorkbenchContext & { readonly text: string }) | null
+}
+
+/**
+ * Show a proposed edit as a diff, before it is applied — the ask flow.
+ *
+ * **Both sides travel as text.** The proposed content does not exist on disk and
+ * must never be written there: the whole point is that it has not been applied.
+ * The original travels too, rather than as a `file:` URI, because the workspace
+ * is addressed `vscode-remote://<authority><root>` and a plain file URI is not
+ * something this build resolves for a diff's original side — and because a live
+ * resource would move under the reader while the card is open. One immutable
+ * snapshot, both sides, proven in the Phase 2 spike.
+ *
+ * File content therefore crosses IPC. Acceptable here and not a precedent: it is
+ * the file the person is being shown a diff of, going to the surface that is
+ * about to show it.
+ */
+export const WORKBENCH_ASK_DIFF_CHANNEL = 'workbench:askDiff'
+export const WORKBENCH_ASK_DIFF_RESULT_CHANNEL = 'workbench:askDiff:result'
+
+export interface WorkbenchAskDiffRequest {
+  readonly requestId: string
+  /** Which approval this is about, so a settled card closes the right tab. */
+  readonly approvalId: string
+  /** Project-relative, for the tab's label. */
+  readonly path: string
+  /** The file as it stood when the card was raised. `null` when it did not exist. */
+  readonly before: string | null
+  /** What the edit would leave. */
+  readonly proposed: string
+  /**
+   * Close the tab instead of opening one. The card settled.
+   *
+   * The same channel rather than a second, because open and close are one
+   * lifecycle and a surface that missed the close would keep a tab describing a
+   * decision already made.
+   */
+  readonly close?: boolean
+  /**
+   * The real file to leave open once the diff goes, absolute.
+   *
+   * Sent with `close`, because answering a card is the moment the person stops
+   * looking at a proposal and starts looking at the file — accepted, it is what
+   * they just agreed to; refused, it is what stayed. Absolute because the
+   * surface builds the URI and main is the only side that resolved the path
+   * against the project root.
+   */
+  readonly revealPath?: string
+}
+
+export interface WorkbenchAskDiffResult {
+  readonly requestId: string
+  readonly ok: boolean
+  readonly message?: string
 }
 
 export const WORKBENCH_EDIT_CHANNEL = 'workbench:edit'
@@ -607,11 +670,9 @@ export interface WorkbenchShellApi {
 }
 
 /**
- * The three methods the workbench's own preload exposes, and there is no fourth.
- *
- * It was one until E5. The two that joined it carry **no path and no project** —
- * the read takes nothing, the write takes text — so neither widens what a surface
- * can name, which is the property the single method was protecting.
+ * The deliberately narrow capability surface exposed by the workbench preload.
+ * Persistence methods carry no path and no project: main derives their scope
+ * from the sender, so the renderer cannot name another project's resources.
  */
 export interface ChorusWorkbenchApi {
   /**
@@ -625,6 +686,8 @@ export interface ChorusWorkbenchApi {
    * defaults rather than inheriting somebody's.
    */
   readonly readUserSettings: () => Promise<string | null>
+  /** The browser extension registry as Code-OSS last stored it, or `null` on a clean profile. */
+  readonly readBrowserExtensions: () => Promise<string | null>
   /**
    * Reports what this surface's editor is looking at. Fire-and-forget: a lost
    * report is corrected by the next one, and blocking the editor on main would
@@ -644,8 +707,16 @@ export interface ChorusWorkbenchApi {
     handler: () => Promise<(WorkbenchContext & { text: string }) | null>
   ) => void
   readonly onEditRequest: (handler: (request: unknown) => Promise<WorkbenchEditResult>) => void
+  /** Shows, replaces or closes the proposed-edit diff. */
+  readonly onAskDiffRequest: (
+    handler: (request: unknown) => Promise<WorkbenchAskDiffResult>
+  ) => void
   /** Hands main the current text of the user's settings file, to store as-is. */
   readonly writeUserSettings: (text: string) => Promise<void>
+  /** Hands main the current browser extension registry, without exposing a path. */
+  readonly writeBrowserExtensions: (text: string) => Promise<void>
+  /** Receives a registry written by another workbench surface. */
+  readonly onBrowserExtensionsChanged: (handler: (text: string) => void) => void
   /**
    * One storage scope's items as JSON text, or `null` when nothing has been
    * stored for it — which the storage service reads as an empty database, i.e.

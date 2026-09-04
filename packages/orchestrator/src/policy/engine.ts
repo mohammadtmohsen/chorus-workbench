@@ -94,11 +94,22 @@ export class SessionGrants {
    * someone reading the request.
    */
   addAlways(request: ApprovalRequest): void {
+    /*
+     * Never for a file edit, and this outlives the button that motivated it.
+     *
+     * A remembered grant survives a restart, so one made before this feature
+     * existed would silently switch it off for ever — no card, no diff, and
+     * nothing on screen saying why. `isRemembered` refuses them for the same
+     * reason: the guard has to hold on the way in *and* on the way out, or an
+     * old key keeps answering.
+     */
+    if (request.kind === 'fileChange') return
     this.rememberedKeys.add(grantKey(request))
     this.onRemember?.([...this.rememberedKeys])
   }
 
   isRemembered(request: ApprovalRequest): boolean {
+    if (request.kind === 'fileChange') return false
     return this.rememberedKeys.has(grantKey(request))
   }
 

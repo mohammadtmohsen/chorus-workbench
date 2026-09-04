@@ -334,18 +334,97 @@ describe('approval decisions', () => {
     expect(service.sessionGrants()).toHaveLength(1)
   })
 
-  it('hands edits to the provider once the user says always, so the next file is not asked', async () => {
+  it("retires the agent's other queued edits when one is refused with an instruction", async () => {
     /*
-     * A grant is keyed on its subject, and for a file change that is the paths
-     * it touched — so on its own "always" answers for this file and asks again
-     * for the next one. For a command the subject *is* the action; for editing,
-     * the next file is the same act.
+     * An assistant message can propose several edits at once and they queue
+     * together. Refusing the first with words — "not like that, do X" — and then
+     * being asked about the second, and only afterwards re-asked about the first,
+     * is the sequence this prevents: the later edits belong to the plan that was
+     * just rejected.
+     *
+     * They are refused rather than left pending, so the agent gets every result
+     * in one batch and can re-plan instead of waiting on cards nobody will
+     * usefully answer.
      */
+    const s = session()
+    const edit = (id: string, path: string) => {
+      s.emit({
+        type: 'approval.requested',
+        request: {
+          id: id as never,
+          agentId: 'codex',
+          kind: 'fileChange',
+          files: [{ path, patch: '@@' }],
+          expiresAt: Number.MAX_SAFE_INTEGER,
+        },
+      })
+    }
+
+    edit('ap-a', '/repo/src/a.ts')
+    edit('ap-b', '/repo/src/b.ts')
+    await tick()
+    expect(service.pendingApprovals()).toHaveLength(2)
+
+    await service.decideApproval('ap-a', { outcome: 'deny', message: 'use a constant instead' })
+    await tick()
+
+    expect(service.pendingApprovals()).toHaveLength(0)
+  })
+
+  it('holds the agent to the refused file when the next edit arrives afterwards', async () => {
+    /*
+     * The sequence that actually happens, measured on 2026-09-04: the second
+     * edit is not requested until the first is answered. A one-shot sweep of the
+     * queue found nothing to cancel and the problem survived it, so the refusal
+     * sets a hold instead.
+     *
+     * The corrected edit to the same file must still reach a card — holding the
+     * agent to a file it is forbidden to touch would be a deadlock — so the path
+     * is what decides, not the order.
+     */
+    const s = session()
+    const edit = (id: string, path: string) => {
+      s.emit({
+        type: 'approval.requested',
+        request: {
+          id: id as never,
+          agentId: 'codex',
+          kind: 'fileChange',
+          files: [{ path, patch: '@@' }],
+          expiresAt: Number.MAX_SAFE_INTEGER,
+        },
+      })
+    }
+
+    edit('ap-1', '/repo/src/a.ts')
+    await tick()
+    await service.decideApproval('ap-1', { outcome: 'deny', message: 'use a constant' })
+    await tick()
+
+    // A different file, proposed after the refusal: refused without asking.
+    edit('ap-2', '/repo/src/b.ts')
+    await tick()
+    expect(service.pendingApprovals()).toHaveLength(0)
+
+    // The same file again — the correction — reaches a card.
+    edit('ap-3', '/repo/src/a.ts')
+    await tick()
+    expect(service.pendingApprovals().map((p) => p.id)).toEqual(['ap-3'])
+
+    // And with the hold cleared, other files are asked about again.
+    await service.decideApproval('ap-3', { outcome: 'allow', scope: 'once' })
+    await tick()
+    edit('ap-4', '/repo/src/b.ts')
+    await tick()
+    expect(service.pendingApprovals().map((p) => p.id)).toEqual(['ap-4'])
+  })
+
+  it('drops the hold when the turn ends, so it cannot outlive its plan', async () => {
     const s = session()
     s.emit({
       type: 'approval.requested',
       request: {
-        id: 'ap-edit' as never,
+        id: 'ap-5' as never,
         agentId: 'codex',
         kind: 'fileChange',
         files: [{ path: '/repo/src/a.ts', patch: '@@' }],
@@ -353,11 +432,97 @@ describe('approval decisions', () => {
       },
     })
     await tick()
+    await service.decideApproval('ap-5', { outcome: 'deny', message: 'not like that' })
+    await tick()
 
+    s.emit({ type: 'turn.completed', turnRef: 't1', status: 'completed' })
+    await tick()
+
+    s.emit({
+      type: 'approval.requested',
+      request: {
+        id: 'ap-6' as never,
+        agentId: 'codex',
+        kind: 'fileChange',
+        files: [{ path: '/repo/src/b.ts', patch: '@@' }],
+        expiresAt: Number.MAX_SAFE_INTEGER,
+      },
+    })
+    await tick()
+    expect(service.pendingApprovals().map((p) => p.id)).toEqual(['ap-6'])
+  })
+
+  it('leaves the other edits alone when the refusal carries no instruction', async () => {
+    /*
+     * The counterpart, and the reason the rule is narrow: a bare "No" says
+     * nothing about the rest of the batch — it may well mean "not that one, the
+     * others are fine". Cancelling on it would take away a choice the person did
+     * not make.
+     */
+    const s = session()
+    for (const [id, path] of [
+      ['ap-c', '/repo/src/c.ts'],
+      ['ap-d', '/repo/src/d.ts'],
+    ] as const) {
+      s.emit({
+        type: 'approval.requested',
+        request: {
+          id: id as never,
+          agentId: 'codex',
+          kind: 'fileChange',
+          files: [{ path, patch: '@@' }],
+          expiresAt: Number.MAX_SAFE_INTEGER,
+        },
+      })
+    }
+    await tick()
+
+    await service.decideApproval('ap-c', { outcome: 'deny', message: '' })
+    await tick()
+
+    expect(service.pendingApprovals().map((p) => p.id)).toEqual(['ap-d'])
+  })
+
+  it('grants nothing for a file edit, so the next one is still asked about', async () => {
+    /*
+     * There is no "allow all edits this session" for a file change. The button
+     * was removed on 2026-09-04, after driving it: pressing it once switched the
+     * feature off for the rest of the session, which is the opposite of what
+     * someone turns diff-and-accept on for.
+     *
+     * It used to mean `setPermissionMode('acceptEdits')`, which was worse again —
+     * that hands the decision to the CLI, so the callback stops firing and Chorus
+     * cannot see an edit happened at all. Measured in the Phase 1 spike:
+     * `acceptEdits` alone means `canUseTool` is never called.
+     *
+     * So the two assertions are that pair — no mode is sent, and a `session`
+     * answer arriving over IPC widens nothing.
+     */
+    const s = session()
+    const edit = (id: string, path: string) => {
+      s.emit({
+        type: 'approval.requested',
+        request: {
+          id: id as never,
+          agentId: 'codex',
+          kind: 'fileChange',
+          files: [{ path, patch: '@@' }],
+          expiresAt: Number.MAX_SAFE_INTEGER,
+        },
+      })
+    }
+
+    edit('ap-edit', '/repo/src/a.ts')
+    await tick()
     await service.decideApproval('ap-edit', { outcome: 'allow', scope: 'session' })
     await tick()
 
-    expect(s.permissionModes).toEqual(['acceptEdits'])
+    expect(s.permissionModes).toEqual([])
+    expect(service.sessionGrants()).toHaveLength(0)
+
+    edit('ap-edit-2', '/repo/src/b.ts')
+    await tick()
+    expect(service.pendingApprovals().map((p) => p.id)).toEqual(['ap-edit-2'])
   })
 
   it('leaves plan mode when the plan is approved', async () => {

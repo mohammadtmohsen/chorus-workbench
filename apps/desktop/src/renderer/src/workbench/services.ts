@@ -130,6 +130,31 @@ import getDebugServiceOverride from '@codingame/monaco-vscode-debug-service-over
 import getExtensionGalleryServiceOverride from '@codingame/monaco-vscode-extension-gallery-service-override'
 import getAccessibilityServiceOverride from '@codingame/monaco-vscode-accessibility-service-override'
 /*
+ * The two the workbench was demonstrably missing, added 2026-09-02.
+ *
+ * **Both were found by reading the app's own logs rather than by survey.**
+ * monaco-vscode-api answers an unregistered service by throwing
+ * `Unsupported: <Service>.<method> is not supported. You are using a feature
+ * without registering the corresponding service override.` — and across ten REH
+ * sessions exactly two names appeared, 24 and 12 times respectively. Nothing
+ * else in the list was missing, which is why this is two lines and not a sweep.
+ *
+ * `AuthenticationService.getProvider` is the one that matters: it is the service
+ * `vscode.github`, GitLab's workflow extension and any sign-in flow route
+ * through, and its absence surfaced as
+ * `[GitHubBranchProtectionProvider] Failed to update repository branch protection`.
+ *
+ * `CommentService.setWorkspaceComments` / `.updateCommentingRanges` is what
+ * merge-request and pull-request comment threads are drawn with.
+ *
+ * Pinned at 33.0.9 like the other overrides. The family shares a vendored VS
+ * Code tree per package, and a version skew inside it is not a version conflict
+ * the resolver can see — it is two copies of the same classes that fail to
+ * recognise each other at runtime.
+ */
+import getAuthenticationServiceOverride from '@codingame/monaco-vscode-authentication-service-override'
+import getCommentsServiceOverride from '@codingame/monaco-vscode-comments-service-override'
+/*
  * The one that makes the files real.
  *
  * `scanRemoteExtensions` is on because a remote extension host that nobody scans
@@ -376,6 +401,36 @@ export function prepareWorkbench(connection: WorkbenchConnection): WorkbenchSetu
 
   const services: IEditorOverrideServices = {
     ...getLogServiceOverride(),
+    /*
+     * **Left unset deliberately, and it costs us browser-only extensions.**
+     * `{ enableWorkerExtensionHost: true }` was tried on 2026-09-02 and reverted
+     * the same day; both halves of that are worth keeping.
+     *
+     * *Why it is tempting.* An extension with `browser` and no `main` deduces to
+     * kind `["web"]`, and `pickRunningLocation` answers `LocalWebWorker`. With
+     * this flag unset, `LocalWebWorker` leaves the picker's allowed list — and
+     * the picker does not refuse the extension, it **remaps** it to
+     * `allowedExtHostKinds[0]`, which is `LocalProcess`. `abstractExtensionService`
+     * then builds the startup set from local-as-LocalProcess, local-as-LocalWebWorker,
+     * remote-as-Remote, plus remote-as-LocalWebWorker. An extension installed on
+     * the REH and remapped to `LocalProcess` matches none of them: it never
+     * reaches `allExtensions`, never enters the registry, and its contributions
+     * are never read. That is why `pomdtr.excalidraw-editor` contributes no
+     * custom editor and `.excalidraw` files open as JSON.
+     *
+     * *Why it is off anyway.* Turning it on does fix the registry drop — the
+     * custom editor appeared — but the web-worker host never became ready, and
+     * `_activateByEvent` awaits **every** host with no readiness filter on the
+     * normal path. So one host that never starts wedges activation for all
+     * extensions in all hosts: git and GitLab commands showed "Activating
+     * extension…" and hung forever. Widening `isWebviewDocument` to cover the
+     * host's iframe (see `main/security.ts`) did not release it, and the actual
+     * cause was never observed — only guessed at twice.
+     *
+     * **Do not re-enable this without capturing the renderer console first.** The
+     * failure is invisible from main and from the REH logs; both attempts above
+     * were reasoning from source, and both were wrong.
+     */
     ...getExtensionServiceOverride(),
     ...getModelServiceOverride(),
     ...getNotificationServiceOverride(),
@@ -392,6 +447,8 @@ export function prepareWorkbench(connection: WorkbenchConnection): WorkbenchSetu
     ...getSearchServiceOverride(),
     ...getMarkersServiceOverride(),
     ...getAccessibilityServiceOverride(),
+    ...getAuthenticationServiceOverride(),
+    ...getCommentsServiceOverride(),
     /*
      * Backed by Chorus, not by the browser — see `workbench/storage.ts`.
      *
@@ -736,20 +793,19 @@ export function prepareWorkbench(connection: WorkbenchConnection): WorkbenchSetu
        * so a client pointing somewhere else would list one registry and install
        * from another.
        *
-       * A first draft of this guessed `resourceUrlTemplate` and an
-       * `extensionUrlTemplate` from memory. The server sets neither: it has
-       * `itemUrl` and `latestUrlTemplate` instead. `resourceUrlTemplate` is left
-       * empty rather than invented — it is the web host's asset path, only
-       * Draw.io among the surveyed extensions lands in the web host (§4), and an
-       * asserted URL that is wrong fails as a network error rather than as
-       * configuration.
+       * Browser extensions are installed from individual gallery resources, not
+       * from the VSIX path the remote extension-management server uses. Leaving
+       * `resourceUrlTemplate` empty therefore makes "Install in Browser" fail
+       * with "No extension gallery service configured" even though search and
+       * remote installation work. This is Open VSX's documented unpkg route.
        */
       extensionsGallery: {
         serviceUrl: 'https://open-vsx.org/vscode/gallery',
         controlUrl:
           'https://raw.githubusercontent.com/EclipseFdn/publish-extensions/refs/heads/master/extension-control/extensions.json',
         extensionUrlTemplate: 'https://open-vsx.org/vscode/gallery/{publisher}/{name}/latest',
-        resourceUrlTemplate: '',
+        resourceUrlTemplate:
+          'https://open-vsx.org/vscode/unpkg/{publisher}/{name}/{version}/{path}',
         nlsBaseUrl: '',
       },
       /*

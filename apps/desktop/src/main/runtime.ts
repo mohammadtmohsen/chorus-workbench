@@ -17,7 +17,11 @@ import type {
   UserInputResponse,
   EditorEditCapability,
 } from '@chorus/agent-protocol'
-import { requestWorkbenchEdit } from './workbench-surface.js'
+import {
+  requestWorkbenchAskDiff,
+  requestWorkbenchEdit,
+  requestWorkbenchSnapshot,
+} from './workbench-surface.js'
 import {
   EventStore,
   openSqlite,
@@ -44,7 +48,13 @@ import {
   type HandoffSource,
   type PermissionProfile,
 } from '@chorus/orchestrator'
-import { newConversationId, newHandoffId, type AgentId, type Logger } from '@chorus/shared'
+import {
+  newConversationId,
+  newHandoffId,
+  type AgentId,
+  type ApprovalId,
+  type Logger,
+} from '@chorus/shared'
 import { relativeWithin } from '@chorus/workspace'
 import type { ActivityPush, ContextUsagePush, TasksPush } from '../shared/ipc.js'
 import { UNREAD_EVENT_TYPES } from '../shared/unread.js'
@@ -55,6 +65,7 @@ import {
   type OpenConversation,
 } from './open-projects.js'
 import { ProjectService } from './project-service.js'
+import { EditPreviews } from './edit-preview.js'
 import { containsPassage } from '../shared/plain-text.js'
 import { questionSetText } from '../shared/question-text.js'
 import { readRemembered, writeRemembered } from './remembered.js'
@@ -824,6 +835,14 @@ export function recapLedger(events: readonly StoredEvent[], cwd = ''): RecapLedg
       case 'policy.changed':
       case 'tool.progress':
       case 'notice.raised':
+      case 'approval.withdrawn':
+        /*
+         * A withdrawal joins this group for the group's own reason: the ledger
+         * carries what the log can prove was *done*, and an approval the agent
+         * abandoned describes work that never started. It is the removal of an
+         * intention, which is one step further from evidence than the intention
+         * was.
+         */
         break
     }
   }
@@ -1203,6 +1222,16 @@ export class ChorusRuntime {
     AgentId,
     { status: 'unqueried' | 'loading' | 'ready' | 'failed'; models: readonly ModelChoice[] }
   >()
+
+  /**
+   * Proposed edits waiting on a card, by approval id.
+   *
+   * One store for the app rather than one per conversation, because a preview is
+   * settled by an approval id and those are unique across every room. Nothing in
+   * it is durable: a preview describes a decision that is still open, and a
+   * decision read back after a restart is one nobody is waiting on.
+   */
+  private readonly previews = new EditPreviews()
 
   private constructor(
     private readonly db: SqliteHandle,
@@ -3587,7 +3616,58 @@ export class ChorusRuntime {
   ): Promise<void> {
     const participant = this.require(conversationId).participants.get(agentId)
     if (participant === undefined) throw new Error(`"${agentId}" is not in this conversation`)
-    await participant.service.decideApproval(approvalId, decision)
+    await participant.service.decideApproval(
+      approvalId,
+      await this.withSelection(decision, approvalId)
+    )
+  }
+
+  /**
+   * Adds the line you had selected to a refusal, so "this line" has a referent.
+   *
+   * Refusing an edit with words is a review comment, and a review comment about
+   * a line the reader cannot see is a riddle. The selection is read from the
+   * editor at the moment of the refusal — the diff is still open, because the
+   * card is still up.
+   *
+   * **The filename comes from the preview, not from the snapshot.** Both sides
+   * of the diff are served on `chorus-ask:`, a scheme that resolves to no file
+   * on disk, so the snapshot's own path would be an internal URI. The approval
+   * already knows which file it is about.
+   *
+   * Silent when there is no selection, no preview or no editor: an approval can
+   * be refused perfectly well without one, and a failure here must not stop the
+   * refusal reaching the agent.
+   */
+  private async withSelection(
+    decision: ApprovalDecision,
+    approvalId: string
+  ): Promise<ApprovalDecision> {
+    if (decision.outcome !== 'deny' || decision.message.trim() === '') return decision
+    const preview = this.previews.get(approvalId)
+    if (preview === undefined) return decision
+
+    try {
+      const snapshot = await requestWorkbenchSnapshot(preview.projectRoot)
+      if (snapshot === undefined || snapshot === null) return decision
+      const { startLine, endLine, text } = snapshot
+      if (startLine === null || endLine === null || text.trim() === '') return decision
+
+      const where =
+        startLine === endLine
+          ? `${preview.path} line ${String(startLine)}`
+          : `${preview.path} lines ${String(startLine)}-${String(endLine)}`
+      // Quoted rather than fenced: it is a fragment of one file being pointed
+      // at, and a fence would invite the agent to read it as a replacement.
+      const quoted = text
+        .split('\n')
+        .map((line) => `> ${line}`)
+        .join('\n')
+      return { ...decision, message: `${decision.message}\n\nAbout ${where}:\n${quoted}` }
+    } catch {
+      // A refusal that could not be decorated is still a refusal.
+      return decision
+    }
   }
 
   /**
@@ -4006,6 +4086,65 @@ export class ChorusRuntime {
       onPlanExited: () => {
         const conversation = this.active.get(conversationId)
         if (conversation !== undefined) conversation.planning = false
+      },
+      /*
+       * A card was raised for a person, so work out what the edit would do.
+       *
+       * Fired after the queue takes the request, which is the only moment that
+       * means "the verdict was `ask`" — an auto-allowed edit must not compute a
+       * preview or flash a tab that closes again immediately.
+       *
+       * Deliberately not awaited: this runs on the synchronous path that pumps
+       * provider events, and a slow filesystem must not hold the stream. The
+       * preview simply arrives a moment after the card, and `EditPreviews`
+       * swallows its own failures.
+       */
+      onApprovalQueued: (request) => {
+        if (request.kind !== 'fileChange') return
+        const projectRoot = this.projectDirectory(conversationId)
+        void this.previews
+          .capture({
+            request,
+            projectRoot,
+            propose: (approvalId, currentText) =>
+              service.previewFileChange(approvalId as ApprovalId, currentText),
+          })
+          .then(async (preview) => {
+            if (preview === null) return
+            /*
+             * Refused when the project has no editor open, and that is fine: the
+             * card still asks and still carries the patch. The tab is the better
+             * read, not the only one.
+             */
+            await requestWorkbenchAskDiff(projectRoot, {
+              approvalId: preview.approvalId,
+              path: preview.path,
+              before: preview.before,
+              proposed: preview.proposed,
+            })
+          })
+          .catch(() => undefined)
+      },
+      /*
+       * The last thing before an allowed edit is let through.
+       *
+       * A preflight, not a guarantee — see `EditPreviews.stillCurrent`. It runs
+       * before the grant and before anything is sent to the provider, so a stale
+       * approval leaves no grant behind it.
+       */
+      preflightApproval: async (request) => this.previews.stillCurrent(request.id),
+      onApprovalSettled: (approvalId) => {
+        const preview = this.previews.release(approvalId)
+        if (preview === undefined) return
+        // The decision is made, so the diff describing it goes with it.
+        void requestWorkbenchAskDiff(preview.projectRoot, {
+          approvalId,
+          path: preview.path,
+          before: null,
+          proposed: '',
+          close: true,
+          revealPath: preview.absolutePath,
+        }).catch(() => undefined)
       },
     })
     await service.attach(session, usedOpts, health, reopening)

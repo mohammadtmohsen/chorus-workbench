@@ -231,6 +231,12 @@
     "sending": "Sending…",
     "card": "{{from}} handed off to {{to}}"
   },
+  "ask": {
+    "heading": "Make this edit to {{path}}?",
+    "yes": "Yes",
+    "tellInstead": "Tell Claude what to do instead…",
+    "no": "No"
+  },
   "approval": {
     "heading": "Approval",
     "wants": "{{agent}} needs approval",
@@ -239,7 +245,6 @@
     "allowOnce": "Allow once",
     "deny": "Deny",
     "enterHint": "Enter to allow once",
-    "enterHintSession": "Enter allows for this session",
     "allowAlways": "Allow for this session",
     "allowRemembered": "Always allow this tool",
     "atVersion": "version {{version}}"
@@ -329,6 +334,11 @@
     "attachedTitle": "Sent with your message: {{path}} lines {{lines}}"
   },
   "notice": {
+    "code": {
+      "editWithoutApproval": "Claude made this edit without asking Chorus.",
+      "editVisibilityUnavailable": "Chorus could not take control of edit permissions for this session — edits may not be shown before they happen.",
+      "staleEditPreview": "The file changed after this was shown, so the edit was refused. Ask again to work from the current file."
+    },
     "omitted": "{{bytes}} bytes omitted — the output was too large to keep",
     "detail": "Details",
     "dismiss": "Dismiss this message",

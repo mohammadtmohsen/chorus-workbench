@@ -908,9 +908,16 @@ export const Entry = memo(function Entry({
               </span>
             )}
             <span className="notice-text">
-              {message.folded === undefined
-                ? message.text
-                : t('notice.hooksFolded', { count: message.folded.length })}
+              {/*
+                A coded notice is Chorus's own and carries no words of its own —
+                the reducer has no translator, so the key travels and the phrase
+                is made here. Anything from a provider still shows what it said.
+              */}
+              {message.folded !== undefined
+                ? t('notice.hooksFolded', { count: message.folded.length })
+                : message.noticeCode !== undefined && message.noticeCode !== ''
+                  ? t(`notice.code.${message.noticeCode}`, { defaultValue: message.text })
+                  : message.text}
             </span>
             {message.folded !== undefined && (
               /*

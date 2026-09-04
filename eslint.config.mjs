@@ -10,6 +10,10 @@ export default tseslint.config(
       '**/build/**',
       '**/coverage/**',
       '**/node_modules/**',
+      // Spike harnesses kept beside their plan as evidence. They drive a live
+      // agent and are not part of any build, so they are outside the project
+      // service the type-aware rules need.
+      'docs/plans/**',
       '**/*.tsbuildinfo',
       // Generated from the Codex protocol — see plan §6.1. Linting it would
       // produce noise we cannot fix and would mask real drift in the diff.

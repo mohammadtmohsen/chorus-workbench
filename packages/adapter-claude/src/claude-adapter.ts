@@ -42,6 +42,7 @@ import {
   mapSdkMessage,
   mapToolPermission,
   mapUserInputRequest,
+  proposedText,
   toClaudeUserInputResult,
   trackBashTools,
   trackStreamMessage,
@@ -171,9 +172,18 @@ interface PendingApproval {
   suggestions?: unknown[]
 }
 
+interface LiveTool {
+  readonly name: string
+  count: number
+  approved: boolean
+  contested: boolean
+}
+
 export class ClaudeSession implements AgentSession {
   private readonly queue = new AsyncQueue<AgentEvent>()
   private readonly pendingApprovals = new Map<string, PendingApproval>()
+  private readonly liveTools = new Map<string, LiveTool>()
+  private readonly approvedEditRefs = new Set<string>()
   /**
    * Open question sets. Holds the original input because the answer goes back
    * as `updatedInput`, which the CLI matches against what it sent.
@@ -320,7 +330,8 @@ export class ClaudeSession implements AgentSession {
        */
       // `session` and `always` are both "stop asking" as far as the CLI is
       // concerned; the difference between them is whether Chorus forgets on quit.
-      const lasting = decision.scope !== 'once'
+      const lasting =
+        decision.scope !== 'once' && pending.toolName !== 'Edit' && pending.toolName !== 'Write'
       const always = lasting ? pending.suggestions : undefined
       pending.resolve({
         behavior: 'allow',
@@ -340,6 +351,12 @@ export class ClaudeSession implements AgentSession {
       decisionClassification: 'user_reject',
     })
     return Promise.resolve()
+  }
+
+  previewFileChange(id: ApprovalId, currentText: string | null): string | null {
+    const pending = this.pendingApprovals.get(id)
+    if (pending === undefined) return null
+    return proposedText(pending.toolName, pending.input, currentText)
   }
 
   setModel(model: string): Promise<void> {
@@ -526,6 +543,8 @@ export class ClaudeSession implements AgentSession {
       pending.resolve({ behavior: 'deny', message: 'Session closed' })
     }
     this.pendingApprovals.clear()
+    this.liveTools.clear()
+    this.approvedEditRefs.clear()
     // Same reasoning for questions: an unanswered one holds `canUseTool` open
     // forever, and the SDK imposes no deadline of its own.
     for (const [, pending] of this.pendingUserInputs) {
@@ -592,6 +611,7 @@ export class ClaudeSession implements AgentSession {
       ...(options?.description === undefined ? {} : { description: options.description }),
       ...(options?.blockedPath === undefined ? {} : { blockedPath: options.blockedPath }),
       ...(options?.decisionReason === undefined ? {} : { decisionReason: options.decisionReason }),
+      ...(options?.toolUseID === undefined ? {} : { itemRef: options.toolUseID }),
     })
 
     return new Promise<PermissionResult>((resolve) => {
@@ -613,6 +633,13 @@ export class ClaudeSession implements AgentSession {
         'abort',
         () => {
           if (!this.pendingApprovals.delete(id)) return
+          this.emit({
+            agentId: 'claude',
+            seq: ++this.seq,
+            at: this.now(),
+            type: 'approval.withdrawn',
+            approvalId: id,
+          })
           resolve({ behavior: 'deny', message: 'The request was withdrawn.' })
         },
         { once: true }
@@ -860,7 +887,62 @@ export class ClaudeSession implements AgentSession {
   }
 
   private emit(event: AgentEvent): void {
+    const bypassedEdit = this.trackEdit(event)
     this.queue.push({ ...event, seq: ++this.seq })
+    if (bypassedEdit) {
+      this.queue.push({
+        agentId: 'claude',
+        seq: ++this.seq,
+        at: this.now(),
+        type: 'notice',
+        level: 'warn',
+        source: 'system',
+        text: '',
+        code: 'editWithoutApproval',
+      })
+    }
+  }
+
+  private trackEdit(event: AgentEvent): boolean {
+    if (event.type === 'tool.started') {
+      const existing = this.liveTools.get(event.itemRef)
+      if (existing === undefined) {
+        this.liveTools.set(event.itemRef, {
+          name: event.name,
+          count: 1,
+          approved: this.approvedEditRefs.has(event.itemRef),
+          contested: false,
+        })
+      } else {
+        existing.count += 1
+        existing.contested = true
+      }
+      return false
+    }
+
+    if (event.type === 'approval.requested') {
+      const ref = event.request.kind === 'fileChange' ? event.request.itemRef : undefined
+      if (ref !== undefined) {
+        this.approvedEditRefs.add(ref)
+        const live = this.liveTools.get(ref)
+        if (live !== undefined) live.approved = true
+      }
+      return false
+    }
+
+    if (event.type !== 'tool.completed') return false
+    const live = this.liveTools.get(event.itemRef)
+    this.approvedEditRefs.delete(event.itemRef)
+    if (live === undefined) return false
+
+    const bypassed =
+      event.status === 'ok' &&
+      (live.name === 'Edit' || live.name === 'Write') &&
+      !live.approved &&
+      !live.contested
+    if (live.count <= 1) this.liveTools.delete(event.itemRef)
+    else live.count -= 1
+    return bypassed
   }
 }
 
@@ -1174,6 +1256,7 @@ export class ClaudeAdapter implements AgentAdapter {
        * noticing.
        */
       permissionMode: 'default',
+      settings: { permissions: { ask: ['Edit', 'Write'] } },
       ...(opts.model === undefined ? {} : { model: opts.model }),
       ...(this.executablePath === undefined
         ? {}

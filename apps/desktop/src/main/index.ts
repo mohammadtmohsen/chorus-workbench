@@ -148,6 +148,46 @@ void app.whenReady().then(async () => {
   setWorkbenchHostLog(log)
   log.info('starting', { version: app.getVersion(), electron: process.versions.electron })
 
+  /*
+   * TEMPORARY — renderer console into `chorus.log`. Remove when the web-worker
+   * extension host question is settled (2026-09-02).
+   *
+   * The workbench's failures are invisible from here. Main logs its own side, the
+   * REH logs the remote extension host, and **nothing captures the renderer** —
+   * so when `enableWorkerExtensionHost` was turned on and every extension command
+   * wedged, the only evidence was in a DevTools console nobody was reading. Two
+   * causes were proposed from source and both were wrong; this exists so the
+   * third is observed instead.
+   *
+   * `web-contents-created` rather than a hook per surface, because the frame that
+   * matters is not one we construct: the worker extension host runs in an iframe
+   * of the workbench document, and `console-message` reports it with `frame`
+   * naming the sub-frame. One listener covers the shell, every project's
+   * workbench view, and everything they frame.
+   *
+   * All four levels are forwarded, at the user's request, and this is the reason
+   * it must not become permanent: a renderer console carries whatever extensions
+   * choose to print, which is the same class of leak C-021 is open about. It goes
+   * to the same file `chorus.log` rotates, so it is not unbounded.
+   */
+  app.on('web-contents-created', (_event, contents) => {
+    contents.on('console-message', ({ level, message, lineNumber, sourceId, frame }) => {
+      // `frame` is non-optional on the event and `lineNumber` is a number, so no
+      // `??` and no optional chain — the linter rejects both as unnecessary.
+      const fields = { level, source: `${sourceId}:${String(lineNumber)}`, frame: frame.url }
+      // Mapped so the file's own levels stay meaningful, and nothing is dropped:
+      // the logger's `minLevel` is `info` unless CHORUS_DEBUG=1, so a `debug`
+      // console line logged as `debug` would be silently discarded — which is the
+      // failure mode this whole detour is about.
+      // `undefined` in the middle is not noise: `error` is
+      // `(message, error?, fields?)`, so passing `fields` second files the whole
+      // object as the caught error and drops it from the record.
+      if (level === 'error') log.error(`renderer: ${message}`, undefined, fields)
+      else if (level === 'warning') log.warn(`renderer: ${message}`, fields)
+      else log.info(`renderer: ${message}`, fields)
+    })
+  })
+
   void reapOrphanedAgents().then(({ killed, inspected, skipped }) => {
     // Said once at startup rather than never: the backstop being unavailable is
     // a fact about this platform, and a silent `killed: 0` reads as a clean

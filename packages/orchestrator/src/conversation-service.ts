@@ -5,6 +5,7 @@ import {
   type AgentEvent,
   type AgentSession,
   type ApprovalDecision,
+  type ApprovalRequest,
   type BackgroundTask,
   type HealthStatus,
   type SessionOpts,
@@ -18,6 +19,16 @@ import { DeltaBuffer, type Scheduler } from './delta-buffer.js'
 import { describeRequest, evaluate, SessionGrants } from './policy/engine.js'
 import { ApprovalQueue } from './policy/queue.js'
 import { DEFAULT_PROFILE_ID, profileById, type PermissionProfile } from './policy/rules.js'
+
+/**
+ * What the agent is told when it is held to an earlier file.
+ *
+ * Addressed to the agent and deliberately naming what to do next: told only
+ * "denied", it proposes the same edit again.
+ */
+const HOLD =
+  'Not now — the user asked for a change to an edit you proposed earlier. ' +
+  'Apply their instruction to that file first, then propose this one again if it is still needed.'
 
 /**
  * Drives one agent session and turns its normalized `AgentEvent` stream into
@@ -62,6 +73,9 @@ export interface ConversationServiceOptions {
   readonly onActivity?: (activity: AgentActivity | null) => void
   /** Told when an approved plan returned the session to ordinary permissions. */
   readonly onPlanExited?: () => void
+  readonly onApprovalQueued?: (request: ApprovalRequest) => void
+  readonly onApprovalSettled?: (approvalId: string) => void
+  readonly preflightApproval?: (request: ApprovalRequest) => Promise<boolean>
   /**
    * Nothing here may stop and wait for a person. Set for asides.
    *
@@ -108,6 +122,9 @@ export class ConversationService {
   private readonly onTasks: ((tasks: readonly BackgroundTask[]) => void) | undefined
   private readonly onActivity: ((activity: AgentActivity | null) => void) | undefined
   private readonly onPlanExited: (() => void) | undefined
+  private readonly onApprovalQueued: ((request: ApprovalRequest) => void) | undefined
+  private readonly onApprovalSettled: ((approvalId: string) => void) | undefined
+  private readonly preflightApproval: ((request: ApprovalRequest) => Promise<boolean>) | undefined
   /**
    * Question sets waiting on the user, kept so an answer can be checked against
    * the questions that produced it — which is what redaction needs to know
@@ -128,6 +145,19 @@ export class ConversationService {
       expiresAt: number
     }
   >()
+  /**
+   * A file whose edit was refused with an instruction, and not yet re-proposed.
+   *
+   * While this is set, the agent is held to finishing that file before it may
+   * touch another. It is the difference between "no" and "no, do it like this":
+   * the second is an instruction about *this* file, and an agent that answers it
+   * by going off to edit the next one has ignored it.
+   *
+   * Cleared when the same file comes back — that proposal is the correction and
+   * must reach a card — and at the end of the turn, so a hold never outlives the
+   * plan it belongs to.
+   */
+  private awaitingCorrectionFor: string | null = null
   private session: AgentSession | null = null
   private pump: Promise<void> | null = null
   /** Set when *we* asked to stop, so an interrupt is not reported as a failure. */
@@ -145,6 +175,9 @@ export class ConversationService {
     this.onTasks = options.onTasks
     this.onActivity = options.onActivity
     this.onPlanExited = options.onPlanExited
+    this.onApprovalQueued = options.onApprovalQueued
+    this.onApprovalSettled = options.onApprovalSettled
+    this.preflightApproval = options.preflightApproval
     this.queue = new ApprovalQueue({
       ...(options.scheduler === undefined ? {} : { scheduler: options.scheduler }),
       onResolved: (entry, decision, decidedBy) =>
@@ -248,6 +281,27 @@ export class ConversationService {
   }
 
   /**
+   * What a queued edit would leave on disk, or `null` when it cannot be said.
+   *
+   * Forwarded rather than computed here: the adapter holds the provider's tool
+   * input and is the only thing that can read it, and `CLAUDE.md` lets nothing
+   * provider-specific past that boundary. The caller supplies the current text
+   * because the adapter must not learn to read a filesystem.
+   *
+   * **The answer is never carried on the request**, which is appended to the log
+   * whole — so it is pulled, held in main for as long as the card is open, and
+   * dropped when the card settles.
+   */
+  previewFileChange(approvalId: ApprovalId, currentText: string | null): string | null {
+    try {
+      return this.session?.previewFileChange?.(approvalId, currentText) ?? null
+    } catch {
+      // A preview that throws is a preview nobody gets, not a broken decision.
+      return null
+    }
+  }
+
+  /**
    * Asks the provider to re-read its account windows, if it can be asked.
    *
    * Silent when the session is not up or the provider has no such notion — the
@@ -282,6 +336,49 @@ export class ConversationService {
     // so the same action does not ask again. Outward-facing kinds refuse to be
     // remembered — `SessionGrants.add` returns false for them (plan §2.6).
     const entry = this.queue.get(approvalId)
+    if (
+      entry?.request.kind === 'fileChange' &&
+      decision.outcome === 'allow' &&
+      this.preflightApproval !== undefined
+    ) {
+      /*
+       * A preflight that throws reads as stale, not as fine.
+       *
+       * It compares the file against the copy the person was shown, so the only
+       * safe reading of "could not compare" is that the two may differ — and
+       * refusing costs a re-ask while proceeding could apply an edit to a file
+       * nobody looked at.
+       */
+      let current: boolean
+      try {
+        current = await this.preflightApproval(entry.request)
+      } catch {
+        current = false
+      }
+      if (!current) {
+        this.lifecycle({
+          type: 'notice.raised',
+          level: 'warn',
+          source: 'system',
+          text: '',
+          code: 'staleEditPreview',
+          detail: null,
+        })
+        await this.queue.resolve(
+          approvalId,
+          { outcome: 'deny', message: 'The file changed after the preview.' },
+          'system'
+        )
+        return
+      }
+    }
+
+    const effectiveDecision: ApprovalDecision =
+      entry?.request.kind === 'fileChange' &&
+      decision.outcome === 'allow' &&
+      decision.scope === 'always'
+        ? { ...decision, scope: 'session' }
+        : decision
     /*
      * "Always" is remembered past this run; "session" only until it ends.
      *
@@ -289,34 +386,33 @@ export class ConversationService {
      * may answer for a kind that can never be auto-decided — because that is the
      * user having decided, not a profile deciding for them.
      */
-    if (entry !== undefined && decision.outcome === 'allow' && decision.scope === 'always') {
+    if (
+      entry !== undefined &&
+      effectiveDecision.outcome === 'allow' &&
+      effectiveDecision.scope === 'always'
+    ) {
       this.grants.addAlways(entry.request)
     }
-    if (entry !== undefined && decision.outcome === 'allow' && decision.scope === 'session') {
-      this.grants.add(entry.request)
-
+    if (
+      entry !== undefined &&
+      effectiveDecision.outcome === 'allow' &&
+      effectiveDecision.scope === 'session'
+    ) {
       /*
-       * "Always" on an edit means always, not "always this file".
+       * An edit grants nothing, ever — not even for this file.
        *
-       * A grant is keyed on its subject, which for a file change is the paths
-       * it touched — so on its own it answers for `src/a.ts` and asks again for
-       * `src/b.ts`. That is right for a command, where the subject *is* the
-       * action, and wrong for editing, where the next file is the same act.
+       * There is no "allow all edits this session" any more: the button was
+       * removed on 2026-09-04 because pressing it once switched the feature off
+       * for the rest of the session, which is the opposite of what someone turns
+       * it on for. With no button, a grant would be a state nothing can set and
+       * nothing can see, so the honest expression of "every edit is asked about"
+       * is that answering one settles that one and nothing else.
        *
-       * So the decision is handed to the provider, which is also where it
-       * belongs once it has been made: the CLI accepts edits itself, with no
-       * round trip through here at all.
-       *
-       * The cost is real and is why this needs an explicit "always" rather than
-       * a profile or a setting. From here to the end of the session the CLI
-       * stops calling the permission callback for edits, so no `fileChange`
-       * rule sees them — including the credential one. That is the user
-       * choosing it, once, knowingly; it is not a default, and it was a default
-       * until very recently.
+       * A `session` scope can still arrive over IPC. It is quietly narrowed to
+       * once rather than refused: the answer the person gave is still honoured,
+       * just not widened.
        */
-      if (entry.request.kind === 'fileChange') {
-        void this.acceptEditsFromNowOn()
-      }
+      if (entry.request.kind !== 'fileChange') this.grants.add(entry.request)
     }
 
     /*
@@ -332,18 +428,82 @@ export class ConversationService {
      */
     if (
       entry !== undefined &&
-      decision.outcome === 'allow' &&
+      effectiveDecision.outcome === 'allow' &&
       entry.request.kind === 'permissionGrant' &&
       entry.request.toolName === 'ExitPlanMode'
     ) {
       void this.leavePlanMode()
     }
 
-    const handled = await this.queue.resolve(approvalId, decision, decidedBy)
+    const handled = await this.queue.resolve(approvalId, effectiveDecision, decidedBy)
     if (!handled) {
       // Not queued — an auto-decided or already-settled approval. Still log it.
-      await this.recordAndAnswer(approvalId, decision, decidedBy, null)
+      await this.recordAndAnswer(approvalId, effectiveDecision, decidedBy, null)
     }
+
+    if (entry !== undefined) await this.standDownAfterRefusal(entry.request, effectiveDecision)
+  }
+
+  /**
+   * A refusal with words holds the agent to that file until it comes back.
+   *
+   * Refusing an edit with an instruction — "not like that, do X" — and then
+   * being asked about the *next* file, and only afterwards being re-asked about
+   * the first, is the sequence this exists to stop. The instruction was about
+   * one file; an agent that answers it by moving on has not answered it.
+   *
+   * Two halves, because the edits arrive two ways. Anything already queued from
+   * the same batch is refused now — an assistant message can propose several at
+   * once. And a hold is set for anything proposed *next*, because measured on
+   * 2026-09-04 the sequence is not a batch at all: the second edit is not
+   * requested until the first is answered, so a one-shot sweep found nothing to
+   * cancel and the problem survived it.
+   *
+   * **Only when words were given.** A bare "No" says nothing about the rest — it
+   * may well mean "not that one, the others are fine" — and holding the agent to
+   * a file on it would take away a choice the person did not make.
+   */
+  private async standDownAfterRefusal(
+    refused: ApprovalRequest,
+    decision: ApprovalDecision
+  ): Promise<void> {
+    if (refused.kind !== 'fileChange') return
+    if (decision.outcome !== 'deny') return
+    if (decision.message.trim() === '') return
+
+    this.awaitingCorrectionFor = refused.files[0]?.path ?? null
+
+    const stale = this.queue
+      .list()
+      .filter(
+        (pending) =>
+          pending.request.kind === 'fileChange' &&
+          pending.request.agentId === refused.agentId &&
+          pending.request.id !== refused.id
+      )
+
+    for (const pending of stale) {
+      await this.queue.resolve(pending.request.id, { outcome: 'deny', message: HOLD }, 'system')
+    }
+  }
+
+  /**
+   * Why this edit is refused, or `null` when it may proceed.
+   *
+   * The held file itself always may: that proposal is the correction being
+   * asked for, and blocking it would hold the agent to a file it is forbidden to
+   * touch. Answering it clears the hold whichever way it is answered — an allow
+   * ends the matter, and a second refusal sets a fresh hold through
+   * `standDownAfterRefusal`.
+   */
+  private heldByCorrection(request: ApprovalRequest): string | null {
+    if (this.awaitingCorrectionFor === null) return null
+    if (request.kind !== 'fileChange') return null
+    if (request.files[0]?.path === this.awaitingCorrectionFor) {
+      this.awaitingCorrectionFor = null
+      return null
+    }
+    return HOLD
   }
 
   /**
@@ -453,6 +613,11 @@ export class ConversationService {
       decidedBy,
       policyRuleId,
     })
+    try {
+      this.onApprovalSettled?.(approvalId)
+    } catch {
+      // The provider still needs its answer.
+    }
     // A timeout is a denial on the wire; the log keeps the distinction.
     const answer: ApprovalDecision =
       decision.outcome === 'timeout'
@@ -543,6 +708,9 @@ export class ConversationService {
           userInitiated: this.interruptRequested,
         })
         this.interruptRequested = false
+        // A hold belongs to the plan that was refused. The turn is over, so the
+        // plan is too, and holding a later one to it would be arbitrary.
+        this.awaitingCorrectionFor = null
         return
       }
 
@@ -611,6 +779,25 @@ export class ConversationService {
         })
 
         /*
+         * The agent was told to change something and went to another file.
+         *
+         * Refused before policy sees it, because policy would allow it: a
+         * profile has no opinion about *which* file, and the objection is not
+         * about permission at all. The correction itself passes the path check,
+         * so the one edit that can clear the hold is never blocked by it.
+         */
+        const held = this.heldByCorrection(event.request)
+        if (held !== null) {
+          void this.recordAndAnswer(
+            event.request.id,
+            { outcome: 'deny', message: held },
+            'system',
+            null
+          )
+          return
+        }
+
+        /*
          * Policy decides before the user ever sees a card. An auto-decision is
          * logged with the rule that made it — an allow nobody can trace back to
          * a rule is indistinguishable from no policy at all (plan §4.4).
@@ -660,8 +847,23 @@ export class ConversationService {
 
         // Nobody but a person can settle this one; the queue owns its deadline.
         this.queue.add(this.conversationId, event.request)
+        try {
+          this.onApprovalQueued?.(event.request)
+        } catch {
+          // A preview failure must not block the event pump.
+        }
         return
       }
+
+      case 'approval.withdrawn':
+        this.queue.withdraw(event.approvalId)
+        this.lifecycle({ type: 'approval.withdrawn', approvalId: event.approvalId })
+        try {
+          this.onApprovalSettled?.(event.approvalId)
+        } catch {
+          // The withdrawal is already complete.
+        }
+        return
 
       /*
        * Logged and held, never auto-answered.
@@ -837,6 +1039,7 @@ export class ConversationService {
           source: event.source,
           text: event.text,
           detail: event.detail ?? null,
+          ...(event.code === undefined ? {} : { code: event.code }),
           // Carried through rather than recomputed — the adapter did the cutting
           // and is the only thing that saw the original length. Spread rather
           // than defaulted to 0, so a notice that lost nothing is written
@@ -871,14 +1074,6 @@ export class ConversationService {
     } catch {
       // The turn is already approved; a mode that failed to change is a worse
       // experience than a failed decision, not a broken one.
-    }
-  }
-
-  private async acceptEditsFromNowOn(): Promise<void> {
-    try {
-      await this.session?.setPermissionMode?.('acceptEdits')
-    } catch {
-      // Nothing to report: the edits keep being asked about, which is safe.
     }
   }
 

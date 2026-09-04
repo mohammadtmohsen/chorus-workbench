@@ -249,6 +249,14 @@ function collect(events: readonly StoredEvent[], recipient: AgentId, maxMessage:
         })
         break
 
+      /*
+       * An approval the agent itself abandoned. It is Chorus bookkeeping about a
+       * card, and the other agent has nothing to do differently for it — the
+       * work it described never happened and was never reported as happening.
+       */
+      case 'approval.withdrawn':
+        break
+
       /* A name the user chose for the room is theirs, not context for a turn. */
       case 'conversation.renamed':
         break

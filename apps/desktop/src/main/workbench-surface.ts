@@ -22,9 +22,14 @@ import {
   WORKBENCH_EDIT_CHANNEL,
   WORKBENCH_SNAPSHOT_CHANNEL,
   WORKBENCH_SNAPSHOT_RESULT_CHANNEL,
+  WORKBENCH_ASK_DIFF_CHANNEL,
+  WORKBENCH_ASK_DIFF_RESULT_CHANNEL,
   WORKBENCH_EDIT_RESULT_CHANNEL,
   WorkbenchContext,
   WORKBENCH_CLIPBOARD_READ_CHANNEL,
+  WORKBENCH_BROWSER_EXTENSIONS_CHANGED_CHANNEL,
+  WORKBENCH_BROWSER_EXTENSIONS_READ_CHANNEL,
+  WORKBENCH_BROWSER_EXTENSIONS_WRITE_CHANNEL,
   WORKBENCH_SECRET_DELETE_CHANNEL,
   WORKBENCH_SECRET_READ_CHANNEL,
   WORKBENCH_SECRET_WRITE_CHANNEL,
@@ -36,6 +41,8 @@ import {
   WORKBENCH_USER_SETTINGS_WRITE_CHANNEL,
   type WorkbenchConnection,
   type WorkbenchEditRequest,
+  type WorkbenchAskDiffRequest,
+  type WorkbenchAskDiffResult,
   type WorkbenchEditResult,
   type WorkbenchSnapshotResult,
   type WorkbenchRect,
@@ -55,6 +62,10 @@ import {
 } from './workbench-secrets.js'
 import { applyWorkbenchStorageDelta, readWorkbenchStorage } from './workbench-storage.js'
 import { readWorkbenchUserSettings, writeWorkbenchUserSettings } from './workbench-user-settings.js'
+import {
+  readWorkbenchBrowserExtensions,
+  writeWorkbenchBrowserExtensions,
+} from './workbench-browser-extensions.js'
 
 /**
  * The isolated workbench surfaces of preflight §4.1a.
@@ -1099,6 +1110,30 @@ export function registerWorkbenchHandlers(
   })
 
   /*
+   * Browser extensions are application-scoped, but every workbench surface has
+   * its own in-memory `vscode-userdata` provider. Main stores the one durable
+   * registry and forwards a write to every other live surface so a later install
+   * cannot replace it from a stale local copy.
+   */
+  ipcMain.handle(WORKBENCH_BROWSER_EXTENSIONS_READ_CHANNEL, (event) => {
+    if (!byContents.has(event.sender)) throw new Error('unknown workbench surface')
+    return readWorkbenchBrowserExtensions(app.getPath('userData'))
+  })
+
+  ipcMain.handle(WORKBENCH_BROWSER_EXTENSIONS_WRITE_CHANNEL, (event, text: unknown) => {
+    if (!byContents.has(event.sender)) throw new Error('unknown workbench surface')
+    if (typeof text !== 'string') throw new Error('Browser extension registry must be text')
+    writeWorkbenchBrowserExtensions(app.getPath('userData'), text)
+
+    for (const [id, surface] of byId) {
+      if (surface.view.webContents === event.sender) continue
+      if (surface.view.webContents.isDestroyed()) continue
+      void id
+      surface.view.webContents.send(WORKBENCH_BROWSER_EXTENSIONS_CHANGED_CHANNEL, text)
+    }
+  })
+
+  /*
    * The storage pair, on the same authorisation as the settings pair: the sender
    * must be a live surface, and `byContents` is the one membership test.
    *
@@ -1262,6 +1297,14 @@ export function registerWorkbenchHandlers(
     pendingSnapshots.get(result.requestId)?.(result)
   })
 
+  ipcMain.on(WORKBENCH_ASK_DIFF_RESULT_CHANNEL, (event, raw: unknown) => {
+    if (byContents.get(event.sender) === undefined) return
+    if (typeof raw !== 'object' || raw === null) return
+    const result = raw as WorkbenchAskDiffResult
+    if (typeof result.requestId !== 'string') return
+    pendingAskDiffs.get(result.requestId)?.(result)
+  })
+
   ipcMain.on(WORKBENCH_EDIT_RESULT_CHANNEL, (event, raw: unknown) => {
     if (byContents.get(event.sender) === undefined) return
     if (typeof raw !== 'object' || raw === null) return
@@ -1317,6 +1360,40 @@ export function setWorkbenchContextSink(
  * request and one edit would be reported with another's outcome.
  */
 const pendingEdits = new Map<string, (result: WorkbenchEditResult) => void>()
+
+const pendingAskDiffs = new Map<string, (result: WorkbenchAskDiffResult) => void>()
+
+/**
+ * Shows, replaces or closes the proposed-edit diff in a project's editor.
+ *
+ * **Refuses rather than opening a surface**, like `requestWorkbenchEdit`: an
+ * editor that is not up is a deliberate state, and opening one because an agent
+ * proposed an edit would rearrange the window on the person's behalf. The card
+ * still asks; only the diff is missing, which is the degradation the plan chose.
+ */
+export async function requestWorkbenchAskDiff(
+  projectRoot: string,
+  request: Omit<WorkbenchAskDiffRequest, 'requestId'>
+): Promise<WorkbenchAskDiffResult> {
+  const surface = [...byId.values()].find((s) => s.projectRoot === projectRoot)
+  const requestId = randomUUID()
+  if (surface === undefined || surface.view.webContents.isDestroyed()) {
+    return { requestId, ok: false, message: 'This project has no editor open.' }
+  }
+
+  return new Promise<WorkbenchAskDiffResult>((resolve) => {
+    const settle = (result: WorkbenchAskDiffResult): void => {
+      if (!pendingAskDiffs.delete(requestId)) return
+      clearTimeout(timer)
+      resolve(result)
+    }
+    const timer = setTimeout(() => {
+      settle({ requestId, ok: false, message: 'The editor did not answer.' })
+    }, EDIT_TIMEOUT_MS)
+    pendingAskDiffs.set(requestId, settle)
+    surface.view.webContents.send(WORKBENCH_ASK_DIFF_CHANNEL, { ...request, requestId })
+  })
+}
 
 /**
  * How long a surface has to answer before the edit is called a failure.

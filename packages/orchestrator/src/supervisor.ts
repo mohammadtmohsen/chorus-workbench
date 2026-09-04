@@ -206,6 +206,10 @@ export class SupervisedSession implements AgentSession {
     return this.current.respondToApproval(id, decision)
   }
 
+  previewFileChange(id: ApprovalId, currentText: string | null): string | null {
+    return this.current.previewFileChange?.(id, currentText) ?? null
+  }
+
   respondToUserInput(id: UserInputId, response: UserInputResponse): Promise<void> {
     return this.current.respondToUserInput(id, response)
   }

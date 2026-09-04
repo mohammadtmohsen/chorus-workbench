@@ -30,6 +30,134 @@ Nothing here can be finished by me alone.
 
 ## Open
 
+### C-066 · A remote-installed browser-only extension is dropped before it is ever registered, and `.excalidraw` opens as raw JSON
+
+**Reported 2026-09-01.** A `.excalidraw` file in a project pane opens as the JSON
+text of the drawing. The same file in VS Code opens as a canvas. Both
+`pomdtr.excalidraw-editor` and a second copy were installed, enabled, and listed
+in the Extensions view the whole time.
+
+**It is not the file, and the missing-cache fast path is not the reason.** That
+was the first guess, because it is exactly how the PDF viewer failed — an
+`editorOverrideService.cache` with no `*.pdf` sent the resolver straight to the
+text editor. **Read while diagnosing on 2026-09-01, before the uninstall below, the
+cache _did_ carry `*.excalidraw`**, which rules that path out; read again
+afterwards it no longer does,
+so this observation is time-scoped and is **not** a general claim that the cache is
+never stale. In any case the cache holds glob patterns rather than provider
+identities, and `editorResolverService.js:130` uses it for one thing only: deciding
+whether to await `whenInstalledExtensionsRegistered()` before resolving.
+
+**The stronger evidence is `memento/customEditors`**, which on a live profile holds
+eleven entries — the built-ins, `hediet.vscode-drawio` and its text variant,
+`pdfViewer.PDFEdit`, `docxreader.docxEditor` — and no Excalidraw. Every extension
+in that list declares `main`. **Read it for exactly what it is**: the memento is
+seeded from, and rewritten by, the `customEditors` _extension point_ handler
+(`contributedCustomEditors.js:23`), so it records declarative manifest
+contributions that were processed. It says nothing about whether an extension
+activated or called `registerCustomEditorProvider`, which is a separate path
+(`mainThreadCustomEditors.js:125`). Absence from it means the contribution was
+never handled at all, which is the claim being made here.
+
+**The cause is that Chorus starts no web-worker extension host, and a browser-only
+extension installed into the REH's directory has nowhere else to go.**
+`pomdtr.excalidraw-editor` declares `browser` and no `main`, so VS Code computes
+its extension kind as `web`.
+
+- `services.ts:379` calls `getExtensionServiceOverride()` with no options, so
+  `enableWorkerExtensionHost` is `undefined` (`index.js:294`).
+- Falsy, the allowed host kinds become `[LocalProcess, Remote]` (`index.js:219`)
+  and `createExtensionHost` returns `null` outright for `LocalWebWorker`
+  (`index.js:174`).
+- The picker therefore rewrites the extension's `LocalWebWorker` to
+  `allowedExtHostKinds[0]` — `LocalProcess` (`index.js:205`).
+- **And that rewrite is where it vanishes.** `abstractExtensionService.js:511`
+  assembles `allExtensions` from three buckets: _remote_ extensions assigned
+  `Remote`, _local_ extensions assigned `LocalProcess`, and _local_ extensions
+  assigned `LocalWebWorker`. A **remote** extension assigned `LocalProcess` is in
+  none of them. It never reaches `_doHandleExtensionPoints`, so its
+  `customEditors` contribution is never handled, so nothing claims
+  `*.excalidraw`, so the resolver falls through to the text editor.
+
+**Why this matters more than one file — and the qualifier is essential.** It is a
+class, but a narrower one than first written: a browser-only extension **that ends
+up in the REH's extensions directory**, which is what a sideloaded VSIX is. It is
+installed, enabled, listed, and silently never runs, with nothing anywhere saying
+so — the Extensions view shows it installed, because it is.
+
+**Ordinary gallery installation does not land there**, so this is not "every
+browser-only Open VSX extension". `deduceExtensionKind` returns `["web"]` for a
+manifest with `browser` and no `main`
+(`extensionManifestPropertiesService.js:171`), and
+`getInstallableExtensionManagementServers` routes `web` to the
+`webExtensionManagementServer` and only `workspace` to the remote one
+(`extensionManagementService.js:752-767`). A gallery install is therefore local,
+lands in the `localWebWorkerExtensions` bucket, and survives. Sideloading put these
+two on the wrong side of that split.
+
+**What would make it done — three prerequisites, and only the first is small.**
+
+1. `enableWorkerExtensionHost: true` at `services.ts:379`. On its own this changes
+   routing and nothing else.
+2. Register the worker in `workers.ts`. The label is exactly
+   `extensionHostWorkerMain` (`webWorkerExtensionHost.js:333`). **The import is
+   extensionless**, because the package's `./*` export already appends `.js`
+   (`monaco-vscode-api/package.json:44`) and writing the suffix resolves to
+   `extensionHost.worker.js.js`:
+
+   ```ts
+   import ExtensionHostWorker from '@codingame/monaco-vscode-api/workers/extensionHost.worker?worker'
+   ```
+
+3. **A CSP branch for the extension-host iframe.** `isWebviewDocument()`
+   (`security.ts:203`) matches only `/out/renderer/assets/(index|fake)-<hash>.html`,
+   so the host iframe gets the workbench policy and its `frame-ancestors 'none'`
+   (`security.ts:104`). The iframe also carries its own meta CSP
+   (`webWorkerExtensionHostIframe.html:4`) and an inline bootstrap script from line
+   11, which production's `script-src` rejects. `security.ts:218-227` already
+   records paying for this exact mistake once, for the webview bootstrap.
+
+**Host population is _not_ a fourth prerequisite** — that was the first draft's
+error. `_startExtensionHostsIfNecessary(true, [])` does run before extensions
+resolve (`abstractExtensionService.js:439`) with an initial snapshot of local web
+extensions only (`extensionService.js:243`), but the worker host starts as
+`EagerManualStart`, so `_startOnDemandExtensionHosts()` afterwards hands it the
+completed registry snapshot (`abstractExtensionService.js:909`) and
+`ExtensionHostManager.start()` sends `extensions.set(versionId, allExtensions,
+myExtensions)` before starting it (`extensionHostManager.js:329`). The host is
+explicitly told. **That call is not awaited**, so runtime ordering is still worth
+watching — but it is a thing to verify, not a blocker to design around.
+
+**The duplicate had to go before anything can be measured.** Two extensions were
+sideloaded as VSIX and both claim viewType `editor.excalidraw` — `pomdtr@3.9.0`
+and `lrstanley@3.7.4`. `contributedCustomEditors.js:65` discards the second with a
+bare `console.error`, and if both ever activate `mainThreadCustomEditors.js:152`
+throws `Provider for editor.excalidraw already registered`.
+
+**`lrstanley@3.7.4` was staged for removal on 2026-09-01, not confirmed removed.**
+Its directory was moved to `workbench-server/lrstanley.excalidraw-editor-3.7.4.removed`
+and its `extensions.json` entry dropped, 33 → 32, with a backup at
+`workbench-server/extensions.json.bak-2026-09-01`. This was done **while Chorus was
+running**, at the user's instruction, so the live REH may rewrite the registry from
+its in-memory copy on exit. Recheck after Chorus quits. Some inert profile metadata
+for `lrstanley` also remains.
+
+**Two wrong diagnoses are recorded here, because the error is the useful part.**
+The first said the extension was dropped for having no host at all — but
+`services.ts:237` registers `localExtensionHost`, so a `LocalProcess` host does
+exist and the drop happens one step later, at bucket assembly. The second said it
+was routed to a host that could not load its code, which is worse, because it was
+reasoned from what the in-page host is _for_ rather than read. Codex's review
+caught both. This is the same failure §4 made about Draw.io and the same one C-057
+and C-063's trust hole were withdrawn for.
+
+**Not the same bug as the PDF viewer, and this entry does not cover it.**
+`adamraichu.pdf-viewer` declares `main` _and_ `browser`, so it is routed to the REH
+rather than dropped, and its manifest contribution was processed — its editor is in
+the memento. Whether it activates or registers a provider is a different question
+this entry has not asked. It still renders blank; that is separate and still
+undiagnosed.
+
 ### C-065 · Two extension hosts survive ten open/close cycles — cause found, bounded, race still open
 
 **Measured 2026-08-29** by `pnpm --filter @chorus/desktop run gate:memory`, on

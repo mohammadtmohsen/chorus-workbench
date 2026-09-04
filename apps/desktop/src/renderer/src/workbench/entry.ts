@@ -5,11 +5,13 @@ import { URI } from '@codingame/monaco-vscode-api/vscode/vs/base/common/uri'
 import { prepareWorkbench } from './services.js'
 import { reportEditorContext } from './context.js'
 import { serveWorkbenchEdits, serveWorkbenchSnapshot } from './edit.js'
+import { serveAskDiff } from './ask-diff.js'
 import { installGateHandle } from './gate-handle.js'
 import { announceSharedExtensionScope } from './extension-scope.js'
 import { refreshScmOnFileChanges } from './scm-refresh.js'
 import { registerWorkbenchWorkers } from './workers.js'
 import { persistUserSettings, restoreUserSettings } from './user-settings.js'
+import { restoreBrowserExtensions, synchronizeBrowserExtensions } from './browser-extensions.js'
 
 /**
  * One workbench, in one document, in one process.
@@ -48,16 +50,16 @@ async function main(): Promise<void> {
   /*
    * Before the container, before the services, and before `initialize` — E5.
    *
-   * The user's settings file has to exist in the user-data provider by the time
-   * the configuration service reads its user layer, and that read happens inside
-   * `initialize`. `restoreUserSettings` enforces the order itself (`initFile`
-   * throws once services are up), so getting this wrong is loud rather than a
-   * workbench that quietly starts with defaults.
+   * User settings and the browser-extension registry have to exist in the
+   * user-data provider by the time services read them inside `initialize`.
+   * Their restore helpers enforce that ordering through `initFile`, so getting
+   * this wrong is loud rather than a workbench that quietly starts empty.
    *
    * A profile that has never stored settings answers `null` and nothing is
    * seeded, which is what leaves Code-OSS's own defaults in place.
    */
   await restoreUserSettings(await window.chorusWorkbench.readUserSettings())
+  await restoreBrowserExtensions(await window.chorusWorkbench.readBrowserExtensions())
 
   const container = document.createElement('div')
   container.className = 'workbench-root'
@@ -80,6 +82,10 @@ async function main(): Promise<void> {
    * reaches the same failure element as everything else through `main`'s catch.
    */
   await persistUserSettings((text) => window.chorusWorkbench.writeUserSettings(text))
+  await synchronizeBrowserExtensions(
+    (text) => window.chorusWorkbench.writeBrowserExtensions(text),
+    (handler) => window.chorusWorkbench.onBrowserExtensionsChanged(handler)
+  )
 
   /*
    * Keeps SCM current while the person is in the chat rather than the editor.
@@ -127,6 +133,7 @@ async function main(): Promise<void> {
    */
   serveWorkbenchEdits(connection.projectRoot)
   serveWorkbenchSnapshot(connection.projectRoot)
+  serveAskDiff(connection.remoteAuthority)
 
   /*
    * Phase 6 slice 6a. After `initialize` like the two above, and given the root

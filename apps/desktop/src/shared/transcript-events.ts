@@ -35,6 +35,13 @@ export const TRANSCRIPT_DISPOSITION: Record<ChorusEventType, 'render' | 'ignore'
   'agent.reasoning.delta': 'render',
   'approval.decided': 'render',
   'approval.requested': 'render',
+  /*
+   * Rendered because nothing else clears the card. `ApprovalQueue.withdraw`
+   * deletes the pending entry without resolving it, so no `approval.decided`
+   * follows — this event is the only signal the transcript gets that the agent
+   * stopped waiting.
+   */
+  'approval.withdrawn': 'render',
   'aside.promoted': 'render',
   'context.compacted': 'render',
   'error.raised': 'render',

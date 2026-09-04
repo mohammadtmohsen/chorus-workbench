@@ -1,4 +1,4 @@
-import type { AgentId } from '@chorus/shared'
+import type { AgentId, ApprovalId } from '@chorus/shared'
 import type { ApprovalRequest } from './approval.js'
 import type { UserInputRequest } from './user-input.js'
 
@@ -129,6 +129,11 @@ export interface DiffUpdated extends AgentEventBase {
 export interface ApprovalRequested extends AgentEventBase {
   readonly type: 'approval.requested'
   readonly request: ApprovalRequest
+}
+
+export interface ApprovalWithdrawn extends AgentEventBase {
+  readonly type: 'approval.withdrawn'
+  readonly approvalId: ApprovalId
 }
 
 /**
@@ -263,6 +268,7 @@ export interface Notice extends AgentEventBase {
   readonly level: 'info' | 'warn' | 'error'
   readonly source: NoticeSource
   readonly text: string
+  readonly code?: 'editWithoutApproval' | 'editVisibilityUnavailable' | 'staleEditPreview'
   readonly detail?: string
   /**
    * How much of `detail` was dropped, when it was too big to keep whole.
@@ -437,6 +443,7 @@ export type AgentEvent =
   | FileChangeCompleted
   | DiffUpdated
   | ApprovalRequested
+  | ApprovalWithdrawn
   | UserInputRequested
   | UsageUpdated
   | TurnCompleted
@@ -456,6 +463,7 @@ const UNDROPPABLE = new Set<AgentEventType>([
   'turn.started',
   'turn.completed',
   'approval.requested',
+  'approval.withdrawn',
   // Dropping one wedges the turn: the agent waits for an answer to a question
   // the user was never shown.
   'userinput.requested',

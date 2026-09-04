@@ -71,6 +71,9 @@ importers:
       '@codingame/monaco-vscode-api':
         specifier: 33.0.9
         version: 33.0.9
+      '@codingame/monaco-vscode-authentication-service-override':
+        specifier: 33.0.9
+        version: 33.0.9
       '@codingame/monaco-vscode-bat-default-extension':
         specifier: 33.0.9
         version: 33.0.9
@@ -78,6 +81,9 @@ importers:
         specifier: 33.0.9
         version: 33.0.9
       '@codingame/monaco-vscode-coffeescript-default-extension':
+        specifier: 33.0.9
+        version: 33.0.9
+      '@codingame/monaco-vscode-comments-service-override':
         specifier: 33.0.9
         version: 33.0.9
       '@codingame/monaco-vscode-configuration-service-override':
@@ -636,6 +642,9 @@ packages:
   '@codingame/monaco-vscode-api@33.0.9':
     resolution: {integrity: sha512-cMyAY0gJmBOSU1n9sYJI57LXU2fwNYcPnpTdHgS5qIfJL/cVvBjlmqRrQSpmS0Q1vHcIELVgTn9WKegdE5581Q==}
 
+  '@codingame/monaco-vscode-authentication-service-override@33.0.9':
+    resolution: {integrity: sha512-ed79DEwO56kROglveAQdd9VfripigzJaNp3wNRMxZZJC4VYJc2MWnm2yrecRv1mf9QrXAH0np6Lc0JVwNW6Bhg==}
+
   '@codingame/monaco-vscode-base-service-override@33.0.9':
     resolution: {integrity: sha512-aLJaaxVGh+x3EQ3AUFAAYo91ohw2x6yzM/w1Iy/SRxb1biXwuE2GIhRR7WR1MdUwv8JWaEIdrTC3J/pLDp9h3g==}
 
@@ -650,6 +659,9 @@ packages:
 
   '@codingame/monaco-vscode-coffeescript-default-extension@33.0.9':
     resolution: {integrity: sha512-G7GbPbF9euYnMOtaF5V7mfK6ZbcJupRlYWjmki/oQOdxTChVP9khhryuKflpivLlEf0p7aAc4c+esD3nz4Dcgw==}
+
+  '@codingame/monaco-vscode-comments-service-override@33.0.9':
+    resolution: {integrity: sha512-P/c8RgmRaCQMUaSZQyf1lUgRnyBWl68HGd109cxwcjb2hzY42wYuHP5K1GmKCterAyON6p72jEjrV9vvW+gY7A==}
 
   '@codingame/monaco-vscode-configuration-service-override@33.0.9':
     resolution: {integrity: sha512-4VaAiq/GuITiLC5EYBO6XDW9axlA5ujOZFQo4R+lvIO72a9uebExkENJ4Do9tVr74eWSCYKz19CwdDn3vTbNWw==}
@@ -3735,6 +3747,10 @@ snapshots:
       jschardet: 3.1.4
       marked: 14.0.0
 
+  '@codingame/monaco-vscode-authentication-service-override@33.0.9':
+    dependencies:
+      '@codingame/monaco-vscode-api': 33.0.9
+
   '@codingame/monaco-vscode-base-service-override@33.0.9':
     dependencies:
       '@codingame/monaco-vscode-api': 33.0.9
@@ -3752,6 +3768,10 @@ snapshots:
       '@codingame/monaco-vscode-api': 33.0.9
 
   '@codingame/monaco-vscode-coffeescript-default-extension@33.0.9':
+    dependencies:
+      '@codingame/monaco-vscode-api': 33.0.9
+
+  '@codingame/monaco-vscode-comments-service-override@33.0.9':
     dependencies:
       '@codingame/monaco-vscode-api': 33.0.9
 

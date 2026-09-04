@@ -511,6 +511,7 @@ export function buildHandlers(runtime: ChorusRuntime): Handlers {
       approvalId: string
       outcome: 'allow' | 'deny' | 'cancel'
       scope: 'once' | 'session'
+      message?: string
     }) => {
       await runtime.decideApproval(
         request.conversationId,
@@ -519,7 +520,15 @@ export function buildHandlers(runtime: ChorusRuntime): Handlers {
         request.outcome === 'allow'
           ? { outcome: 'allow', scope: request.scope }
           : request.outcome === 'deny'
-            ? { outcome: 'deny', message: 'Denied by the user' }
+            ? {
+                outcome: 'deny',
+                // The person's own words when they gave any. The fallback is not
+                // decoration: an agent told only "denied" retries the same thing.
+                message:
+                  request.message !== undefined && request.message.trim() !== ''
+                    ? request.message.trim()
+                    : 'Denied by the user',
+              }
             : { outcome: 'cancel' }
       )
       return OK

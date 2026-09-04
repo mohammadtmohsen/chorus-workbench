@@ -197,6 +197,7 @@ export interface AgentSession {
   /** Normalized, ordered, at-least-once. */
   readonly events: AsyncIterable<AgentEvent>
   respondToApproval(id: ApprovalId, decision: ApprovalDecision): Promise<void>
+  previewFileChange?(id: ApprovalId, currentText: string | null): string | null
   /**
    * Answers a question set. Separate from `respondToApproval` because the two
    * are different acts: an approval is settled by a verdict, a question by

@@ -42,6 +42,7 @@ export interface CommandApproval extends ApprovalRequestBase {
 
 export interface FileChangeApproval extends ApprovalRequestBase {
   readonly kind: 'fileChange'
+  readonly itemRef?: string
   readonly files: readonly { readonly path: string; readonly patch: string }[]
 }
 

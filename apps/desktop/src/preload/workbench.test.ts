@@ -1,6 +1,9 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import {
   WORKBENCH_CONNECTION_CHANNEL,
+  WORKBENCH_BROWSER_EXTENSIONS_CHANGED_CHANNEL,
+  WORKBENCH_BROWSER_EXTENSIONS_READ_CHANNEL,
+  WORKBENCH_BROWSER_EXTENSIONS_WRITE_CHANNEL,
   WORKBENCH_CLIPBOARD_READ_CHANNEL,
   WORKBENCH_SECRET_DELETE_CHANNEL,
   WORKBENCH_SECRET_READ_CHANNEL,
@@ -30,6 +33,9 @@ interface Exposed {
   connection: () => Promise<unknown>
   readUserSettings: () => Promise<string | null>
   writeUserSettings: (text: string) => Promise<void>
+  readBrowserExtensions: () => Promise<string | null>
+  writeBrowserExtensions: (text: string) => Promise<void>
+  onBrowserExtensionsChanged: (handler: (text: string) => void) => void
 }
 let exposed: Exposed | null = null
 
@@ -60,6 +66,9 @@ const {
   CONNECTION_CHANNEL,
   USER_SETTINGS_READ_CHANNEL,
   USER_SETTINGS_WRITE_CHANNEL,
+  BROWSER_EXTENSIONS_READ_CHANNEL,
+  BROWSER_EXTENSIONS_WRITE_CHANNEL,
+  BROWSER_EXTENSIONS_CHANGED_CHANNEL,
   STORAGE_READ_CHANNEL,
   STORAGE_WRITE_CHANNEL,
   SECRET_READ_CHANNEL,
@@ -78,6 +87,9 @@ describe('the workbench preload', () => {
     expect(CONNECTION_CHANNEL).toBe(WORKBENCH_CONNECTION_CHANNEL)
     expect(USER_SETTINGS_READ_CHANNEL).toBe(WORKBENCH_USER_SETTINGS_READ_CHANNEL)
     expect(USER_SETTINGS_WRITE_CHANNEL).toBe(WORKBENCH_USER_SETTINGS_WRITE_CHANNEL)
+    expect(BROWSER_EXTENSIONS_READ_CHANNEL).toBe(WORKBENCH_BROWSER_EXTENSIONS_READ_CHANNEL)
+    expect(BROWSER_EXTENSIONS_WRITE_CHANNEL).toBe(WORKBENCH_BROWSER_EXTENSIONS_WRITE_CHANNEL)
+    expect(BROWSER_EXTENSIONS_CHANGED_CHANNEL).toBe(WORKBENCH_BROWSER_EXTENSIONS_CHANGED_CHANNEL)
     expect(STORAGE_READ_CHANNEL).toBe(WORKBENCH_STORAGE_READ_CHANNEL)
     expect(STORAGE_WRITE_CHANNEL).toBe(WORKBENCH_STORAGE_WRITE_CHANNEL)
     expect(SECRET_READ_CHANNEL).toBe(WORKBENCH_SECRET_READ_CHANNEL)
@@ -90,13 +102,16 @@ describe('the workbench preload', () => {
     expect(CLIPBOARD_READ_CHANNEL).toBe(WORKBENCH_CLIPBOARD_READ_CHANNEL)
   })
 
-  it('exposes exactly fourteen methods, and no fifteenth', () => {
+  it('exposes exactly seventeen methods, and no eighteenth', () => {
     // The list, not the count: a method named here is a capability a document
     // running extension code is handed, so which ones they are is the assertion.
     expect(Object.keys(exposed ?? {})).toEqual([
       'connection',
       'readUserSettings',
       'writeUserSettings',
+      'readBrowserExtensions',
+      'writeBrowserExtensions',
+      'onBrowserExtensionsChanged',
       /*
        * The storage pair. Unlike the settings pair these carry an argument — the
        * storage scope — because there are several scopes and main cannot derive
@@ -165,6 +180,14 @@ describe('the workbench preload', () => {
        * keystroke. This one is asked once, when a message is sent.
        */
       'onSnapshotRequest',
+      /*
+       * The ask flow's diff. Like `onEditRequest` it lets main *ask this
+       * document for something*, and it is the wider of the two in one respect
+       * — it can put a tab in front of the person — but it only ever shows.
+       * Nothing it carries is written anywhere: both sides are text held in
+       * memory for as long as the card is open.
+       */
+      'onAskDiffRequest',
       'onEditRequest',
     ])
   })

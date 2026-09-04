@@ -3703,6 +3703,29 @@ body {
 }
 
 /*
+ * Where a refusal says what to do instead.
+ *
+ * Full width and above the buttons rather than beside them: it is a sentence,
+ * not a field, and a one-line box squeezed next to three controls invites two
+ * words when the useful answer is a clause.
+ */
+.approval-reason {
+  width: 100%;
+  margin-bottom: calc(var(--step) * 2);
+  padding: calc(var(--step) * 1.5) calc(var(--step) * 2);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--ground);
+  color: inherit;
+  font-family: var(--ui-font);
+  font-size: 13px;
+}
+
+.approval-reason::placeholder {
+  color: var(--muted);
+}
+
+/*
  * The box and its one control, on a line together.
  *
  * `flex-end` rather than centred: the field grows downward with what is typed

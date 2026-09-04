@@ -44,13 +44,16 @@ import type { ChorusWorkbenchApi, WorkbenchConnection } from '../shared/workbenc
  */
 export const CONNECTION_CHANNEL = 'workbench:connection'
 /*
- * E5's two, spelled out for the same reason and carrying the same risk. A test
- * asserts all three against the shared constants, because a channel name that
- * drifts here fails as silence — an `invoke` nobody answers — rather than as an
- * error naming the channel.
+ * Persistence channels are spelled out for the same reason and carry the same
+ * risk. A test asserts them against the shared constants, because a channel name
+ * that drifts here fails as silence — an `invoke` nobody answers — rather than
+ * as an error naming the channel.
  */
 export const USER_SETTINGS_READ_CHANNEL = 'workbench:userSettings:read'
 export const USER_SETTINGS_WRITE_CHANNEL = 'workbench:userSettings:write'
+export const BROWSER_EXTENSIONS_READ_CHANNEL = 'workbench:browserExtensions:read'
+export const BROWSER_EXTENSIONS_WRITE_CHANNEL = 'workbench:browserExtensions:write'
+export const BROWSER_EXTENSIONS_CHANGED_CHANNEL = 'workbench:browserExtensions:changed'
 /* The storage pair, under the same test and drifting the same silent way. */
 export const STORAGE_READ_CHANNEL = 'workbench:storage:read'
 export const STORAGE_WRITE_CHANNEL = 'workbench:storage:write'
@@ -69,6 +72,9 @@ export const SNAPSHOT_CHANNEL = 'workbench:snapshot'
 export const SNAPSHOT_RESULT_CHANNEL = 'workbench:snapshot:result'
 export const EDIT_CHANNEL = 'workbench:edit'
 export const EDIT_RESULT_CHANNEL = 'workbench:edit:result'
+/* The proposed-edit diff — open, replace or close. */
+export const ASK_DIFF_CHANNEL = 'workbench:askDiff'
+export const ASK_DIFF_RESULT_CHANNEL = 'workbench:askDiff:result'
 
 /**
  * A hand-written check instead of a schema, for the reason above — and it is now
@@ -173,6 +179,21 @@ const api: ChorusWorkbenchApi = {
 
   writeUserSettings: async (text: string) => {
     await ipcRenderer.invoke(USER_SETTINGS_WRITE_CHANNEL, text)
+  },
+
+  readBrowserExtensions: async () => {
+    const raw: unknown = await ipcRenderer.invoke(BROWSER_EXTENSIONS_READ_CHANNEL)
+    return typeof raw === 'string' ? raw : null
+  },
+
+  writeBrowserExtensions: async (text: string) => {
+    await ipcRenderer.invoke(BROWSER_EXTENSIONS_WRITE_CHANNEL, text)
+  },
+
+  onBrowserExtensionsChanged: (handler: (text: string) => void) => {
+    ipcRenderer.on(BROWSER_EXTENSIONS_CHANGED_CHANNEL, (_event, text: unknown) => {
+      if (typeof text === 'string') handler(text)
+    })
   },
 
   /*
@@ -303,6 +324,26 @@ const api: ChorusWorkbenchApi = {
           // Answered regardless: main is waiting, and an unanswered request is
           // indistinguishable from a hung surface until its timeout.
           ipcRenderer.send(SNAPSHOT_RESULT_CHANNEL, { requestId, snapshot: null })
+        }
+      })()
+    })
+  },
+
+  onAskDiffRequest: (handler) => {
+    ipcRenderer.on(ASK_DIFF_CHANNEL, (_event, request: unknown) => {
+      void (async () => {
+        const requestId =
+          typeof request === 'object' && request !== null && 'requestId' in request
+            ? String(request.requestId)
+            : ''
+        try {
+          ipcRenderer.send(ASK_DIFF_RESULT_CHANNEL, await handler(request))
+        } catch (error) {
+          ipcRenderer.send(ASK_DIFF_RESULT_CHANNEL, {
+            requestId,
+            ok: false,
+            message: error instanceof Error ? error.message : String(error),
+          })
         }
       })()
     })

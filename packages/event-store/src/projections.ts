@@ -181,6 +181,14 @@ export function applyToProjections(db: Database, event: StoredEvent): void {
       })
       break
 
+    case 'approval.withdrawn':
+      db.prepare(
+        `UPDATE approvals
+            SET outcome = 'cancel', scope = NULL, decided_by = 'system', decided_at = @at
+          WHERE id = @id`
+      ).run({ id: payload.approvalId, at: base.at })
+      break
+
     /*
      * Deliberately not projected into a table of their own.
      *

@@ -1007,6 +1007,7 @@ function EditorPane(props: LayoutViewProps & { readonly paneId: string }): React
                 props.onStartInProject(projectId)
               }}
               onEndConversation={props.onEndConversation}
+              onRename={props.onRename}
               renderSession={props.renderSession}
             />
           )}

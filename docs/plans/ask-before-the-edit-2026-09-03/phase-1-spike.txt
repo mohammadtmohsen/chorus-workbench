@@ -1,0 +1,17 @@
+user settings — allow entries: 149
+user settings — edit-tool allows: []
+user settings — defaultMode: auto
+cli: /Users/mohamadtaleb/.local/bin/claude 
+
+1. user config as-is, mode default         canUseTool: 1   landed: true
+2. + flag-layer ask                        canUseTool: 1   landed: true
+3. flag ask + acceptEdits at start         canUseTool: 1   landed: true
+4. acceptEdits, no flag layer              canUseTool: 0   landed: true
+5. managedSettings ask                     canUseTool: 1   landed: true
+
+--- live transitions, one session ---
+   a. flag ask, mode default              canUseTool: 1
+   b. + acceptEdits, flag still on        canUseTool: 1
+   c. flag cleared, still acceptEdits     canUseTool: 1
+   d. flag reinstalled, still acceptEdits canUseTool: 1
+   e. back to default, flag on            canUseTool: 1

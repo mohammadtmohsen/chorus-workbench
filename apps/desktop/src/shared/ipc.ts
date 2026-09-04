@@ -159,6 +159,16 @@ export const ApprovalChoice = z.object({
    * refused and the same tool asked again on every call, forever.
    */
   scope: z.enum(['once', 'session', 'always']),
+  /**
+   * What to tell the agent, when the answer is no.
+   *
+   * A denial already reaches the provider as a message — it is how an agent
+   * learns to try something else rather than only that it was stopped. Until now
+   * that message was a fixed string, so the one thing worth saying could not be
+   * said. Optional: most denials have no words, and an empty one keeps the
+   * default.
+   */
+  message: z.string().optional(),
 })
 export type ApprovalChoice = z.infer<typeof ApprovalChoice>
 

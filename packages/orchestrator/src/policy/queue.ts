@@ -77,6 +77,10 @@ export class ApprovalQueue {
     return this.pending.get(id)
   }
 
+  withdraw(id: ApprovalId | string): boolean {
+    return this.pending.delete(id)
+  }
+
   /** Resolves one approval. Unknown ids are ignored — a double-click is not an error. */
   async resolve(
     id: ApprovalId | string,

@@ -1,3 +1,4 @@
+import { useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import type { SessionInfo } from '../Session.js'
 import { useWorkspaceActions } from './hooks.js'
@@ -44,6 +45,18 @@ export function ConversationColumn(props: {
   readonly onNewConversation: () => void
   /** Ends one conversation — the × on its tab. Confirms first; see the markup. */
   readonly onEndConversation: (conversationId: string) => void
+  /**
+   * Names one conversation — a double-click on its tab.
+   *
+   * **The project tab strip says rename does not live on a tab, and that note is
+   * about the project tab.** Its argument is a redirection: the hover card shows
+   * the whole name and is already where you go to ask about a project. A
+   * conversation has no such card — `SessionRow`, which had the double-click, is
+   * no longer mounted anywhere — so `conversation:rename` was wired end to end
+   * with nothing in the running app able to reach it. The tab is the only place a
+   * conversation appears, which makes it the only place its name can be changed.
+   */
+  readonly onRename: (conversationId: string, title: string) => void
   /** The pane's one conversation drag, shared by every group in it. */
   readonly drag: ConversationDrag
   readonly renderSession: (
@@ -54,6 +67,15 @@ export function ConversationColumn(props: {
 }): React.JSX.Element {
   const { t } = useTranslation()
   const { showConversationIn, focusConversationGroup } = useWorkspaceActions()
+
+  /*
+   * Which tab is being renamed, held here rather than lifted, because nothing
+   * outside this strip can act on it: a rename starts and ends inside one tab,
+   * and the committed name goes to main rather than to a parent. Only one at a
+   * time by construction — a second double-click replaces the first, and the
+   * first input's `blur` commits what was typed on the way out.
+   */
+  const [renaming, setRenaming] = useState<string | null>(null)
 
   /*
    * Resolved from the group's own tab order, not from the project's session
@@ -130,55 +152,135 @@ export function ConversationColumn(props: {
               }
               data-active={session.conversationId === active?.conversationId}
             >
-              <button
-                type="button"
-                role="tab"
-                className="conversation-dock-tab-main"
-                aria-selected={session.conversationId === active?.conversationId}
-                title={session.title}
-                onPointerDown={(event) => {
-                  props.drag.onPointerDown(
-                    props.group.id,
-                    session.conversationId,
-                    session.title,
-                    event
-                  )
-                }}
-                onClick={() => {
+              {renaming === session.conversationId ? (
+                /*
+                 * The input takes the whole tab, replacing the × as well as the
+                 * label. A destructive control sitting beside a text field you
+                 * are typing in is one press away from ending the session you
+                 * meant to name, and there is nothing the × could usefully mean
+                 * mid-rename anyway.
+                 *
+                 * Uncontrolled, like the project card's: the value is read off
+                 * the element when the edit ends, so typing does not re-render
+                 * the strip and an abandoned edit leaves no state behind.
+                 *
+                 * **Empty is not rejected here.** `renameConversation` in main
+                 * treats a blank field as a request for the folder name back
+                 * (runtime.ts), trims, and no-ops when the name is unchanged —
+                 * so it decides, and `App`'s rename applies the title main
+                 * returns rather than the one that was typed. A second guard
+                 * here would be a second rule to keep in step with that one.
+                 */
+                <input
+                  className="conversation-dock-tab-rename"
+                  defaultValue={session.title}
                   /*
-                   * A drag that moved suppresses the click the browser fires
-                   * next. Without this, letting go over the tab's own strip both
-                   * reorders it and switches to it — and the switch is the one
-                   * you did not ask for.
+                   * **Not styling — this is what stops the tab resizing.**
+                   *
+                   * `size` defaults to 20, so an input's max-content width is
+                   * about twenty characters. The tab wrapper is `flex: 0 1 auto`
+                   * and takes its width from its content, so swapping a short
+                   * label for that input widened the tab on every double-click.
+                   * `width: 100%` does not help: a percentage resolves to `auto`
+                   * while the parent's intrinsic size is being computed, which is
+                   * exactly the step that was reading 20 characters.
+                   *
+                   * At 1 the input contributes nothing, the wrapper falls to its
+                   * `min-width: 160px`, and the tab keeps the width it had.
                    */
-                  if (props.drag.consumeSuppressedClick()) return
-                  showConversationIn(props.projectId, props.group.id, session.conversationId)
-                }}
-              >
-                {session.title}
-              </button>
-              {/*
-                **Ends the session, and does not merely close the tab.**
-                
-                That is the difference from the project tab's ×, which closes a
-                view and leaves the conversations inside running in main. A
-                conversation has no equivalent — a tab is the only place it
-                appears, so a × that hid it would leave agents running in a room
-                with no door. It goes through `App`'s confirmation dialog for the
-                same reason the card's End Session does.
-              */}
-              <button
-                type="button"
-                className="conversation-dock-tab-close"
-                aria-label={t('conversation.endTitled', { title: session.title })}
-                title={t('conversation.endTitled', { title: session.title })}
-                onClick={(event) => {
-                  event.stopPropagation()
-                  props.onEndConversation(session.conversationId)
-                }}
-              >
-                <span aria-hidden="true">×</span>
-              </button>
+                  size={1}
+                  autoFocus
+                  aria-label={t('conversation.renameTitle')}
+                  placeholder={t('conversation.titlePlaceholder')}
+                  onKeyDown={(event) => {
+                    /* Escape abandons; the name is whatever it already was. */
+                    if (event.key === 'Escape') {
+                      setRenaming(null)
+                      return
+                    }
+                    /*
+                     * `isComposing` guards an IME: Enter while a candidate is
+                     * open picks the candidate, and committing there would file
+                     * the half-composed text as the name.
+                     */
+                    if (event.key === 'Enter' && !event.nativeEvent.isComposing) {
+                      props.onRename(session.conversationId, event.currentTarget.value)
+                      setRenaming(null)
+                    }
+                  }}
+                  /*
+                   * Blur commits rather than cancels, which is the behaviour the
+                   * project card already has — clicking away from a field you
+                   * typed in means keep it everywhere else in this app.
+                   */
+                  onBlur={(event) => {
+                    props.onRename(session.conversationId, event.currentTarget.value)
+                    setRenaming(null)
+                  }}
+                />
+              ) : (
+                <>
+                  <button
+                    type="button"
+                    role="tab"
+                    className="conversation-dock-tab-main"
+                    aria-selected={session.conversationId === active?.conversationId}
+                    title={session.title}
+                    onPointerDown={(event) => {
+                      props.drag.onPointerDown(
+                        props.group.id,
+                        session.conversationId,
+                        session.title,
+                        event
+                      )
+                    }}
+                    onClick={() => {
+                      /*
+                       * A drag that moved suppresses the click the browser fires
+                       * next. Without this, letting go over the tab's own strip both
+                       * reorders it and switches to it — and the switch is the one
+                       * you did not ask for.
+                       */
+                      if (props.drag.consumeSuppressedClick()) return
+                      showConversationIn(props.projectId, props.group.id, session.conversationId)
+                    }}
+                    /*
+                     * Both clicks of the double still run `onClick` first, and
+                     * that is wanted rather than tolerated: renaming a tab you
+                     * were not looking at switches to it on the way in, so the
+                     * transcript under the name is the one being named. The
+                     * second click is a no-op on an already-open conversation.
+                     */
+                    onDoubleClick={() => {
+                      setRenaming(session.conversationId)
+                    }}
+                  >
+                    {session.title}
+                  </button>
+                  {/*
+                    **Ends the session, and does not merely close the tab.**
+
+                    That is the difference from the project tab's ×, which closes a
+                    view and leaves the conversations inside running in main. A
+                    conversation has no equivalent — a tab is the only place it
+                    appears, so a × that hid it would leave agents running in a room
+                    with no door. It goes through `App`'s confirmation dialog for the
+                    same reason the card's End Session does.
+                  */}
+                  <button
+                    type="button"
+                    className="conversation-dock-tab-close"
+                    aria-label={t('conversation.endTitled', { title: session.title })}
+                    title={t('conversation.endTitled', { title: session.title })}
+                    onClick={(event) => {
+                      event.stopPropagation()
+                      props.onEndConversation(session.conversationId)
+                    }}
+                  >
+                    <span aria-hidden="true">×</span>
+                  </button>
+                </>
+              )}
             </div>
           ))}
         </div>
