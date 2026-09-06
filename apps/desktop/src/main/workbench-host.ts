@@ -14,7 +14,7 @@ import {
 } from 'node:fs'
 import { join } from 'node:path'
 import { promisify } from 'node:util'
-import { app } from 'electron'
+import { app, dialog } from 'electron'
 import { z } from 'zod'
 import { hashBytes, publishServer, sweepQuarantine } from './workbench-extract.js'
 
@@ -301,6 +301,28 @@ let startAbort: AbortController | null = null
  * says so.
  */
 let hostFailure: string | null = null
+
+const CANNOT_FORK = /Error: spawn (?:EBADF|EMFILE|ENFILE)\b/
+
+let hostDegraded = false
+
+function noteDegradedServer(output: string): void {
+  if (hostDegraded) return
+  if (!CANNOT_FORK.test(output)) return
+  hostDegraded = true
+  log.warn('workbench server can no longer start child processes', {
+    consequence: 'file watching and source control stop tracking changes on disk',
+  })
+  void dialog
+    .showMessageBox({
+      type: 'warning',
+      buttons: ['OK'],
+      message: 'The workbench server has stopped watching files.',
+      detail:
+        'It can no longer start child processes, so the editor’s Source Control view and file explorer will not notice changes made on disk. Anything already open keeps working.\n\nRestart Chorus to clear this.',
+    })
+    .catch(() => undefined)
+}
 
 /**
  * The port, read back out of the child's own stdout — never chosen, never
@@ -1038,8 +1060,10 @@ async function start(): Promise<WorkbenchRuntime> {
   const logFile = join(app.getPath('userData'), 'logs', 'workbench-server.log')
   mkdirSync(join(app.getPath('userData'), 'logs'), { recursive: true })
   const record = (chunk: Buffer): void => {
+    const output = chunk.toString()
+    noteDegradedServer(output)
     try {
-      appendFileSync(logFile, redactToken(chunk.toString()))
+      appendFileSync(logFile, redactToken(output))
     } catch {
       /* a log that cannot be written must not take the server down with it */
     }

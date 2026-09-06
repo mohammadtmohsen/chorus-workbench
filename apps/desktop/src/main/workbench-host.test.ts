@@ -82,6 +82,7 @@ vi.mock('electron', () => ({
     getAppPath: () => APP_PATH,
     getPath: (name: string) => (name === 'userData' ? USER_DATA : join(scratch, 'app-data')),
   },
+  dialog: { showMessageBox: () => Promise.resolve({ response: 0 }) },
 }))
 
 /** The 76 MB download, the checksum and the 257 MB extraction are not the subject. */
