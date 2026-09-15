@@ -2,7 +2,8 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { ErrorNotice } from './ErrorNotice.js'
 import { useTranslation } from 'react-i18next'
 import type { TFunction } from 'i18next'
-import type { AgentProbeResult, IpcResponse } from '../../shared/ipc.js'
+import type { AgentProbeResult, IpcRequest, IpcResponse } from '../../shared/ipc.js'
+import type { WindowRole } from '../../shared/detached-window-ipc.js'
 import { ChorusLogo } from './ChorusLogo.js'
 import { LogViewer } from './LogViewer.js'
 import { fail, Session, type SessionCarry, type SessionInfo } from './Session.js'
@@ -12,11 +13,23 @@ import { noticesFrom, roomsWaiting, shouldRaise, trackPending, type Notice } fro
 import { HistoryPanel } from './HistoryPanel.js'
 import { INSTALL, Settings, type Defaults } from './Settings.js'
 import { Workspace } from './workspace/Workspace.js'
+import { DetachedStage } from './workspace/DetachedStage.js'
 import { GlobalNotes } from './GlobalNotes.js'
 import { KeptNotes } from './KeptNotes.js'
 import type { NoteSize } from './noteSize.js'
 import { ConfirmEndSession } from './ConfirmEndSession.js'
 import { sameWorkspaceSnapshot, useWorkspaceStore, workspaceSnapshot } from './workspace/store.js'
+import {
+  applyDetachedEntries,
+  detachTab,
+  detachedSnapshot,
+  mergeSlice,
+  returnTab,
+  sliceOf,
+  virtualIndex,
+  withDetachedReturned,
+} from './workspace/layout.js'
+import { measureTabGeometry, resolveTarget } from './workspace/useTabDrag.js'
 import { reorderSessions } from './workspace/session-row.js'
 import { NOTE_SIZE } from '../../shared/workspace-layout.js'
 import { setRunningPlatform } from './shortcuts.js'
@@ -37,7 +50,7 @@ function raise(notice: Notice, title: string, t: TFunction, projectId: string): 
       tag: notice.conversationId,
     })
     banner.onclick = () => {
-      void window.chorus.focusWindow()
+      if (useWorkspaceStore.getState().detached[projectId] === undefined) void window.chorus.focusWindow()
       useWorkspaceStore.getState().openProject(projectId)
       useWorkspaceStore.getState().clearConversationUnread(notice.conversationId)
     }
@@ -56,7 +69,7 @@ function raise(notice: Notice, title: string, t: TFunction, projectId: string): 
  */
 const SEEN_DEBOUNCE_MS = 1_000
 
-export function App(): React.JSX.Element {
+export function App({ role }: { readonly role: WindowRole }): React.JSX.Element {
   const { t } = useTranslation()
   const [appVersion, setAppVersion] = useState<string | null>(null)
   /** Where "no folder" resolves to, so a card can say which it is looking at. */
@@ -149,6 +162,12 @@ export function App(): React.JSX.Element {
   const seen = useRef<Readonly<Record<string, number>>>({})
   const seenTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
   const [error, setError] = useState<string | null>(null)
+  const detachedVisibility = useRef(
+    new Map<
+      string,
+      { readonly focused: boolean; readonly visibleConversationIds: readonly string[] }
+    >()
+  )
   const [starting, setStarting] = useState(false)
   const [showingLogs, setShowingLogs] = useState(false)
   const [showingSettings, setShowingSettings] = useState(false)
@@ -279,6 +298,7 @@ export function App(): React.JSX.Element {
   useEffect(
     () =>
       window.chorus.onEvents((events) => {
+        if (role.kind === 'detached') return
         pending.current = trackPending(pending.current, events)
         void window.chorus.setBadge({ count: roomsWaiting(pending.current) })
 
@@ -308,9 +328,15 @@ export function App(): React.JSX.Element {
 
         // Absent in a test renderer, and not worth a failed turn.
         if (!('Notification' in window)) return
+        const detachedSeen = [...detachedVisibility.current.values()]
+          .filter((visibility) => visibility.focused)
+          .flatMap((visibility) => visibility.visibleConversationIds)
         for (const notice of noticesFrom(events)) {
           if (
-            !shouldRaise(notice, { windowFocused: document.hasFocus(), visibleConversationIds })
+            !shouldRaise(notice, {
+              windowFocused: document.hasFocus() || detachedSeen.includes(notice.conversationId),
+              visibleConversationIds: [...visibleConversationIds, ...detachedSeen],
+            })
           ) {
             continue
           }
@@ -320,7 +346,7 @@ export function App(): React.JSX.Element {
           raise(notice, session?.title ?? '', t, session?.projectId ?? '')
         }
       }),
-    [t, markSeenSoon]
+    [t, markSeenSoon, role.kind]
   )
 
   /*
@@ -380,6 +406,20 @@ export function App(): React.JSX.Element {
     []
   )
 
+  const persistLayout = useCallback(
+    (request: IpcRequest<'conversation:layout'>): Promise<unknown> =>
+      role.kind === 'detached'
+        ? Promise.resolve()
+        : window.chorus.writeConversationLayout({
+            ...request,
+            workspace: withDetachedReturned(
+              request.workspace,
+              useWorkspaceStore.getState().detached
+            ),
+          }),
+    [role.kind]
+  )
+
   useEffect(() => {
     let timer: ReturnType<typeof setTimeout> | undefined
     /*
@@ -409,27 +449,25 @@ export function App(): React.JSX.Element {
         }
         clearTimeout(timer)
         timer = setTimeout(() => {
-          window.chorus
-            .writeConversationLayout({
-              order: sessionsRef.current.map((session) => session.conversationId),
-              /*
-               * Taken from the snapshot function, not typed out field by field.
-               *
-               * It *was* typed out, and that is the same defect the equality
-               * comment below records from the other side: a field added to
-               * `WorkspaceSnapshot` and forgotten here is silently never
-               * persisted. Reading it through `workspaceSnapshot` means adding a
-               * field cannot be forgotten, because there is nothing to remember.
-               *
-               * Current state rather than the `next` that triggered this: the
-               * write is 180ms debounced, so `next` is by then one of several
-               * changes that have happened, and the last one is the one worth
-               * saving. The other two write paths — `reorder` and `commitLayout`
-               * — already send the whole current snapshot for the same reason.
-               */
-              workspace: workspaceSnapshot(useWorkspaceStore.getState()),
-            })
-            .catch(fail(setError))
+          persistLayout({
+            order: sessionsRef.current.map((session) => session.conversationId),
+            /*
+             * Taken from the snapshot function, not typed out field by field.
+             *
+             * It *was* typed out, and that is the same defect the equality
+             * comment below records from the other side: a field added to
+             * `WorkspaceSnapshot` and forgotten here is silently never
+             * persisted. Reading it through `workspaceSnapshot` means adding a
+             * field cannot be forgotten, because there is nothing to remember.
+             *
+             * Current state rather than the `next` that triggered this: the
+             * write is 180ms debounced, so `next` is by then one of several
+             * changes that have happened, and the last one is the one worth
+             * saving. The other two write paths — `reorder` and `commitLayout`
+             * — already send the whole current snapshot for the same reason.
+             */
+            workspace: workspaceSnapshot(useWorkspaceStore.getState()),
+          }).catch(fail(setError))
         }, 180)
       },
       {
@@ -452,7 +490,74 @@ export function App(): React.JSX.Element {
       clearTimeout(timer)
       stop()
     }
-  }, [])
+  }, [persistLayout])
+
+  useEffect(() => {
+    if (role.kind !== 'detached') return undefined
+    const projectId = role.projectId
+    let seeded = false
+    return useWorkspaceStore.subscribe(
+      (state) => ({ slice: sliceOf(state, projectId), hydrated: state.hydrated }),
+      (next) => {
+        if (!next.hydrated) return
+        if (!seeded) {
+          seeded = true
+          return
+        }
+        window.chorus.sendProjectSlice({ projectId, slice: next.slice }).catch(fail(setError))
+      },
+      {
+        equalityFn: (left, right) =>
+          left.hydrated === right.hydrated &&
+          JSON.stringify(left.slice) === JSON.stringify(right.slice),
+      }
+    )
+  }, [role])
+
+  useEffect(() => {
+    if (role.kind !== 'detached') return undefined
+    const projectId = role.projectId
+    const report = (): void => {
+      const arrangement = useWorkspaceStore.getState().conversationGroups[projectId]
+      const visibleConversationIds = Object.values(arrangement?.panes ?? {})
+        .map((pane) => pane.activeTabId)
+        .filter((id): id is string => id !== null)
+      window.chorus
+        .sendProjectVisibility({ projectId, focused: document.hasFocus(), visibleConversationIds })
+        .catch(fail(setError))
+    }
+    report()
+    window.addEventListener('focus', report)
+    window.addEventListener('blur', report)
+    const stop = useWorkspaceStore.subscribe(
+      (state) => state.conversationGroups[projectId],
+      report
+    )
+    return () => {
+      window.removeEventListener('focus', report)
+      window.removeEventListener('blur', report)
+      stop()
+    }
+  }, [role])
+
+  useEffect(() => {
+    if (role.kind !== 'detached') return undefined
+    const projectId = role.projectId
+    return window.chorus.onFlushRequest(({ requestId }) => {
+      Promise.all(
+        [...draftReaders.current].map(([conversationId, read]) =>
+          window.chorus.rememberDraft({ conversationId, draft: read() })
+        )
+      )
+        .then(() =>
+          window.chorus.sendFlushResult({
+            requestId,
+            slice: sliceOf(useWorkspaceStore.getState(), projectId),
+          })
+        )
+        .catch(fail(setError))
+    })
+  }, [role])
 
   useEffect(() => {
     window.chorus
@@ -514,8 +619,29 @@ export function App(): React.JSX.Element {
     const grace = setTimeout(() => {
       setRestoring(false)
     }, 1_500)
-    window.chorus
-      .restoreConversations()
+    const reopen: Promise<IpcResponse<'conversation:restore'>> =
+      role.kind === 'detached'
+        ? window.chorus.readDetachedBootstrap().then(({ projectId, slice, conversations }) => ({
+            sessions: conversations,
+            workspace: detachedSnapshot(projectId, slice),
+          }))
+        : Promise.all([window.chorus.restoreConversations(), window.chorus.readDetachedState()]).then(
+            ([restored, { entries }]) => {
+              useWorkspaceStore
+                .getState()
+                .setDetached(
+                  Object.fromEntries(entries.map((entry) => [entry.projectId, entry.returnSlot]))
+                )
+              return {
+                ...restored,
+                workspace:
+                  restored.workspace === null
+                    ? null
+                    : applyDetachedEntries(restored.workspace, entries),
+              }
+            }
+          )
+    reopen
       .then(({ sessions: reopened, workspace }) => {
         /*
          * Merged out here, and the store written after — C-048.
@@ -626,7 +752,7 @@ export function App(): React.JSX.Element {
     return () => {
       clearTimeout(grace)
     }
-  }, [updateSessions])
+  }, [updateSessions, role.kind])
 
   const remember = useCallback((patch: Partial<Defaults>) => {
     setDefaults((current) => ({ ...current, ...patch }))
@@ -740,14 +866,12 @@ export function App(): React.JSX.Element {
         return session === undefined ? [] : [session]
       })
       updateSessions(() => next)
-      window.chorus
-        .writeConversationLayout({
-          order: [...order],
-          workspace: workspaceSnapshot(useWorkspaceStore.getState()),
-        })
-        .catch(fail(setError))
+      persistLayout({
+        order: [...order],
+        workspace: workspaceSnapshot(useWorkspaceStore.getState()),
+      }).catch(fail(setError))
     },
-    [updateSessions]
+    [updateSessions, persistLayout]
   )
 
   /**
@@ -776,16 +900,25 @@ export function App(): React.JSX.Element {
        * main — the sharpest form of the UI disagreeing with what is actually
        * alive.
        */
-      if (ending !== undefined) {
-        const siblings = sessionsRef.current.some(
-          (session) => session.projectId === ending.projectId
-        )
-        if (!siblings) useWorkspaceStore.getState().removeProject(ending.projectId)
+      const emptiedProject =
+        ending !== undefined &&
+        !sessionsRef.current.some((session) => session.projectId === ending.projectId)
+          ? ending.projectId
+          : null
+      if (emptiedProject !== null && role.kind !== 'detached') {
+        useWorkspaceStore.getState().removeProject(emptiedProject)
       }
-      window.chorus.closeConversation({ conversationId }).catch(fail(setError))
+      window.chorus
+        .closeConversation({ conversationId })
+        .then(() =>
+          emptiedProject !== null && role.kind === 'detached'
+            ? window.chorus.closeEmptyProject({ projectId: emptiedProject })
+            : undefined
+        )
+        .catch(fail(setError))
       void refreshProjects()
     },
-    [updateSessions, refreshProjects]
+    [updateSessions, refreshProjects, role.kind]
   )
 
   /**
@@ -902,11 +1035,17 @@ export function App(): React.JSX.Element {
           ...(options.continueFrom === undefined ? {} : { continueFrom: options.continueFrom }),
         })
         .then(async (session) => {
-          updateSessions((current) => [...current, session])
+          updateSessions((current) =>
+            current.some((existing) => existing.conversationId === session.conversationId)
+              ? current
+              : [...current, session]
+          )
           useWorkspaceStore.getState().openProject(session.projectId)
           /* A tab for it, in the focused group. Without this the conversation
              streams into a project that has nowhere to show it until relaunch. */
-          useWorkspaceStore.getState().adoptConversation(session.projectId, session.conversationId)
+          if (useWorkspaceStore.getState().detached[session.projectId] === undefined) {
+            useWorkspaceStore.getState().adoptConversation(session.projectId, session.conversationId)
+          }
           useWorkspaceStore.getState().clearConversationUnread(session.conversationId)
           // `finishEnd` and not `endNow`: restart has already asked its own
           // question by the time this runs, and asking again would be two
@@ -964,6 +1103,62 @@ export function App(): React.JSX.Element {
     useWorkspaceStore.getState().openProject(projectId)
   }, [])
 
+  const detachProject = useCallback(
+    (projectId: string) => {
+      const title = projects.find((project) => project.id === projectId)?.name ?? projectId
+      window.chorus
+        .prepareDetach({ projectId, title })
+        .then(async (prepared) => {
+          if (!('ticket' in prepared)) return
+          await Promise.all(
+            sessionsRef.current
+              .filter((session) => session.projectId === projectId)
+              .flatMap((session) => {
+                const read = draftReaders.current.get(session.conversationId)
+                return read === undefined
+                  ? []
+                  : [
+                      window.chorus.rememberDraft({
+                        conversationId: session.conversationId,
+                        draft: read(),
+                      }),
+                    ]
+              })
+          )
+          const state = useWorkspaceStore.getState()
+          const detached = detachTab(workspaceSnapshot(state), projectId, state.detached)
+          if (detached === null) return
+          await window.chorus.commitDetach({
+            ticket: prepared.ticket,
+            returnSlot: detached.slot,
+            slice: sliceOf(state, projectId),
+          })
+          useWorkspaceStore.setState(detached.workspace)
+          useWorkspaceStore.getState().markDetached(projectId, detached.slot)
+        })
+        .catch(fail(setError))
+    },
+    [projects]
+  )
+
+  const redockProject = useCallback((projectId: string) => {
+    window.chorus
+      .prepareRedock({ projectId })
+      .then(async (prepared) => {
+        if (!('ticket' in prepared)) return
+        await Promise.all(
+          [...draftReaders.current].map(([conversationId, read]) =>
+            window.chorus.rememberDraft({ conversationId, draft: read() })
+          )
+        )
+        await window.chorus.commitRedock({
+          ticket: prepared.ticket,
+          slice: sliceOf(useWorkspaceStore.getState(), projectId),
+        })
+      })
+      .catch(fail(setError))
+  }, [])
+
   const addProject = useCallback(async () => {
     setError(null)
     try {
@@ -1011,12 +1206,13 @@ export function App(): React.JSX.Element {
    * consequence rather than a guard.
    */
   useEffect(() => {
+    if (role.kind === 'detached') return
     if (autoStarted.current) return
     if (!restored || !settingsRead || starting || sessions.length > 0 || error !== null) return
     if (projects.length === 0) return
     autoStarted.current = true
     start()
-  }, [restored, settingsRead, starting, sessions.length, error, projects.length, start])
+  }, [restored, settingsRead, starting, sessions.length, error, projects.length, start, role.kind])
 
   /**
    * An aside stops being a footnote and becomes a room.
@@ -1307,13 +1503,110 @@ export function App(): React.JSX.Element {
    * window would silently discard the change and reopen at the old value.
    */
   const commitLayout = useCallback(() => {
-    window.chorus
-      .writeConversationLayout({
-        order: sessionsRef.current.map((session) => session.conversationId),
-        workspace: workspaceSnapshot(useWorkspaceStore.getState()),
-      })
-      .catch(fail(setError))
-  }, [])
+    persistLayout({
+      order: sessionsRef.current.map((session) => session.conversationId),
+      workspace: workspaceSnapshot(useWorkspaceStore.getState()),
+    }).catch(fail(setError))
+  }, [persistLayout])
+
+  useEffect(() => {
+    if (role.kind !== 'main') return undefined
+    return window.chorus.onProjectSlice(({ projectId, slice }) => {
+      useWorkspaceStore.setState((state) => mergeSlice(workspaceSnapshot(state), projectId, slice))
+    })
+  }, [role.kind])
+
+  useEffect(() => {
+    if (role.kind !== 'main') return undefined
+    return window.chorus.onProjectVisibility(({ projectId, focused, visibleConversationIds }) => {
+      detachedVisibility.current.set(projectId, { focused, visibleConversationIds })
+    })
+  }, [role.kind])
+
+  useEffect(() => {
+    if (role.kind !== 'main') return undefined
+    return window.chorus.onHitTestRequest(({ requestId, x, y }) => {
+      const state = useWorkspaceStore.getState()
+      const target = resolveTarget(
+        { ...measureTabGeometry(), sourceTabCount: 0 },
+        null,
+        '',
+        x,
+        y,
+        false
+      )
+      window.chorus
+        .sendHitTestResult(
+          target?.kind === 'insert'
+            ? {
+                requestId,
+                paneId: target.paneId,
+                slot: virtualIndex(target.paneId, target.slot, state.detached),
+              }
+            : { requestId, paneId: null, slot: null }
+        )
+        .catch(fail(setError))
+    })
+  }, [role.kind])
+
+  useEffect(() => {
+    if (role.kind !== 'main') return undefined
+    return window.chorus.onProjectReturned(({ projectId, returnSlot, slice }) => {
+      const store = useWorkspaceStore.getState()
+      store.clearDetached(projectId)
+      detachedVisibility.current.delete(projectId)
+      const merged = mergeSlice(workspaceSnapshot(store), projectId, slice)
+      const hasSession = sessionsRef.current.some((session) => session.projectId === projectId)
+      useWorkspaceStore.setState(
+        hasSession
+          ? returnTab(merged, projectId, returnSlot, useWorkspaceStore.getState().detached)
+          : merged
+      )
+      commitLayout()
+    })
+  }, [role.kind, commitLayout])
+
+  useEffect(
+    () =>
+      window.chorus.onConversationsChanged(() => {
+        window.chorus
+          .readActiveSessions()
+          .then(({ sessions: active }) => {
+            const scoped =
+              role.kind === 'detached'
+                ? active.filter((session) => session.projectId === role.projectId)
+                : active
+            const current = sessionsRef.current
+            const activeIds = new Set(scoped.map((session) => session.conversationId))
+            const added = scoped.filter(
+              (session) =>
+                !current.some((existing) => existing.conversationId === session.conversationId)
+            )
+            const removed = current.filter((session) => !activeIds.has(session.conversationId))
+            if (added.length === 0 && removed.length === 0) return
+            updateSessions(() => [
+              ...added,
+              ...current.filter((session) => activeIds.has(session.conversationId)),
+            ])
+            const store = useWorkspaceStore.getState()
+            for (const session of removed) store.removeSession(session.conversationId)
+            if (role.kind === 'detached') {
+              for (const session of added) {
+                store.adoptConversation(session.projectId, session.conversationId)
+              }
+              return
+            }
+            for (const projectId of Object.keys(store.detached)) {
+              if (!scoped.some((session) => session.projectId === projectId)) {
+                store.clearDetached(projectId)
+                detachedVisibility.current.delete(projectId)
+              }
+            }
+          })
+          .catch(fail(setError))
+      }),
+    [role, updateSessions]
+  )
 
   /*
    * Reorder writes through the same way, but builds its own order: the
@@ -1462,6 +1755,79 @@ export function App(): React.JSX.Element {
     )
   }
 
+  const renderSession = (
+    session: SessionInfo,
+    focused: boolean,
+    paneId: string
+  ): React.ReactNode => (
+    <Session
+      key={session.conversationId}
+      session={session}
+      active={focused}
+      onActivate={() => {
+        useWorkspaceStore.getState().focusPane(paneId)
+      }}
+      carry={carries.current.get(session.conversationId)}
+      onCarry={keepCarry}
+      onDraftReader={keepDraftReader}
+      onPromoteAside={promoteAside}
+      /*
+       * Ending this room and opening a fresh one in the same project, in
+       * one gesture. `startIn`'s `replacing` argument is what orders the
+       * two — see there for why the new one has to exist first.
+       */
+      onRestart={() => {
+        startIn(session.projectId, { replacing: session.conversationId })
+      }}
+      /*
+       * Opening a fresh room that goes on from this one, and ending
+       * nothing. The exact opposite of Restart beside it, from the same
+       * conversation and through the same call — which is why the two
+       * pass different named fields rather than the same positional one.
+       */
+      onContinue={() => {
+        startIn(session.projectId, { continueFrom: session.conversationId })
+      }}
+      /* Read once here rather than per pane: it decides whether Explain
+         exists under every reply, and four panes asking the same question
+         of the same file is four answers that must agree. */
+      explainLanguage={explainLanguage}
+    />
+  )
+
+  if (role.kind === 'detached') {
+    return (
+      <div className="stage">
+        {error !== null && (
+          <ErrorNotice
+            message={error}
+            className="notice--workspace"
+            onDismiss={() => {
+              setError(null)
+            }}
+          />
+        )}
+        <DetachedStage
+          sessions={sessions}
+          projects={projects}
+          onStartInProject={startIn}
+          onRename={rename}
+          onEnd={endNow}
+          onCommitLayout={commitLayout}
+          onReorderSessions={moveSession}
+          onRenameProject={renameProject}
+          onSetProjectNotes={setProjectNotes}
+          onSetProjectNoteSize={saveProjectNoteSize}
+          onSendProjectNoteSelection={sendNoteSelection}
+          onRedockProject={redockProject}
+          renderSession={renderSession}
+        />
+        {sheets}
+        {badge}
+      </div>
+    )
+  }
+
   return (
     <div className="stage">
       {/*
@@ -1542,6 +1908,7 @@ export function App(): React.JSX.Element {
         onMoveProject={(projectId, beforeId) => {
           void moveProject(projectId, beforeId)
         }}
+        onDetachProject={detachProject}
         onOpenSettings={() => {
           setShowingSettings(true)
         }}
@@ -1562,41 +1929,7 @@ export function App(): React.JSX.Element {
         onOpenProject={showProject}
         home={home}
         onChooseProfile={applyProfile}
-        renderSession={(session, focused, paneId) => (
-          <Session
-            key={session.conversationId}
-            session={session}
-            active={focused}
-            onActivate={() => {
-              useWorkspaceStore.getState().focusPane(paneId)
-            }}
-            carry={carries.current.get(session.conversationId)}
-            onCarry={keepCarry}
-            onDraftReader={keepDraftReader}
-            onPromoteAside={promoteAside}
-            /*
-             * Ending this room and opening a fresh one in the same project, in
-             * one gesture. `startIn`'s `replacing` argument is what orders the
-             * two — see there for why the new one has to exist first.
-             */
-            onRestart={() => {
-              startIn(session.projectId, { replacing: session.conversationId })
-            }}
-            /*
-             * Opening a fresh room that goes on from this one, and ending
-             * nothing. The exact opposite of Restart beside it, from the same
-             * conversation and through the same call — which is why the two
-             * pass different named fields rather than the same positional one.
-             */
-            onContinue={() => {
-              startIn(session.projectId, { continueFrom: session.conversationId })
-            }}
-            /* Read once here rather than per pane: it decides whether Explain
-               exists under every reply, and four panes asking the same question
-               of the same file is four answers that must agree. */
-            explainLanguage={explainLanguage}
-          />
-        )}
+        renderSession={renderSession}
       />
 
       {sheets}

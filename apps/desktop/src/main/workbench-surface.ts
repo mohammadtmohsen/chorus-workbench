@@ -130,9 +130,11 @@ interface Surface {
    * workbench by naming it. The owner is taken from `event.sender` and never
    * from the request, because a request argument is a claim rather than a fact.
    */
-  readonly owner: WebContents
+  owner: WebContents
+  state: 'active' | 'handing-off'
 }
 
+const HANDOFF_EXPIRY_MS = 10_000
 const byId = new Map<string, Surface>()
 /**
  * Keyed by the `WebContents` itself, which is what makes §4.1b rule 4 cheap.
@@ -154,6 +156,17 @@ const byContents = new Map<WebContents, Surface>()
  * the one that notices.
  */
 const byOwner = new Map<WebContents, Set<string>>()
+
+const handoffs = new Map<
+  string,
+  {
+    projectRoot: string
+    source: WebContents
+    destination: WebContents
+    kind: 'detach' | 'return'
+    timer: ReturnType<typeof setTimeout>
+  }
+>()
 
 /**
  * Every capability main has minted, and it is the whole of what `workbench:open`
@@ -643,7 +656,11 @@ function redeem(caller: WebContents, target: WorkbenchTarget): string {
     if (resolveProjectRoot === null) {
       throw new Error(`No project registry is wired, so "${target.projectId}" cannot be opened`)
     }
-    return resolveProjectRoot(target.projectId)
+    const root = resolveProjectRoot(target.projectId)
+    if (detachedAccess?.(caller, root) === false) {
+      throw new Error(`No workbench project "${target.projectId}" is open in this window`)
+    }
+    return root
   }
   const held = grants.get(target.grant)
   if (held?.owner !== caller) {
@@ -786,6 +803,8 @@ export async function openSurface(
   devServerUrl: string | undefined
 ): Promise<string> {
   const projectRoot = redeem(owner, target)
+  const claimed = claimHandoff(owner, projectRoot)
+  if (claimed !== null) return claimed
 
   /*
    * The lease is taken **before** the view exists, and the await is why this
@@ -844,7 +863,7 @@ export async function openSurface(
     },
   })
 
-  const surface: Surface = { id, projectRoot, runtime, view, owner }
+  const surface: Surface = { id, projectRoot, runtime, view, owner, state: 'active' }
   byId.set(id, surface)
   byContents.set(view.webContents, surface)
   watchOwner(owner).add(id)
@@ -890,6 +909,96 @@ export async function openSurface(
   else void view.webContents.loadURL(entry.href)
 
   return id
+}
+
+function attachSurface(surface: Surface, owner: WebContents): void {
+  const parent = BrowserWindow.fromWebContents(owner)
+  if (parent === null || owner.isDestroyed()) {
+    throw new Error('A workbench surface needs a window to attach to')
+  }
+  surface.view.setBounds({ x: 0, y: 0, width: 0, height: 0 })
+  parent.contentView.addChildView(surface.view)
+  surface.owner = owner
+  watchOwner(owner).add(surface.id)
+  surface.state = 'active'
+  applyVisibility(surface)
+}
+
+export function beginHandoff(
+  caller: WebContents,
+  projectRoot: string,
+  destination: WebContents,
+  kind: 'detach' | 'return'
+): string {
+  const matches = [...(byOwner.get(caller) ?? [])].filter(
+    (id) => byId.get(id)?.projectRoot === projectRoot
+  )
+  if (matches.length !== 1) {
+    throw new Error(`No single workbench surface for "${projectRoot}" belongs to this window`)
+  }
+  const viewId = matches[0]
+  const surface = viewId === undefined ? undefined : byId.get(viewId)
+  if (viewId === undefined || surface === undefined) {
+    throw new Error(`No single workbench surface for "${projectRoot}" belongs to this window`)
+  }
+  surface.state = 'handing-off'
+  byOwner.get(caller)?.delete(viewId)
+  for (const [grant, held] of [...grants]) {
+    if (held.owner === caller && held.projectRoot === projectRoot) grants.delete(grant)
+  }
+  BrowserWindow.getAllWindows()
+    .find((window) => window.contentView.children.includes(surface.view))
+    ?.contentView.removeChildView(surface.view)
+  surface.view.setBounds({ x: 0, y: 0, width: 0, height: 0 })
+  handoffs.set(viewId, {
+    projectRoot,
+    source: caller,
+    destination,
+    kind,
+    timer: setTimeout(() => {
+      expireHandoff(viewId)
+    }, HANDOFF_EXPIRY_MS),
+  })
+  return viewId
+}
+
+function expireHandoff(viewId: string): void {
+  const pending = handoffs.get(viewId)
+  const surface = byId.get(viewId)
+  if (pending === undefined) return
+  handoffs.delete(viewId)
+  if (surface === undefined) return
+  if (pending.kind === 'detach' && !pending.source.isDestroyed()) {
+    handoffs.set(viewId, {
+      projectRoot: pending.projectRoot,
+      source: pending.destination,
+      destination: pending.source,
+      kind: 'return',
+      timer: setTimeout(() => {
+        expireHandoff(viewId)
+      }, HANDOFF_EXPIRY_MS),
+    })
+    onHandoffExpired?.(pending.projectRoot)
+    return
+  }
+  destroySurface(viewId)
+}
+
+function claimHandoff(caller: WebContents, projectRoot: string): string | null {
+  const entry = [...handoffs].find(([, pending]) => pending.projectRoot === projectRoot)
+  if (entry === undefined) return null
+  const [viewId, pending] = entry
+  const surface = byId.get(viewId)
+  if (
+    surface === undefined ||
+    (pending.destination !== caller && !(pending.kind === 'detach' && pending.source === caller))
+  ) {
+    throw new Error(`No workbench surface "${viewId}" belongs to this window`)
+  }
+  attachSurface(surface, caller)
+  clearTimeout(pending.timer)
+  handoffs.delete(viewId)
+  return viewId
 }
 
 /**
@@ -955,7 +1064,7 @@ function destroySurface(viewId: string): void {
  */
 function ownedSurface(caller: WebContents, viewId: string): Surface {
   const surface = byId.get(viewId)
-  if (surface?.owner !== caller) {
+  if (surface?.owner !== caller || surface.state === 'handing-off') {
     throw new Error(`No workbench surface "${viewId}" belongs to this window`)
   }
   return surface
@@ -972,6 +1081,8 @@ export function setSurfaceBounds(caller: WebContents, viewId: string, rect: Work
 
 /** Every open surface, for shutdown. */
 export function closeAllSurfaces(): void {
+  for (const pending of handoffs.values()) clearTimeout(pending.timer)
+  handoffs.clear()
   for (const id of [...byId.keys()]) destroySurface(id)
 }
 
@@ -992,6 +1103,14 @@ export function closeAllSurfaces(): void {
  * service would be taking a registry in order to call one method on it.
  */
 let resolveProjectRoot: ((projectId: string) => string) | null = null
+
+let detachedAccess: ((caller: WebContents, projectRoot: string) => boolean) | null = null
+
+export function setDetachedAccessPredicate(
+  predicate: ((caller: WebContents, projectRoot: string) => boolean) | null
+): void {
+  detachedAccess = predicate
+}
 
 export function registerWorkbenchHandlers(
   devServerUrl: string | undefined,
@@ -1353,6 +1472,12 @@ let onSurfaceGone: ((projectRoot: string) => void) | null = null
 
 export function setWorkbenchSurfaceGoneSink(sink: ((projectRoot: string) => void) | null): void {
   onSurfaceGone = sink
+}
+
+let onHandoffExpired: ((projectRoot: string) => void) | null = null
+
+export function setHandoffExpiredSink(sink: ((projectRoot: string) => void) | null): void {
+  onHandoffExpired = sink
 }
 
 export function setWorkbenchContextSink(

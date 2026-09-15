@@ -3,6 +3,8 @@ import {
   SIDEBAR_WIDTH,
   TERMINAL_HEIGHT,
   type ConversationArrangement,
+  type ProjectLayoutSlice,
+  type ReturnSlot,
   type TerminalPanelState,
   type WorkspaceLayoutNode,
   type WorkspacePane,
@@ -108,6 +110,53 @@ export const EMPTY_WORKSPACE: WorkspaceSnapshot = {
   chorusWidths: {},
   terminals: {},
   globalTerminal: { open: false, height: TERMINAL_HEIGHT.default, tabs: [], activeId: null },
+}
+
+export const DETACHED_PANE_ID = 'detached'
+
+function withEntry<T>(
+  record: Record<string, T>,
+  key: string,
+  value: T | undefined
+): Record<string, T> {
+  const rest = Object.fromEntries(Object.entries(record).filter(([entry]) => entry !== key))
+  return value === undefined ? rest : { ...rest, [key]: value }
+}
+
+export function sliceOf(workspace: WorkspaceSnapshot, projectId: string): ProjectLayoutSlice {
+  return {
+    conversationGroups: workspace.conversationGroups[projectId],
+    chorusWidth: workspace.chorusWidths[projectId],
+    workbenchHidden: workspace.workbenchHidden[projectId],
+  }
+}
+
+export function mergeSlice(
+  workspace: WorkspaceSnapshot,
+  projectId: string,
+  slice: ProjectLayoutSlice
+): WorkspaceSnapshot {
+  return {
+    ...workspace,
+    conversationGroups: withEntry(workspace.conversationGroups, projectId, slice.conversationGroups),
+    chorusWidths: withEntry(workspace.chorusWidths, projectId, slice.chorusWidth),
+    workbenchHidden: withEntry(workspace.workbenchHidden, projectId, slice.workbenchHidden),
+  }
+}
+
+export function detachedSnapshot(projectId: string, slice: ProjectLayoutSlice): WorkspaceSnapshot {
+  return mergeSlice(
+    {
+      ...EMPTY_WORKSPACE,
+      layout: { kind: 'leaf', paneId: DETACHED_PANE_ID },
+      panes: {
+        [DETACHED_PANE_ID]: { id: DETACHED_PANE_ID, tabs: [projectId], activeTabId: projectId },
+      },
+      focusedPaneId: DETACHED_PANE_ID,
+    },
+    projectId,
+    slice
+  )
 }
 
 interface NormalizedNode {
@@ -871,4 +920,98 @@ export function reconcileWorkspace(
     if (arranged !== null) groups[projectId] = arranged
   }
   return { ...workspace, conversationGroups: groups }
+}
+
+function insertTab(pane: WorkspacePane, tabId: string, index: number): WorkspacePane {
+  const tabs = pane.tabs.filter((id) => id !== tabId)
+  tabs.splice(Math.max(0, Math.min(index, tabs.length)), 0, tabId)
+  return { ...pane, tabs, activeTabId: pane.activeTabId ?? tabId }
+}
+
+function fallbackPane(workspace: WorkspaceSnapshot): WorkspacePane | undefined {
+  return [workspace.focusedPaneId, ...leafPaneIds(workspace.layout)]
+    .map((id) => (id === null ? undefined : workspace.panes[id]))
+    .find((pane) => pane !== undefined)
+}
+
+function soleTab(workspace: WorkspaceSnapshot, paneId: string, tabId: string): WorkspaceSnapshot {
+  return {
+    ...workspace,
+    layout: { kind: 'leaf', paneId },
+    panes: { [paneId]: { id: paneId, tabs: [tabId], activeTabId: tabId } },
+    focusedPaneId: paneId,
+  }
+}
+
+export function withDetachedReturned(
+  workspace: WorkspaceSnapshot,
+  detached: Readonly<Record<string, ReturnSlot>>
+): WorkspaceSnapshot {
+  return Object.entries(detached)
+    .sort(([, left], [, right]) => left.index - right.index)
+    .reduce<WorkspaceSnapshot>((current, [projectId, slot]) => {
+      const target = current.panes[slot.paneId] ?? fallbackPane(current)
+      if (target === undefined) return soleTab(current, slot.paneId, projectId)
+      const index = target.id === slot.paneId ? slot.index : target.tabs.length
+      return {
+        ...current,
+        panes: { ...current.panes, [target.id]: insertTab(target, projectId, index) },
+      }
+    }, workspace)
+}
+
+export function detachTab(
+  workspace: WorkspaceSnapshot,
+  projectId: string,
+  detached: Readonly<Record<string, ReturnSlot>>
+): { readonly workspace: WorkspaceSnapshot; readonly slot: ReturnSlot } | null {
+  const full = withDetachedReturned(workspace, detached)
+  const pane = Object.values(full.panes).find((candidate) => candidate.tabs.includes(projectId))
+  if (pane === undefined) return null
+  return {
+    workspace: closeTab(workspace, pane.id, projectId),
+    slot: { paneId: pane.id, index: pane.tabs.indexOf(projectId) },
+  }
+}
+
+export function returnTab(
+  workspace: WorkspaceSnapshot,
+  projectId: string,
+  slot: ReturnSlot,
+  detached: Readonly<Record<string, ReturnSlot>>
+): WorkspaceSnapshot {
+  if (workspace.panes[slot.paneId] !== undefined) {
+    const before = Object.entries(detached).filter(
+      ([id, other]) =>
+        id !== projectId && other.paneId === slot.paneId && other.index < slot.index
+    ).length
+    return placeSession(workspace, projectId, slot.paneId, slot.index - before)
+  }
+  const target = fallbackPane(workspace)
+  if (target === undefined) return soleTab(workspace, slot.paneId, projectId)
+  return placeSession(workspace, projectId, target.id, target.tabs.length)
+}
+
+export function applyDetachedEntries(
+  workspace: WorkspaceSnapshot,
+  entries: readonly { readonly projectId: string; readonly slice: ProjectLayoutSlice }[]
+): WorkspaceSnapshot {
+  return entries.reduce<WorkspaceSnapshot>((current, entry) => {
+    const closed = Object.values(current.panes)
+      .filter((pane) => pane.tabs.includes(entry.projectId))
+      .reduce((next, pane) => closeTab(next, pane.id, entry.projectId), current)
+    return mergeSlice(closed, entry.projectId, entry.slice)
+  }, workspace)
+}
+
+export function virtualIndex(
+  paneId: string,
+  realIndex: number,
+  detached: Readonly<Record<string, ReturnSlot>>
+): number {
+  return Object.values(detached)
+    .filter((slot) => slot.paneId === paneId)
+    .map((slot) => slot.index)
+    .sort((left, right) => left - right)
+    .reduce((index, taken) => (taken <= index ? index + 1 : index), realIndex)
 }

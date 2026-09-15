@@ -248,6 +248,8 @@ beforeEach(() => {
   // Module state is shared across this file; a leaked surface would make the
   // next test's "the last constructed view" the wrong one.
   surface.closeAllSurfaces()
+  surface.setDetachedAccessPredicate(null)
+  surface.setHandoffExpiredSink(null)
   showOpenDialog.mockReset()
   acquireWorkbenchRuntime.mockClear()
   releaseWorkbenchRuntime.mockClear()
@@ -632,6 +634,190 @@ describe('a shell that goes away without saying so', () => {
 
     expect(theirs.webContents.close).toHaveBeenCalled()
     expect(mine.webContents.close).not.toHaveBeenCalled()
+  })
+})
+
+describe('a surface changing hands', () => {
+  const placed = { x: 1, y: 2, width: 3, height: 4 }
+
+  async function withRegistry(run: () => Promise<void>): Promise<void> {
+    surface.registerWorkbenchHandlers(undefined, (projectId) => {
+      if (projectId === 'a') return ROOT_A
+      throw new Error(`No project with id ${projectId}`)
+    })
+    try {
+      await run()
+    } finally {
+      surface.registerWorkbenchHandlers(undefined)
+    }
+  }
+
+  it('refuses a handoff when the caller owns no surface on that root', async () => {
+    await openAt(shell, ROOT_B)
+
+    expect(() =>
+      surface.beginHandoff(shell as never, ROOT_A, new FakeWebContents() as never, 'detach')
+    ).toThrow(/No single workbench surface/)
+  })
+
+  it('refuses a handoff when the caller owns two surfaces on that root', async () => {
+    await openAt(shell, ROOT_A)
+    await openAt(shell, ROOT_A)
+
+    expect(() =>
+      surface.beginHandoff(shell as never, ROOT_A, new FakeWebContents() as never, 'detach')
+    ).toThrow(/No single workbench surface/)
+  })
+
+  it('stops the old owner driving the view once a handoff begins', async () => {
+    const viewId = await openAt(shell, ROOT_A)
+    const view = lastView()
+
+    surface.beginHandoff(shell as never, ROOT_A, new FakeWebContents() as never, 'detach')
+
+    expect(() => {
+      surface.setSurfaceBounds(shell as never, viewId, placed)
+    }).toThrow(/belongs to this window/)
+    expect(() => {
+      surface.closeSurface(shell as never, viewId)
+    }).toThrow(/belongs to this window/)
+    expect(view.webContents.close).not.toHaveBeenCalled()
+    expect(fakeWindow.contentView.children).not.toContain(view)
+  })
+
+  it('lets only the destination claim the view', async () => {
+    await withRegistry(async () => {
+      await openAt(shell, ROOT_A)
+      surface.beginHandoff(shell as never, ROOT_A, new FakeWebContents() as never, 'detach')
+
+      await expect(
+        surface.openSurface(new FakeWebContents() as never, { projectId: 'a' }, undefined)
+      ).rejects.toThrow(/belongs to this window/)
+    })
+  })
+
+  it('lets the source take back a detach nobody has claimed yet', async () => {
+    await withRegistry(async () => {
+      const viewId = await openAt(shell, ROOT_A)
+      surface.beginHandoff(shell as never, ROOT_A, new FakeWebContents() as never, 'detach')
+
+      await expect(
+        surface.openSurface(shell as never, { projectId: 'a' }, undefined)
+      ).resolves.toBe(viewId)
+    })
+  })
+
+  it('hands the destination the same view rather than a new one', async () => {
+    await withRegistry(async () => {
+      const destination = new FakeWebContents()
+      const viewId = await openAt(shell, ROOT_A)
+      const view = lastView()
+      const before = constructed.length
+
+      surface.beginHandoff(shell as never, ROOT_A, destination as never, 'detach')
+
+      await expect(
+        surface.openSurface(destination as never, { projectId: 'a' }, undefined)
+      ).resolves.toBe(viewId)
+      expect(constructed.length).toBe(before)
+      expect(fakeWindow.contentView.children).toContain(view)
+
+      surface.setSurfaceBounds(destination as never, viewId, placed)
+      expect(view.bounds).toEqual(placed)
+    })
+  })
+
+  it('does not carry the old owner overlay onto the new one', async () => {
+    await withRegistry(async () => {
+      const destination = new FakeWebContents()
+      await openAt(shell, ROOT_A)
+      const view = lastView()
+
+      await handlers.get('workbench:setVisible')?.(
+        { sender: shell },
+        { visible: false, heartbeat: true }
+      )
+      expect(view.visible).toBe(false)
+
+      surface.beginHandoff(shell as never, ROOT_A, destination as never, 'detach')
+      await surface.openSurface(destination as never, { projectId: 'a' }, undefined)
+      expect(view.visible).toBe(true)
+
+      await handlers.get('workbench:setVisible')?.({ sender: shell }, { visible: true })
+    })
+  })
+
+  it('revokes the old owner grant for that root and keeps its others', async () => {
+    const grantA = await grantFor(shell, ROOT_A)
+    await surface.openSurface(shell as never, { grant: grantA }, undefined)
+    const grantB = await grantFor(shell, ROOT_B)
+
+    surface.beginHandoff(shell as never, ROOT_A, new FakeWebContents() as never, 'detach')
+
+    await expect(
+      surface.openSurface(shell as never, { grant: grantA }, undefined)
+    ).rejects.toThrow(/No workbench project grant/)
+    await expect(
+      surface.openSurface(shell as never, { grant: grantB }, undefined)
+    ).resolves.toEqual(expect.any(String))
+  })
+
+  it('refuses a project id the detached-window check turns away', async () => {
+    await withRegistry(async () => {
+      surface.setDetachedAccessPredicate(() => false)
+      await expect(
+        surface.openSurface(shell as never, { projectId: 'a' }, undefined)
+      ).rejects.toThrow(/is open in this window/)
+
+      surface.setDetachedAccessPredicate(() => true)
+      await expect(
+        surface.openSurface(shell as never, { projectId: 'a' }, undefined)
+      ).resolves.toEqual(expect.any(String))
+    })
+  })
+
+  it('turns an unclaimed detach into a return the source can claim', async () => {
+    await withRegistry(async () => {
+      const viewId = await openAt(shell, ROOT_A)
+      const view = lastView()
+      const expired = vi.fn()
+      surface.setHandoffExpiredSink(expired)
+
+      vi.useFakeTimers()
+      try {
+        surface.beginHandoff(shell as never, ROOT_A, new FakeWebContents() as never, 'detach')
+        vi.advanceTimersByTime(10_000)
+
+        expect(expired).toHaveBeenCalledWith(ROOT_A)
+        expect(view.webContents.close).not.toHaveBeenCalled()
+        expect(fakeWindow.contentView.children).not.toContain(view)
+
+        await expect(
+          surface.openSurface(shell as never, { projectId: 'a' }, undefined)
+        ).resolves.toBe(viewId)
+        expect(fakeWindow.contentView.children).toContain(view)
+      } finally {
+        vi.useRealTimers()
+      }
+    })
+  })
+
+  it('destroys an unclaimed return when it expires', async () => {
+    await openAt(shell, ROOT_A)
+    const view = lastView()
+
+    vi.useFakeTimers()
+    try {
+      surface.beginHandoff(shell as never, ROOT_A, new FakeWebContents() as never, 'return')
+      vi.advanceTimersByTime(9_999)
+      expect(view.webContents.close).not.toHaveBeenCalled()
+
+      vi.advanceTimersByTime(1)
+      expect(view.webContents.close).toHaveBeenCalled()
+      expect(fakeWindow.contentView.children).not.toContain(view)
+    } finally {
+      vi.useRealTimers()
+    }
   })
 })
 

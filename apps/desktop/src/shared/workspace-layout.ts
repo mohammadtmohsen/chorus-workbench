@@ -275,3 +275,13 @@ export const WorkspaceSnapshot = z.object({
   conversationGroups: z.record(z.string(), ConversationArrangement).default({}),
 })
 export type WorkspaceSnapshot = z.infer<typeof WorkspaceSnapshot>
+
+export const ReturnSlot = z.object({ paneId: z.string(), index: z.number().int().nonnegative() })
+export type ReturnSlot = z.infer<typeof ReturnSlot>
+
+export const ProjectLayoutSlice = z.object({
+  conversationGroups: ConversationArrangement.optional(),
+  chorusWidth: z.number().optional(),
+  workbenchHidden: z.boolean().optional(),
+})
+export type ProjectLayoutSlice = z.infer<typeof ProjectLayoutSlice>

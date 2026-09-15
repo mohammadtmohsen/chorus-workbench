@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import type { IdeContextPush, TranscriptEvent } from '../../../shared/ipc.js'
 import {
   CLOSED_TERMINAL_PANEL,
@@ -386,5 +386,27 @@ describe('ide context survives a remount', () => {
     const entry = useWorkspaceStore.getState().ideByConversation['c1']
     expect(entry?.workbench).toBeNull()
     expect(entry?.external?.status).toBe('unmatched')
+  })
+})
+
+describe('a detached project', () => {
+  it('focuses its window instead of opening a tab', () => {
+    const focusProjectWindow = vi.fn(() => Promise.resolve({ ok: true as const }))
+    const previousWindow: unknown = Reflect.get(globalThis, 'window')
+    Reflect.set(globalThis, 'window', { chorus: { focusProjectWindow } })
+    try {
+      useWorkspaceStore.setState({
+        ...EMPTY_WORKSPACE,
+        detached: { p1: { paneId: 'pane-1', index: 0 } },
+      })
+      const before = useWorkspaceStore.getState().panes
+      useWorkspaceStore.getState().openProject('p1')
+      expect(focusProjectWindow).toHaveBeenCalledWith({ projectId: 'p1' })
+      expect(useWorkspaceStore.getState().panes).toBe(before)
+    } finally {
+      if (previousWindow === undefined) Reflect.deleteProperty(globalThis, 'window')
+      else Reflect.set(globalThis, 'window', previousWindow)
+      useWorkspaceStore.setState({ detached: {} })
+    }
   })
 })

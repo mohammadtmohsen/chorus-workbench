@@ -1439,6 +1439,7 @@ export class ChorusRuntime {
   private onLimits: ((push: { agentId: AgentId; windows: UsageWindow[] }) => void) | undefined
   private onContextUsage: ((push: ContextUsagePush) => void) | undefined
   private onTasks: ((push: TasksPush) => void) | undefined
+  private onConversations: (() => void) | undefined
   private onActivity: ((push: ActivityPush) => void) | undefined
   /**
    * The last model list each agent reported, for the settings sheet.
@@ -1595,6 +1596,10 @@ export class ChorusRuntime {
    */
   onTasksReported(listener: (push: TasksPush) => void): void {
     this.onTasks = listener
+  }
+
+  onConversationsChanged(listener: () => void): void {
+    this.onConversations = listener
   }
 
   /**
@@ -1929,6 +1934,7 @@ export class ChorusRuntime {
     })
     this.active.set(conversationId, conversation)
     this.rememberOpen()
+    this.onConversations?.()
     return {
       conversationId,
       participants: [...conversation.participants.keys()],
@@ -2738,6 +2744,7 @@ export class ChorusRuntime {
     }
     this.active.set(asideId, conversation)
     this.rememberOpen()
+    this.onConversations?.()
     this.log.info('aside promoted', { asideId, parentId: aside.parentId, agentId, profileId })
     return {
       conversationId: asideId,
@@ -3218,6 +3225,7 @@ export class ChorusRuntime {
     this.collaborations.delete(conversationId)
     this.active.delete(conversationId)
     this.rememberOpen()
+    this.onConversations?.()
 
     /*
      * The conversation's asides go with it. They fork its agents and are only
@@ -3473,6 +3481,7 @@ export class ChorusRuntime {
     if (conversation.participants.size === 0 && !readOnlyProfiling()) return null
     this.reseedCarriedContext(conversation)
     this.active.set(entry.conversationId, conversation)
+    this.onConversations?.()
     return conversation
   }
 
@@ -3643,6 +3652,33 @@ export class ChorusRuntime {
   setConversationLayout(order: readonly string[], workspace: WorkspaceSnapshot): void {
     this.workspaceSnapshot = workspace
     this.reorderConversations(order)
+  }
+
+  activeSessions(): {
+    conversationId: string
+    participants: AgentId[]
+    profileId: string
+    projectId: string
+    cwd: string
+    title: string
+    unread: number
+    pendingApprovalIds: string[]
+    pendingQuestionIds: string[]
+    draft: string
+    planning: boolean
+  }[] {
+    return [...this.active.entries()].map(([conversationId, open]) => ({
+      conversationId,
+      participants: [...open.participants.keys()],
+      profileId: open.profile.id,
+      projectId: open.projectId,
+      cwd: open.cwd,
+      title: open.title,
+      unread: this.unreadSince(conversationId, open.lastSeenSeq),
+      ...this.pendingDecisions(conversationId),
+      draft: open.draft,
+      planning: open.planning,
+    }))
   }
 
   /** Conversations with live agents right now, newest last. */

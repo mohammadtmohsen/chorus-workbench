@@ -7,8 +7,10 @@ import {
   type WorkspaceSnapshot,
 } from '../../../shared/workspace-layout.js'
 import {
+  applyDetachedEntries,
   clampSidebarWidth,
   closeTab,
+  detachTab,
   EMPTY_WORKSPACE,
   leafPaneIds,
   MAX_PANES,
@@ -20,10 +22,13 @@ import {
   placeSession,
   reconcileWorkspace,
   reorderTab,
+  returnTab,
   setBranchSizes,
   splitTab,
   splitWithSession,
   tabLocation,
+  virtualIndex,
+  withDetachedReturned,
 } from './layout.js'
 
 function onePane(...tabs: string[]): WorkspaceSnapshot {
@@ -538,5 +543,66 @@ describe('newTerminalId', () => {
 
   it('is never empty, since an empty id is the thing normalization drops', () => {
     expect(newTerminalId()).not.toBe('')
+  })
+})
+
+describe('detached projects', () => {
+  const detach = (
+    workspace: WorkspaceSnapshot,
+    projectId: string,
+    detached: Parameters<typeof detachTab>[2]
+  ): NonNullable<ReturnType<typeof detachTab>> => {
+    const result = detachTab(workspace, projectId, detached)
+    if (result === null) throw new Error(`${projectId} is not open`)
+    return result
+  }
+
+  it('returns two projects from one pane in the order they were detached', () => {
+    const first = detach(onePane('a', 'b', 'c', 'd'), 'b', {})
+    const second = detach(first.workspace, 'c', { b: first.slot })
+    expect(second.workspace.panes['pane-1']?.tabs).toEqual(['a', 'd'])
+
+    const withB = returnTab(second.workspace, 'b', first.slot, { b: first.slot, c: second.slot })
+    const withBoth = returnTab(withB, 'c', second.slot, { c: second.slot })
+    expect(withBoth.panes['pane-1']?.tabs).toEqual(['a', 'b', 'c', 'd'])
+  })
+
+  it('returns them to the same places in the other order', () => {
+    const first = detach(onePane('a', 'b', 'c', 'd'), 'b', {})
+    const second = detach(first.workspace, 'c', { b: first.slot })
+
+    const withC = returnTab(second.workspace, 'c', second.slot, { b: first.slot, c: second.slot })
+    const withBoth = returnTab(withC, 'b', first.slot, { b: first.slot })
+    expect(withBoth.panes['pane-1']?.tabs).toEqual(['a', 'b', 'c', 'd'])
+  })
+
+  it('writes both back into their places while both are still detached', () => {
+    const first = detach(onePane('a', 'b', 'c', 'd'), 'b', {})
+    const second = detach(first.workspace, 'c', { b: first.slot })
+    const saved = withDetachedReturned(second.workspace, { b: first.slot, c: second.slot })
+    expect(saved.panes['pane-1']?.tabs).toEqual(['a', 'b', 'c', 'd'])
+    expect(saved.panes['pane-1']?.activeTabId).toBe('a')
+  })
+
+  it('returns to the end of the focused pane when its own pane is gone', () => {
+    const returned = returnTab(onePane('x', 'y'), 'p', { paneId: 'gone', index: 0 }, {})
+    expect(returned.panes['pane-1']?.tabs).toEqual(['x', 'y', 'p'])
+  })
+
+  it('takes a detached project out of the panes and keeps its slice', () => {
+    const applied = applyDetachedEntries(onePane('a', 'b'), [
+      { projectId: 'b', slice: { chorusWidth: 480 } },
+    ])
+    expect(applied.panes['pane-1']?.tabs).toEqual(['a'])
+    expect(applied.chorusWidths['b']).toBe(480)
+  })
+
+  it('gives a dropped tab a slot that returns it where it was dropped', () => {
+    const first = detach(onePane('a', 'b', 'c', 'd'), 'b', {})
+    const second = detach(first.workspace, 'c', { b: first.slot })
+    const detached = { b: first.slot, c: second.slot }
+    const slot = { paneId: 'pane-1', index: virtualIndex('pane-1', 1, detached) }
+    const returned = returnTab(second.workspace, 'x', slot, { ...detached, x: slot })
+    expect(returned.panes['pane-1']?.tabs).toEqual(['a', 'x', 'd'])
   })
 })

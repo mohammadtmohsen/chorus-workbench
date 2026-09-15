@@ -3,6 +3,14 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { app, BrowserWindow, session } from 'electron'
+import {
+  attachDetachedWindowListeners,
+  closeEveryDetachedWindow,
+  detachedAccess,
+  handOffExpired,
+  registerDetachedWindowHandlers,
+  type DetachedWindowDeps,
+} from './detached-windows.js'
 import { IdeBridge } from './ide-bridge.js'
 import {
   attachIdeBridge,
@@ -29,7 +37,13 @@ import { reapOrphanedAgents } from './reap.js'
 import { ChorusRuntime } from './runtime.js'
 import { applyContentSecurityPolicy, lockDownNavigation } from './security.js'
 import { reapedOrphanedServers, setWorkbenchHostLog, stopWorkbenchHost } from './workbench-host.js'
-import { closeAllSurfaces, deliverUrl, registerWorkbenchHandlers } from './workbench-surface.js'
+import {
+  closeAllSurfaces,
+  deliverUrl,
+  registerWorkbenchHandlers,
+  setDetachedAccessPredicate,
+  setHandoffExpiredSink,
+} from './workbench-surface.js'
 import { adoptShellPath } from './which.js'
 
 const devServerUrl = process.env['ELECTRON_RENDERER_URL']
@@ -37,10 +51,15 @@ const devServerUrl = process.env['ELECTRON_RENDERER_URL']
 /** The shell's one document, named once so the load and the allowlist agree. */
 const SHELL_ENTRY_FILE = join(__dirname, '../renderer/index.html')
 
-function createWindow(): BrowserWindow {
+type ShellWindowRole =
+  | { kind: 'main' }
+  | { kind: 'detached'; projectId: string; title: string; x: number; y: number }
+
+function createWindow(role: ShellWindowRole): BrowserWindow {
   const window = new BrowserWindow({
-    width: 1_280,
-    height: 860,
+    width: role.kind === 'main' ? 1_280 : 1_000,
+    height: role.kind === 'main' ? 860 : 720,
+    ...(role.kind === 'detached' ? { title: role.title, x: role.x, y: role.y } : {}),
     /*
      * Down to phone width: the layout reflows there, and the old floor of 940 —
      * tablet width — was stopping a window that renders perfectly well at 360.
@@ -66,7 +85,9 @@ function createWindow(): BrowserWindow {
      * would also need accessible minimize, maximize, restore and close
      * controls, and that is a feature rather than a platform guard.
      */
-    ...(process.platform === 'darwin' ? { titleBarStyle: 'hiddenInset' as const } : {}),
+    ...(process.platform === 'darwin' && role.kind === 'main'
+      ? { titleBarStyle: 'hiddenInset' as const }
+      : {}),
     webPreferences: {
       preload: join(__dirname, '../preload/index.js'),
       // Non-negotiable (plan §4.4). Relaxing any of these turns an injection in
@@ -103,10 +124,22 @@ function createWindow(): BrowserWindow {
     applyScale(currentScale())
   })
 
-  if (devServerUrl !== undefined) {
-    void window.loadURL(devServerUrl)
+  if (role.kind === 'main') {
+    window.on('close', () => {
+      closeEveryDetachedWindow()
+    })
   } else {
-    void window.loadFile(SHELL_ENTRY_FILE)
+    window.on('page-title-updated', (event) => {
+      event.preventDefault()
+    })
+  }
+
+  const hash = role.kind === 'detached' ? `detached=${encodeURIComponent(role.projectId)}` : ''
+
+  if (devServerUrl !== undefined) {
+    void window.loadURL(hash === '' ? devServerUrl : `${devServerUrl}#${hash}`)
+  } else {
+    void window.loadFile(SHELL_ENTRY_FILE, hash === '' ? {} : { hash })
   }
 
   return window
@@ -114,6 +147,7 @@ function createWindow(): BrowserWindow {
 
 let runtime: ChorusRuntime | null = null
 let ideBridge: IdeBridge | null = null
+let mainWindow: BrowserWindow | null = null
 /**
  * Held at module scope so shutdown can say what it failed to stop.
  *
@@ -280,6 +314,27 @@ void app.whenReady().then(async () => {
    * message about the channel rather than about the workbench.
    */
   registerWorkbenchHandlers(devServerUrl, (projectId) => opened.projects.resolveRoot(projectId))
+  const detachedDeps: DetachedWindowDeps = {
+    mainWindow: () => mainWindow,
+    createDetachedWindow: (projectId, title, x, y) => {
+      const window = createWindow({ kind: 'detached', projectId, title, x, y })
+      attachDetachedWindowListeners(detachedDeps, projectId, window)
+      return window
+    },
+    resolveRoot: (projectId) => opened.projects.resolveRoot(projectId),
+    runtime: opened,
+  }
+  registerDetachedWindowHandlers(detachedDeps)
+  setDetachedAccessPredicate((caller, projectRoot) =>
+    detachedAccess(
+      caller,
+      projectRoot,
+      mainWindow === null || mainWindow.isDestroyed() ? null : mainWindow.webContents
+    )
+  )
+  setHandoffExpiredSink((projectRoot) => {
+    handOffExpired(detachedDeps, projectRoot)
+  })
   /*
    * Phase 6 slice 6c. Beside the other forwarders and taking no bridge: the
    * embedded workbench reports through main's own surface channel, so unlike
@@ -336,10 +391,10 @@ void app.whenReady().then(async () => {
    */
   applyTheme(readSettings(app.getPath('userData')).theme)
 
-  createWindow()
+  mainWindow = createWindow({ kind: 'main' })
 
   app.on('activate', () => {
-    if (BrowserWindow.getAllWindows().length === 0) createWindow()
+    if (mainWindow === null || mainWindow.isDestroyed()) mainWindow = createWindow({ kind: 'main' })
   })
 })
 

@@ -30,6 +30,22 @@ import {
   type WorkbenchShellChannel,
   type WorkbenchShellResponse,
 } from '../shared/workbench-ipc.js'
+import {
+  CONVERSATIONS_PUSH_CHANNEL,
+  DETACHED_WINDOW_CONTRACT,
+  FLUSH_REQUEST_PUSH_CHANNEL,
+  FlushRequestPush,
+  HIT_TEST_REQUEST_PUSH_CHANNEL,
+  HitTestRequestPush,
+  PROJECT_RETURNED_PUSH_CHANNEL,
+  PROJECT_SLICE_PUSH_CHANNEL,
+  PROJECT_VISIBILITY_PUSH_CHANNEL,
+  ProjectReturnedPush,
+  ProjectSlicePush,
+  ProjectVisibilityPush,
+  type DetachedWindowChannel,
+  type DetachedWindowResponse,
+} from '../shared/detached-window-ipc.js'
 
 /**
  * One method per IPC message, generated from the contract. `ipcRenderer` itself
@@ -70,6 +86,17 @@ function invokeWorkbench<C extends WorkbenchShellChannel>(channel: C) {
   }
 }
 
+function invokeDetached<C extends DetachedWindowChannel>(channel: C) {
+  return async (request: unknown): Promise<DetachedWindowResponse<C>> => {
+    const raw: unknown = await ipcRenderer.invoke(channel, request)
+    const parsed = DETACHED_WINDOW_CONTRACT[channel].response.safeParse(raw)
+    if (!parsed.success) {
+      throw new Error(`Malformed response on "${channel}": ${parsed.error.message}`)
+    }
+    return parsed.data as DetachedWindowResponse<C>
+  }
+}
+
 const api: ChorusApi = {
   getAppInfo: invoke('app:getInfo'),
   chooseWorkbenchProject: () => invokeWorkbench('workbench:chooseProject')({}),
@@ -83,6 +110,7 @@ const api: ChorusApi = {
   interrupt: invoke('conversation:interrupt'),
   closeConversation: invoke('conversation:close'),
   restoreConversations: () => invoke('conversation:restore')({}),
+  readActiveSessions: () => invoke('conversation:active')({}),
   markSeen: invoke('conversation:markSeen'),
   rememberDraft: invoke('conversation:draft'),
   setPlanMode: invoke('conversation:planMode'),
@@ -114,7 +142,19 @@ const api: ChorusApi = {
   clearTerminal: invoke('terminal:clear'),
   describeTerminal: invoke('terminal:describe'),
   setBadge: invoke('app:setBadge'),
-  focusWindow: invoke('app:focus'),
+  focusWindow: () => invokeDetached('window:focus')({}),
+  focusProjectWindow: invokeDetached('project:focusWindow'),
+  prepareDetach: invokeDetached('project:prepareDetach'),
+  commitDetach: invokeDetached('project:commitDetach'),
+  prepareRedock: invokeDetached('project:prepareRedock'),
+  commitRedock: invokeDetached('project:commitRedock'),
+  closeEmptyProject: invokeDetached('project:closeEmpty'),
+  sendProjectSlice: invokeDetached('project:sliceChanged'),
+  sendProjectVisibility: invokeDetached('project:visibility'),
+  readDetachedState: () => invokeDetached('window:detachedState')({}),
+  readDetachedBootstrap: () => invokeDetached('window:detachedBootstrap')({}),
+  sendFlushResult: invokeDetached('window:flushResult'),
+  sendHitTestResult: invokeDetached('window:hitTestResult'),
   copyText: invoke('app:copyText'),
   renameConversation: invoke('conversation:rename'),
   adoptProject: invoke('project:adopt'),
@@ -278,6 +318,65 @@ const api: ChorusApi = {
     ipcRenderer.on(SCALE_PUSH_CHANNEL, wrapped)
     return () => {
       ipcRenderer.removeListener(SCALE_PUSH_CHANNEL, wrapped)
+    }
+  },
+  onProjectReturned: (listener) => {
+    const wrapped = (_event: unknown, payload: unknown): void => {
+      const parsed = ProjectReturnedPush.safeParse(payload)
+      if (parsed.success) listener(parsed.data)
+    }
+    ipcRenderer.on(PROJECT_RETURNED_PUSH_CHANNEL, wrapped)
+    return () => {
+      ipcRenderer.removeListener(PROJECT_RETURNED_PUSH_CHANNEL, wrapped)
+    }
+  },
+  onProjectSlice: (listener) => {
+    const wrapped = (_event: unknown, payload: unknown): void => {
+      const parsed = ProjectSlicePush.safeParse(payload)
+      if (parsed.success) listener(parsed.data)
+    }
+    ipcRenderer.on(PROJECT_SLICE_PUSH_CHANNEL, wrapped)
+    return () => {
+      ipcRenderer.removeListener(PROJECT_SLICE_PUSH_CHANNEL, wrapped)
+    }
+  },
+  onProjectVisibility: (listener) => {
+    const wrapped = (_event: unknown, payload: unknown): void => {
+      const parsed = ProjectVisibilityPush.safeParse(payload)
+      if (parsed.success) listener(parsed.data)
+    }
+    ipcRenderer.on(PROJECT_VISIBILITY_PUSH_CHANNEL, wrapped)
+    return () => {
+      ipcRenderer.removeListener(PROJECT_VISIBILITY_PUSH_CHANNEL, wrapped)
+    }
+  },
+  onConversationsChanged: (listener) => {
+    const wrapped = (): void => {
+      listener()
+    }
+    ipcRenderer.on(CONVERSATIONS_PUSH_CHANNEL, wrapped)
+    return () => {
+      ipcRenderer.removeListener(CONVERSATIONS_PUSH_CHANNEL, wrapped)
+    }
+  },
+  onFlushRequest: (listener) => {
+    const wrapped = (_event: unknown, payload: unknown): void => {
+      const parsed = FlushRequestPush.safeParse(payload)
+      if (parsed.success) listener(parsed.data)
+    }
+    ipcRenderer.on(FLUSH_REQUEST_PUSH_CHANNEL, wrapped)
+    return () => {
+      ipcRenderer.removeListener(FLUSH_REQUEST_PUSH_CHANNEL, wrapped)
+    }
+  },
+  onHitTestRequest: (listener) => {
+    const wrapped = (_event: unknown, payload: unknown): void => {
+      const parsed = HitTestRequestPush.safeParse(payload)
+      if (parsed.success) listener(parsed.data)
+    }
+    ipcRenderer.on(HIT_TEST_REQUEST_PUSH_CHANNEL, wrapped)
+    return () => {
+      ipcRenderer.removeListener(HIT_TEST_REQUEST_PUSH_CHANNEL, wrapped)
     }
   },
 }

@@ -10,7 +10,7 @@ interface TabGeometry {
   readonly index: number
 }
 
-interface PaneGeometry {
+export interface PaneGeometry {
   readonly paneId: string
   readonly paneRect: DOMRect
   readonly contentRect: DOMRect
@@ -29,13 +29,13 @@ interface PaneGeometry {
  * draws them again. `tiles` are the project tiles it draws now, and they reorder
  * by insertion — the same gap arithmetic, over a different list.
  */
-interface RailGeometry {
+export interface RailGeometry {
   readonly rect: DOMRect
   readonly cards: readonly { readonly conversationId: string; readonly rect: DOMRect }[]
   readonly tiles: readonly { readonly projectId: string; readonly rect: DOMRect }[]
 }
 
-interface DragGeometry {
+export interface DragGeometry {
   readonly panes: readonly PaneGeometry[]
   readonly paneCount: number
   readonly sourceTabCount: number
@@ -132,7 +132,7 @@ function contains(rect: DOMRect, x: number, y: number): boolean {
   return x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom
 }
 
-function geometry(): DragGeometry {
+export function measureTabGeometry(): DragGeometry {
   const panes = [...document.querySelectorAll<HTMLElement>('[data-workspace-pane]')].flatMap(
     (pane): PaneGeometry[] => {
       const paneId = pane.dataset['workspacePane']
@@ -234,7 +234,7 @@ function edgeTarget(
   return { direction: winner.direction, rect: new DOMRect(left, top, width, height) }
 }
 
-function resolveTarget(
+export function resolveTarget(
   dragGeometry: DragGeometry,
   sourcePaneId: string | null,
   conversationId: string,
@@ -381,6 +381,7 @@ export function useTabDrag(options: {
    * the other names two projects and is written to the database by main.
    */
   onMoveProject: (projectId: string, beforeId: string | null) => void
+  onDropOutside: (projectId: string) => void
 }): {
   drag: ActiveTabDrag | null
   onPointerDown: (
@@ -434,6 +435,8 @@ export function useTabDrag(options: {
             options.onInsert(current.conversationId, target.paneId, target.slot)
           } else if (target?.kind === 'split' && !target.disabled) {
             options.onSplit(current.conversationId, target.paneId, target.direction)
+          } else if (target === null && !current.fromRail) {
+            options.onDropOutside(current.conversationId)
           }
         }
         suppressClick.current = true
@@ -476,13 +479,19 @@ export function useTabDrag(options: {
     const onCancel = (event: PointerEvent): void => {
       if (event.pointerId === active.current?.pointerId) finish(null, false)
     }
+    const captured = active.current?.element
+    const onLost = (event: PointerEvent): void => {
+      if (event.pointerId === active.current?.pointerId) finish(null, false)
+    }
     document.addEventListener('pointermove', onMove)
     document.addEventListener('pointerup', onUp)
     document.addEventListener('pointercancel', onCancel)
+    captured?.addEventListener('lostpointercapture', onLost)
     return () => {
       document.removeEventListener('pointermove', onMove)
       document.removeEventListener('pointerup', onUp)
       document.removeEventListener('pointercancel', onCancel)
+      captured?.removeEventListener('lostpointercapture', onLost)
     }
   }, [drag === null, finish])
 
@@ -523,7 +532,7 @@ export function useTabDrag(options: {
           return
         }
         cleanup()
-        const measured = geometry()
+        const measured = measureTabGeometry()
         /*
          * A rail drag has no pane of its own, but the session might still have
          * one — you can drag an already-open session out of the list.

@@ -10,6 +10,7 @@ import type {
 import { countsAsUnread } from '../../../shared/unread.js'
 import type {
   ConversationArrangement,
+  ReturnSlot,
   TerminalPanelState,
 } from '../../../shared/workspace-layout.js'
 // `WorkspaceSnapshot` is imported as a value, not a type: `SNAPSHOT_KEYS` below
@@ -180,6 +181,7 @@ export interface WorkspaceRuntime {
    * relaunch is a new one. Nothing here is persisted.
    */
   readonly planning: Readonly<Record<string, boolean>>
+  readonly detached: Readonly<Record<string, ReturnSlot>>
 }
 
 export interface WorkspaceActions {
@@ -249,6 +251,9 @@ export interface WorkspaceActions {
   ) => void
   /** What plan mode actually became, as the session reported it. */
   setPlanning: (conversationId: string, planning: boolean) => void
+  markDetached: (projectId: string, slot: ReturnSlot) => void
+  clearDetached: (projectId: string) => void
+  setDetached: (detached: Readonly<Record<string, ReturnSlot>>) => void
   setBranchSizes: (path: readonly number[], sizes: readonly number[]) => void
   equalizeBranch: (path: readonly number[]) => void
   /** Forgets one conversation's state. Leaves the project's tab alone. */
@@ -567,7 +572,7 @@ export function reducePulse(
 }
 
 export const useWorkspaceStore = create<WorkspaceStore>()(
-  subscribeWithSelector((set) => {
+  subscribeWithSelector((set, get) => {
     const update = (change: (current: WorkspaceSnapshot) => WorkspaceSnapshot): void => {
       set((state) => change(snapshot(state)))
     }
@@ -587,6 +592,7 @@ export const useWorkspaceStore = create<WorkspaceStore>()(
       pulses: {},
       ideByConversation: {},
       planning: {},
+      detached: {},
       hydrate: (
         saved,
         conversationIds,
@@ -652,6 +658,10 @@ export const useWorkspaceStore = create<WorkspaceStore>()(
        * what goes in rather than a rewrite of the algebra.
        */
       openProject: (projectId, paneId) => {
+        if (get().detached[projectId] !== undefined) {
+          void window.chorus.focusProjectWindow({ projectId })
+          return
+        }
         update((current) => openSession(current, projectId, paneId))
       },
       activateTab: (paneId, projectId) => {
@@ -736,6 +746,19 @@ export const useWorkspaceStore = create<WorkspaceStore>()(
             ? state
             : { planning: { ...state.planning, [conversationId]: planning } }
         )
+      },
+      markDetached: (projectId, slot) => {
+        set((state) => ({ detached: { ...state.detached, [projectId]: slot } }))
+      },
+      clearDetached: (projectId) => {
+        set((state) =>
+          state.detached[projectId] === undefined
+            ? state
+            : { detached: without(state.detached, projectId) }
+        )
+      },
+      setDetached: (detached) => {
+        set({ detached })
       },
       setBranchSizes: (path, sizes) => {
         update((current) => setBranchSizes(current, path, sizes))

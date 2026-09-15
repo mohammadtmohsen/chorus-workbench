@@ -265,16 +265,6 @@ export function buildHandlers(runtime: ChorusRuntime): Handlers {
       return Promise.resolve(OK)
     },
 
-    'app:focus': () => {
-      const window = BrowserWindow.getAllWindows().find((w) => !w.isDestroyed())
-      if (window !== undefined) {
-        if (window.isMinimized()) window.restore()
-        window.show()
-        window.focus()
-      }
-      return Promise.resolve(OK)
-    },
-
     'app:copyText': (request: IpcRequest<'app:copyText'>) => {
       // `writeText`, never `write`: an HTML flavour would carry the transcript's
       // markup onto the clipboard, and what the user pointed at is the source.
@@ -328,6 +318,8 @@ export function buildHandlers(runtime: ChorusRuntime): Handlers {
     },
 
     'conversation:restore': () => runtime.restoreOpenConversations(),
+
+    'conversation:active': () => Promise.resolve({ sessions: runtime.activeSessions() }),
 
     'conversation:list': () =>
       Promise.resolve({

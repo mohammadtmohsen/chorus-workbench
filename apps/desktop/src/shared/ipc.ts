@@ -2,6 +2,7 @@ import { ActorSchema, AgentIdSchema, agentRecord } from '@chorus/shared'
 import { z } from 'zod'
 import { NOTE_SIZE, WorkspaceSnapshot } from './workspace-layout.js'
 import type { WorkbenchShellApi } from './workbench-ipc.js'
+import type { DetachedWindowApi } from './detached-window-ipc.js'
 
 /**
  * The single source of truth for the IPC surface.
@@ -552,6 +553,32 @@ export const CollaborationPush = z.object({
 })
 export type CollaborationPush = z.infer<typeof CollaborationPush>
 
+export const OpenSessionSchema = z.object({
+  conversationId: z.string(),
+  participants: z.array(AgentIdSchema),
+  profileId: z.string(),
+  projectId: z.string(),
+  cwd: z.string(),
+  title: z.string(),
+  /** Counted out of the log against the saved watermark, not remembered. */
+  unread: z.number().int().min(0),
+  /**
+   * Decisions still outstanding, by id.
+   *
+   * Ids and not counts, because the renderer clears them by id when the
+   * answer arrives. They are rows with no outcome rather than a memory
+   * of what was asked, so they are as true after a relaunch as before
+   * one — the transcript has always drawn them; the tab's mark had no
+   * way to know.
+   */
+  pendingApprovalIds: z.array(z.string()).default([]),
+  pendingQuestionIds: z.array(z.string()).default([]),
+  /** A message typed and not sent when the app last closed. */
+  draft: z.string().default(''),
+  /** Reading and reasoning, executing nothing. Never survives a restart. */
+  planning: z.boolean().default(false),
+})
+
 export const IPC_CONTRACT = {
   'app:getInfo': { request: z.void(), response: AppInfo },
   /**
@@ -674,35 +701,14 @@ export const IPC_CONTRACT = {
   'conversation:restore': {
     request: z.object({}),
     response: z.object({
-      sessions: z.array(
-        z.object({
-          conversationId: z.string(),
-          participants: z.array(AgentIdSchema),
-          profileId: z.string(),
-          projectId: z.string(),
-          cwd: z.string(),
-          title: z.string(),
-          /** Counted out of the log against the saved watermark, not remembered. */
-          unread: z.number().int().min(0),
-          /**
-           * Decisions still outstanding, by id.
-           *
-           * Ids and not counts, because the renderer clears them by id when the
-           * answer arrives. They are rows with no outcome rather than a memory
-           * of what was asked, so they are as true after a relaunch as before
-           * one — the transcript has always drawn them; the tab's mark had no
-           * way to know.
-           */
-          pendingApprovalIds: z.array(z.string()).default([]),
-          pendingQuestionIds: z.array(z.string()).default([]),
-          /** A message typed and not sent when the app last closed. */
-          draft: z.string().default(''),
-          /** Reading and reasoning, executing nothing. Never survives a restart. */
-          planning: z.boolean().default(false),
-        })
-      ),
+      sessions: z.array(OpenSessionSchema),
       workspace: WorkspaceSnapshot.nullable(),
     }),
+  },
+
+  'conversation:active': {
+    request: z.object({}),
+    response: z.object({ sessions: z.array(OpenSessionSchema) }),
   },
 
   /**
@@ -1040,7 +1046,6 @@ export const IPC_CONTRACT = {
     response: z.object({ ok: z.literal(true) }),
   },
   /** Brings Chorus forward — what clicking a notification has to do first. */
-  'app:focus': { request: z.void(), response: z.object({ ok: z.literal(true) }) },
 
   /**
    * Puts text on the system clipboard, for the copy control on a code block.
@@ -2187,7 +2192,7 @@ export function isIpcChannel(value: string): value is IpcChannel {
  * channels are not in `IPC_CONTRACT` — they are answered by a registrar that
  * validates `event.sender`. The shape belongs beside the channels it names.
  */
-export interface ChorusApi extends WorkbenchShellApi {
+export interface ChorusApi extends WorkbenchShellApi, DetachedWindowApi {
   readonly getAppInfo: () => Promise<AppInfo>
   /** Asks; the answer arrives on `onLimits`. */
   readonly refreshLimits: () => Promise<{ ok: true }>
@@ -2204,6 +2209,7 @@ export interface ChorusApi extends WorkbenchShellApi {
   readonly interrupt: (request: IpcRequest<'conversation:interrupt'>) => Promise<{ ok: true }>
   readonly closeConversation: (request: IpcRequest<'conversation:close'>) => Promise<{ ok: true }>
   readonly restoreConversations: () => Promise<IpcResponse<'conversation:restore'>>
+  readonly readActiveSessions: () => Promise<IpcResponse<'conversation:active'>>
   readonly markSeen: (request: IpcRequest<'conversation:markSeen'>) => Promise<{ ok: true }>
   readonly rememberDraft: (request: IpcRequest<'conversation:draft'>) => Promise<{ ok: true }>
   readonly setPlanMode: (

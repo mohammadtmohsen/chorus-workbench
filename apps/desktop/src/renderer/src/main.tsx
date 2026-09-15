@@ -1,6 +1,7 @@
 import { StrictMode } from 'react'
 import { createRoot } from 'react-dom/client'
 import { App } from './App.js'
+import type { WindowRole } from '../../shared/detached-window-ipc.js'
 import { WorkbenchProbe } from './workbench/WorkbenchProbe.js'
 import './i18n/index.js'
 /*
@@ -16,9 +17,17 @@ import './styles.css'
 const container = document.getElementById('root')
 if (container === null) throw new Error('Missing #root container')
 
+const DETACHED_HASH = '#detached='
+const role: WindowRole = window.location.hash.startsWith(DETACHED_HASH)
+  ? {
+      kind: 'detached',
+      projectId: decodeURIComponent(window.location.hash.slice(DETACHED_HASH.length)),
+    }
+  : { kind: 'main' }
+
 createRoot(container).render(
   <StrictMode>
-    <App />
+    <App role={role} />
     {/*
      * Beside `App`, not inside it. `App` returns early for a restoring shell and
      * for one with no sessions, and the containment probe has to be reachable in
