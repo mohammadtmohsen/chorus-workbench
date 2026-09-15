@@ -50,7 +50,8 @@ function raise(notice: Notice, title: string, t: TFunction, projectId: string): 
       tag: notice.conversationId,
     })
     banner.onclick = () => {
-      if (useWorkspaceStore.getState().detached[projectId] === undefined) void window.chorus.focusWindow()
+      if (useWorkspaceStore.getState().detached[projectId] === undefined)
+        void window.chorus.focusWindow()
       useWorkspaceStore.getState().openProject(projectId)
       useWorkspaceStore.getState().clearConversationUnread(notice.conversationId)
     }
@@ -529,10 +530,7 @@ export function App({ role }: { readonly role: WindowRole }): React.JSX.Element 
     report()
     window.addEventListener('focus', report)
     window.addEventListener('blur', report)
-    const stop = useWorkspaceStore.subscribe(
-      (state) => state.conversationGroups[projectId],
-      report
-    )
+    const stop = useWorkspaceStore.subscribe((state) => state.conversationGroups[projectId], report)
     return () => {
       window.removeEventListener('focus', report)
       window.removeEventListener('blur', report)
@@ -625,22 +623,23 @@ export function App({ role }: { readonly role: WindowRole }): React.JSX.Element 
             sessions: conversations,
             workspace: detachedSnapshot(projectId, slice),
           }))
-        : Promise.all([window.chorus.restoreConversations(), window.chorus.readDetachedState()]).then(
-            ([restored, { entries }]) => {
-              useWorkspaceStore
-                .getState()
-                .setDetached(
-                  Object.fromEntries(entries.map((entry) => [entry.projectId, entry.returnSlot]))
-                )
-              return {
-                ...restored,
-                workspace:
-                  restored.workspace === null
-                    ? null
-                    : applyDetachedEntries(restored.workspace, entries),
-              }
+        : Promise.all([
+            window.chorus.restoreConversations(),
+            window.chorus.readDetachedState(),
+          ]).then(([restored, { entries }]) => {
+            useWorkspaceStore
+              .getState()
+              .setDetached(
+                Object.fromEntries(entries.map((entry) => [entry.projectId, entry.returnSlot]))
+              )
+            return {
+              ...restored,
+              workspace:
+                restored.workspace === null
+                  ? null
+                  : applyDetachedEntries(restored.workspace, entries),
             }
-          )
+          })
     reopen
       .then(({ sessions: reopened, workspace }) => {
         /*
@@ -1044,7 +1043,9 @@ export function App({ role }: { readonly role: WindowRole }): React.JSX.Element 
           /* A tab for it, in the focused group. Without this the conversation
              streams into a project that has nowhere to show it until relaunch. */
           if (useWorkspaceStore.getState().detached[session.projectId] === undefined) {
-            useWorkspaceStore.getState().adoptConversation(session.projectId, session.conversationId)
+            useWorkspaceStore
+              .getState()
+              .adoptConversation(session.projectId, session.conversationId)
           }
           useWorkspaceStore.getState().clearConversationUnread(session.conversationId)
           // `finishEnd` and not `endNow`: restart has already asked its own

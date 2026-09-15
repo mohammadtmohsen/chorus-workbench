@@ -754,9 +754,9 @@ describe('a surface changing hands', () => {
 
     surface.beginHandoff(shell as never, ROOT_A, new FakeWebContents() as never, 'detach')
 
-    await expect(
-      surface.openSurface(shell as never, { grant: grantA }, undefined)
-    ).rejects.toThrow(/No workbench project grant/)
+    await expect(surface.openSurface(shell as never, { grant: grantA }, undefined)).rejects.toThrow(
+      /No workbench project grant/
+    )
     await expect(
       surface.openSurface(shell as never, { grant: grantB }, undefined)
     ).resolves.toEqual(expect.any(String))

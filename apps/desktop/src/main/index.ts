@@ -52,8 +52,7 @@ const devServerUrl = process.env['ELECTRON_RENDERER_URL']
 const SHELL_ENTRY_FILE = join(__dirname, '../renderer/index.html')
 
 type ShellWindowRole =
-  | { kind: 'main' }
-  | { kind: 'detached'; projectId: string; title: string; x: number; y: number }
+  { kind: 'main' } | { kind: 'detached'; projectId: string; title: string; x: number; y: number }
 
 function createWindow(role: ShellWindowRole): BrowserWindow {
   const window = new BrowserWindow({

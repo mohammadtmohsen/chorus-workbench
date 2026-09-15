@@ -138,7 +138,11 @@ export function mergeSlice(
 ): WorkspaceSnapshot {
   return {
     ...workspace,
-    conversationGroups: withEntry(workspace.conversationGroups, projectId, slice.conversationGroups),
+    conversationGroups: withEntry(
+      workspace.conversationGroups,
+      projectId,
+      slice.conversationGroups
+    ),
     chorusWidths: withEntry(workspace.chorusWidths, projectId, slice.chorusWidth),
     workbenchHidden: withEntry(workspace.workbenchHidden, projectId, slice.workbenchHidden),
   }
@@ -982,8 +986,7 @@ export function returnTab(
 ): WorkspaceSnapshot {
   if (workspace.panes[slot.paneId] !== undefined) {
     const before = Object.entries(detached).filter(
-      ([id, other]) =>
-        id !== projectId && other.paneId === slot.paneId && other.index < slot.index
+      ([id, other]) => id !== projectId && other.paneId === slot.paneId && other.index < slot.index
     ).length
     return placeSession(workspace, projectId, slot.paneId, slot.index - before)
   }

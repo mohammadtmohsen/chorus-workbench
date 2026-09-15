@@ -26,12 +26,7 @@ import type { ChorusRuntime } from './runtime.js'
 import { beginHandoff } from './workbench-surface.js'
 
 export type DetachedState =
-  | 'detaching'
-  | 'detached'
-  | 'redocking'
-  | 'returning'
-  | 'closing-empty'
-  | 'shutting-down'
+  'detaching' | 'detached' | 'redocking' | 'returning' | 'closing-empty' | 'shutting-down'
 
 interface DetachedEntry {
   readonly window: BrowserWindow
@@ -413,7 +408,7 @@ export function registerDetachedWindowHandlers(deps: DetachedWindowDeps): void {
     'window:hitTestResult': (event, request) => {
       const main = deps.mainWindow()
       const pending = pendingHitTests.get(request.requestId)
-      if (pending === undefined || main === null || event.sender !== main.webContents) return OK
+      if (pending === undefined || main?.webContents !== event.sender) return OK
       clearTimeout(pending.timer)
       pendingHitTests.delete(request.requestId)
       pending.resolve({ paneId: request.paneId, slot: request.slot })

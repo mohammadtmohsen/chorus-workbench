@@ -318,4 +318,3 @@ export function PaneTabStrip(
  * The dashed edge survives and matters more now. It marks the seam the split
  * opens along, which is the one thing a filled rectangle cannot say by itself.
  */
-

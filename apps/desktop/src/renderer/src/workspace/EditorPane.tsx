@@ -65,7 +65,9 @@ export interface LayoutViewProps {
   ) => React.ReactNode
 }
 
-export function EditorPane(props: LayoutViewProps & { readonly paneId: string }): React.JSX.Element {
+export function EditorPane(
+  props: LayoutViewProps & { readonly paneId: string }
+): React.JSX.Element {
   const { t } = useTranslation()
   const pane = usePane(props.paneId)
   /*

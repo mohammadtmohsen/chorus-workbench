@@ -9,11 +9,7 @@ import { createPreviewController, ProjectPreviewHost } from './SessionPreview.js
 import { TerminalPanel } from '../TerminalPanel.js'
 import type { TerminalRefShape } from '../../../shared/ipc.js'
 import { leafPaneIds, resizeBranch, type SplitDirection } from './layout.js'
-import {
-  useGlobalTerminal,
-  useWorkspaceActions,
-  useWorkspaceLayout,
-} from './hooks.js'
+import { useGlobalTerminal, useWorkspaceActions, useWorkspaceLayout } from './hooks.js'
 import { EditorPane, type LayoutViewProps } from './EditorPane.js'
 import type { ProjectInfo } from './session-row.js'
 import { countRender } from './render-count.js'

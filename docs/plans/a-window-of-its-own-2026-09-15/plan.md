@@ -403,6 +403,7 @@ Phases 2 to 4 add code that nothing calls yet. Nothing calls
    - An expired detach returns; an expired return destroys.
 
    _Exit:_ the transfer exists and is covered. The manual check above has passed.
+
 2. **A window for one project.** `index.ts`, `ipc.ts`, `shared/ipc.ts`,
    `preload/index.ts`: `createWindow(role)`, the registry with its slots, slices
    and states, the close flow with `flushDraftsAndReadSlice` and its timeout, the
@@ -426,6 +427,7 @@ Phases 2 to 4 add code that nothing calls yet. Nothing calls
 
    _Exit:_ a return puts the tab back where it was, and the saved layout always
    shows it there.
+
 5. **Drag out.** `useTabDrag.ts`, `Workspace.tsx`, `App.tsx`: prepare, the draft
    flush, commit, and cancel on lost capture. The first phase anyone can reach.
    _Exit:_ dragging a tab out opens it in its own window, on macOS and Windows,
