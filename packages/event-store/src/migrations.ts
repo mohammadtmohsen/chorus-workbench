@@ -361,6 +361,155 @@ export const MIGRATIONS: readonly Migration[] = [
       );
     `,
   },
+  {
+    version: 7,
+    name: 'projects-keep-a-note',
+    /*
+     * A scratchpad per project: what to check later, what is still pending.
+     *
+     * **In the registry rather than the log, and the distinction is the one
+     * `projects.ts` opens with.** The log holds what happened, and its value is
+     * that it happened. A note is not that — it is a current fact that gets
+     * corrected, edited over and eventually deleted, and appending an event per
+     * revision would file a person crossing out a reminder as history. It is the
+     * same argument that keeps a project's name here.
+     *
+     * It is also not `context.usage`. That rule — state that would be worse to
+     * read back later than to lack — sends a value to a push channel and nowhere
+     * else. A note fails it in the other direction: read back a week later it is
+     * exactly as useful as when it was written, which is the whole point of
+     * writing it down.
+     *
+     * Nullable, so ALTER adds it without rewriting the table, and so "never
+     * written" is distinct from "emptied". Nothing reads that distinction today;
+     * it costs nothing and collapsing it later is easier than inventing it.
+     */
+    up: `
+      ALTER TABLE projects ADD COLUMN notes TEXT;
+    `,
+  },
+  {
+    version: 8,
+    name: 'app-keeps-a-note',
+    /*
+     * The same scratchpad one level up: a note that belongs to no project.
+     *
+     * **A table rather than a column, because there is no row to add one to.**
+     * Version 7 put the project note on the project, which is where a fact about
+     * a project belongs. This note is a fact about the app, and the app is not a
+     * row anywhere — so the choice was a single-row table or a general key/value
+     * bag, and a bag would invite everything that is currently a considered
+     * column to become an untyped string.
+     *
+     * The CHECK is what keeps it single-row. Without it a second insert would
+     * succeed and every read would silently pick one of two notes.
+     *
+     * `width` is the panel's width as a fraction of the window, not pixels. It
+     * is stored beside the note because it is answered the same way and read at
+     * the same moment. A fraction rather than a count of pixels so that moving
+     * to a smaller display reopens a panel that still fits, instead of one wider
+     * than the window that has to be clamped back on read.
+     */
+    up: `
+      CREATE TABLE app_note (
+        id    INTEGER PRIMARY KEY CHECK (id = 1),
+        notes TEXT,
+        width REAL
+      );
+    `,
+  },
+  {
+    version: 9,
+    name: 'a-note-is-a-size-too',
+    /*
+     * How big each note was left, for both of them.
+     *
+     * Version 8 stored a width for the app's note because its panel was already
+     * draggable on one edge. Both notes now drag on two, so the pair travels
+     * together — and a project's belongs on the project for the same reason its
+     * text does: it is a current fact about that project, corrected in place and
+     * gone when the project is.
+     *
+     * Fractions of the window, never pixels, and the reasoning is `NOTE_SIZE`'s:
+     * a count of pixels reopens a note wider than the display it moved to.
+     *
+     * All three nullable, which ALTER TABLE ADD COLUMN requires anyway without a
+     * default — and null is the value that means something here. It reads as
+     * "never dragged", which is what lets the stylesheet's own ceiling stay in
+     * charge until somebody says otherwise. A zero could not say that.
+     */
+    up: `
+      ALTER TABLE app_note ADD COLUMN height REAL;
+      ALTER TABLE projects ADD COLUMN note_width REAL;
+      ALTER TABLE projects ADD COLUMN note_height REAL;
+    `,
+  },
+  {
+    version: 10,
+    name: 'the-notes-you-keep',
+    /*
+     * A collection of notes that belong to nothing in particular.
+     *
+     * **Rows rather than a second single-row table**, which is the whole of what
+     * this adds. Version 8 gave the app one note because there was one to give,
+     * and the CHECK that keeps it single-row is exactly what this case cannot
+     * live with: several documents, each addressed, updated and deleted on its
+     * own.
+     *
+     * **No title column.** A row is labelled by the note's own first line, so a
+     * title would be a second copy of something already in the document and a
+     * second thing to keep in step with it.
+     *
+     * **No size, unlike `app_note`.** That panel is dragged on two edges and has
+     * to reopen where it was left; this one is a fixed panel beside a menu, and
+     * a column for a size nothing can change would be a column that only ever
+     * holds its default.
+     *
+     * Both stamps, because what orders the list is still open — made, or last
+     * touched — and neither is recoverable from the other after the fact.
+     */
+    up: `
+      CREATE TABLE kept_note (
+        id         TEXT PRIMARY KEY,
+        notes      TEXT,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+      );
+    `,
+  },
+  {
+    version: 11,
+    name: 'notes-in-the-order-you-put-them',
+    /*
+     * Where each kept note sits, because the order stopped being computed.
+     *
+     * Version 10 left the list ordered by `updated_at`, which is a guess about
+     * what somebody wants to see next. Dragging a row says it outright, and a
+     * said order has to be written down.
+     *
+     * **Backfilled by the rank the list is already drawn in**, so the first
+     * launch after this migration shows exactly what the last one showed. A
+     * `DEFAULT 0` would have been one line and would have reordered every
+     * existing note once, silently — the kind of change nobody connects to an
+     * upgrade, and the kind that loses an arrangement somebody was relying on.
+     *
+     * The tie-break repeats `list()`'s: equal stamps, lower id first. It has to,
+     * or the two orders disagree for exactly the rows a millisecond apart.
+     *
+     * Nullable rather than `NOT NULL DEFAULT`, because null never survives the
+     * UPDATE below and because a NOT NULL add is the form SQLite is fussiest
+     * about across versions.
+     */
+    up: `
+      ALTER TABLE kept_note ADD COLUMN position INTEGER;
+      UPDATE kept_note
+         SET position = (
+           SELECT COUNT(*) FROM kept_note AS earlier
+            WHERE earlier.updated_at > kept_note.updated_at
+               OR (earlier.updated_at = kept_note.updated_at AND earlier.id < kept_note.id)
+         );
+    `,
+  },
 ]
 
 export interface MigrationResult {

@@ -1,5 +1,5 @@
 import { parseDiff } from '@chorus/workspace/diff'
-import type { AgentId } from '@chorus/shared'
+import { agentRecord, isAgentId, type AgentId } from '@chorus/shared'
 import { trailingSummary } from '../../shared/markdown.js'
 import { questionFields, type QuestionField } from '../../shared/question-text.js'
 import { TRANSCRIPT_DISPOSITION } from '../../shared/transcript-events.js'
@@ -285,7 +285,7 @@ export const EMPTY_VIEW: TranscriptView = {
   firstSeq: 0,
   spend: { inputTokens: 0, outputTokens: 0, costUsd: null },
   usageByActor: {},
-  openChanges: { codex: null, claude: null },
+  openChanges: agentRecord(() => null),
 }
 
 interface Mutable {
@@ -1254,7 +1254,7 @@ function openChanges(view: Mutable, event: TranscriptEvent, files: readonly Chan
 
 /** Only an agent writes files, so only an agent can have a card open. */
 function isAgent(actor: string): actor is AgentId {
-  return actor === 'codex' || actor === 'claude'
+  return isAgentId(actor)
 }
 
 function readChangedFiles(value: unknown): ChangedFile[] {

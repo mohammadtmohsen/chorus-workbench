@@ -1,8 +1,8 @@
+import type { AgentId } from '@chorus/shared'
 import { useEffect, useState } from 'react'
 import { useDialog } from './useDialog.js'
 import { useTranslation } from 'react-i18next'
 
-type AgentId = 'codex' | 'claude'
 /**
  * What the receiving agent is being asked to do.
  *
@@ -13,7 +13,11 @@ type AgentId = 'codex' | 'claude'
 export type HandoffIntent = 'implement' | 'review' | 'discuss'
 
 /** Agents are named, not identified — copy should read like a sentence. */
-const NAME: Record<AgentId, string> = { codex: 'Codex', claude: 'Claude' }
+const NAME: Record<AgentId, string> = {
+  codex: 'Codex',
+  claude: 'Claude',
+  deepseek: 'DeepSeek',
+}
 
 export interface HandoffDraft {
   readonly from: AgentId

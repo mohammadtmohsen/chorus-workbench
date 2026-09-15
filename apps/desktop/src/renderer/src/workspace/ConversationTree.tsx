@@ -1,6 +1,7 @@
 import { Fragment } from 'react'
 import type { SessionInfo } from '../Session.js'
 import { ConversationColumn } from './ConversationColumn.js'
+import { resizeBranch } from './layout.js'
 import type { ConversationDrag } from './useConversationDrag.js'
 import type {
   ConversationArrangement,
@@ -33,6 +34,15 @@ export function ConversationTree(props: {
   readonly paneFocused: boolean
   readonly drag: ConversationDrag
   readonly onSizes: (path: readonly number[], sizes: readonly number[]) => void
+  /**
+   * Even the groups in one branch out — a double-click on a divider.
+   *
+   * Double rather than single, and that is forced rather than chosen: the
+   * divider's whole job is dragging, and a drag ends in a click. A single-click
+   * handler here would fire at the end of every resize and undo the drag that
+   * had just finished. The pane divider settled this the same way.
+   */
+  readonly onEqualize: (path: readonly number[]) => void
   /** Start a conversation in one group — the `+` at the end of its strip. */
   readonly onNewConversation: (groupId: string) => void
   /** End one conversation — the × on its tab. */
@@ -86,6 +96,12 @@ export function ConversationTree(props: {
                   props.onSizes(props.path, sizes)
                 })
               }}
+              /* The whole branch, not the pair this divider sits between:
+                 "even them up" about three groups means three equal groups, and
+                 evening one pair would leave the third where it was. */
+              onDoubleClick={() => {
+                props.onEqualize(props.path)
+              }}
             />
           )}
           <div className="conversation-branch-child" style={{ flexGrow: branch.sizes[index] ?? 1 }}>
@@ -99,6 +115,7 @@ export function ConversationTree(props: {
               paneFocused={props.paneFocused}
               drag={props.drag}
               onSizes={props.onSizes}
+              onEqualize={props.onEqualize}
               onNewConversation={props.onNewConversation}
               onEndConversation={props.onEndConversation}
               onRename={props.onRename}
@@ -146,21 +163,34 @@ function startResize(
   const span = end - start
   if (span <= 0) return
 
-  const total = branch.sizes.reduce((sum, size) => sum + size, 0) || 1
-  const share = branch.sizes.map((size) => size / total)
-  const pair = (share[index - 1] ?? 0) + (share[index] ?? 0)
-
   sash.setPointerCapture(event.pointerId)
 
   const move = (moved: PointerEvent): void => {
-    const along = (row ? moved.clientX : moved.clientY) - start
-    /* Clamped so neither side can be dragged to nothing — a group with no size
-       is one nobody can grab the sash back out of. */
-    const first = Math.min(Math.max(along / span, 0.15), Math.max(pair - 0.15, 0.15))
-    const next = [...share]
-    next[index - 1] = first
-    next[index] = pair - first
-    commit(next)
+    /*
+     * Where the pointer sits **between the two neighbours**, as a fraction of
+     * their combined span. `resizeBranch` scales that into their combined share
+     * and applies the floor.
+     *
+     * **The scaling step is the fix, and its absence is why a third group made
+     * the divider jump.** `along / span` is a fraction of the *pair*; the sizes
+     * are fractions of the whole *branch*. With two children those are the same
+     * number, so the bug was invisible for as long as a column was split once:
+     * `pair` is 1, and a fraction of the pair is a fraction of the branch.
+     *
+     * Split twice and they diverge. Three even groups each hold a third, the
+     * pair holds two thirds, and grabbing their divider where it already sits
+     * gives `along / span` of about a half — which was then written as *half the
+     * branch* for a child that had a third. The left group grew by a sixth of
+     * the column on the first pointer move, before anything had been dragged
+     * anywhere, which in a wide column is the couple of hundred pixels this
+     * was reported as.
+     *
+     * Scaled, the pair's own total is preserved, so the children on either side
+     * of these two keep the share they had and no drag can quietly renormalise
+     * the rest of the branch.
+     */
+    const along = ((row ? moved.clientX : moved.clientY) - start) / span
+    commit(resizeBranch(branch.sizes, index - 1, along, span))
   }
   const stop = (): void => {
     sash.removeEventListener('pointermove', move)

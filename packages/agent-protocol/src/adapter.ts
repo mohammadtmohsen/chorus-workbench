@@ -118,7 +118,36 @@ export interface SessionOpts {
   readonly cwd: string
   readonly model?: string
   readonly sandbox: SandboxPolicy
+  /**
+   * A standing instruction, added to whatever system prompt the provider already
+   * has — never replacing it.
+   *
+   * **Append, in both adapters, or the option means two different things.** Claude
+   * exposes `systemPrompt`'s preset arm, which is additive by construction; Codex
+   * exposes `developerInstructions`, which sits alongside its own instructions
+   * rather than displacing them. The arm that *replaces* exists on both providers
+   * and is deliberately unreachable from here: a caller cannot discard the CLI's
+   * own prompt through this port, because nothing above the adapters knows what
+   * it would be discarding.
+   *
+   * Optional, and absent is not the same as empty — an adapter must omit the
+   * provider field entirely rather than send a blank string, so a conversation
+   * with no instruction is byte-for-byte the session it was before this existed.
+   *
+   * **A fork must not inherit it.** `ForkOpts` extends this interface, so the
+   * field is reachable from an aside — and an aside already carries its own
+   * language prompt. Two instructions about how to write, in one context, argue.
+   */
+  readonly instructions?: string
+  readonly transcript?: TranscriptReader
 }
+
+export interface TranscriptRequest {
+  readonly skip: number
+  readonly count: number
+}
+
+export type TranscriptReader = (request: TranscriptRequest) => string
 
 /**
  * A copy of a session, taken to be asked something and then thrown away.

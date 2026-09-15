@@ -191,13 +191,40 @@ export interface WorkspaceActions {
     /** What the log says was missed while the app was closed, per conversation. */
     unreadByConversation?: Readonly<Record<string, number>>,
     /** Which conversations each project holds — what the inner columns are built from. */
-    conversationsByProject?: Readonly<Record<string, readonly string[]>>
+    conversationsByProject?: Readonly<Record<string, readonly string[]>>,
+    /**
+     * Decisions still outstanding when the app last closed, per conversation.
+     *
+     * Real ids rather than counts, because `approval.decided` clears by id — a
+     * seeded placeholder would never match and the mark would stick on a
+     * question that had been answered.
+     */
+    pendingByConversation?: Readonly<
+      Record<
+        string,
+        { readonly approvalIds: readonly string[]; readonly questionIds: readonly string[] }
+      >
+    >
   ) => void
   /** Opens a **project** tab. Conversations live inside one; they are not tabs. */
   openProject: (projectId: string, paneId?: string) => void
   activateTab: (paneId: string, projectId: string) => void
   /** Marks one conversation read. Separate from the tab actions on purpose. */
   clearConversationUnread: (conversationId: string) => void
+  /**
+   * Seeds one conversation's outstanding decisions — what `hydrate` does at
+   * launch, for a conversation that arrives afterwards.
+   *
+   * Reopening from history is the case: the room may have been left with an
+   * approval nobody answered, and the pulse only folds events pushed since the
+   * app started, so its tab would read idle beside a transcript drawing the
+   * card. Replaces rather than merges, because main has just read the
+   * projection and its answer is the whole truth.
+   */
+  seedPendingDecisions: (
+    conversationId: string,
+    pending: { readonly approvalIds: readonly string[]; readonly questionIds: readonly string[] }
+  ) => void
   /**
    * Puts one of a project's conversations on screen — what the dock does.
    *
@@ -300,6 +327,15 @@ export interface WorkspaceActions {
     path: readonly number[],
     sizes: readonly number[]
   ) => void
+  /**
+   * Give every group in one branch the same share — the inner `equalizeBranch`.
+   *
+   * The same function the pane tree's divider calls, not a second one that
+   * agrees with it: `equalizeBranch` is generic over `PaneTree`, so "double-click
+   * a divider to even things up" is one behaviour at both levels rather than two
+   * that happen to match today.
+   */
+  equalizeConversationBranch: (projectId: string, path: readonly number[]) => void
   ingestEvents: (events: readonly TranscriptEvent[]) => void
   /** Pushed state, not a logged event — see the action for why it is separate. */
   ingestContextUsage: (usage: ContextUsagePush) => void
@@ -556,7 +592,8 @@ export const useWorkspaceStore = create<WorkspaceStore>()(
         conversationIds,
         projectIds,
         unreadByConversation = {},
-        conversationsByProject = {}
+        conversationsByProject = {},
+        pendingByConversation = {}
       ) => {
         const repaired = reconcileWorkspace(
           saved,
@@ -574,15 +611,28 @@ export const useWorkspaceStore = create<WorkspaceStore>()(
           /*
            * Seeded with what happened while the app was closed.
            *
-           * Every other field starts empty on purpose — they describe a live
-           * agent, and nothing is live yet. Unread is the exception because it
+           * Most fields start empty on purpose — they describe a live agent, and
+           * nothing is live yet. Unread was the first exception, because it
            * describes the *log*, which outlived the process, and starting it at
-           * zero is what used to make every relaunch claim nothing had happened.
+           * zero is what used to make every relaunch claim nothing happened.
+           *
+           * **An outstanding decision is the same kind of fact**, and leaving it
+           * out was the other half of "the flag does not always show". A pending
+           * approval is a row in the store with no outcome, so it survives a
+           * relaunch and the transcript draws its card the moment the
+           * conversation is mounted — while the tab, folding only events pushed
+           * since launch, went on saying idle. The two now agree, which is the
+           * rule the mark exists to keep.
            */
           pulses: Object.fromEntries(
             conversationIds.map((id) => [
               id,
-              { ...EMPTY_PULSE, unread: unreadByConversation[id] ?? 0 },
+              {
+                ...EMPTY_PULSE,
+                unread: unreadByConversation[id] ?? 0,
+                approvalIds: [...(pendingByConversation[id]?.approvalIds ?? [])],
+                questionIds: [...(pendingByConversation[id]?.questionIds ?? [])],
+              },
             ])
           ),
         })
@@ -609,6 +659,21 @@ export const useWorkspaceStore = create<WorkspaceStore>()(
       },
       clearConversationUnread: (conversationId) => {
         clearUnread(conversationId)
+      },
+      seedPendingDecisions: (conversationId, pending) => {
+        set((state) => {
+          const current = state.pulses[conversationId] ?? EMPTY_PULSE
+          return {
+            pulses: {
+              ...state.pulses,
+              [conversationId]: {
+                ...current,
+                approvalIds: [...pending.approvalIds],
+                questionIds: [...pending.questionIds],
+              },
+            },
+          }
+        })
       },
       /*
        * Reveal, rather than a pointer write.
@@ -876,6 +941,13 @@ export const useWorkspaceStore = create<WorkspaceStore>()(
         set((state) => ({
           conversationGroups: editArrangement(state, projectId, (arrangement) =>
             setBranchSizes(arrangement, path, sizes)
+          ),
+        }))
+      },
+      equalizeConversationBranch: (projectId, path) => {
+        set((state) => ({
+          conversationGroups: editArrangement(state, projectId, (arrangement) =>
+            equalizeBranch(arrangement, path)
           ),
         }))
       },

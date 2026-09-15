@@ -12,6 +12,17 @@ vi.mock('electron', () => ({
   // `themeSource` is what `prefers-color-scheme` answers from. A plain object
   // is enough: the assignment is the whole behaviour.
   nativeTheme: { themeSource: 'system' },
+  /*
+   * A keychain that works, so the secret store takes its real path rather than
+   * its refuse-to-store one. Base64 stands in for encryption: what is asserted
+   * below is that the value never crosses back to a renderer, and a reversible
+   * stand-in makes a leak *easier* to detect, not harder.
+   */
+  safeStorage: {
+    isEncryptionAvailable: () => true,
+    encryptString: (s: string) => Buffer.from(s, 'utf8'),
+    decryptString: (b: Buffer) => b.toString('utf8'),
+  },
 }))
 
 const { buildHandlers } = await import('./ipc.js')
@@ -136,19 +147,31 @@ describe('conversation:start', () => {
      * arriving here would mean a conversation choosing its own directory, which
      * is precisely what the Project-as-unit hierarchy removes.
      */
-    const startConversation = await startWith({ agents: ['claude'], projectId: 'p1' })
-    expect(startConversation).toHaveBeenCalledWith({ agents: ['claude'], projectId: 'p1' })
+    const startConversation = await startWith({ projectId: 'p1' })
+    expect(startConversation).toHaveBeenCalledWith({ projectId: 'p1' })
     expect(Object.keys(startConversation.mock.calls[0]?.[0] ?? {})).not.toContain('cwd')
   })
 
-  it('omits an absent profile rather than passing undefined through', async () => {
+  it('passes no cast, even when one is sent', async () => {
+    /*
+     * The cast is main's, and this is the channel where it stopped being the
+     * renderer's. It used to forward `agents` — filled from `settings.json` —
+     * so a new conversation opened with whatever that file held and a project
+     * showing three agents got two. Asserted by sending one anyway: dropping
+     * the field from the schema is not the same as the handler ignoring it,
+     * and only the second is what makes the cast un-gettable-wrong.
+     */
     const startConversation = await startWith({ agents: ['claude'], projectId: 'p1' })
+    expect(Object.keys(startConversation.mock.calls[0]?.[0] ?? {})).not.toContain('agents')
+  })
+
+  it('omits an absent profile rather than passing undefined through', async () => {
+    const startConversation = await startWith({ projectId: 'p1' })
     expect(Object.keys(startConversation.mock.calls[0]?.[0] ?? {})).not.toContain('profileId')
   })
 
   it('passes a profile when one is given', async () => {
     const startConversation = await startWith({
-      agents: ['claude'],
       projectId: 'p1',
       profileId: 'trusted',
     })
@@ -172,6 +195,61 @@ describe('the channels that could move a conversation', () => {
   })
 })
 
+/**
+ * The credential goes in and never comes out.
+ *
+ * This is the whole reason `agent-secrets.ts` exists as its own module rather
+ * than reusing `workbench-secrets.ts`: that store is reachable by name from any
+ * workbench surface through a generic `readSecret(key)`. Nothing asserts the
+ * absence of a channel, so what is asserted here is the property that channel
+ * would break — the key is not in anything main hands back.
+ */
+describe('the DeepSeek key', () => {
+  const KEY = 'sk-do-not-echo-this-anywhere'
+
+  const handlers = () => buildHandlers({} as unknown as ChorusRuntime)
+  const write = async (patch: unknown): Promise<Record<string, unknown>> =>
+    (handlers()['settings:write'] as unknown as (r: unknown) => Promise<Record<string, unknown>>)(
+      patch
+    )
+  const read = async (): Promise<Record<string, unknown>> =>
+    (handlers()['settings:read'] as unknown as () => Promise<Record<string, unknown>>)()
+
+  it('is never in the answer to the write that set it', async () => {
+    const after = await write({ deepseekApiKey: KEY })
+    expect(after['deepseekKeySet']).toBe(true)
+    expect(after['deepseekApiKey']).toBeUndefined()
+    // The whole payload, not just the fields we thought to name.
+    expect(JSON.stringify(after)).not.toContain(KEY)
+  })
+
+  it('is never in a later read either', async () => {
+    await write({ deepseekApiKey: KEY })
+    const settings = await read()
+    expect(settings['deepseekKeySet']).toBe(true)
+    expect(JSON.stringify(settings)).not.toContain(KEY)
+  })
+
+  /*
+   * The control. Without it the two assertions above pass on a store that never
+   * saved anything — "the key is not in the payload" is trivially true of a key
+   * that was dropped on the floor.
+   */
+  it('reports no key once it is cleared, and reports one while it is set', async () => {
+    await write({ deepseekApiKey: KEY })
+    expect((await read())['deepseekKeySet']).toBe(true)
+    const cleared = await write({ deepseekApiKey: '' })
+    expect(cleared['deepseekKeySet']).toBe(false)
+    expect((await read())['deepseekKeySet']).toBe(false)
+  })
+
+  it('leaves a stored key alone when the patch does not mention it', async () => {
+    await write({ deepseekApiKey: KEY })
+    const after = await write({ cwd: '/tmp/elsewhere' })
+    expect(after['deepseekKeySet']).toBe(true)
+  })
+})
+
 describe('settings:write and the per-agent maps', () => {
   const write = async (patch: unknown): Promise<{ models: Record<string, string> }> => {
     const handler = buildHandlers({} as unknown as ChorusRuntime)['settings:write'] as unknown as (
@@ -189,7 +267,7 @@ describe('settings:write and the per-agent maps', () => {
     await write({ models: { claude: 'opus' } })
     await write({ models: { codex: 'gpt-5.6-sol' } })
     const after = await write({})
-    expect(after.models).toEqual({ claude: 'opus', codex: 'gpt-5.6-sol' })
+    expect(after.models).toEqual({ claude: 'opus', codex: 'gpt-5.6-sol', deepseek: '' })
   })
 
   it('keeps the other agent’s effort too', async () => {

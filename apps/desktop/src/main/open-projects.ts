@@ -1,5 +1,6 @@
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
+import { AgentIdSchema } from '@chorus/shared'
 import { z } from 'zod'
 import {
   WorkspaceSnapshot,
@@ -29,7 +30,7 @@ import {
 
 export const OpenConversation = z.object({
   conversationId: z.string(),
-  agents: z.array(z.enum(['codex', 'claude'])),
+  agents: z.array(AgentIdSchema),
   profileId: z.string(),
   title: z.string(),
   /**

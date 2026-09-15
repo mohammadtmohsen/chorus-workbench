@@ -1507,7 +1507,9 @@ export const specs = [
           plan: !!document.querySelector('.session-settings-plan'),
         }))()`)
         assert(settings.panels === 1, 'one settings panel, not one per session')
-        assert(settings.agents === 2, 'it carries the cast')
+        // Three, and no longer a count that can change: the card states the
+        // whole cast rather than offering a subset of it.
+        assert(settings.agents === 3, 'it carries the whole cast')
         assert(settings.path, 'the folder')
         assert(settings.profiles >= 2, 'the profiles')
         assert(settings.plan, 'and Plan mode')
@@ -3488,8 +3490,9 @@ export const specs = [
           label: 'the offer appears for your own words',
         })
         assert(
-          JSON.stringify(await offerLabels(app)) === JSON.stringify(['Quote in message']),
-          'and offers only quoting, because there is nobody to ask'
+          JSON.stringify(await offerLabels(app)) ===
+            JSON.stringify(['Send to chat', 'Quote in message']),
+          'and offers no asking, because your own words have nobody to ask'
         )
         assert(
           (await app.evaluate(`document.querySelector('.quote-offer').dataset.askable ?? null`)) ===
@@ -3508,7 +3511,7 @@ export const specs = [
         })
         assert(
           JSON.stringify(await offerLabels(app)) ===
-            JSON.stringify(['Quote in message', 'Ask about this']),
+            JSON.stringify(['Send to chat', 'Quote in message', 'Ask about this']),
           'and translating stays away until a language is set'
         )
 
@@ -3527,29 +3530,49 @@ export const specs = [
          * anything else writes. Main echoes every settings write to every window
          * (`settings:changed`) precisely so this passes.
          *
-         * Three, not four: Explain left the offer for a button on the reply.
+         * Four, not five: Explain left the offer for a button on the reply, and
+         * Send to chat joined it at the front.
          */
         await selectInside(
           app,
           '.entry[data-kind="message"][data-actor="claude"][data-status="complete"]'
         )
-        await app.until(`document.querySelectorAll('.quote-offer-action').length === 3`, {
+        await app.until(`document.querySelectorAll('.quote-offer-action').length === 4`, {
           label: 'setting a language offers translating',
         })
         assert(
           JSON.stringify(await offerLabels(app)) ===
-            JSON.stringify(['Quote in message', 'Ask about this', 'Translate']),
-          'three, and Explain is not among them — it is a button under the reply now'
+            JSON.stringify(['Send to chat', 'Quote in message', 'Ask about this', 'Translate']),
+          'four, and Explain is not among them — it is a button under the reply now'
         )
 
         /*
          * One row, and the dividers between them.
+         *
+         * **At a width this spec sets rather than inherits.** "A wide pane" used
+         * to mean whatever the default window happened to be, so the assertion's
+         * meaning moved every time an action joined the bar — and it silently got
+         * closer to failing rather than saying so. Adding "Send to chat" as a
+         * fourth is exactly that kind of change. 1200px states what wide means,
+         * and the narrow spec below states what narrow means; between them the
+         * wrap is described by two numbers instead of by a default.
+         *
+         * Re-selected after the resize, because a viewport change collapses the
+         * Range the offer hangs off and takes the offer with it. Same shape as
+         * the narrow loop below.
          *
          * The hairlines are the container showing through one-pixel gaps, which
          * is what makes them work when the bar wraps — a border on the buttons
          * cannot, because CSS cannot tell a wrapped flex item from an unwrapped
          * one. If someone reinstates one, this is what notices.
          */
+        await app.viewport(1200, 900)
+        for (let i = 0; i < 4; i += 1) await app.settle()
+        await selectInside(
+          app,
+          '.entry[data-kind="message"][data-actor="claude"][data-status="complete"]'
+        )
+        for (let i = 0; i < 6; i += 1) await app.settle()
         const bar = await app.evaluate(`(() => {
           const el = document.querySelector('.quote-offer')
           const btns = [...el.querySelectorAll('.quote-offer-action')]

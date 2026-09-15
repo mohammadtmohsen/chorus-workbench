@@ -84,6 +84,20 @@ describe('a new conversation', () => {
     await runtime.startConversation({ agents: ['claude'], projectId })
     expect(startedWith(claude)).toEqual([undefined])
   })
+
+  it('defaults only the initial unmentioned message to Claude', async () => {
+    const { conversationId } = await runtime.startConversation({
+      agents: ['codex', 'claude'],
+      projectId,
+    })
+
+    const initial = await runtime.send(conversationId, 'start here')
+    await runtime.send(conversationId, '@codex take this one')
+    const followUp = await runtime.send(conversationId, 'continue')
+
+    expect(initial.targets).toEqual(['claude'])
+    expect(followUp.targets).toEqual(['codex'])
+  })
 })
 
 describe('adding an agent to a conversation', () => {
@@ -124,12 +138,12 @@ describe('the setting already on disk', () => {
     // Not a split. Whatever is in a settings file today was chosen from Claude's
     // catalogue, because that is the only one the sheet ever showed.
     const written = writeSettings(dataPath, { ...DEFAULT_SETTINGS, model: 'sonnet' })
-    expect(written.models).toEqual({ claude: 'sonnet', codex: '' })
+    expect(written.models).toEqual({ claude: 'sonnet', codex: '', deepseek: '' })
   })
 
   it('folds the single effort the same way', () => {
     const written = writeSettings(dataPath, { ...DEFAULT_SETTINGS, effortLevel: 'high' })
-    expect(written.efforts).toEqual({ claude: 'high', codex: '' })
+    expect(written.efforts).toEqual({ claude: 'high', codex: '', deepseek: '' })
   })
 
   it('clears the legacy field, so the fold happens exactly once', () => {
@@ -142,7 +156,7 @@ describe('the setting already on disk', () => {
     const written = writeSettings(dataPath, {
       ...DEFAULT_SETTINGS,
       model: 'sonnet',
-      models: { claude: 'opus', codex: '' },
+      models: { claude: 'opus', codex: '', deepseek: '' },
     })
     expect(written.models.claude).toBe('opus')
   })

@@ -47,7 +47,6 @@ export function ProjectPreviewCard(props: {
    */
   readonly pinned: boolean
   readonly onRename: (name: string) => void
-  readonly onToggleAgent: (agentId: AgentId, present: boolean) => Promise<void>
   readonly onChooseProfile: (profileId: string) => Promise<void>
   /** Both only reachable while the project's folder is missing — see `ProjectSettings`. */
   readonly onRelocate: () => Promise<void>
@@ -229,7 +228,6 @@ export function ProjectPreviewCard(props: {
           home={props.home}
           profiles={props.profiles}
           installed={props.installed}
-          onToggleAgent={props.onToggleAgent}
           onChooseProfile={props.onChooseProfile}
           onRelocate={props.onRelocate}
           onForget={props.onForget}

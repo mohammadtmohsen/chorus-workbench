@@ -25,6 +25,8 @@ import {
   WORKBENCH_ASK_DIFF_CHANNEL,
   WORKBENCH_ASK_DIFF_RESULT_CHANNEL,
   WORKBENCH_EDIT_RESULT_CHANNEL,
+  WORKBENCH_REVEAL_CHANNEL,
+  WORKBENCH_REVEAL_RESULT_CHANNEL,
   WorkbenchContext,
   WORKBENCH_CLIPBOARD_READ_CHANNEL,
   WORKBENCH_BROWSER_EXTENSIONS_CHANGED_CHANNEL,
@@ -44,6 +46,7 @@ import {
   type WorkbenchAskDiffRequest,
   type WorkbenchAskDiffResult,
   type WorkbenchEditResult,
+  type WorkbenchRevealResult,
   type WorkbenchSnapshotResult,
   type WorkbenchRect,
   type WorkbenchShellResponse,
@@ -1312,6 +1315,14 @@ export function registerWorkbenchHandlers(
     if (typeof result.requestId !== 'string') return
     pendingEdits.get(result.requestId)?.(result)
   })
+
+  ipcMain.on(WORKBENCH_REVEAL_RESULT_CHANNEL, (event, raw: unknown) => {
+    if (byContents.get(event.sender) === undefined) return
+    if (typeof raw !== 'object' || raw === null) return
+    const result = raw as WorkbenchRevealResult
+    if (typeof result.requestId !== 'string') return
+    pendingReveals.get(result.requestId)?.(result)
+  })
 }
 
 /**
@@ -1402,6 +1413,44 @@ export async function requestWorkbenchAskDiff(
  * open, and mean because an edit nobody answers must not hang a turn for ever.
  */
 const EDIT_TIMEOUT_MS = 15_000
+
+const pendingReveals = new Map<string, (result: WorkbenchRevealResult) => void>()
+
+/**
+ * Opens a file in the editor of the project it belongs to.
+ *
+ * **`undefined` means there is no surface, and that is the whole reason this
+ * returns a union.** It is the same distinction `requestWorkbenchSnapshot`
+ * draws, and for the same reason one level up: `ide:openFile` falls back to
+ * external VS Code when the Editor switch is off, and must *not* fall back when
+ * an editor is up and refused. Flattening both into a failure would spawn a
+ * second editor every time a file was missing.
+ *
+ * Shorter budget than an edit, and longer than a snapshot. Nothing waits on
+ * this — no turn, no message — but it sits under a click, and a click that
+ * appears to do nothing for fifteen seconds is worse than one that falls back.
+ */
+export async function requestWorkbenchReveal(
+  projectRoot: string,
+  target: { readonly path: string; readonly line: number | null; readonly column: number | null }
+): Promise<WorkbenchRevealResult | undefined> {
+  const surface = [...byId.values()].find((s) => s.projectRoot === projectRoot)
+  if (surface === undefined || surface.view.webContents.isDestroyed()) return undefined
+
+  const requestId = randomUUID()
+  return new Promise<WorkbenchRevealResult>((resolve) => {
+    const settle = (result: WorkbenchRevealResult): void => {
+      if (!pendingReveals.delete(requestId)) return
+      clearTimeout(timer)
+      resolve(result)
+    }
+    const timer = setTimeout(() => {
+      settle({ requestId, ok: false, message: 'The editor did not answer.' })
+    }, 5_000)
+    pendingReveals.set(requestId, settle)
+    surface.view.webContents.send(WORKBENCH_REVEAL_CHANNEL, { ...target, requestId })
+  })
+}
 
 /** Snapshot requests in flight, by id. Same correlation as the edits below. */
 const pendingSnapshots = new Map<string, (result: WorkbenchSnapshotResult) => void>()

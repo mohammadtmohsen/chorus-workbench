@@ -1,3 +1,5 @@
+import { z } from 'zod'
+
 declare const brand: unique symbol
 
 /** Nominal typing so a ConversationId can never be passed where an EventId is wanted. */
@@ -16,11 +18,49 @@ export type UserInputId = Brand<string, 'UserInputId'>
 export type HandoffId = Brand<string, 'HandoffId'>
 export type AgentSessionId = Brand<string, 'AgentSessionId'>
 
-/** Which agent produced or is targeted by something. Extended per adapter package. */
-export type AgentId = 'codex' | 'claude'
+/**
+ * Which agent produced or is targeted by something.
+ *
+ * **The tuple is the declaration and the type is derived from it**, so a new
+ * agent is added in exactly one place. It used to be a hand-written union with
+ * the pair spelled out again at 119 further sites, of which the compiler saw
+ * eighteen — every `z.enum`, every equality predicate and every per-agent record
+ * kept compiling while silently excluding whoever was added.
+ */
+export const AGENT_IDS = ['codex', 'claude', 'deepseek'] as const
+
+export type AgentId = (typeof AGENT_IDS)[number]
 
 /** Who acted. `system` covers Chorus itself (timeouts, policy auto-decisions). */
-export type Actor = 'user' | 'system' | AgentId
+export const ACTORS = ['user', 'system', ...AGENT_IDS] as const
+
+export type Actor = (typeof ACTORS)[number]
+
+export const AgentIdSchema = z.enum(AGENT_IDS)
+export const ActorSchema = z.enum(ACTORS)
+
+/**
+ * Narrows an `Actor` — or anything else — to an agent.
+ *
+ * Replaces the `x === 'codex' || x === 'claude'` predicate and its negation,
+ * which were written out at twenty-two sites and are the shape that compiles
+ * happily while dropping an agent the union already knows about.
+ */
+export function isAgentId(value: unknown): value is AgentId {
+  return typeof value === 'string' && (AGENT_IDS as readonly string[]).includes(value)
+}
+
+/**
+ * A value per agent, built from the tuple rather than written out.
+ *
+ * The eleven per-agent object literals this replaces — `models`, `efforts`,
+ * `openChanges` and the defaults beside them — name their keys directly, so
+ * adding an agent left a hole that no typecheck reported. `Record<AgentId, T>`
+ * is only enforced when the object is *annotated* with it, and most were not.
+ */
+export function agentRecord<T>(value: (id: AgentId) => T): Record<AgentId, T> {
+  return Object.fromEntries(AGENT_IDS.map((id) => [id, value(id)])) as Record<AgentId, T>
+}
 
 /**
  * UUIDv7 — time-ordered, so `events.seq` and id ordering agree and an index on

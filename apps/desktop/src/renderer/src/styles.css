@@ -65,6 +65,7 @@
 
   --voice-codex: #7fd1c1;
   --voice-claude: #e9a05c;
+  --voice-deepseek: #b49ae8;
   --danger: #f85149;
 
   /*
@@ -100,6 +101,7 @@
   /* Voices. Cool and warm so they separate peripherally, not on inspection. */
   --codex: var(--voice-codex);
   --claude: var(--voice-claude);
+  --deepseek: var(--voice-deepseek);
   --alert: var(--danger);
 
   /*
@@ -232,6 +234,114 @@
    */
   --sidebar: 248px;
   /*
+   * The masthead's height, and the global note's top edge.
+   *
+   * Two rules have to agree on it and they are in different stacking worlds —
+   * the row is a flex item in `.stage`, the note is fixed to the viewport — so
+   * neither can measure the other. A number in both places would be the same
+   * kind of number `--sidebar` above exists to stop being.
+   */
+  --masthead: 31px;
+  /*
+   * The note's type, in one place because two shells and one shared editor all
+   * have to agree on it. `--note-line` is the line box: the padding that centres
+   * one line in the masthead's row is derived from it, and so is the editor's
+   * own line-height, so changing the font moves both instead of leaving a
+   * resting row the text no longer fits.
+   *
+   * **The app's own size, not a smaller one.** It was 12px in an 18px box, which
+   * read as a caption next to everything around it — and a note is prose someone
+   * writes and comes back to, not a label. `body` is 13px at `line-height: 1.6`,
+   * so the line box follows the size up: 21px is that ratio to the pixel, and
+   * leaving it at 18 would have set the app's type in a caption's line spacing.
+   *
+   * Everything else measured here is derived — the resting row, the drag grip,
+   * the divider, the masthead padding — so this pair is the only thing to change.
+   */
+  --note-font: 13px var(--ui-font);
+  --note-line: 21px;
+  /*
+   * Code inside a note, which is warm where the note's prose is cool.
+   *
+   * Its own token rather than `--voice-claude`, which is the identical hue and
+   * would be the wrong borrowing: that colour means "Claude said this", and the
+   * note's accent was chosen precisely because it is *not* a voice. Rather than
+   * `--tok-number` too — that is the number colour, and a reader would fairly
+   * ask why a backtick made something a number.
+   */
+  --note-code: #e9a05c;
+  /*
+   * A note's own padding, declared once because two rules read it.
+   *
+   * **At the root rather than on `.note-body`, and that is not arbitrary.** They
+   * were defaulted to zero on the body while the global note declared its real
+   * values on the body's *parent* — and a child re-declaring a custom property
+   * shadows what it would otherwise inherit, so everything downstream read zero.
+   * A root default cannot shadow anything.
+   */
+  --note-pad-x: calc(var(--step) * 4);
+  --note-pad-y: 0px;
+  /*
+   * The gutter a note keeps clear on its left, for the drag grip.
+   *
+   * Reserved rather than made on hover: a handle that appeared by pushing the
+   * text sideways would move every line under the pointer, and the thing you
+   * were about to grab would be the thing that moved. The gutter is always
+   * there and usually empty.
+   */
+  --note-grip: 18px;
+  /*
+   * How round a note's corners are, in one place because the two notes have to
+   * agree and only show different corners of it.
+   *
+   * **The whole shorthand, not a length.** The global note is flush to the
+   * window's top and right and cannot be round there, so its shape is dictated
+   * rather than chosen — which makes it the one to match. A project's note
+   * floats and was round on all four, and two notes with different silhouettes
+   * read as two different boxes rather than the same thing in two places.
+   */
+  --note-radius: 0 0 0 10px;
+  /*
+   * How far the mark's colour bleeds in from the left edge before it is gone.
+   *
+   * A rule on its own is a line; a rule with the colour falling away behind it
+   * reads as light coming off it, which is what makes a note look like a note
+   * rather than a box with a border. One value because both notes carry it and
+   * the whole point is that they match.
+   */
+  --note-glow: 150px;
+  /*
+   * The left padding, and the only side made of three parts: the same pad every
+   * other edge gets, then the gutter, then that pad again.
+   *
+   * Twice rather than once, because the grip needs room on *both* sides of it. A
+   * gutter exactly one icon wide put the dots hard against the note's own edge —
+   * touching the rule on the left, touching the first word on the right — which
+   * reads as something that overflowed rather than something to take hold of.
+   */
+  --note-pad-l: calc(var(--note-pad-x) * 2 + var(--note-grip));
+  /*
+   * The mark on a note's left edge, and it is deliberately not the accent.
+   *
+   * The accent is this app's "worth your attention" blue and is everywhere else;
+   * a note wearing it read as another piece of app chrome. This says "yours, not
+   * the app's" at a glance.
+   *
+   * **It began as a tinted ground and is an edge because that failed.** A page of
+   * text over a coloured field reads worse than the same text on a flat one,
+   * measured against a flat dark reference. Moving the colour to a 3px margin
+   * keeps the signal and gives the words a plain surface.
+   *
+   * Its own token rather than `--danger`, which is a lighter red meaning alarm.
+   * Darker than that on purpose: this one is a solid fill behind a line of text
+   * at one row, so it is the only place in the app where a note's colour has to
+   * hold contrast rather than merely be seen.
+   *
+   * **One value for the edge and the fill**, so a note that is opened does not
+   * change colour — it only loses everything but its margin.
+   */
+  --note-tint: #d3453e;
+  /*
    * The quick rail's width, shared with everything that has to clear it.
    *
    * 64px held a 44×44 target with a 10px gutter either side — enough for the
@@ -352,6 +462,7 @@
 
     --voice-codex: #0e7469;
     --voice-claude: #9a520f;
+    --voice-deepseek: #5b3a9e;
     --danger: #cf222e;
   }
 }
@@ -1602,12 +1713,37 @@ body {
   align-items: center;
   flex: none;
   gap: calc(var(--step) * 3);
-  height: 31px;
+  height: var(--masthead);
   /* Clear of the traffic lights, which macOS draws over this row's left end. */
   padding: 0 calc(var(--step) * 4) 0 88px;
   border-bottom: 1px solid var(--border-default);
   background: var(--bg-chrome);
   -webkit-app-region: drag;
+}
+
+/*
+ * The handle gives way while the global note is grown, and it has to.
+ *
+ * A drag region swallows pointer input before the page sees it — the same fact
+ * `.workspace-tabstrip` records about the wheel, one event further up. Every
+ * other part of the window closes that note by taking focus off it, because
+ * blur is what collapses the box. This row could not: the press was consumed by
+ * the window server, the editor stayed focused, and the note sat open over an
+ * app that looked like it was ignoring the click.
+ *
+ * Conditional rather than removed. This is the window's only handle, and a
+ * window that cannot be moved is a worse bug than a note that will not close —
+ * so the region comes back the moment the note collapses. The cost is that the
+ * first press on this row closes the note instead of starting a drag, which is
+ * what a click outside is supposed to do anyway.
+ *
+ * `:has(~ …)` because `.masthead` *precedes* the note in `.stage`: the note is
+ * fixed to the window rather than living in the header, for the reason the
+ * comment above `GlobalNotes` in `App.tsx` gives. `data-focused` is that note's
+ * own open state, so nothing new has to be published for this.
+ */
+.masthead:has(~ .global-note[data-focused='true']) {
+  -webkit-app-region: no-drag;
 }
 
 .path {
@@ -1673,6 +1809,27 @@ body {
 
 .voice--claude {
   --voice: var(--claude);
+}
+
+.voice--deepseek {
+  --voice: var(--deepseek);
+}
+
+/*
+ * The API-key panel. Laid out like the other settings fieldsets; the two extra
+ * rules are the button row and the failure line, which no existing panel has
+ * because no other setting can refuse to save.
+ */
+.settings-key-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.settings-key-error {
+  margin: 8px 0 0;
+  color: var(--danger);
+  font-size: 12px;
 }
 
 /* The one motion moment: a voice breathes while it is mid-turn. */
@@ -1950,6 +2107,10 @@ body {
 
 .entry--claude {
   --voice: var(--claude);
+}
+
+.entry--deepseek {
+  --voice: var(--deepseek);
 }
 
 .entry--system {
@@ -3438,6 +3599,10 @@ body {
   --voice: var(--claude);
 }
 
+.question--deepseek {
+  --voice: var(--deepseek);
+}
+
 .question-head {
   display: flex;
   align-items: center;
@@ -4696,6 +4861,60 @@ input::placeholder {
 }
 
 /*
+ * A review loop's state, above the composer.
+ *
+ * In the conversation column rather than over the pane, so it needs no shell
+ * overlay — nothing here is drawn on top of a project's workbench view.
+ *
+ * It stays up after the run ends, because the row is where a terminal run that
+ * still owns its agents says so and offers Restart. A row that vanished on
+ * completion would take that remedy with it.
+ */
+.collaboration-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: calc(var(--step) * 2);
+  padding: var(--step) calc(var(--step) * 2);
+  margin: 0 0 var(--step);
+  border-radius: var(--radius-sm, 6px);
+  background: color-mix(in srgb, var(--voice) 6%, transparent);
+  font-size: 0.85em;
+  color: var(--text-muted);
+}
+
+.collaboration-row-state {
+  min-width: 0;
+}
+
+.collaboration-row-drain {
+  display: flex;
+  align-items: baseline;
+  gap: var(--step);
+  white-space: nowrap;
+}
+
+/*
+ * A button rather than a label, because it is the only thing on the row that
+ * does something — and `Stop collaboration` rather than `Stop`, since the
+ * agent's turn deliberately keeps running and a shorter word would be a lie the
+ * transcript contradicts a moment later.
+ */
+.collaboration-row-stop {
+  border: 0;
+  background: none;
+  padding: 0;
+  font: inherit;
+  color: var(--voice);
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.collaboration-row-stop:hover {
+  text-decoration: underline;
+}
+
+/*
  * The second line, which exists so `Go ahead` is not read as part of the first.
  *
  * `flex-basis: 100%` in a wrapping row is a line break without a new grid area,
@@ -4717,6 +4936,12 @@ input::placeholder {
   padding: 0;
   border: 0;
   background: none;
+  /*
+   * A button centres its text, and these are sized to their own label — so the
+   * centring is invisible until a label is long enough to wrap, and then one
+   * row in a left-aligned column is suddenly centred over two lines.
+   */
+  text-align: left;
   font-family: var(--mono);
   font-size: 10px;
   letter-spacing: 0.06em;
@@ -6128,15 +6353,19 @@ input::placeholder {
   display: flex;
   flex: 0 1 auto;
   /*
-   * Wide enough to still be a name.
+   * A floor, and no ceiling: the tab is as wide as what it says.
    *
    * 84px held a truncated word and the voice dots and nothing else, so a pane
    * with five sessions gave you five identical stubs — the tab strip stopped
-   * answering the only question it exists for. Past this width the strip
-   * scrolls instead, which costs a gesture rather than the information.
+   * answering the only question it exists for. 160px is that floor.
+   *
+   * The 260px cap went with it, because a tab now carries a name *and* the
+   * folder that name belongs to and there is no width at which truncating that
+   * is better than scrolling. `flex: 0 1 auto` above is what makes the pair
+   * work: the basis is the content, and 160px is as far as crowding may squeeze
+   * it before the strip scrolls instead.
    */
   min-width: 160px;
-  max-width: 260px;
   height: 34px;
   margin-bottom: -1px;
   margin-right: calc(var(--step) * 1.5);
@@ -6277,17 +6506,47 @@ input::placeholder {
   opacity: 1;
 }
 
+/*
+ * The tab while its project is being named: a field, and the part that is not
+ * editable sitting beside it.
+ *
+ * The folder is drawn rather than typed into, because renaming a project moves
+ * a row in the registry and never a directory on disk. Showing it here is what
+ * makes that legible at the moment it matters — you can see the half you are
+ * not changing while you change the other half.
+ */
 .workspace-tab-rename {
-  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: calc(var(--step) * 1.5);
+  flex: 1 1 auto;
   min-width: 0;
-  margin: 4px;
+  height: 100%;
+  padding: 0 calc(var(--step) * 3);
+}
+
+.workspace-tab-rename-field {
+  flex: 1 1 auto;
+  min-width: 0;
   padding: 0 5px;
   border: 1px solid var(--muted);
-  border-radius: 0;
-  background: var(--sunken);
-  color: var(--bone);
-  font: 11px var(--mono);
+  border-radius: 4px;
+  background: var(--bg-control);
+  color: var(--text-primary);
+  font: 13px var(--ui-font);
   outline: none;
+}
+
+.workspace-tab-rename-field:focus-visible {
+  border-color: var(--accent-text);
+}
+
+/* Muted, because it is context rather than the name. */
+.workspace-tab-folder {
+  flex: none;
+  color: var(--text-muted);
+  font: 13px var(--ui-font);
+  white-space: nowrap;
 }
 
 .workspace-pane-close {
@@ -6849,6 +7108,39 @@ input::placeholder {
   color: var(--text-secondary);
 }
 
+/*
+ * The standing-instruction toggle, beside the editor button.
+ *
+ * A word rather than an icon, and `flex: none` like its neighbour so the row's
+ * shortfall keeps going to the path pill. There is no glyph that means "answer
+ * in my own language", and an invented one would need a tooltip to explain it —
+ * which is the thing the row deliberately does not have.
+ */
+.composer-style {
+  display: inline-flex;
+  align-items: center;
+  flex: none;
+  height: 28px;
+  padding: 0 8px;
+  border: 1px solid var(--border-default);
+  border-radius: 8px;
+  background: var(--bg-surface);
+  color: var(--text-secondary);
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.composer-style[aria-pressed='true'] {
+  color: var(--text-primary);
+  border-color: var(--border-strong);
+}
+
+/* Mid-turn, and while the respawn is in flight. Both mean "not now". */
+.composer-style:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
 .ide-source-icon {
   width: 14px;
   height: 14px;
@@ -7343,13 +7635,17 @@ input::placeholder {
   padding: 0;
   list-style: none;
   /*
-   * One tile plus one gap — the distance a tile travels to swap places with its
-   * neighbour, declared once here and multiplied by a whole number of tiles in
-   * `QuickRail`. Written from the two values it is made of rather than as `50px`,
-   * so changing either moves the animation with it. Every tile in the rail is
-   * this size; the drag preview is exact rather than approximate because of it.
+   * One card plus one gap — the distance a card travels to swap places with its
+   * neighbour, declared once here and multiplied by a whole number of cards in
+   * `QuickRail`. Written from the values it is made of rather than as `85px`, so
+   * changing either moves the animation with it.
+   *
+   * The card's side is the rail minus its left inset, because the project card
+   * is square and fills that box; the gap is the sessions group's own, which is
+   * wider than this rule's `gap` above. Only projects are dragged, so this is
+   * measured on them rather than on the 44px buttons at the head and foot.
    */
-  --rail-step: calc(44px + var(--step) * 2);
+  --rail-step: calc(var(--rail) - var(--step) * 2 + var(--step) * 5);
 }
 
 /*
@@ -7374,12 +7670,13 @@ input::placeholder {
 }
 
 /*
- * Room for what hangs off a tile, not just between the tiles.
+ * Room between two-line cards, which is not the same as room between tiles.
  *
- * At 8px the session column was tight enough that a badge — which sits 6px
- * *above* its tile's top edge — landed on the tile above it, and the state dot
- * on the bottom-right corner touched the one below. The gap has to clear the
- * two things that deliberately overhang.
+ * It was sized for overhang: at 8px a badge sitting 6px above its tile's top
+ * edge landed on the tile above it, and the state dot on the bottom-right
+ * corner touched the one below. Nothing overhangs now — both marks became a
+ * line of type inside the card — so the 15px is spacing and only spacing, and a
+ * card carrying two lines wants at least that much air around it.
  *
  * Only the sessions: the foot group already spaces itself with the rules around
  * the account block, and the two buttons at the top are a pair.
@@ -7559,17 +7856,51 @@ input::placeholder {
 }
 
 /*
- * A project, as two letters.
+ * A project, by name, across the whole rail.
  *
- * Deliberately the same tile as a session rather than a new shape: they are one
- * column and a second visual language down the same rail would read as two rails
- * that happen to be adjacent. What separates them is the group boundary and the
- * mark below, not the tile.
+ * Two letters were a puzzle rather than a label: `NS` and `PT` are only learned
+ * by opening them, so a column of initials said which projects exist without
+ * saying which is which. The name needs no decoding, so the card gives up being
+ * a 44px square and takes the rail's width — the shape the account block at the
+ * foot has always used, and the one this was asked to match.
+ *
+ * Edge to edge, and nothing hangs off it any more. Three passes went on trying
+ * to place a badge and a dot on the corners of a card that has no ground around
+ * it — inset, centred, flush — and each one either clipped a mark or took its
+ * room out of the name. Both are gone; the card says the same things on a second
+ * line of type, which is inside the box by construction.
+ *
+ * Two rows, centred as a block rather than spread over the height: `align-items`
+ * would centre each row inside its own stretched half and push them 20px apart.
+ * With `align-content` the pair sits together and a card with no second line is
+ * still centred, which is most of them.
+ *
+ * The rail's own width is unchanged, so most names are cut. A few characters of
+ * the real thing beat two initials of it; `aria-label` still carries all of it.
  */
 .rail-project {
+  /* What a state wash is mixed into, so hover still answers on a washed card —
+     see the wash rule's own note about specificity. */
+  --card-ground: var(--bg-surface);
+
+  align-content: center;
+  justify-items: start;
+  row-gap: 2px;
+  /*
+   * Square, said as a ratio rather than as 70px.
+   *
+   * The side is whatever the rail's content box is, so the card stays square if
+   * `--rail` ever moves. Written as a height it would be the same number twice,
+   * in two places, and the second one would be the one that went stale.
+   */
+  aspect-ratio: 1;
+  width: 100%;
+  height: auto;
+  margin: 0;
+  padding: 0 calc(var(--step) * 2);
   font-size: 12px;
   font-weight: 600;
-  letter-spacing: 0.04em;
+  letter-spacing: 0;
 }
 
 /*
@@ -7588,38 +7919,96 @@ input::placeholder {
 }
 
 /*
- * A session, as two letters and a state mark.
+ * A card, as a name and a state mark.
  *
- * The monogram is the thing you learn; the mark is the thing you scan. Both are
+ * The name is the thing you read; the mark is the thing you scan. Both are
  * decoration as far as assistive technology is concerned — the button's
  * `aria-label` carries the title, the state and the count as words.
  */
 /*
- * The monogram fills the tile; the marks hang off its corners.
+ * The name, then what the project wants from you — both as type, both inside.
  *
- * They used to be stacked — two letters over a 7px dot, both shrunk to fit —
- * which spent the tile on a column of two tiny things. A monogram that owns the
- * square is the thing you learn, and the state and the count are corner marks on
- * it rather than competitors for the middle.
+ * Neither line is positioned. That is the whole repair: a mark placed against a
+ * corner has to be told what to do about an edge it cannot see, and the rail's
+ * scroller clips. A row in a two-row grid has nothing to say about edges.
  */
 .rail-session {
   color: var(--text-secondary);
 }
 
-.rail-session-monogram {
+.rail-project-name {
+  overflow: hidden;
+  max-width: 100%;
   font-family: var(--ui-font);
-  font-size: 15px;
-  font-weight: 600;
-  letter-spacing: 0.02em;
   line-height: 1;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
-/* Bottom-right, half off the edge, the way a presence dot sits on an avatar. */
-.rail-session .state-mark {
-  position: absolute;
-  right: -3px;
-  bottom: -3px;
-  box-shadow: 0 0 0 2px var(--bg-chrome);
+/*
+ * The folder under the name, and the two are allowed to repeat each other.
+ *
+ * A project is usually named after the directory it opens, so this line often
+ * says the name again — and the case it is here for is the one where it does
+ * not: four clones of one repository, or a project renamed to something a
+ * person calls it. Dimmer than the status line, because it never changes and
+ * never asks for anything.
+ */
+.rail-project-folder {
+  color: var(--text-disabled);
+}
+
+/*
+ * The status line, coloured the way its mark was.
+ *
+ * The same tokens the state marks use — danger for a blocked approval and for a
+ * failed turn, the accent for a question, the working agent's own voice — so the
+ * rail did not gain a second colour language when it lost the dot. Read at a
+ * glance it is still just a colour on a card; read properly it says which.
+ *
+ * 9px against the name's 12px, and lighter: two lines the same weight would be
+ * two things competing, and the name is the one you are looking for.
+ */
+.rail-project-folder,
+.rail-project-status {
+  overflow: hidden;
+  max-width: 100%;
+  font-family: var(--ui-font);
+  font-size: 9px;
+  font-weight: 500;
+  letter-spacing: 0.01em;
+  line-height: 1.2;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.rail-project-status {
+  color: var(--text-muted);
+}
+
+.rail-project-status[data-state='approval'],
+.rail-project-status[data-state='failed'] {
+  color: var(--danger);
+}
+
+.rail-project-status[data-state='question'] {
+  color: var(--accent-text);
+}
+
+.rail-project-status[data-state='working'] {
+  color: var(--text-primary);
+}
+
+.rail-project-status[data-state='working'][data-voice='codex'] {
+  color: var(--voice-codex);
+}
+
+.rail-project-status[data-state='working'][data-voice='claude'] {
+  color: var(--voice-claude);
+}
+
+.rail-project-status[data-state='working'][data-voice='deepseek'] {
+  color: var(--voice-deepseek);
 }
 
 /*
@@ -7643,6 +8032,130 @@ input::placeholder {
 /* Open in a pane somewhere, but not the one on screen. */
 .rail-session[data-placement='open'] {
   color: var(--text-primary);
+}
+
+/*
+ * The card wears what it is doing.
+ *
+ * One tint per state, named once here and spent twice below — a strong share in
+ * the border and a weak one in the ground. The tints are the status line's, so
+ * the card and its own last line cannot disagree about what red means, and the
+ * rail has one colour vocabulary rather than two.
+ *
+ * Idle is the state with no colour, and it is excluded rather than given a
+ * transparent tint: `color-mix` with `transparent` mixes the alpha too, which
+ * would leave every resting card slightly see-through against the chrome.
+ */
+.rail-project[data-state='approval'],
+.rail-project[data-state='failed'] {
+  --state-tint: var(--danger);
+}
+
+.rail-project[data-state='question'] {
+  --state-tint: var(--accent-text);
+}
+
+/*
+ * Working is neutral until exactly one agent owns the turn, for the reason the
+ * state mark gives: a project with both of them running is not Claude's.
+ */
+.rail-project[data-state='working'] {
+  --state-tint: var(--text-primary);
+}
+
+.rail-project[data-state='working'][data-voice='codex'] {
+  --state-tint: var(--voice-codex);
+}
+
+.rail-project[data-state='working'][data-voice='claude'] {
+  --state-tint: var(--voice-claude);
+}
+
+.rail-project[data-state='working'][data-voice='deepseek'] {
+  --state-tint: var(--voice-deepseek);
+}
+
+/*
+ * `[data-state]` is carried for the specificity, not for the match.
+ *
+ * `.rail-item:hover:not(:disabled)` sets a background outright and scores three,
+ * so a one-class-one-attribute rule here would lose the wash the moment the
+ * pointer arrived — the card would drop its colour under your hand, which reads
+ * as a fault rather than as feedback. Matching the attribute twice scores three
+ * as well, and this rule is later. Hover still answers, through `--card-ground`.
+ */
+.rail-project[data-state]:not([data-state='idle']) {
+  border-color: color-mix(in srgb, var(--state-tint) 40%, var(--border-default));
+  background: color-mix(in srgb, var(--state-tint) 12%, var(--card-ground));
+}
+
+.rail-project:hover:not(:disabled),
+.rail-project:focus-visible {
+  --card-ground: var(--bg-control);
+}
+
+/*
+ * The ground breathes under the travelling segment while an agent works.
+ *
+ * Two motions on one card, which the orbit's own note argues against — so they
+ * are given the **same 2.6s period** rather than two rhythms that drift in and
+ * out of phase. That drift is what "beating against each other" means; matched,
+ * the card reads as one thing moving.
+ *
+ * A percentage is animated rather than the colour, and that is not a style
+ * choice. `@property` is what lets a custom property interpolate at all, and a
+ * `<percentage>` keyframe can be written as two literals — a `<color>` keyframe
+ * would have to say `var(--bg-control)`, and a variable-dependent keyframe is
+ * the one shape of this that fails silently. The colour is then mixed from the
+ * lift, so the swing is exactly the surface-to-control step hover already uses.
+ *
+ * Doubled class for the specificity: `.rail-project:hover` scores three and sets
+ * `--card-ground` outright, so at one class and one attribute the breath would
+ * stop under the pointer and read as a stall.
+ */
+@property --card-lift {
+  syntax: '<percentage>';
+  initial-value: 0%;
+  inherits: false;
+}
+
+.rail-item.rail-project[data-state='working'] {
+  --card-ground: color-mix(in srgb, var(--bg-control) var(--card-lift), var(--bg-surface));
+
+  animation: card-breathe 2.6s ease-in-out infinite;
+}
+
+@keyframes card-breathe {
+  0%,
+  100% {
+    --card-lift: 0%;
+  }
+
+  50% {
+    --card-lift: 100%;
+  }
+}
+
+/*
+ * Motion goes; the state does not — the same trade the orbit makes one screen
+ * down. With no animation `--card-lift` rests at its initial `0%`, so the card
+ * keeps its wash and simply stops breathing.
+ */
+@media (prefers-reduced-motion: reduce) {
+  .rail-item.rail-project[data-state='working'] {
+    animation: none;
+  }
+}
+
+/*
+ * The one on screen keeps the accent edge, whatever it is doing.
+ *
+ * Its wash stays — that is the state — but the border is how the rail says
+ * "this one", the same way the pane and the tab do, and a project you are
+ * looking at while it works should not lose that to its own voice.
+ */
+.rail-project[data-placement='active'][data-state] {
+  border-color: var(--accent-text);
 }
 
 /*
@@ -7791,38 +8304,8 @@ input::placeholder {
 }
 
 /*
- * A count, and only when there is one.
- *
- * Never a zero: "nothing is waiting" is the ordinary state and deserves no
- * pixels at all.
+ * Arrange mode says so on the shortcut itself, which becomes the handle.
  */
-.rail-badge {
-  position: absolute;
-  top: -6px;
-  right: -6px;
-  display: grid;
-  place-items: center;
-  min-width: 18px;
-  height: 18px;
-  padding: 0 5px;
-  border-radius: 999px;
-  /* The accent, not the foreground: a count is the one number on the rail that
-     is asking for something, and it sits on the corner of a bordered tile. */
-  background: var(--accent-text);
-  color: var(--bg-canvas);
-  font-family: var(--ui-font);
-  font-size: 11px;
-  font-weight: 600;
-  line-height: 1;
-  box-shadow: 0 0 0 2px var(--bg-chrome);
-}
-
-.rail-badge[data-state='waiting'] {
-  background: var(--danger);
-  color: var(--bg-canvas);
-}
-
-/* Arrange mode says so on the shortcut itself, which becomes the handle. */
 .rail-session-grip {
   position: absolute;
   inset: 0;
@@ -7925,6 +8408,10 @@ input::placeholder {
 
 .rail-account[data-agent='claude'] {
   --voice: var(--voice-claude);
+}
+
+.rail-account[data-agent='deepseek'] {
+  --voice: var(--voice-deepseek);
 }
 
 /* The provider, in its own colour and the right way up. */
@@ -8794,6 +9281,23 @@ input::placeholder {
   padding-inline: 0;
 }
 
+/*
+ * The project card's cast is read, not pressed.
+ *
+ * `.voice` is shared with the composer's chips, which are buttons, so it carries
+ * a pointer cursor and a hover border. Both are a lie on a `<p>` — and the
+ * margin is the browser's, which a button never had. Specificity ties with
+ * `.voice:hover:not(:disabled)`, so this wins by being further down the file.
+ */
+.session-settings-agents .voice {
+  margin: 0;
+  cursor: default;
+}
+
+.session-settings-agents .voice:hover {
+  border-color: transparent;
+}
+
 .session-settings-folder {
   display: flex;
   align-items: center;
@@ -9546,7 +10050,21 @@ input::placeholder {
  */
 .conversation-dock {
   position: relative;
-  z-index: 1;
+  /*
+   * Above the transcript, not merely above nothing.
+   *
+   * It was 1, which was enough for the joint this rule was written for and not
+   * for the hover tooltip added later. `position: relative` with a `z-index`
+   * makes this a stacking context, so the tooltip's own `z-index` is settled
+   * *inside* the dock and cannot lift it: however high that number goes, the
+   * whole dock still competes with the transcript at the dock's value. At 1 it
+   * lost to positioned entries and the tooltip was drawn behind a message.
+   *
+   * 10 clears everything the transcript uses and stays well under the notes
+   * pad's 20, which shares this column's stacking context and has to remain on
+   * top of both.
+   */
+  z-index: 10;
   flex: 0 0 auto;
   display: flex;
   gap: 4px;
@@ -9618,12 +10136,11 @@ input::placeholder {
   position: relative;
   flex: 0 1 auto;
   /*
-   * The project tab's own numbers. `min-width` is the one that will bite in a
-   * narrow column — 160px is what stops a tab being a truncated stub, and past
-   * it the strip scrolls, which costs a gesture rather than the name.
+   * The project tab's own numbers, and it keeps following them: a floor and no
+   * ceiling, so the tab is as wide as the conversation's name and 160px is only
+   * how far crowding may squeeze it before the strip scrolls instead.
    */
   min-width: 160px;
-  max-width: 260px;
   height: 34px;
   display: flex;
   align-items: center;
@@ -9653,6 +10170,8 @@ input::placeholder {
 .conversation-dock-tab-main {
   display: flex;
   align-items: center;
+  /* The project tab's spacing between a name and its state mark. */
+  gap: calc(var(--step) * 2);
   flex: 1 1 auto;
   min-width: 0;
   height: 100%;
@@ -9669,6 +10188,1176 @@ input::placeholder {
   cursor: default;
   outline: none;
   touch-action: none;
+}
+
+/*
+ * The tab while its conversation is being named.
+ *
+ * **This had no rule at all**, which is why the field collapsed to about one
+ * character: `size={1}` gives it a one-character intrinsic width on purpose —
+ * see the note in `ConversationColumn` — and a flex child does not grow unless
+ * it is told to, so nothing ever widened it back. The `size` attribute is what
+ * stops the *tab* resizing on a double-click; `flex: 1 1 auto` is what fills the
+ * tab once it has stopped.
+ *
+ * `min-width: 0` is the other half of that pair. A flex item's automatic minimum
+ * is its content, and a field holding a long name would otherwise refuse to
+ * shrink below it and push the tab wider than the strip.
+ */
+.conversation-dock-tab-rename {
+  flex: 1 1 auto;
+  min-width: 0;
+  margin: 0 calc(var(--step) * 1.5);
+  padding: 0 5px;
+  border: 1px solid var(--muted);
+  border-radius: 4px;
+  background: var(--bg-control);
+  color: var(--text-primary);
+  font: inherit;
+  outline: none;
+}
+
+.conversation-dock-tab-rename:focus-visible {
+  border-color: var(--accent-text);
+}
+
+/*
+ * The full title, under the tab, on hover.
+ *
+ * It **replaced** the native tooltip rather than joining it: two tooltips on one
+ * element open on the same hover and draw over each other, which is the fault
+ * the rail's preview card already had. The OS one also takes about a second,
+ * which is a long time to wait to read a name the tab truncated to nothing.
+ *
+ * Placed by an inline `left` *or* `right` — see `showHint`. Anchoring it to the
+ * near edge is what keeps it inside the column, and that matters more here than
+ * it looks: the workbench beside it is a native view composited over the
+ * window, so a tooltip that crossed the boundary would be painted underneath it
+ * and simply disappear rather than overlap.
+ */
+/*
+ * The project's scratchpad, docked above its conversations.
+ *
+ * `flex: none` so it never competes with the transcript for height: the pad is
+ * a line until it is opened, and an opened one takes what the textarea asks for
+ * and no more.
+ */
+/*
+ * The icon and the field, on one line.
+ *
+ * **In the flow, and that is the change.** This used to be a bar with a panel
+ * hanging off it, absolutely positioned and lifted over the transcript — two
+ * elements for one piece of text, and a dropdown to edit a single line. The
+ * field is the note at every size now, so the row grows and the conversations
+ * below move down with it. Nothing is covered and nothing has to be dismissed.
+ *
+ * **The row stays one line; the field grows out of it.** Focusing takes the
+ * field out of the flow, so its height stops being the row's height and the
+ * expansion covers the conversations rather than pushing them down. The lift is
+ * back for the same reason it was needed before: the transcripts are later
+ * siblings and would otherwise paint on top.
+ *
+ * The column above is a stacking context of its own, so this number competes
+ * only with the column's own contents and cannot reach anything outside it.
+ */
+.project-notes {
+  position: relative;
+  z-index: 20;
+  flex: 0 0 auto;
+  display: flex;
+  align-items: flex-start;
+  gap: calc(var(--step) * 1.5);
+  padding: calc(var(--step) * 1.5) calc(var(--step) * 2) 0;
+
+  /* Only the vertical pad is this note's own — the horizontal pair is inherited
+     from the root, so the two notes cannot drift apart on it. Declared here
+     rather than on the body, so this row can be sized from the same number the
+     body pads itself with. */
+  --note-pad-y: calc(var(--step) * 1.5);
+
+  /*
+   * The row keeps its height when the note opens.
+   *
+   * **An absolutely positioned element contributes none**, so the moment the body
+   * leaves the flow this row would collapse to its padding and everything below
+   * would jump up by the height of a line. The original code had a slot element
+   * holding the row open for exactly this reason; it went when the editor
+   * replaced the textarea, and the note icon was accidentally covering for it
+   * until the icon went too.
+   *
+   * Stated as the line plus the body's own padding rather than a measured pixel
+   * count, so changing the note's type or padding moves this with it.
+   */
+  min-height: calc(var(--note-line) + var(--note-pad-y) + var(--step) * 1.5);
+}
+
+/*
+ * A project's note grows over its own conversations, and stops at a quarter of
+ * the window.
+ *
+ * A quarter rather than the global note's half, because this one has a
+ * transcript under it that has to stay readable — the global note covers a
+ * frozen still of an editor, and this covers the thing you are working in.
+ */
+.project-notes .note-editor {
+  overflow: hidden;
+  max-height: calc(var(--note-line) + var(--note-pad-y));
+}
+
+.project-notes[data-focused='true'] .note-editor {
+  /* The dragged height, or a quarter of the window — see the global note's twin
+     for why the editor is what carries this rather than the box, and why a
+     dragged one has to be a height as well as a ceiling. */
+  height: var(--note-h, auto);
+  max-height: var(--note-h, 25vh);
+  overflow-y: auto;
+}
+
+/*
+ * Focused: out of the flow, growing downward over the conversations.
+ *
+ * **The shadow earns its place here and did not before.** In the flow the box
+ * was part of the strip; floating over text, a bordered panel sitting flat reads
+ * as a rendering fault. The values match the app's other floating surfaces
+ * rather than being chosen here.
+ */
+.project-notes[data-focused='true'] .note-body {
+  position: absolute;
+  top: calc(var(--step) * 1.5);
+  right: calc(var(--step) * 2);
+  /*
+   * Pinned to the right edge and sized, rather than pinned to both.
+   *
+   * `left: auto` is what makes the note grow leftward under the handle: with a
+   * left *and* a right and a width, the width would lose — a box cannot honour
+   * all three, and the one CSS drops is the right edge, so the note would have
+   * grown away from the edge being dragged.
+   *
+   * The fallback is the column minus its own padding twice over, which is
+   * exactly where the two edges used to put it. The same left as the collapsed
+   * row, in other words: it was `--step * 5` once, a number that matched neither
+   * state, and with the note icon gone both are the container's padding — so
+   * opening the note moves nothing sideways.
+   */
+  left: auto;
+  width: var(--note-w, calc(100% - var(--step) * 4));
+  /* Inside its column whatever it was dragged to. The size is a fraction of the
+     window, so a wide note in a narrow pane would otherwise reach past it. */
+  max-width: calc(100% - var(--step) * 4);
+  z-index: 21;
+  border-radius: var(--note-radius);
+  /*
+   * A flat page with the rose on its edge, rather than under the words.
+   *
+   * The tint was the ground and it cost the thing the note is for: a page of
+   * text over a coloured field reads worse than the same text on a flat one, and
+   * next to Slack's flat dark ground the difference was the whole complaint. The
+   * colour still says "this is a note" — it has just moved to the margin.
+   *
+   * An inset shadow rather than a border, so the mark costs no layout: a border
+   * would widen the box and, on the global note, add a pixel to a resting height
+   * that is derived from the masthead's own.
+   */
+  background:
+    linear-gradient(
+      to right,
+      color-mix(in srgb, var(--note-tint) 20%, transparent),
+      transparent var(--note-glow)
+    ),
+    var(--bg-control);
+  box-shadow:
+    inset 3px 0 0 var(--note-tint),
+    0 8px 28px rgb(0 0 0 / 55%);
+}
+
+/*
+ * A project holding a note says so at rest.
+ *
+ * The text alone was carrying that once, and one coloured line at the top of a
+ * column is easy to read past. A mark on the edge makes the whole row the
+ * signal without putting anything under the words — which is what the fill that
+ * used to be here did, and what cost it against a flat dark reference.
+ *
+ * **The same mark focused**, so opening a note does not change what colour it
+ * is; only the page behind it arrives.
+ */
+.project-notes[data-filled='true'][data-focused='false'] .note-body {
+  /* The mark and the light off it: a note with something in it carries a rule
+     down its left edge with the colour falling away behind it, and an empty one
+     carries neither. */
+  background: linear-gradient(
+    to right,
+    color-mix(in srgb, var(--note-tint) 20%, transparent),
+    transparent var(--note-glow)
+  );
+  box-shadow: inset 3px 0 0 var(--note-tint);
+}
+
+/*
+ * The same padding open or closed, so the text does not move when the note
+ * grows. A row that padded differently when collapsed would shift every line in
+ * it the moment the caret arrived.
+ */
+.project-notes .note-body {
+  overflow: hidden;
+  /*
+   * The dragged width belongs to the resting row too.
+   *
+   * **Closing a narrowed note used to put it back against the column's left
+   * edge**, because the row is a flex box and this is a flex item: with no width
+   * of its own it is sized by its own text and starts where the column starts,
+   * so the note jumped sideways the moment the caret left it. The open panel is
+   * pinned to the right, so the closed one has to be as well or the two states
+   * are two different boxes.
+   *
+   * `margin-left` and not `justify-content`, and only once a width exists: a row
+   * nobody has dragged is still sized by its text, and pinning that one right
+   * would move every note that was never resized.
+   */
+  width: var(--note-w, auto);
+  max-width: 100%;
+}
+
+.project-notes[data-sized='true'] .note-body {
+  margin-left: auto;
+}
+
+/* The box the resize handles are placed against — see `NoteGrips`, which both
+   notes draw inside this element because it is the one they have in common. */
+.note-body {
+  position: relative;
+}
+
+/*
+ * No `:focus-visible` border here, deliberately.
+ *
+ * A text field matches `:focus-visible` on *any* focus, mouse included, so a
+ * rule colouring the border would put the outline straight back on every click
+ * — which is the thing being removed. The focused state is still unmistakable:
+ * the box gains a fill and a shadow, and both apply to keyboard and pointer
+ * alike, so nothing is lost for anyone navigating by keyboard.
+ */
+
+/*
+ * Downward, where the transcript's own offer goes upward.
+ *
+ * The two are the same control in different places. A passage in a transcript
+ * has room above it; the note is the top of the column, and an offer opening
+ * upward from it leaves the column entirely and is painted over by the project
+ * tab strip. `top` is the field's bottom edge — see `readSelection` — so this
+ * only has to clear it rather than reach back over it.
+ */
+.project-notes-selection {
+  z-index: 5;
+  transform: translate(-50%, 6px);
+}
+
+/* --------------------------------------------------------- the global note */
+
+/*
+ * The note that belongs to no project, sitting on the masthead's own row.
+ *
+ * **Fixed rather than a child of the header, and that is forced.** `.stage`
+ * clips its overflow and the masthead is 31px tall, so a field inside it would
+ * be cut off at the row's edge the moment a second line was typed. Fixed to the
+ * window is also the honest description: this is about the app, and the app is
+ * not a box in the layout.
+ *
+ * **One line at rest, on the version's line.** The vertical padding is derived
+ * from `--masthead` and the line box, so the resting height is exactly the row's
+ * and the first line sits where the version does. Growing changes the height
+ * below that line and never the line itself, so nothing jumps when the caret
+ * lands in it.
+ *
+ * `width` is written inline by the component as a percentage; the two bounds
+ * here are the same numbers `NOTE_SIZE` clamps to, kept as a second
+ * floor so a stored value from an older build cannot leave a field too narrow to
+ * find or too wide to escape.
+ *
+ * **Above everything except a modal.** 120 is the highest z-index in the app and
+ * belongs to a dialog; this sits at 110, so a dialog opened while the note is
+ * grown still comes out in front.
+ */
+.global-note {
+  position: fixed;
+  top: 0;
+  right: 0;
+  z-index: 110;
+  /*
+   * What the left edge was dragged to, or a quarter of the window.
+   *
+   * The fallback is `NOTE_SIZE.width.default` written twice, which is the same
+   * bargain the two bounds below already make: the renderer always sets the
+   * property, and this is the box before the first paint carries it.
+   */
+  width: var(--note-w, 25vw);
+  /*
+   * Room for a dragged height, which the bottom edge allows up to 90% of the
+   * window — plus the toolbar under it, which is not part of that number. 50vh
+   * was this note's whole ceiling before there was a way to ask for more, and
+   * leaving it would have quietly capped every drag at half the screen.
+   */
+  max-height: 95vh;
+  min-width: 25vw;
+  max-width: 90vw;
+  /* The one padding that is this note's alone: derived from the masthead, which
+     is what puts the resting line on the version's line. The horizontal pair is
+     the root's, shared with the project note. */
+  --note-pad-y: calc((var(--masthead) - var(--note-line)) / 2);
+
+  /* Clipped, so the mark follows the rounded corner rather than running square
+     past it. */
+  overflow: hidden;
+  /* It lies over the window's drag region, and a field you cannot select text in
+     because the window moves instead is worse than no field. */
+  -webkit-app-region: no-drag;
+}
+
+/*
+ * The space the editor stopped holding, moved out to the box.
+ *
+ * The text lost its top padding, which is right for a note that begins at its
+ * own edge — but this one begins at the *window's* edge, and the padding was
+ * what put its first line on the version's line. Dropping it outright would
+ * leave the resting row 10px short of the masthead and the text against the top
+ * of the screen. So the gap stays and only its owner changes: outside the
+ * editor, where it is the box sitting on the row rather than text sitting low
+ * in a box. On `.note-body` rather than on `.global-note` itself, because the
+ * width grip is absolutely positioned against the box and padding there would
+ * lift its top edge off the corner.
+ */
+.global-note .note-body {
+  padding-top: var(--note-pad-y);
+}
+
+/*
+ * Grown: out over the app, with a surface under it.
+ *
+ * At rest there is no box at all — the masthead is the surface, and the note
+ * reads as part of the title bar. The fill and the shadow arrive with the caret,
+ * which is the moment the text stops being a line in a row and starts being a
+ * pad over a workspace. The values match the app's other floating surfaces
+ * rather than being chosen here.
+ */
+.global-note[data-focused='true'] {
+  /*
+   * The corner belongs to the grown box, not the resting row.
+   *
+   * A one-line row has nothing to round: the radius only made the edge mark hook
+   * inward at its bottom, which reads as a stray curve rather than a corner. The
+   * box that grows over the app is a panel and wants one.
+   */
+  border-radius: var(--note-radius);
+  /* Flat, with the rose on the edge — see the project note's twin for why the
+     tint left the ground, and why this is an inset shadow rather than a
+     border. */
+  background:
+    linear-gradient(
+      to right,
+      color-mix(in srgb, var(--note-tint) 20%, transparent),
+      transparent var(--note-glow)
+    ),
+    var(--bg-control);
+  box-shadow:
+    inset 3px 0 0 var(--note-tint),
+    0 8px 28px rgb(0 0 0 / 55%);
+}
+
+/*
+ * A note with something in it says so at rest.
+ *
+ * `ProjectNotes`'s rule and its reasoning, which apply harder here: the text
+ * alone was carrying the signal, and one coloured line in a title bar is exactly
+ * the thing an eye reads past — the corner looked identical whether or not
+ * anything was written in it. A mark on the edge makes the whole box the signal.
+ *
+ * **The same mark focused**, so opening the note does not change what colour it
+ * is; only the page behind it arrives, and the drop shadow with it.
+ */
+.global-note[data-filled='true'][data-focused='false'] {
+  /* The mark and the light off it — see the project note's twin. */
+  background: linear-gradient(
+    to right,
+    color-mix(in srgb, var(--note-tint) 20%, transparent),
+    transparent var(--note-glow)
+  );
+  box-shadow: inset 3px 0 0 var(--note-tint);
+}
+
+/*
+ * And it keeps saying it while you are in it — `ProjectNotes`'s rule, same
+ * reasoning.
+ *
+ * Mixed into `--bg-control` rather than layered over it, so the grown box stays
+ * opaque over the workspace and only its hue moves. The shadow from the focused
+ * rule above is untouched, which is what still separates open from closed.
+ */
+
+/*
+ * The note itself, and there is no height written by anything now.
+ *
+ * A `contenteditable` sizes to its own content, so the box grows by existing
+ * rather than by being measured — the textarea this replaced needed an effect
+ * writing `scrollHeight` back on every keystroke, and that whole mechanism went
+ * with it. Two ceilings do the work instead: one line at rest, half the window
+ * when the caret is in it.
+ *
+ * Stated as the ceiling minus the padding rather than as `100%`: this is the
+ * only thing in a box with no other height to fill, so a percentage would
+ * resolve against a container that is itself sized by this element.
+ */
+.note-editor {
+  overflow: hidden;
+  max-height: calc(var(--note-line) + var(--note-pad-y));
+}
+
+.global-note[data-focused='true'] .note-editor {
+  /*
+   * The dragged height, or half the window.
+   *
+   * **What is dragged is this element rather than the box**, and that is what
+   * makes one custom property enough: the box is the editor plus the toolbar, so
+   * sizing the editor sizes the box without anything having to know what the bar
+   * costs. `useNoteSize` measures that difference when a drag starts, which is
+   * why the edge stays under the pointer.
+   *
+   * **A height *and* a ceiling, and the height is the half that was missing.** A
+   * `max-height` alone cannot make a box taller — it only stops one growing — so
+   * with a short note, dragging the bottom edge downward raised a limit nothing
+   * was reaching and moved nothing on screen. Dragging upward appeared to work,
+   * which is what made it look like the handle was half broken rather than the
+   * rule. Unset, `auto` hands the size back to the text and the ceiling below
+   * does its original job.
+   */
+  height: var(--note-h, auto);
+  max-height: var(--note-h, calc(50vh - var(--masthead) + var(--note-line) - 34px));
+  overflow-y: auto;
+}
+
+/*
+ * ProseMirror's own element, which is the thing that actually holds the text.
+ * `EditorContent` wraps it in a div, so the type and the caret belong here and
+ * the scrolling belongs to the wrapper above.
+ */
+/*
+ * Primary text, not the accent.
+ *
+ * The accent was right when a note was one line of hint: a short, deliberately
+ * tinted row in a corner. It is wrong for a document — a page of mid-blue on a
+ * ground tinted with the same blue is exactly as hard to read as it sounds, and
+ * that was the report. The tint stays where it earns its place, on the collapsed
+ * row, saying there is something written here.
+ */
+.note-editor .ProseMirror {
+  /*
+   * The padding is the editor's, not the box's, and that is what keeps the drag
+   * grip alive.
+   *
+   * The plugin hides the handle on `mouseleave` of the editor's own DOM. With
+   * the padding on the box around it, the blank space either side of a line was
+   * *outside* the editor — so moving the pointer off the words and into that
+   * margin left the editor and the handle vanished, where in Jira it stays. Here
+   * the margin is part of the thing being hovered.
+   */
+  /*
+   * **Nothing at the top.** The first line sits on the box's own top edge, so
+   * the text starts where the note starts. The bottom keeps its padding — a
+   * grown note ending flush on its last line reads as cut off rather than
+   * finished — and so does the left, which is the gutter the drag grip lives in.
+   */
+  padding: 0 var(--note-pad-x) var(--note-pad-y) var(--note-pad-l);
+  color: var(--bone);
+  /*
+   * A note is a place to paste a path, a URL or a stack frame, and none of those
+   * break at spaces. Without this each one is an unbreakable run that becomes
+   * the note's min-content width — which is the thing the column above had to be
+   * guarded against, and it is better not to produce it in the first place.
+   */
+  /* Fills a box that was dragged taller than its own text, so the caret lands
+     where you click and the drag gutter runs the whole height. A percentage
+     against an `auto` parent resolves to nothing, so this costs a note that was
+     never resized exactly nothing. */
+  min-height: 100%;
+  overflow-wrap: anywhere;
+  font: var(--note-font);
+  line-height: var(--note-line);
+  outline: none;
+}
+
+.note-editor .ProseMirror p {
+  margin: 0;
+}
+
+/*
+ * The placeholder, which is a `::before` on the first empty paragraph rather
+ * than a real one — TipTap has no `::placeholder` to correct, so the same
+ * quietness `.project-notes-field::placeholder` asks for is spelled out here.
+ */
+.note-editor .ProseMirror p.is-editor-empty:first-child::before {
+  content: attr(data-placeholder);
+  float: left;
+  height: 0;
+  pointer-events: none;
+  color: var(--text-placeholder);
+}
+
+/*
+ * What the marks look like. Written out because nothing else in this app renders
+ * a rich document — the transcript's markdown has its own rules and its own
+ * classes, and reaching for those would tie a note's appearance to a reply's.
+ */
+.note-editor .ProseMirror ul,
+.note-editor .ProseMirror ol {
+  margin: 0;
+  padding-left: calc(var(--step) * 6);
+}
+
+.note-editor .ProseMirror blockquote {
+  margin: 0;
+  padding-left: calc(var(--step) * 3);
+  border-left: 2px solid color-mix(in srgb, var(--accent-text) 40%, transparent);
+}
+
+.note-editor .ProseMirror code {
+  padding: 0 calc(var(--step) * 0.5);
+  border-radius: 3px;
+  /*
+   * Darker than the page with a hairline, which is the shape the reference uses
+   * and the reason its orange reads. A light wash over the ground was the
+   * opposite: it lifted the chip towards the text colour and left the two
+   * competing.
+   */
+  background: color-mix(in srgb, var(--sunken) 80%, transparent);
+  border: 1px solid color-mix(in srgb, var(--bone) 14%, transparent);
+  color: var(--note-code);
+  font-family: var(--mono);
+  font-size: 0.92em;
+}
+
+.note-editor .ProseMirror pre {
+  margin: calc(var(--step) * 1.5) 0;
+  padding: calc(var(--step) * 2);
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--sunken) 80%, transparent);
+  border: 1px solid color-mix(in srgb, var(--bone) 14%, transparent);
+  color: var(--note-code);
+  font-family: var(--mono);
+  font-size: 0.92em;
+  overflow-x: auto;
+}
+
+/* Already inside a block with its own background, so it must not take a second
+   one — nested chips inside a code block read as a rendering fault. */
+.note-editor .ProseMirror pre code {
+  padding: 0;
+  background: none;
+}
+
+.note-editor .ProseMirror a {
+  color: var(--accent-text);
+  text-decoration: underline;
+}
+
+/*
+ * An image in the note is a thumbnail, always.
+ *
+ * The box is capped at half the window and one line at rest, so an image at its
+ * own size would either be the whole note or overflow it — and a note is a place
+ * to jot, not a gallery. A bounded height keeps a screenshot recognisable while
+ * leaving the text around it readable, and clicking opens it properly.
+ */
+.note-editor .ProseMirror img {
+  display: block;
+  max-width: 100%;
+  max-height: 120px;
+  margin: calc(var(--step) * 1.5) 0;
+  border-radius: 6px;
+  cursor: zoom-in;
+}
+
+/*
+ * A divider, typed rather than clicked — `---` on its own line.
+ *
+ * Heavier than the hairlines the quote and the code chip wear, because this one
+ * is doing the opposite job: those enclose a block, this separates two that
+ * would otherwise run together. A 1px line at note type size reads as a border
+ * somebody left on, not as a break.
+ */
+.note-editor .ProseMirror hr {
+  height: 2px;
+  margin: calc(var(--step) * 2) 0;
+  border: 0;
+  background: color-mix(in srgb, var(--bone) 30%, transparent);
+}
+
+/*
+ * A box: the run of blocks somebody said were one thing.
+ *
+ * **The note's own colour rather than the accent, which the quote uses.** Those
+ * are the only two bordered containers a note has, and the one question asked of
+ * either at a glance is which one this is — so they cannot wear the same colour.
+ * The tint is also what the note's own edge and its bar are drawn in, so a box
+ * reads as part of the note rather than as something the app put there.
+ *
+ * **The left padding is a gutter, not padding**, which is why it is the only side
+ * that is not `--step`-based. A block inside a box gets a drag grip of its own,
+ * and the handle is placed immediately left of whichever block it grips — so
+ * without room inside the box it would be drawn across the box's own border. The
+ * width is the grip plus one pad, the same two parts the note's `--note-pad-l`
+ * is made of, minus the outer pad that only the note's own edge needs.
+ *
+ * **The vertical padding is a target rather than breathing room.** The band
+ * between a box's top and its first child is how the box itself is taken hold
+ * of — `inBoxGrabStrip` in `NoteEditor.tsx` measures exactly that gap — so at
+ * `--step * 2` it was 6px, which is too fine to land on without aiming. Twice
+ * that is a strip you hit by moving towards it.
+ */
+.note-editor .ProseMirror .note-box {
+  margin: calc(var(--step) * 1.5) 0;
+  padding: calc(var(--step) * 4) calc(var(--step) * 3);
+  padding-left: calc(var(--note-pad-x) + var(--note-grip));
+  border: 1px solid color-mix(in srgb, var(--note-tint) 45%, transparent);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--note-tint) 8%, transparent);
+}
+
+/* The box already spaces its contents; a first or last child bringing its own
+   margin adds to the padding instead of sitting in it, and a code block or an
+   image at the top of a box then floats away from the edge the paragraph above
+   it was flush to. */
+.note-editor .ProseMirror .note-box > :first-child {
+  margin-top: 0;
+}
+
+.note-editor .ProseMirror .note-box > :last-child {
+  margin-bottom: 0;
+}
+
+/* Already inside something with a wash, so it must not take a second one — the
+   same fault `pre code` avoids, one level up. The border alone says it is
+   nested; two fills over each other read as a rendering error rather than as
+   depth, and a box three deep would be unreadable. */
+.note-editor .ProseMirror .note-box .note-box {
+  background: none;
+}
+
+/* The document's own selected-node outline, which ProseMirror sets: without it,
+   a selected image, divider or box looks exactly like one that is not, and
+   Backspace then deletes something invisible. These three are the only nodes in
+   here that are selected whole rather than by the text in them — and the box is
+   the one where that matters most, because what goes with it is everything
+   inside it. */
+.note-editor .ProseMirror img.ProseMirror-selectednode,
+.note-editor .ProseMirror hr.ProseMirror-selectednode,
+.note-editor .ProseMirror .note-box.ProseMirror-selectednode {
+  outline: 2px solid var(--accent-text);
+}
+
+/*
+ * The opened image: 80% of the window in both directions, over everything.
+ *
+ * Fixed rather than grown in place, because it cannot be grown in place — the
+ * note is capped at half the window and clips its overflow. Above the note's own
+ * 110 so it covers the box it came from, and still under a dialog at 120.
+ *
+ * The backdrop is the button, so a click anywhere puts it back. That is the
+ * gesture asked for — click to open, click again to close — and it means there
+ * is no control to find.
+ */
+.note-zoom {
+  position: fixed;
+  inset: 0;
+  z-index: 115;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border: 0;
+  background: rgb(0 0 0 / 72%);
+  cursor: zoom-out;
+}
+
+.note-zoom img {
+  width: 80vw;
+  height: 80vh;
+  border-radius: 8px;
+  /* `contain`, so 80% in both directions is a box it fits inside rather than a
+     shape it is stretched to. A screenshot distorted to the window's proportions
+     is not the image anybody clicked on. */
+  object-fit: contain;
+}
+
+/* The two controls in the insert sheet. Sized to the sheet rather than to their
+   text, so Choose a file and the address field read as one pair. */
+.note-image-pick {
+  width: 100%;
+}
+
+.note-image-address input {
+  width: 100%;
+  padding: calc(var(--step) * 2);
+  border: 1px solid var(--border-default);
+  border-radius: 6px;
+  background: var(--bg-control);
+  color: var(--bone);
+  font: 12px var(--ui-font);
+}
+
+/* Whatever came back, in the app's own failure colour rather than as another
+   quiet paragraph — a fetch that failed has to be distinguishable from the
+   instructions above it. */
+.note-image-error {
+  color: var(--danger);
+}
+
+/*
+ * The toolbar, under the text and drawn only while the caret is in the note.
+ *
+ * It cannot be there at rest: the resting box is one line inside a 31px row, and
+ * a bar of ten controls has nowhere to sit in it. Mount-gated rather than
+ * hidden, so it takes no height when it is not there and the resting line stays
+ * exactly the row's height.
+ *
+ * Below rather than above, because the box grows downward from the window's top
+ * edge: a bar at the top would arrive between the version row and the first
+ * line, which is where the eye goes to read what is already written.
+ */
+.note-bar {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 1px;
+  /*
+   * Out to the box's edges, so it closes the note rather than floating in it.
+   *
+   * The negative margins are exactly the padding the note sets, which is what
+   * `--note-pad-x` and `--note-pad-y` are declared once for; the padding here
+   * puts the buttons back on the same left margin as the text above them. A bar
+   * inset on three sides reads as a control that happens to be at the bottom,
+   * not as the thing that ends the note.
+   */
+  /* No negative margins any more: the box stopped padding when the editor
+     started, so the bar already reaches both edges. The padding is what keeps
+     its buttons on the same left margin as the text above them. */
+  padding: calc(var(--step) * 1.5) var(--note-pad-x) calc(var(--step) * 1.5) var(--note-pad-l);
+  /*
+   * The bar is the divider, rather than sitting under one.
+   *
+   * It carries the same colour as the note's edge mark, so the strip that closes
+   * the note is the same red rule that runs down its side — one shape in two
+   * directions. The hairline that used to separate it went with the fill: two
+   * dividers a pixel apart is one more than the eye needs.
+   */
+  background: var(--note-tint);
+}
+
+/*
+ * The drag grip, drawn by the extension's own portal.
+ *
+ * It positions itself against whichever block the pointer is over; all this
+ * decides is what it looks like and that it stays out of the way until wanted.
+ * `cursor: grab` rather than `move`, because it is the thing you pick up rather
+ * than the thing being moved.
+ */
+.note-drag {
+  display: grid;
+  place-items: center;
+  width: var(--note-grip);
+  height: var(--note-line);
+  border-radius: 4px;
+  color: var(--text-disabled);
+  cursor: grab;
+  /*
+   * **No `opacity` rule here, deliberately.** The plugin already owns whether
+   * this is seen: it sets `visibility` as the pointer moves over a block and
+   * clears it otherwise. A second mechanism on top fought the first — the handle
+   * was hidden by CSS at the moment the plugin had just shown it.
+   *
+   * The padding is the other half of the same bug. The plugin hides on
+   * `mouseleave` unless the element you move onto is inside its own wrapper, and
+   * the gutter put 18px of the note's padding between the text and the grip —
+   * so crossing that gap left the editor and the handle vanished on approach.
+   * Padding the hit area out to meet the text closes the gap without moving the
+   * dots.
+   */
+  padding-right: calc(var(--note-pad-x));
+  box-sizing: content-box;
+}
+
+.note-drag:hover {
+  color: var(--bone);
+  background: color-mix(in srgb, var(--bone) 12%, transparent);
+}
+
+.note-drag:active {
+  cursor: grabbing;
+}
+
+.note-drag svg {
+  width: 10px;
+  height: 16px;
+  fill: currentcolor;
+}
+
+.note-tool {
+  display: grid;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+}
+
+/* A gap that reads as a divider, the way `.quote-offer` does it: the container
+   showing through rather than a border on the button, because a border would
+   also draw on whichever button happens to wrap. */
+.note-tool[data-divided='true'] {
+  margin-left: calc(var(--step) * 2);
+}
+
+.note-tool svg {
+  width: 14px;
+  height: 14px;
+  fill: none;
+  stroke: currentcolor;
+  /* Heavier than the 1.6 these were drawn at, because they sit on a colour now
+     rather than on the page. A hairline icon reads as a smudge on a mid-tone
+     ground however dark you make it — weight carries as much of the legibility
+     here as the colour does. */
+  stroke-width: 2.1;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.note-tool:hover {
+  color: color-mix(in srgb, black 88%, var(--note-tint));
+  background: color-mix(in srgb, white 22%, transparent);
+}
+
+/* On means the mark is under the caret. Without this the bar says nothing about
+   the text you are standing in, which is the only question it is asked. */
+.note-tool[aria-pressed='true'] {
+  /* Inverted rather than merely darker: on a coloured bar a pressed control has
+     to be unmistakable, and a white pill with a red glyph cannot be confused
+     with a hover. */
+  color: var(--note-tint);
+  background: color-mix(in srgb, white 90%, transparent);
+}
+
+/*
+ * The four marks that have a letterform keep it, and the six that do not get an
+ * icon. That is the reference's own split, and the reason is legibility: a bold
+ * `B` is read faster than any glyph anyone could draw for it.
+ */
+.note-letter {
+  font-family: var(--ui-font);
+  font-size: 13px;
+  /* The same argument as the icons' stroke: on a coloured bar the letterforms
+     need the extra weight to hold their shape. */
+  font-weight: 600;
+  line-height: 1;
+}
+
+.note-letter--bold {
+  font-weight: 700;
+}
+
+.note-letter--italic {
+  font-family: Georgia, serif;
+  font-style: italic;
+}
+
+.note-letter--underline {
+  text-decoration: underline;
+}
+
+.note-letter--strike {
+  text-decoration: line-through;
+}
+
+/*
+ * The colour control's letter, with the current colour under it.
+ *
+ * The bar is a child rather than a `border-bottom`, because it has to be able to
+ * show *nothing* — an uncoloured caret leaves it at the muted default, and a
+ * border would have to be given a colour to be absent.
+ */
+.note-swatch {
+  position: relative;
+  display: grid;
+  place-items: center;
+}
+
+.note-swatch-bar {
+  position: absolute;
+  bottom: -3px;
+  left: 0;
+  width: 100%;
+  height: 2px;
+  border-radius: 1px;
+  background: var(--mark-decorative);
+}
+
+/*
+ * The swatches, opening upward.
+ *
+ * The bar is at the bottom of the note, so a menu dropping from it would leave
+ * whatever holds the note — the window for the global one, the transcript for a
+ * project's. Above it, the note's own box is already there to open into.
+ */
+.note-palette {
+  position: absolute;
+  bottom: calc(100% + var(--step) * 1.5);
+  left: 0;
+  z-index: 22;
+  display: flex;
+  gap: calc(var(--step) * 1.5);
+  padding: calc(var(--step) * 1.5);
+  border: 1px solid var(--border-default);
+  border-radius: 8px;
+  background: var(--raised);
+  box-shadow: 0 4px 14px rgb(0 0 0 / 45%);
+}
+
+.note-palette-swatch {
+  display: grid;
+  place-items: center;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: 1px solid color-mix(in srgb, var(--bone) 20%, transparent);
+  border-radius: 50%;
+  background: transparent;
+  color: var(--text-muted);
+  font: 11px var(--ui-font);
+  cursor: pointer;
+}
+
+/* The one that is currently on. A ring outside the swatch rather than a border
+   on it, so the colour it is showing is not altered by saying so. */
+.note-palette-swatch[aria-pressed='true'] {
+  outline: 2px solid var(--accent-text);
+  outline-offset: 1px;
+}
+
+/*
+ * The copy that is measured and never seen.
+ *
+ * `white-space: pre` is the whole point — it is the field's text refusing to
+ * wrap, so its width is the longest line. `visibility: hidden` rather than
+ * `display: none`, which would give it no box and therefore no width at all.
+ */
+/*
+ * A zero-sized box that clips whatever is measured inside it.
+ *
+ * **Absolute is not enough, and that is the bug this exists for.** Taking the
+ * measuring copy out of the flow stops it pushing anything around, but it still
+ * counts towards its ancestors' *scrollable overflow* — so a note holding a page
+ * of text made the column thousands of pixels wide, and the transcript below it
+ * was laid out at that width and ran off the pane. It came back the moment the
+ * note was focused, because the body goes out of flow then and takes the copy
+ * with it, which is exactly the shape of the report.
+ *
+ * Clipping costs nothing: `getBoundingClientRect` reports a span's own box
+ * whether or not an ancestor is hiding it.
+ */
+.note-measure-clip {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 0;
+  height: 0;
+  overflow: hidden;
+  pointer-events: none;
+}
+
+.note-measure {
+  display: inline-block;
+  visibility: hidden;
+  white-space: pre;
+  font: var(--note-font);
+  line-height: var(--note-line);
+}
+
+/*
+ * The resize handles: the left edge, the bottom edge, and the corner of both.
+ *
+ * Wider than the line they draw, the way `.chorus-sash` is: a 1px target is one
+ * a pointer misses, and the extra width costs nothing because there is nothing
+ * underneath it to click. `touch-action: none` so a drag is not stolen by the
+ * scroll gesture the pointer events would otherwise be interpreted as.
+ *
+ * Outside the app's own drag region, which matters for one of the two: the
+ * global note lies over the title bar, and a handle that moved the window
+ * instead of the note would be worse than no handle at all.
+ */
+.note-grip {
+  position: absolute;
+  z-index: 2;
+  background: transparent;
+  touch-action: none;
+  -webkit-app-region: no-drag;
+}
+
+.note-grip--width {
+  top: 0;
+  bottom: 0;
+  left: 0;
+  width: 9px;
+  cursor: col-resize;
+}
+
+/*
+ * Narrower than its neighbour on purpose: the bottom edge *is* the toolbar.
+ *
+ * The bar pads its buttons by `--step * 1.5`, so six pixels is the strip below
+ * them plus a pixel and a half of a 22px button — a target that can be hit
+ * without one that swallows the presses meant for bold. The corner is allowed to
+ * be wider because it sits over the bar's left padding, which is `--note-pad-l`
+ * and has nothing in it.
+ */
+.note-grip--height {
+  right: 0;
+  bottom: 0;
+  left: 0;
+  height: 6px;
+  cursor: row-resize;
+}
+
+/*
+ * Over the two edges where they meet, so the corner wins the overlap.
+ *
+ * Last in the markup and higher in the stack: without both, whichever edge was
+ * painted over it would take the press and the gesture would silently be one
+ * axis instead of two.
+ */
+.note-grip--corner {
+  bottom: 0;
+  left: 0;
+  z-index: 3;
+  width: 16px;
+  height: 16px;
+  cursor: nesw-resize;
+}
+
+/*
+ * There is nothing to drag vertically in a one-line row.
+ *
+ * The width handle stays, because the resting line has a width and dragging it
+ * is how the note is made to fit its longest line without opening it at all.
+ */
+.note-grip--height,
+.note-grip--corner {
+  display: none;
+}
+
+:is(.global-note, .project-notes)[data-focused='true'] .note-grip--height,
+:is(.global-note, .project-notes)[data-focused='true'] .note-grip--corner {
+  display: block;
+}
+
+.note-grip--width:hover,
+.note-grip--width:focus-visible {
+  background: linear-gradient(
+    to right,
+    transparent 4px,
+    var(--accent-text) 4px,
+    var(--accent-text) 5px,
+    transparent 5px
+  );
+  outline: none;
+}
+
+.note-grip--height:hover,
+.note-grip--height:focus-visible {
+  background: linear-gradient(
+    to bottom,
+    transparent 2px,
+    var(--accent-text) 2px,
+    var(--accent-text) 3px,
+    transparent 3px
+  );
+  outline: none;
+}
+
+/* The corner says what it is with the two lines it is the junction of, rather
+   than with a box of its own. */
+.note-grip--corner:hover,
+.note-grip--corner:focus-visible {
+  background:
+    linear-gradient(to right, var(--accent-text) 1px, transparent 1px) bottom left / 1px 100%
+      no-repeat,
+    linear-gradient(to bottom, var(--accent-text) 1px, transparent 1px) bottom left / 100% 1px
+      no-repeat;
+  outline: none;
+}
+
+/* Downward from the field's line, for the reason `.project-notes-selection`
+   goes downward, only sharper: this field's top edge is the window's, so an
+   offer opening upward from a selection in the first line is off the screen
+   rather than merely behind a tab strip. */
+.note-selection {
+  z-index: 5;
+  transform: translate(-50%, 6px);
+}
+
+.conversation-dock-hint {
+  position: absolute;
+  top: 100%;
+  z-index: 2;
+  /*
+   * A ceiling and a wrap. Ellipsing here would reproduce the very problem this
+   * exists to solve one layer down, and an unbounded box on a long name would
+   * be the thing that reaches the editor.
+   */
+  max-width: min(360px, 100%);
+  margin-top: 4px;
+  padding: var(--step) calc(var(--step) * 2);
+  border: 1px solid var(--muted);
+  border-radius: 6px;
+  background: var(--bg-control);
+  color: var(--text-primary);
+  font: 12px var(--ui-font);
+  line-height: 1.45;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  /* It must never take the hover it exists because of. */
+  pointer-events: none;
+}
+
+/*
+ * The name ellipses; the mark beside it does not shrink.
+ *
+ * `overflow: hidden` is what makes this work rather than decoration: it drops
+ * the automatic minimum size to 0, so a long conversation name gives way here
+ * instead of pushing `.workspace-tab-state` out of the tab. The truncation used
+ * to be declared on the button, where a bare text node could not take it.
+ */
+.conversation-dock-tab-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/*
+ * A waiting conversation tab says so in colour, exactly as its project tab does.
+ *
+ * Same two rules as `.workspace-tab`, and they are stated twice rather than
+ * shared because the selector's subject is the tab, and the two strips are
+ * different elements. The mark inside is the same `.workspace-tab-state`.
+ */
+.conversation-dock-tab:has(.workspace-tab-state[data-state='approval']) .conversation-dock-tab-main,
+.conversation-dock-tab:has(.workspace-tab-state[data-state='question'])
+  .conversation-dock-tab-main {
+  background: color-mix(in srgb, var(--danger) 9%, transparent);
+}
+
+.conversation-dock-tab:has(.workspace-tab-state[data-state='question'])
+  .conversation-dock-tab-main {
+  background: color-mix(in srgb, var(--focus-ring) 10%, transparent);
 }
 
 /*
@@ -9875,9 +11564,38 @@ input::placeholder {
  */
 .workspace-pane-chorus {
   display: flex;
-  flex-direction: row;
+  /*
+   * A column, since the notes pad joined the conversation tree in here.
+   *
+   * It was `row`, which read as deliberate and was not: the only child was
+   * `.conversation-branch`, and a lone `flex: 1 1 auto` child fills its parent
+   * either way — so the direction had never been tested against a second child.
+   * The pad is that second child, and under `row` it docked to the left of the
+   * conversations as a narrow strip instead of sitting above them.
+   *
+   * The tree is unaffected. It still stretches to the full width and takes the
+   * height left over, and its own splits are decided by `data-orientation` on
+   * `.conversation-branch` rather than by anything inherited from here.
+   */
+  flex-direction: column;
+  /*
+   * A stacking context of its own, so the notes pad's `z-index` is decided
+   * here and not against the whole pane.
+   *
+   * Without it the column is transparent to stacking: every transcript, dock
+   * and card inside competes directly with the pad, and the ones that happen to
+   * be positioned win by document order. The symptom is the pad drawing over
+   * some conversation groups and under others in the same row, which is what a
+   * z-index that is only *usually* high enough looks like.
+   *
+   * `z-index: 0` rather than a number, because this element does not need to
+   * beat anything outside itself — the sash beside it is deliberately above,
+   * and the drag ghost is portalled to the body and out of reach either way.
+   */
+  position: relative;
+  z-index: 0;
   flex-grow: 0;
-  flex-shrink: 0;
+  flex-shrink: 1;
   flex-basis: auto;
   width: clamp(340px, 30%, 520px);
   min-width: 0;
@@ -9899,8 +11617,30 @@ input::placeholder {
  * back restores the divider exactly where it was left.
  */
 .workspace-pane-chorus[data-full='true'] {
-  flex-grow: 1;
+  /*
+   * **All three, because `width` and `flex-basis: auto` are what the base rule
+   * sizes this column with.**
+   *
+   * The base rule used to set `flex-shrink: 0` as well, on the reading that a
+   * column carrying an inline pixel width must stay exactly it. With the
+   * workbench off that zero was the bug — overriding `flex-grow` and `width`
+   * left the shrink at zero, so the column took its *content's* width as a floor
+   * it was forbidden to go under. Measured at 773px inside a 373px parent,
+   * ending 393px past the right of the window, which is the text being cut off.
+   *
+   * The same zero was the bug with the workbench **on**, one drag further out: a
+   * pane narrowed past the stored width left the column overflowing
+   * `.workspace-pane-content`, which clips. It is `1` now, so the column compacts
+   * instead — and it still sits at exactly its pixel width whenever the pane can
+   * hold it, because flex only distributes free space that has gone negative.
+   *
+   * `min-width: 0` cannot help a box that is not allowed to shrink at all, which
+   * is why adding it did not fix this. A zero basis is what makes the growth
+   * divide the parent rather than start from what the content wants.
+   */
+  flex: 1 1 0;
   width: auto;
+  min-width: 0;
   border-left: 0;
 }
 
@@ -9934,6 +11674,44 @@ input::placeholder {
   flex-basis: 0;
   min-width: 0;
   min-height: 0;
+}
+
+/*
+ * A row of groups scrolls once they stop fitting, instead of being squeezed.
+ *
+ * **`flex-basis: 0` above has no floor, and that is what was wrong.** The
+ * growth factors divide the whole width, so a third group does not make the
+ * column wider — it makes every group a third narrower, and with two already
+ * open the third arrives at a width that cannot hold a transcript. Observed:
+ * a group clipped mid-sentence at the pane's edge, its composer and half its
+ * messages simply not on screen and no way to reach them.
+ *
+ * So the branch becomes a scroller and each group gets a width it may not go
+ * below. Past that point the stored proportions stop dividing anything — every
+ * group sits at the floor and the row overflows — which is the honest outcome:
+ * proportions of a width that is no longer enough are not a layout.
+ *
+ * **Only a row.** A column of groups divides height, and height is not what
+ * runs out here — a short group is still a readable group.
+ *
+ * `overflow-y: hidden` because the transcripts scroll themselves. Leaving it to
+ * compute from `overflow-x` would give the branch a second vertical scrollbar
+ * outside the one people actually use.
+ */
+.conversation-branch[data-orientation='row'] {
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: thin;
+}
+
+/*
+ * Named rather than `> *`, and the note further up says why: a universal child
+ * selector catches the sash too, and it outranks the sash's own `flex` on
+ * specificity — which is the bug that once inflated a 9px divider to hundreds
+ * of pixels.
+ */
+.conversation-branch[data-orientation='row'] > .conversation-branch-child {
+  min-width: 320px;
 }
 
 .conversation-column {
@@ -10347,4 +12125,329 @@ input::placeholder {
   border-color: var(--danger);
   background: color-mix(in srgb, var(--danger) 14%, transparent);
   color: var(--danger);
+}
+
+/* ------------------------------------------------------ the notes you keep */
+
+/*
+ * The button on the masthead, beside the version.
+ *
+ * **`no-drag` is the whole reason this rule cannot be skipped.** `.masthead` is
+ * the window's drag region, and a control inside a drag region does not receive
+ * clicks — it moves the window instead. The symptom is a button that does
+ * nothing at all, which reads as a wiring fault rather than as a CSS one.
+ */
+.kept-notes-button {
+  display: grid;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  /* The note's colour at rest, not a muted chrome grey. It is the only thing on
+     this row that is not the app talking about itself, and the rose is what the
+     other two notes use to say exactly that. */
+  color: var(--note-tint);
+  cursor: pointer;
+  -webkit-app-region: no-drag;
+}
+
+.kept-notes-button:hover,
+.kept-notes-button[aria-expanded='true'] {
+  background: color-mix(in srgb, var(--note-tint) 18%, transparent);
+  color: var(--note-tint);
+}
+
+.kept-notes-button svg {
+  width: 15px;
+  height: 15px;
+  fill: none;
+  stroke: currentcolor;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+/*
+ * The card: the panel on the left, the list on the right.
+ *
+ * Fixed and portalled to the body, because `.stage` clips its overflow and the
+ * masthead is one row tall — the same wall the global note met. Placed by
+ * script, which is why there are no offsets here: only the two it is given.
+ *
+ * Above the note's own zoomed image at 110 and below a dialog at 120, so a
+ * confirmation opened from anywhere still covers this.
+ */
+.kept-notes {
+  position: fixed;
+  z-index: 115;
+  display: flex;
+  align-items: flex-start;
+  /* No `gap` here: the placement arithmetic subtracts it, so it is declared
+     once, in the script that does the subtracting. */
+}
+
+.kept-note-list {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  width: 240px;
+  max-height: 60vh;
+  margin: 0;
+  padding: calc(var(--step) * 1.5);
+  overflow-y: auto;
+  list-style: none;
+  border-radius: 8px;
+  /*
+   * The note's own colours, not a menu's — this is a note surface and has to say
+   * so before it is read.
+   *
+   * Copied from `.project-notes[data-focused='true'] .note-body` rather than
+   * approximated: the rose on the left edge with the light falling away behind
+   * it over `--note-glow`, on the control ground. An inset shadow rather than a
+   * border for the same reason it is one there — the mark costs no layout, where
+   * a border would widen the box.
+   *
+   * The radius is this file's own 8px rather than `--note-radius`, and that is
+   * the one thing not shared. That shorthand rounds a single corner because both
+   * other notes are flush to the window's edge and cannot be round where they
+   * meet it. This one floats clear of everything.
+   */
+  background:
+    linear-gradient(
+      to right,
+      color-mix(in srgb, var(--note-tint) 20%, transparent),
+      transparent var(--note-glow)
+    ),
+    var(--bg-control);
+  box-shadow:
+    inset 3px 0 0 var(--note-tint),
+    0 8px 28px rgb(0 0 0 / 55%);
+}
+
+.kept-note-row {
+  display: flex;
+  align-items: center;
+  gap: calc(var(--step) * 2);
+  padding: calc(var(--step) * 1.5) calc(var(--step) * 2);
+  border-radius: 5px;
+  color: var(--text-default);
+  cursor: default;
+}
+
+.kept-note-row:hover,
+.kept-note-row[data-shown='true'] {
+  background: color-mix(in srgb, var(--bone) 10%, transparent);
+}
+
+/*
+ * Pinned is a stronger claim than hovered — it is the one being typed in — and
+ * the two are on screen together, so they cannot look the same.
+ *
+ * A fill only. It carried a left bar of its own until the list took the note's
+ * own edge mark, and two rose rules a few pixels apart on one edge read as a
+ * misalignment rather than as two states.
+ */
+.kept-note-row[data-pinned='true'] {
+  background: color-mix(in srgb, var(--note-tint) 22%, transparent);
+}
+
+/* Carried rather than gone: the row keeps its place and fades, so the list holds
+   its shape while something is moved through it. */
+.kept-note-row[data-dragging='true'] {
+  opacity: 0.4;
+}
+
+/*
+ * Where it would land, drawn on the edge it would land against.
+ *
+ * A line rather than a gap that opens up. A list that reflows under the pointer
+ * moves every row below the one being aimed at, so the target is no longer where
+ * it was when the aim was taken — and the drop lands one row out.
+ */
+.kept-note-row[data-drop='above'] {
+  box-shadow: inset 0 2px 0 var(--accent-text);
+}
+
+.kept-note-row[data-drop='below'] {
+  box-shadow: inset 0 -2px 0 var(--accent-text);
+}
+
+/*
+ * One line, and the ellipsis is load-bearing rather than tidy.
+ *
+ * A row is labelled by the note's own first line, which is arbitrary text of
+ * arbitrary length. Without this the list would be as wide as the longest
+ * sentence anybody ever typed into a note.
+ */
+.kept-note-label {
+  flex: 1;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.kept-note-delete {
+  display: grid;
+  place-items: center;
+  flex: none;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text-disabled);
+  cursor: pointer;
+  visibility: hidden;
+}
+
+.kept-note-row:hover .kept-note-delete,
+.kept-note-delete[data-confirming='true'] {
+  visibility: visible;
+}
+
+.kept-note-delete:hover {
+  background: color-mix(in srgb, var(--danger) 16%, transparent);
+  color: var(--danger);
+}
+
+/* Asked once already. It has to look different from the control that asked, or
+   the second press is the same press and nobody knows anything happened. */
+.kept-note-delete[data-confirming='true'] {
+  background: var(--danger);
+  color: var(--bg-chrome);
+}
+
+.kept-note-delete svg {
+  width: 13px;
+  height: 13px;
+  fill: none;
+  stroke: currentcolor;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.kept-note-none {
+  padding: calc(var(--step) * 2);
+  color: var(--text-disabled);
+}
+
+.kept-note-new {
+  width: 100%;
+  margin-top: calc(var(--step) * 1.5);
+  padding: calc(var(--step) * 1.5) calc(var(--step) * 2);
+  border: 1px dashed var(--border-default);
+  border-radius: 5px;
+  background: transparent;
+  color: var(--text-muted);
+  text-align: left;
+  cursor: pointer;
+}
+
+.kept-note-new:hover {
+  border-style: solid;
+  color: var(--bone);
+}
+
+/*
+ * The note itself, to the right of the list.
+ *
+ * **Not resizable, unlike the other two.** Those open in a place that is theirs
+ * — a window corner, a project's column — and are dragged to suit what is in
+ * them. This one is a flyout beside a menu: a size remembered per note would
+ * make the menu's shape depend on which row the pointer is over.
+ *
+ * **Three things decide the width, in this order.** An inline width, set from the
+ * room the list leaves, until somebody drags a handle; then `--note-w`, which is
+ * what the drag writes; then the number below, which only stands if neither has
+ * happened. A plain length here consumed the first and silently swallowed the
+ * second — the handle moved, the property changed, and nothing read it.
+ *
+ * The inline width exists because a fixed one hangs off a narrow window, and
+ * pulling the list back to make it fit is exactly the jump this panel was
+ * rearranged to stop.
+ */
+.kept-note-panel {
+  width: var(--note-w, 460px);
+  /* No height here. What a drag sets is the *editor's* height — that is what
+     `--note-h` means everywhere in this file — and the panel is that plus the
+     bar and its own padding. Fixing it here would leave the two disagreeing and
+     the pointer running ahead of the edge it is dragging. */
+  padding: calc(var(--step) * 2) 0;
+  border-radius: 8px;
+  /* The same page the other two notes are written on, for the same reason: the
+     colour is what says this is a note rather than a popover that happens to
+     hold text. See the list above for why the radius is not shared. */
+  background:
+    linear-gradient(
+      to right,
+      color-mix(in srgb, var(--note-tint) 20%, transparent),
+      transparent var(--note-glow)
+    ),
+    var(--bg-control);
+  box-shadow:
+    inset 3px 0 0 var(--note-tint),
+    0 8px 28px rgb(0 0 0 / 55%);
+}
+
+.kept-note-panel .note-body {
+  display: flex;
+  flex-direction: column;
+}
+
+/*
+ * The editor fills the panel and scrolls, which has to be said here.
+ *
+ * `.note-editor` is one line tall with its overflow hidden by default — that is
+ * the collapsed state both other notes rest in, and it is undone for them by a
+ * `[data-focused='true']` rule on a shell this panel does not have. A note
+ * reached by opening it is never collapsed.
+ */
+.kept-note-panel .note-editor {
+  height: var(--note-h, 300px);
+  max-height: var(--note-h, 300px);
+  overflow-y: auto;
+}
+
+/*
+ * The handles, mirrored.
+ *
+ * Both other notes are pinned by their right edge, so the handle that widens
+ * them is on the left. This panel is pinned by its left — it opens to the right
+ * of a list that must not move — so its handle is on the right and the corner
+ * goes with it. `useNoteSize`'s `anchor` is the other half of the same mirror;
+ * either one alone would drag the note away from the pointer.
+ */
+.kept-note-panel .note-grip--width,
+.kept-note-panel .note-grip--corner {
+  right: 0;
+  left: auto;
+}
+
+.kept-note-panel .note-grip--corner {
+  cursor: nwse-resize;
+}
+
+/* Hidden by default and revealed by a `[data-focused]` rule belonging to the two
+   shells that rest as one line. This panel is never collapsed — a note reached
+   by opening it is open — so it reveals them outright. */
+.kept-note-panel .note-grip--height,
+.kept-note-panel .note-grip--corner {
+  display: block;
+}
+
+/* The same hairline the other handles show, measured from the edge it is on. */
+.kept-note-panel .note-grip--width:hover,
+.kept-note-panel .note-grip--width:focus-visible {
+  background: linear-gradient(
+    to left,
+    transparent 4px,
+    var(--accent-text) 4px,
+    var(--accent-text) 5px,
+    transparent 5px
+  );
 }

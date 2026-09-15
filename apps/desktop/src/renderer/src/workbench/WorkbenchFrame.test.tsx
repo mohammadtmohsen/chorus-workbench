@@ -184,6 +184,25 @@ afterEach(() => {
   frames.clear()
 })
 
+/**
+ * A fresh target for every mount, and it is the file's isolation rather than a
+ * detail.
+ *
+ * `WorkbenchFrame` parks a released surface at **module scope** for
+ * `RELEASE_GRACE_MS` so that a remount can adopt it — which is the whole point
+ * of the feature, because splitting a pane changes an `EditorPane`'s depth in
+ * the tree and React tears the subtree down. Inside one test file that same
+ * mechanism hands a surface from one test to the next: cleanup unmounts and
+ * parks, the next mount adopts, and an adopted surface is set synchronously
+ * without ever opening — so a test counting bounds reports sees one it did not
+ * cause. Three did, and each passed when run alone.
+ *
+ * Distinct grants make each test's surface its own. A test *about* adoption
+ * would deliberately reuse one, and there is none yet.
+ */
+let grants = 0
+const freshGrant = (): string => `grant-${String((grants += 1))}`
+
 describe('WorkbenchFrame bounds reporting', () => {
   it('reports a refusal that arrives while the frame is still mounted', async () => {
     const failures: string[] = []
@@ -204,7 +223,7 @@ describe('WorkbenchFrame bounds reporting', () => {
 
     render(
       <WorkbenchFrame
-        target={{ grant: 'grant-1' }}
+        target={{ grant: freshGrant() }}
         projectRoot="/tmp/project"
         onFailed={(message) => {
           failures.push(message)
@@ -239,7 +258,7 @@ describe('WorkbenchFrame bounds reporting', () => {
 
     const { unmount } = render(
       <WorkbenchFrame
-        target={{ grant: 'grant-1' }}
+        target={{ grant: freshGrant() }}
         projectRoot="/tmp/project"
         onFailed={(message) => {
           failures.push(message)
@@ -297,7 +316,7 @@ describe('WorkbenchFrame bounds tracking', () => {
 
     const { container } = render(
       <WorkbenchFrame
-        target={{ grant: 'grant-1' }}
+        target={{ grant: freshGrant() }}
         projectRoot="/tmp/project"
         onFailed={(message) => {
           failures.push(message)
@@ -352,7 +371,7 @@ describe('WorkbenchFrame bounds tracking', () => {
 
     const { container } = render(
       <WorkbenchFrame
-        target={{ grant: 'grant-1' }}
+        target={{ grant: freshGrant() }}
         projectRoot="/tmp/project"
         onFailed={(message) => {
           failures.push(message)
@@ -414,7 +433,7 @@ describe('WorkbenchFrame zero-area reporting', () => {
     install(bridge(sent))
     const { container } = render(
       <WorkbenchFrame
-        target={{ grant: 'grant-1' }}
+        target={{ grant: freshGrant() }}
         projectRoot="/tmp/project"
         onFailed={(message) => {
           failures.push(message)
@@ -478,7 +497,7 @@ describe('WorkbenchFrame zero-area reporting', () => {
     install(bridge(sent))
     const { container } = render(
       <WorkbenchFrame
-        target={{ grant: 'grant-1' }}
+        target={{ grant: freshGrant() }}
         projectRoot="/tmp/project"
         onFailed={(message) => {
           failures.push(message)

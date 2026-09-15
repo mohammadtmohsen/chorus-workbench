@@ -3,6 +3,7 @@ import { promisify } from 'node:util'
 import type { AgentProbeResult } from '../shared/ipc.js'
 import { spawnSpec, type ResolvedCommand } from './command.js'
 import { resolveCommand } from './which.js'
+import { agentKeyIsSet } from './agent-secrets.js'
 
 const run = promisify(execFile)
 
@@ -16,8 +17,37 @@ const PROBES = [
   { id: 'claude', command: 'claude', args: ['--version'] },
 ] as const
 
-export async function probeAgents(): Promise<AgentProbeResult[]> {
-  return Promise.all(PROBES.map(probeOne))
+export async function probeAgents(userDataPath: string): Promise<AgentProbeResult[]> {
+  const probed = await Promise.all(PROBES.map(probeOne))
+  const claude = probed.find((p) => p.id === 'claude')
+  if (claude === undefined) return probed
+  return [...probed, deepseekFrom(claude, agentKeyIsSet(userDataPath, 'deepseek'))]
+}
+
+/**
+ * DeepSeek's row, derived rather than probed.
+ *
+ * Takes the answer to "is there a key" rather than looking it up, so the rule
+ * itself is readable without a keychain behind it.
+ *
+ * It runs on the same `claude` binary, so a second `PROBES` entry would spawn
+ * `claude --version` twice and print the same string under two names. What makes
+ * DeepSeek different is not the install but the key, so its row is Claude's
+ * answer with one extra condition — and when only the key is missing it says so,
+ * because telling someone to install a CLI they already have is the loop this
+ * file's `missing`/`failed` split exists to avoid.
+ */
+export function deepseekFrom(claude: AgentProbeResult, hasKey: boolean): AgentProbeResult {
+  if (!claude.installed) return { ...claude, id: 'deepseek' }
+  if (hasKey) return { ...claude, id: 'deepseek' }
+  return {
+    id: 'deepseek',
+    installed: false,
+    version: claude.version,
+    problem: null,
+    reason: 'needsKey',
+    foundAt: claude.foundAt,
+  }
 }
 
 async function probeOne(probe: (typeof PROBES)[number]): Promise<AgentProbeResult> {

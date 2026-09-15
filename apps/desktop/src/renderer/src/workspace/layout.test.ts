@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import {
   CLOSED_TERMINAL_PANEL,
   SIDEBAR_WIDTH,
+  TERMINAL_HEIGHT,
   type TerminalPanelState,
   type WorkspaceSnapshot,
 } from '../../../shared/workspace-layout.js'
@@ -227,18 +228,15 @@ describe('workspace layout', () => {
   /*
    * A persisted width is not trusted. It comes from a file the user can edit,
    * and it survives a window being resized much narrower — either of which can
-   * hand back a sidebar wider than the screen or too thin to read.
+   * hand back a sidebar too thin to read. Wide is allowed; there is no ceiling.
    */
   it('clamps the sidebar width, on the way in as well as during a drag', () => {
-    expect(clampSidebarWidth(9_000)).toBe(SIDEBAR_WIDTH.max)
+    expect(clampSidebarWidth(9_000)).toBe(9_000)
     expect(clampSidebarWidth(-40)).toBe(SIDEBAR_WIDTH.min)
     expect(clampSidebarWidth(Number.NaN)).toBe(SIDEBAR_WIDTH.default)
-    // Rounded, not floored, and inside the range — 320 is the ceiling now that
-    // the drawer is a temporary panel rather than the permanent column.
+    // Rounded, not floored.
     expect(clampSidebarWidth(261.6)).toBe(262)
-    expect(normalizeWorkspace({ ...onePane('a'), sidebarWidth: 9_000 }).sidebarWidth).toBe(
-      SIDEBAR_WIDTH.max
-    )
+    expect(normalizeWorkspace({ ...onePane('a'), sidebarWidth: 9_000 }).sidebarWidth).toBe(9_000)
   })
 
   it('normalizes persisted branch sizes', () => {
@@ -316,9 +314,9 @@ describe('terminal panels across a restore', () => {
   it('clamps a stored height that could not be dragged to', () => {
     const restored = normalizeWorkspace({
       ...EMPTY_WORKSPACE,
-      globalTerminal: panel({ open: true, height: 99_999 }),
+      globalTerminal: panel({ open: true, height: 4 }),
     })
-    expect(restored.globalTerminal.height).toBeLessThanOrEqual(720)
+    expect(restored.globalTerminal.height).toBe(TERMINAL_HEIGHT.min)
   })
 
   it('survives a workspace that never had panels', () => {
@@ -500,9 +498,19 @@ describe('normalizeTerminalPanel', () => {
     expect(normalizeTerminalPanel(sound)).toEqual(sound)
   })
 
-  it('clamps a height no grip could have produced', () => {
-    expect(normalizeTerminalPanel(panel({ open: true, height: 99_999 })).height).toBe(720)
-    expect(normalizeTerminalPanel(panel({ open: true, height: -5 })).height).toBe(96)
+  /*
+   * A floor and no ceiling, which is the shape `clampSidebarWidth` and
+   * `clampChorusWidth` already have: the panel takes whatever it is dragged to,
+   * and squeezing the transcript is the person's call to make. The ceiling was
+   * real — `TERMINAL_HEIGHT` carried a `max: 720` — and went with the same
+   * change that moved the floor from 96 to 100. Asserting the huge value comes
+   * back untouched is what stops a ceiling being reinstated by accident.
+   */
+  it('repairs a height no grip could have produced, and imposes no ceiling', () => {
+    expect(normalizeTerminalPanel(panel({ open: true, height: 99_999 })).height).toBe(99_999)
+    expect(normalizeTerminalPanel(panel({ open: true, height: -5 })).height).toBe(
+      TERMINAL_HEIGHT.min
+    )
   })
 
   /* Every panel in a workspace goes through it, not just the global one. */

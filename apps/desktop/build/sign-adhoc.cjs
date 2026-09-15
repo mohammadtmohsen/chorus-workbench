@@ -36,7 +36,7 @@ function repairSpawnHelper(app) {
 }
 
 /**
- * `codesign --sign -` over the packed .app.
+ * `codesign` over the packed .app — ad-hoc, or with a named identity.
  *
  * Deep, so the framework and helpers are sealed too, and forced, because the
  * Electron binary arrives already linker-signed and that signature has to be
@@ -44,12 +44,26 @@ function repairSpawnHelper(app) {
  *
  * Failing loudly is the point: a silently unsigned build looks fine here and
  * is unopenable on the machine it was sent to.
+ *
+ * **`CHORUS_SIGN_IDENTITY` is set by `package-local.mjs` and by nothing else.**
+ * Ad-hoc stays the default, so the release pipeline and every gate are
+ * unchanged and the notes they publish about being ad-hoc signed stay true.
+ *
+ * The reason a local install wants more than ad-hoc is the keychain rather than
+ * Gatekeeper: `--sign -` produces no stable designated requirement, so the
+ * access list `safeStorage` needs has nothing to bind to and "Always Allow"
+ * silently records nothing. `local-identity.mjs` has the whole argument.
  */
 exports.default = async function signAdHoc({ appOutDir, packager, electronPlatformName }) {
   if (electronPlatformName !== 'darwin') return
 
   const app = join(appOutDir, `${packager.appInfo.productFilename}.app`)
   repairSpawnHelper(app)
-  execFileSync('codesign', ['--force', '--deep', '--sign', '-', app], { stdio: 'inherit' })
+
+  const identity = process.env.CHORUS_SIGN_IDENTITY
+  const signWith = identity === undefined || identity === '' ? '-' : identity
+  if (signWith !== '-') console.log(`sign-adhoc: signing with "${signWith}"`)
+
+  execFileSync('codesign', ['--force', '--deep', '--sign', signWith, app], { stdio: 'inherit' })
   execFileSync('codesign', ['--verify', '--deep', '--strict', app], { stdio: 'inherit' })
 }

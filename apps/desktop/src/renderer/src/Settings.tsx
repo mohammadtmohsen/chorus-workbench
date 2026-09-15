@@ -1,3 +1,4 @@
+import type { AgentId } from '@chorus/shared'
 import { useCallback, useEffect, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import {
@@ -8,13 +9,13 @@ import {
 } from '../../shared/ipc.js'
 import { useDialog } from './useDialog.js'
 
-type AgentId = 'codex' | 'claude'
-/* Claude first, matching `ALL_AGENTS` and `DEFAULT_SETTINGS.agents`. The sheet
-   saying "new sessions start with" must list them in the order they arrive. */
-const AGENTS: AgentId[] = ['claude', 'codex']
+/* Matching `ALL_AGENTS` and `DEFAULT_SETTINGS.agents`. The sheet saying "new
+   sessions start with" must list them in the order they arrive. Reading order,
+   not `AGENT_IDS` declaration order — see `ALL_AGENTS` for why the two that
+   think come before the one that is handed work. */
+const AGENTS: AgentId[] = ['codex', 'claude', 'deepseek']
 
 export interface Defaults {
-  agents: AgentId[]
   cwd: string
   profileId: string
 }
@@ -306,16 +307,115 @@ function Appearance(): React.JSX.Element {
   )
 }
 
-function ExplainLanguage(): React.JSX.Element {
+/**
+ * DeepSeek's API key.
+ *
+ * **Saved on a button rather than on every keystroke, unlike every other field
+ * in this sheet.** The others persist as you type because losing a keystroke of
+ * a preference costs nothing; a credential written per keystroke would encrypt
+ * and store a dozen truncated keys on the way to the real one, and the last
+ * partial value would win if the sheet were closed mid-word.
+ *
+ * The field is always empty on open and the stored key is never fetched. Main
+ * answers only whether one is set — see `withSecretState` — so there is nothing
+ * here to leak into a screenshot or a transcript.
+ */
+function DeepseekKey(): React.JSX.Element {
   const { t } = useTranslation()
-  const [language, setLanguage] = useState('')
+  const [draft, setDraft] = useState('')
+  const [isSet, setIsSet] = useState(false)
+  const [error, setError] = useState<string | null>(null)
 
   useEffect(() => {
     let live = true
     window.chorus
       .readSettings()
       .then((settings) => {
-        if (live) setLanguage(settings.explainLanguage)
+        if (live) setIsSet(settings.deepseekKeySet)
+      })
+      .catch(() => undefined)
+    return () => {
+      live = false
+    }
+  }, [])
+
+  /*
+   * `deepseekKeySet` is read back off the answer rather than assumed from what
+   * was sent. Storing can fail for a reason the renderer cannot see — a profile
+   * with no OS keychain refuses rather than falling back to plaintext — and a
+   * field that says "saved" when nothing was is the failure this avoids.
+   */
+  const store = (value: string): void => {
+    setError(null)
+    window.chorus
+      .writeSettings({ deepseekApiKey: value })
+      .then((settings) => {
+        setIsSet(settings.deepseekKeySet)
+        setDraft('')
+      })
+      .catch((e: unknown) => {
+        setError(e instanceof Error ? e.message : String(e))
+      })
+  }
+
+  return (
+    <fieldset className="settings-key">
+      <legend>{t('settings.deepseekHeading')}</legend>
+      <label>
+        <span>{t('settings.deepseekKey')}</span>
+        <input
+          type="password"
+          value={draft}
+          autoComplete="off"
+          spellCheck={false}
+          placeholder={isSet ? t('settings.deepseekStored') : t('settings.deepseekPlaceholder')}
+          onChange={(e) => {
+            setDraft(e.target.value)
+          }}
+        />
+      </label>
+      <div className="settings-key-actions">
+        <button
+          type="button"
+          className="btn"
+          disabled={draft.trim() === ''}
+          onClick={() => {
+            store(draft.trim())
+          }}
+        >
+          {t('settings.deepseekSave')}
+        </button>
+        {isSet && (
+          <button
+            type="button"
+            className="btn"
+            onClick={() => {
+              store('')
+            }}
+          >
+            {t('settings.deepseekClear')}
+          </button>
+        )}
+      </div>
+      {error !== null && <p className="settings-key-error">{error}</p>}
+      <p className="footnote">{t('settings.deepseekNote')}</p>
+    </fieldset>
+  )
+}
+
+function ExplainLanguage(): React.JSX.Element {
+  const { t } = useTranslation()
+  const [language, setLanguage] = useState('')
+  const [onByDefault, setOnByDefault] = useState(false)
+
+  useEffect(() => {
+    let live = true
+    window.chorus
+      .readSettings()
+      .then((settings) => {
+        if (!live) return
+        setLanguage(settings.explainLanguage)
+        setOnByDefault(settings.styleOnByDefault)
       })
       .catch(() => undefined)
     return () => {
@@ -360,6 +460,27 @@ function ExplainLanguage(): React.JSX.Element {
         is one nobody reads twice.
       */}
       <p className="footnote">{t('settings.explainNote')}</p>
+      <label className="settings-style-default">
+        {/*
+          A checkbox and nothing else.
+
+          A textarea sat here for one build, holding an override of the built-in
+          style. It was removed deliberately: the style is the product's answer,
+          tuned against real replies, and a box inviting anyone to rewrite it made
+          a settled decision look like a blank the user was expected to fill in.
+          One switch is the whole question — this style, or plain.
+        */}
+        <input
+          type="checkbox"
+          checked={onByDefault}
+          onChange={(e) => {
+            setOnByDefault(e.target.checked)
+            void window.chorus.writeSettings({ styleOnByDefault: e.target.checked })
+          }}
+        />
+        <span>{t('settings.styleOnByDefault')}</span>
+      </label>
+      <p className="footnote">{t('settings.styleNote')}</p>
     </fieldset>
   )
 }
@@ -383,7 +504,7 @@ function AgentDefaults({
   effort,
   onChange,
 }: {
-  agentId: 'codex' | 'claude'
+  agentId: AgentId
   status: 'unqueried' | 'loading' | 'ready' | 'failed'
   /* Taken from the response rather than restated, so the two cannot drift. */
   models: IpcResponse<'agents:models'>['agents'][number]['models']
@@ -596,9 +717,13 @@ function DefaultModel(): React.JSX.Element {
  * from memory — a wrong package name in an error message is worse than no
  * message, because it is followed.
  */
-export const INSTALL: Record<'codex' | 'claude', string> = {
+export const INSTALL: Record<AgentId, string> = {
   codex: 'npm install -g @openai/codex',
   claude: 'npm install -g @anthropic-ai/claude-code',
+  /* The same binary on purpose: DeepSeek is driven through the installed
+     `claude` CLI pointed at its Anthropic-compatible endpoint, so there is
+     nothing else to install and a DeepSeek-specific command would be a lie. */
+  deepseek: 'npm install -g @anthropic-ai/claude-code',
 }
 
 export function Settings(props: {
@@ -726,7 +851,11 @@ export function Settings(props: {
                   */}
                   {props.probes !== null && !installed && (
                     <p className="cast-help">
-                      {probe?.reason === 'failed' && probe.foundAt !== null ? (
+                      {probe?.reason === 'needsKey' ? (
+                        /* Found, runnable, and unusable for a reason no install
+                           command fixes — so this one names the field instead. */
+                        t('agents.needsKeyHelp')
+                      ) : probe?.reason === 'failed' && probe.foundAt !== null ? (
                         t('agents.failedHelp', { path: probe.foundAt })
                       ) : (
                         <>
@@ -750,6 +879,7 @@ export function Settings(props: {
           <DefaultModel />
 
           <Appearance />
+          <DeepseekKey />
           <ExplainLanguage />
 
           <p className="footnote">{t('settings.paneNote')}</p>

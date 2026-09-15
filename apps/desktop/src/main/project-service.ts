@@ -249,9 +249,28 @@ export class ProjectService {
     return this.projects.setProfile(projectId, profileId)
   }
 
-  /** Records the project's cast, on the same terms as `setProfile`. */
-  setAgents(projectId: string, agentIds: readonly string[] | null): Project {
-    return this.projects.setAgents(projectId, agentIds)
+  /*
+   * `setAgents` stood here, recording the project's cast on the same terms as
+   * `setProfile`. A cast is not a project answer any more — every conversation
+   * holds every agent — so nothing calls it. The registry below still has its
+   * own `setAgents` and the column it writes; this was the way in from main, and
+   * it is the part that had to go.
+   */
+
+  /**
+   * Records the project's scratchpad.
+   *
+   * Nothing running has to be told, which is what makes this the simplest of the
+   * three: a note changes no agent's permissions, no root and no cast. It is a
+   * write and a redraw.
+   */
+  setNotes(projectId: string, notes: string | null): Project {
+    return this.projects.setNotes(projectId, notes)
+  }
+
+  /** How big that scratchpad was left, on the same terms as its text. */
+  setNoteSize(projectId: string, width: number | null, height: number | null): Project {
+    return this.projects.setNoteSize(projectId, width, height)
   }
 
   /**

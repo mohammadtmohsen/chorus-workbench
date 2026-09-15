@@ -15,6 +15,7 @@ import {
 const CTX = {
   seq: 1,
   now: 1_000,
+  agentId: 'claude' as const,
   approvalTtlMs: 60_000,
   usageSoFar: { inputTokens: 0, outputTokens: 0 },
 }
@@ -30,7 +31,7 @@ describe('message mapping', () => {
   it('says why a turn failed instead of ending it silently', () => {
     const events = mapSdkMessage(
       { type: 'result', subtype: 'error_during_execution', uuid: 'r1', session_id: 's1' },
-      { seq: 1, now: 1_000, approvalTtlMs: 1_000 }
+      { seq: 1, now: 1_000, agentId: 'claude' as const, approvalTtlMs: 1_000 }
     )
     const error = events.find((e) => e.type === 'error')
     expect(error).toBeDefined()
@@ -47,7 +48,7 @@ describe('message mapping', () => {
         uuid: 'r2',
         session_id: 's1',
       },
-      { seq: 1, now: 1_000, approvalTtlMs: 1_000 }
+      { seq: 1, now: 1_000, agentId: 'claude' as const, approvalTtlMs: 1_000 }
     )
     const error = events.find((e) => e.type === 'error')
     expect(error && 'message' in error && error.message).toBe('rate_limit: weekly quota exhausted')
@@ -305,6 +306,7 @@ describe('system notices', () => {
     mapSdkMessage(fields as unknown as Parameters<typeof mapSdkMessage>[0], {
       seq: 1,
       now: 1_000,
+      agentId: 'claude' as const,
       approvalTtlMs: 1_000,
     })
 
@@ -675,7 +677,7 @@ describe('system notices', () => {
 })
 
 describe('tool calls', () => {
-  const CTX_T = { seq: 1, now: 1_000, approvalTtlMs: 1_000 }
+  const CTX_T = { seq: 1, now: 1_000, agentId: 'claude' as const, approvalTtlMs: 1_000 }
   const assistant = (blocks: unknown[], parent?: string) =>
     mapSdkMessage(
       {
@@ -840,6 +842,7 @@ describe('subagents', () => {
     mapSdkMessage(fields as unknown as Parameters<typeof mapSdkMessage>[0], {
       seq: 1,
       now: 1_000,
+      agentId: 'claude' as const,
       approvalTtlMs: 1_000,
     })
 
@@ -1016,6 +1019,7 @@ describe('tool results', () => {
   const CTX = {
     seq: 0,
     now: 1_000,
+    agentId: 'claude' as const,
     approvalTtlMs: 60_000,
     usageSoFar: { inputTokens: 0, outputTokens: 0 },
   }
@@ -1128,7 +1132,7 @@ describe('context usage', () => {
 })
 
 describe('rate limits', () => {
-  const CTX = { seq: 0, now: 1_000, approvalTtlMs: 60_000 }
+  const CTX = { seq: 0, now: 1_000, agentId: 'claude' as const, approvalTtlMs: 60_000 }
 
   /*
    * Captured from a live `rate_limit_event`, not written from sdk.d.ts.
@@ -1435,7 +1439,7 @@ describe('user input results', () => {
  * codebase has been wrong five times about what the SDK actually sends.
  */
 describe('mapping: edit patches', () => {
-  const CTX = { seq: 1, now: 1_000, approvalTtlMs: 1_000 }
+  const CTX = { seq: 1, now: 1_000, agentId: 'claude' as const, approvalTtlMs: 1_000 }
 
   const result = (toolUseResult: unknown, opts: { isError?: boolean } = {}) =>
     mapSdkMessage(

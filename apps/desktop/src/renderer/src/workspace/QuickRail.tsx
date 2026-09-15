@@ -6,14 +6,13 @@ import { resetMoment } from '../format.js'
 import type { SessionInfo } from '../Session.js'
 import { useActiveProjectId, useOpenProjectKey, useProjectRowState } from './hooks.js'
 import { countRender } from './render-count.js'
-import { projectTile, monogramsForNames, type SessionPlacement } from './session-row.js'
+import { projectTile, type SessionPlacement } from './session-row.js'
 import {
   previewContextMenuProps,
   previewTriggerProps,
   type PreviewController,
 } from './SessionPreview.js'
 import { moveBefore, tileOffsets } from './reorder.js'
-import { StateMark } from './SessionRow.js'
 import { useShellOverlay } from './overlay.js'
 import { useUsage, type UsageReading } from './useUsage.js'
 
@@ -131,10 +130,6 @@ export function QuickRail(props: QuickRailProps): React.JSX.Element {
   }, [props.projects, props.pendingMove])
 
   const open = useMemo(() => new Set(openKey.split('\n')), [openKey])
-  const monograms = useMemo(
-    () => monogramsForNames(props.projects.map((p) => ({ id: p.id, name: p.name }))),
-    [props.projects]
-  )
 
   /*
    * Which conversations belong to each project, built once for the whole rail.
@@ -241,7 +236,6 @@ export function QuickRail(props: QuickRailProps): React.JSX.Element {
               key={project.id}
               project={project}
               conversationIds={byProject.get(project.id) ?? NO_CONVERSATIONS}
-              monogram={monograms.get(project.id) ?? ''}
               placement={
                 project.id === activeProjectId
                   ? 'active'
@@ -343,7 +337,6 @@ function RailProject(props: {
   readonly project: { readonly id: string; readonly name: string; readonly root: string }
   /** Every conversation in this project, folded into the tile's one badge. */
   readonly conversationIds: readonly string[]
-  readonly monogram: string
   readonly placement: SessionPlacement
   /** In flight: the tile dims while its ghost follows the pointer. */
   readonly dragging: boolean
@@ -371,12 +364,13 @@ function RailProject(props: {
   const triggers = previewTriggerProps(props.preview, props.project.id)
 
   /*
-   * The monogram is two letters; the name is the whole sentence.
+   * The card shows the name; this is the name and everything around it.
    *
-   * Everything the tile cannot show at 44px — which project this is, what state
-   * its conversations are in, how many things are waiting, whether it is the one
-   * on screen — is here, because at this width the accessible name is not a
-   * caption for the visual, it is the visual's only complete form.
+   * What the card still cannot show at 70px — the rest of a name too long to
+   * fit, what state its conversations are in, how many things are waiting,
+   * whether it is the one on screen — is here, because at this width the
+   * accessible name is not a caption for the visual, it is the visual's only
+   * complete form.
    *
    * "Working" is announced separately from the state rather than folded into it,
    * because at project scope the two are not exclusive: one conversation blocked
@@ -400,6 +394,46 @@ function RailProject(props: {
   ]
     .filter((part) => part !== null)
     .join(' — ')
+
+  /*
+   * The folder, not the path.
+   *
+   * A 58px line at 9px holds about thirteen characters, and the segments a path
+   * shares with every other project would take all of them — `/Users/…/code/` is
+   * the same on every card here. The last segment is the part that differs.
+   *
+   * Split on both separators because the root is whatever the platform stored,
+   * and this card is drawn on Windows too.
+   */
+  const folder = props.project.root.split(/[/\\]/).filter(Boolean).at(-1) ?? props.project.root
+
+  /*
+   * The third line, in words rather than in a shape.
+   *
+   * A badge and a dot said the same things in 18px and 7px, hung off the card's
+   * corners because there was nowhere else for them, and both were cut by the
+   * scroller on a card that runs the rail's full width. Two lines of type inside
+   * the card cannot be clipped, and they do not have to be learned: "2 to
+   * approve" is what the dot's colour and the badge's number meant together.
+   *
+   * **`stateOf`'s order, not the dot's.** The dot deliberately reported working
+   * over a pending request, because it could — the badge carried the other half.
+   * One line cannot, so it reports the request, which is the half that is asking
+   * for a person. That a project is *also* running something stays in
+   * `aria-label`, which has room for both.
+   */
+  const status =
+    facts.state === 'approval'
+      ? t('workspace.approvals', { count: facts.count })
+      : facts.state === 'question'
+        ? t('workspace.questions', { count: facts.count })
+        : facts.state === 'working'
+          ? t('state.working')
+          : facts.state === 'failed'
+            ? t('rail.failed')
+            : facts.count > 0
+              ? t('rail.unread', { count: facts.count })
+              : null
 
   return (
     /*
@@ -499,18 +533,25 @@ function RailProject(props: {
           }
         }}
       >
-        <span className="rail-session-monogram" aria-hidden="true">
-          {props.monogram}
+        <span className="rail-project-name" aria-hidden="true">
+          {props.project.name}
         </span>
-        {/*
-          Driven by `working` and not by `state`, which is the one place this
-          tile differs from a conversation row. A project can be waiting on you
-          *and* running something, and the dot is the half that says so.
-        */}
-        <StateMark state={facts.working.length > 0 ? 'working' : facts.state} voice={facts.voice} />
-        {facts.count > 0 && (
-          <span className="rail-badge" data-state={facts.state} aria-hidden="true">
-            {facts.count}
+        <span className="rail-project-folder" aria-hidden="true">
+          {folder}
+        </span>
+        {status !== null && (
+          <span
+            className="rail-project-status"
+            data-state={facts.state}
+            /* Absent rather than empty when there is no single voice, for the
+               reason `StateMark` gives: the stylesheet matches on the attribute
+               existing, and `data-voice=""` would still match. */
+            {...(facts.state === 'working' && facts.voice !== null
+              ? { 'data-voice': facts.voice }
+              : {})}
+            aria-hidden="true"
+          >
+            {status}
           </span>
         )}
       </button>

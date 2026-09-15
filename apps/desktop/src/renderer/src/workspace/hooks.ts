@@ -49,6 +49,7 @@ function selectActions(state: WorkspaceStore): WorkspaceActions {
     hydrate,
     openProject,
     clearConversationUnread,
+    seedPendingDecisions,
     showConversation,
     showConversationIn,
     focusConversationGroup,
@@ -57,6 +58,7 @@ function selectActions(state: WorkspaceStore): WorkspaceActions {
     placeConversation,
     closeConversationTab,
     setConversationSizes,
+    equalizeConversationBranch,
     activateTab,
     focusPane,
     closeTab,
@@ -96,6 +98,7 @@ function selectActions(state: WorkspaceStore): WorkspaceActions {
     hydrate,
     openProject,
     clearConversationUnread,
+    seedPendingDecisions,
     showConversation,
     showConversationIn,
     focusConversationGroup,
@@ -104,6 +107,7 @@ function selectActions(state: WorkspaceStore): WorkspaceActions {
     placeConversation,
     closeConversationTab,
     setConversationSizes,
+    equalizeConversationBranch,
     activateTab,
     focusPane,
     closeTab,
@@ -252,6 +256,28 @@ export function useActiveProjectId(): string | null {
   return useWorkspaceStore((state) =>
     state.focusedPaneId === null ? null : (state.panes[state.focusedPaneId]?.activeTabId ?? null)
   )
+}
+
+/**
+ * The one conversation the person is looking at, anywhere in the window.
+ *
+ * `Workspace.tsx` derives the same thing per pane, because a pane's own note
+ * asks about that pane. The global note belongs to no pane, so it has to walk
+ * the whole chain: focused pane, its active tab's project, that project's
+ * focused group, that group's active tab. Every link can be absent — a window
+ * with no project open, a project with no conversations — and each returns null
+ * rather than reaching past it, since "no conversation to send to" is a state
+ * the panel draws rather than an error.
+ */
+export function useFocusedConversationId(): string | null {
+  return useWorkspaceStore((state) => {
+    if (state.focusedPaneId === null) return null
+    const projectId = state.panes[state.focusedPaneId]?.activeTabId ?? null
+    if (projectId === null) return null
+    const arrangement = state.conversationGroups[projectId]
+    const groupId = arrangement?.focusedPaneId ?? null
+    return groupId === null ? null : (arrangement?.panes[groupId]?.activeTabId ?? null)
+  })
 }
 
 /** Which pane holds a session's tab, or null when it is running off screen. */

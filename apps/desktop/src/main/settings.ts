@@ -1,5 +1,6 @@
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
+import { agentRecord } from '@chorus/shared'
 import { z } from 'zod'
 import { normaliseExplainLanguage } from '../shared/ipc.js'
 
@@ -27,13 +28,21 @@ import { normaliseExplainLanguage } from '../shared/ipc.js'
  * provider's own default, which is the right thing for a machine whose CLI we
  * have not asked yet.
  */
-const perAgent = z
-  .object({ codex: z.string().default(''), claude: z.string().default('') })
-  .default({ codex: '', claude: '' })
+const perAgent = z.object(agentRecord(() => z.string().default(''))).default(agentRecord(() => ''))
 
 export const Settings = z
   .object({
-    agents: z.array(z.enum(['codex', 'claude'])),
+    /*
+     * `agents` stood here and is gone, and unlike `model` below it is not kept
+     * for migration.
+     *
+     * The two cases are opposite. `model` is read and folded onto Claude, so
+     * dropping it would lose a value its owner chose. `agents` decided a cast,
+     * and a cast is no longer a choice anybody makes — the value is not being
+     * migrated anywhere, it has simply stopped meaning anything. zod strips what
+     * it does not name, so an existing file loses the key on its next save,
+     * which is the outcome we want rather than one to guard against.
+     */
     /** Empty means "start at home", the same as leaving the field blank. */
     cwd: z.string(),
     profileId: z.string(),
@@ -76,6 +85,17 @@ export const Settings = z
      */
     explainLanguage: z.string().default('').transform(normaliseExplainLanguage),
     /**
+     * Whether a new conversation starts in the bilingual style.
+     *
+     * Must track `SettingsShape` in `shared/ipc.ts`, like every other key here.
+     *
+     * A default and nothing more — the live value belongs to the conversation, so
+     * one room can read Arabic while the room next door is answering a colleague
+     * in English. What the style *is* lives in code as
+     * `DEFAULT_STYLE_INSTRUCTION`; there is deliberately no setting for it.
+     */
+    styleOnByDefault: z.boolean().default(false),
+    /**
      * Which appearance to draw, rather than always deferring to the OS.
      *
      * `system` is the default and preserves what every version before this did:
@@ -115,26 +135,6 @@ export const Settings = z
 export type Settings = z.infer<typeof Settings>
 
 export const DEFAULT_SETTINGS: Settings = {
-  /*
-   * Both, and Claude first.
-   *
-   * This said one agent, and the argument was cost: two agents is two provider
-   * processes and twice the wait before anything can be typed, so the other
-   * could be brought in from its chip when the conversation needed it. What that
-   * missed is that **the product is the shared room** — a conversation with one
-   * agent in it is the thing Chorus exists to replace, and asking for the second
-   * one is a step nobody takes before they know they want it. An agent brought in
-   * late reads the transcript as catch-up, which works, but it has not been
-   * *present* for the reasoning it is catching up on.
-   *
-   * Claude first because the order is read: it leads the composer's placeholder
-   * and the cast toggles, and something has to be named first.
-   *
-   * Only the default. A session still chooses its own cast, and toggling one no
-   * longer writes back here — see `setParticipants` in `App.tsx` for why a cast
-   * is not a preference.
-   */
-  agents: ['claude', 'codex'],
   cwd: '',
   // Permissive defaults ship by accident, not on purpose (plan §4.4).
   profileId: 'read-only',
@@ -144,8 +144,10 @@ export const DEFAULT_SETTINGS: Settings = {
   effortLevel: '',
   // Off until someone says which language. See the field's own comment.
   explainLanguage: '',
-  models: { codex: '', claude: '' },
-  efforts: { codex: '', claude: '' },
+  // Off: a first launch answers exactly as every launch before this existed.
+  styleOnByDefault: false,
+  models: agentRecord(() => ''),
+  efforts: agentRecord(() => ''),
   // Follow the OS, which is what every version before the setting existed did.
   theme: 'system',
 }

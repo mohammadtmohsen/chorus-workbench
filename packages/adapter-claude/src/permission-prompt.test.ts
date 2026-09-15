@@ -12,7 +12,7 @@ import { mapToolPermission } from './mapping.js'
  * protocol-correct "always allow": Chorus stops asking and the CLI does not.
  */
 
-const CTX = { seq: 1, now: 1_000, approvalTtlMs: 60_000 }
+const CTX = { seq: 1, now: 1_000, agentId: 'claude' as const, approvalTtlMs: 60_000 }
 const ID = 'ap-1' as ApprovalId
 
 describe('what the provider said', () => {

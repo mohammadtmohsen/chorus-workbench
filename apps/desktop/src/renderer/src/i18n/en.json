@@ -1,7 +1,52 @@
 {
   "app": {
     "name": "Chorus",
-    "tagline": "Work with several coding agents in one conversation, on your own machine."
+    "tagline": "Work with several coding agents in one conversation, on your own machine.",
+    "note": "Note",
+    "noteTool": {
+      "bold": "Bold",
+      "italic": "Italic",
+      "underline": "Underline",
+      "strike": "Strikethrough",
+      "link": "Link",
+      "orderedList": "Numbered list",
+      "bulletList": "Bulleted list",
+      "blockquote": "Quote",
+      "code": "Code",
+      "codeBlock": "Code block",
+      "box": "Box",
+      "colour": "Text colour",
+      "image": "Image"
+    },
+    "noteColour": {
+      "default": "No colour",
+      "red": "Red",
+      "amber": "Amber",
+      "green": "Green",
+      "blue": "Blue",
+      "purple": "Purple",
+      "grey": "Grey"
+    },
+    "keptNotes": "Notes",
+    "keptNoteNew": "New note",
+    "keptNoteEmpty": "No notes yet",
+    "keptNoteUntitled": "Empty note",
+    "keptNoteDelete": "Delete this note",
+    "keptNoteDeleteConfirm": "Press again to delete",
+    "keptNotePlaceholder": "Anything worth keeping…",
+    "keptNoteLabel": "Kept note",
+    "noteImageTitle": "Add an image",
+    "noteImagePick": "Choose a file…",
+    "noteImageOr": "Or paste an address:",
+    "noteImageAddress": "https://…",
+    "noteImageInsert": "Insert",
+    "noteImageWorking": "Fetching…",
+    "noteImageCancel": "Cancel",
+    "noteImageClose": "Close the image",
+    "notePlaceholder": "Anything that is not about one project…",
+    "noteResizeWidth": "Drag to set the width, double-click to fit the longest line",
+    "noteResizeHeight": "Drag to set the height, double-click to fit the text",
+    "noteResizeBoth": "Drag to resize, double-click to fit"
   },
   "agents": {
     "probing": "checking…",
@@ -9,6 +54,7 @@
     "unknownVersion": "installed",
     "missingHelp": "Chorus could not find it. Install it, then press Re-check:",
     "failedHelp": "Found at {{path}}, but it would not run. It may be a broken install, or a shim whose interpreter is gone.",
+    "needsKeyHelp": "DeepSeek runs on the claude CLI you already have, so there is nothing to install — it just needs your DeepSeek API key. Add one under DeepSeek below.",
     "recheck": "Re-check",
     "oneIsEnough": "One is enough — Chorus runs with either agent on its own.",
     "noneAtAll": "Chorus drives the coding CLI you already have, and could not find one. Install either of these and press Try again:"
@@ -47,21 +93,34 @@
     "noFolder": "No folder",
     "renameTitle": "Rename this session",
     "titlePlaceholder": "Empty for the folder's name",
-    "addAgent": "Bring {{agent}} in — it reads the conversation so far",
-    "removeAgent": "Take {{agent}} out of this conversation",
     "nobodyHere": "Nobody is in this conversation. Add an agent to start again.",
     "quoteInMessage": "Quote in message",
+    "sendSelection": "Send to chat",
+    "teamDetail": "Tell every agent how to call the others",
+    "teamMessage": "This conversation has {{agents}} and me. I call one of you by starting a message with its name, like @claude. You can call any other agent the same way whenever it helps: to review your work, take on a writing or coding task, or give advice. End your reply with a line that starts with its name, like @deepseek, followed by what you want. Everything from that line down is sent to that agent, and it starts at once. When an agent calls you, answer it the same way. Leave that line out when your answer is for me. Never start a line with an agent's name unless you mean to call it.",
     "endConfirm": "An agent is working — press again to end this session",
     "cancel": "Cancel",
     "waiting": "waiting",
     "noAnswer": "No answer yet — the message may not have reached the agent. Try sending it again.",
     "askAboutThis": "Ask about this",
     "explainSimply": "Explain simply",
+    "styleOn": "Answer this room in English and Arabic",
+    "styleOff": "Answer this room in English only",
+    "styleBadgeOn": "Bilingual",
+    "styleBadgeOff": "Plain",
     "restart": "Start over — end this chat and open a fresh one",
+    "continue": "Continue in a new chat — carries this transcript across, leaves this chat open",
     "confirmRestartTitle": "Start over?",
     "confirmRestartBody": "{{agents}} is still working. Starting over ends this conversation and discards the turn in flight. The transcript stays in History.",
     "confirmRestartCancel": "Keep going",
     "confirmRestart": "Start over",
+    "confirmEndTitle": "End this conversation?",
+    "confirmEndWorking": "{{agents}} is still working, and the turn in flight is discarded.",
+    "confirmEndDecisions_one": "{{count}} decision is still waiting for you.",
+    "confirmEndDecisions_other": "{{count}} decisions are still waiting for you.",
+    "confirmEndDraft": "There is a message you have written and not sent. It is kept nowhere else.",
+    "confirmEndCancel": "Keep it open",
+    "confirmEnd": "End it",
     "translateThis": "Translate",
     "lookingUp": "Looking…",
     "noneFound": "Nothing to offer yet",
@@ -153,6 +212,15 @@
     "explainLanguage": "Answer in",
     "explainPlaceholder": "Arabic",
     "explainNote": "Every finished reply gets an Explain simply button, which asks the agent to say the whole answer again plainly in this language. Select part of a reply and it can also translate that passage into it. Write the language however you like — “Arabic”, “Lebanese Arabic”, “simple Arabic”. An explanation follows what you write; a translation uses the standard written form of the language. Technical terms stay in English either way — event, status, props, a file name — so what you read still matches the code. Leave it empty and neither is offered. This does not change Chorus's own language.",
+    "deepseekHeading": "DeepSeek",
+    "deepseekKey": "API key",
+    "deepseekPlaceholder": "sk-…",
+    "deepseekStored": "A key is stored",
+    "deepseekSave": "Save key",
+    "deepseekClear": "Remove it",
+    "deepseekNote": "DeepSeek runs through the claude CLI you already have, pointed at DeepSeek's own endpoint — there is nothing extra to install. The key is encrypted with your login keychain and never leaves this machine except to DeepSeek. Chorus cannot show it back to you: remove it and enter a new one to change it. Your Claude account is not touched and its limits are not used.",
+    "styleOnByDefault": "Start new conversations bilingual",
+    "styleNote": "Bilingual replies come as paired paragraphs: one in English, then the same paragraph in Modern Standard Arabic, with technical terms, file names and identifiers left in English on both sides. It is off unless you ask for it. Each conversation also has its own switch in the composer — Plain or Bilingual — so you can read in Arabic in one room and leave another plain because you are pasting its replies to someone else. Flipping that switch restarts the room's agents on the same thread: nothing is lost and nothing is re-read, but the change lands on the next reply rather than one already arriving.",
     "catalogue": {
       "unqueried": "Its models are read from a running session — start one to choose.",
       "loading": "Reading its models…",
@@ -231,6 +299,52 @@
     "sending": "Sending…",
     "card": "{{from}} handed off to {{to}}"
   },
+  "collaborate": {
+    "delivery": "Plan · review · deliver",
+    "build": "Split · deliver",
+    "running": "{{step}} · {{index}} of {{total}}",
+    "stop": "Stop collaboration",
+    "draining": "Waiting for a safe boundary.",
+    "restart": "Restart the agent",
+    "interrupted": "Stopped — another turn started that this review did not ask for.",
+    "step": {
+      "reviewPlan": "Codex reviewing the plan",
+      "split": "Claude splitting it into tasks",
+      "implement": "DeepSeek on a task",
+      "accept": "Claude checking the task",
+      "report": "Claude reporting"
+    },
+    "outcome": {
+      "agreed": "Done — every task was delivered and accepted.",
+      "unresolved": "Stopped — a task kept coming back and was never accepted.",
+      "unsplit": "Stopped — the plan came back without a task list.",
+      "tooManyTasks": "Stopped — the plan split into more tasks than a run will deliver. Plan it smaller."
+    },
+    "cancelled": {
+      "stop": "Stopped by you.",
+      "userMessage": "Stopped — you sent a message.",
+      "manualHandoff": "Stopped — you handed off by hand.",
+      "shutdown": "Stopped — the conversation closed."
+    },
+    "failed": {
+      "delivery": "Stopped — the message could not be delivered.",
+      "acknowledgement": "Stopped — the agent never picked it up.",
+      "idle": "Stopped — the agent went quiet.",
+      "turnFailed": "Stopped — the agent's turn failed.",
+      "noReply": "Stopped — the turn ended without a reply.",
+      "sessionEnded": "Stopped — the agent's session ended."
+    },
+    "refused": {
+      "running": "A review is already running here.",
+      "draining": "The last review is still finishing. Try again in a moment.",
+      "missingAgent": "{{agent}} is not in this conversation.",
+      "unknownEvent": "That reply is no longer in the log.",
+      "notAgentMessage": "A review starts from a reply, not from that.",
+      "busy": "{{agent}} has a turn that never finished. Restart it to clear this.",
+      "notPlanner": "A review starts from one of the planner's replies."
+    },
+    "runningUnknown": "{{step}} · step {{index}}"
+  },
   "ask": {
     "heading": "Make this edit to {{path}}?",
     "yes": "Yes",
@@ -268,6 +382,7 @@
     "user": "You",
     "codex": "Codex",
     "claude": "Claude",
+    "deepseek": "DeepSeek",
     "system": "System"
   },
   "ide": {
@@ -337,7 +452,8 @@
     "code": {
       "editWithoutApproval": "Claude made this edit without asking Chorus.",
       "editVisibilityUnavailable": "Chorus could not take control of edit permissions for this session — edits may not be shown before they happen.",
-      "staleEditPreview": "The file changed after this was shown, so the edit was refused. Ask again to work from the current file."
+      "staleEditPreview": "The file changed after this was shown, so the edit was refused. Ask again to work from the current file.",
+      "contextCarried": "Continuing where the previous conversation left off — the agents here start with the transcript so far. Restart to begin fresh."
     },
     "omitted": "{{bytes}} bytes omitted — the output was too large to keep",
     "detail": "Details",
@@ -548,6 +664,10 @@
   "project": {
     "firstRun": "Add a project folder to begin. Chorus opens conversations inside a project, and everything an agent does happens there.",
     "renameTitle": "Rename this project",
+    "namePlaceholder": "Name this project",
+    "notes": "Notes for this project",
+    "notesEmpty": "Add a note",
+    "notesPlaceholder": "What is pending, what to check later…",
     "noConversations": "No conversations in this project yet.",
     "folderMissing": "This folder is no longer there. It may have been renamed, moved, deleted, or it is on a drive that is not connected.",
     "locateFolder": "Locate folder…",
@@ -570,7 +690,10 @@
     "label": "Projects, terminal and settings",
     "projects": "Projects",
     "addProject": "Add project",
-    "openProject": "New conversation in {{name}}"
+    "openProject": "New conversation in {{name}}",
+    "failed": "failed",
+    "unread_one": "{{count}} unread",
+    "unread_other": "{{count}} unread"
   },
   "state": {
     "idle": "idle",

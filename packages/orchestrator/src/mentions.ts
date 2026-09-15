@@ -42,7 +42,12 @@ export function parseMentions(text: string, context: RouteContext): MentionRoute
   }
 
   if (named.length > 0) {
-    return { targets: named, text: stripLeadingMentions(text, named), explicit: true }
+    const { leading, rest } = splitLeadingMentions(text, named)
+    return {
+      targets: leading.length > 0 ? leading : named.slice(0, 1),
+      text: rest,
+      explicit: true,
+    }
   }
 
   return { targets: inferTarget(context), text: text.trim(), explicit: false }
@@ -67,16 +72,65 @@ function inferTarget(context: RouteContext): readonly AgentId[] {
  * A mid-sentence mention is usually meaningful content — "ask @codex to review
  * this" — and removing it would change what the agent reads.
  */
-function stripLeadingMentions(text: string, named: readonly AgentId[]): string {
+function splitLeadingMentions(
+  text: string,
+  named: readonly AgentId[]
+): { leading: AgentId[]; rest: string } {
+  const leading: AgentId[] = []
   let rest = text.trimStart()
   for (;;) {
     const match = /^@([a-z][a-z0-9-]*)\b[,:]?\s*/i.exec(rest)
     const name = match?.[1]?.toLowerCase()
     if (match === null || name === undefined) break
     if (!named.includes(name as AgentId)) break
+    if (!leading.includes(name as AgentId)) leading.push(name as AgentId)
     rest = rest.slice(match[0].length)
   }
-  return rest.trim()
+  return { leading, rest: rest.trim() }
+}
+
+export interface ReplyHandoff {
+  readonly to: AgentId
+  readonly prompt: string
+  readonly above: string
+}
+
+export function findReplyHandoff(
+  reply: string,
+  from: AgentId,
+  agents: readonly AgentId[]
+): ReplyHandoff | null {
+  const lines = reply.split('\n')
+  let fenced = false
+  let call: { readonly index: number; readonly to: AgentId; readonly rest: string } | null = null
+  for (const [index, line] of lines.entries()) {
+    if (/^\s*(```|~~~)/.test(line)) {
+      fenced = !fenced
+      continue
+    }
+    if (fenced) continue
+    const match = /^@([a-z][a-z0-9-]*)\b[,:]?\s*/i.exec(line)
+    const name = match?.[1]?.toLowerCase()
+    const to = agents.find((agent) => agent === name)
+    if (match === null || to === undefined || to === from) continue
+    call = { index, to, rest: line.slice(match[0].length) }
+  }
+  if (call === null) return null
+  const prompt = [call.rest, ...lines.slice(call.index + 1)].join('\n').trim()
+  if (prompt === '') return null
+  return { to: call.to, prompt, above: lines.slice(0, call.index).join('\n').trim() }
+}
+
+export function callRule(agents: readonly AgentId[]): string {
+  return [
+    `Agents in this conversation: ${agents.join(', ')}.`,
+    'To call another agent, for a review, a task, advice or anything else, end your reply',
+    'with a line that starts with @ and its name, such as @codex, followed by what you want.',
+    'Everything from that line down is sent to that agent, and it starts at once.',
+    'When an agent calls you, answer it the same way.',
+    'Leave that line out when your answer is for the user.',
+    "Never start a line with an agent's name unless you mean to call it.",
+  ].join(' ')
 }
 
 /** Renders a route for a log line or a UI hint. */

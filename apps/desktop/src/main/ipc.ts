@@ -1,7 +1,7 @@
 import type { TranscriptState } from '@chorus/event-store'
 import { writeFileSync } from 'node:fs'
 import { join, resolve } from 'node:path'
-import { buildDiagnostics } from '@chorus/shared'
+import { buildDiagnostics, type AgentId } from '@chorus/shared'
 import { homedir } from 'node:os'
 import {
   app,
@@ -17,6 +17,7 @@ import {
   DIAGNOSTIC_PUSH_CHANNEL,
   EVENTS_PUSH_CHANNEL,
   IDE_PUSH_CHANNEL,
+  COLLABORATION_PUSH_CHANNEL,
   CONTEXT_PUSH_CHANNEL,
   TASKS_PUSH_CHANNEL,
   TERMINAL_PUSH_CHANNEL,
@@ -28,6 +29,7 @@ import {
   type IpcRequest,
   type IpcResponse,
   type TranscriptEvent,
+  type SettingsWithSecrets,
 } from '../shared/ipc.js'
 import { MAX_SELECTED_BYTES, toDisplayRange, type EditorMetadata } from '@chorus/ide-protocol'
 /*
@@ -49,15 +51,18 @@ import {
   resolveVsix,
 } from './ide-extension.js'
 import { canonicalPath } from './real-path.js'
+import { copyNoteImageTo, fetchNoteImage, pickNoteImage, saveNoteImage } from './note-images.js'
 import { probeAgents } from './agent-probe.js'
 import { completeFiles } from './files.js'
 import { listPlugins } from './plugins.js'
 import type { ChorusRuntime } from './runtime.js'
 import type { WorkspaceSnapshot } from '../shared/workspace-layout.js'
 import { readSettings, writeSettings, type Settings } from './settings.js'
+import { agentKeyIsSet, clearAgentKey, writeAgentKey } from './agent-secrets.js'
 import { applyTheme } from './theme.js'
 import { previewFile, stashFile } from './stash.js'
 import {
+  requestWorkbenchReveal,
   requestWorkbenchSnapshot,
   setWorkbenchContextSink,
   setWorkbenchSurfaceGoneSink,
@@ -130,12 +135,64 @@ function toPushFile(root: CanonicalRoot, editor: EditorMetadata): IdeContextPush
 }
 
 /**
+ * Splits `src/foo.ts:42:7` into the file and where in it to land.
+ *
+ * **Parsed here rather than in the renderer, so both editors get it from one
+ * place.** `code -g` has always understood `path[:line[:column]]`, so a line an
+ * agent wrote already worked in external VS Code by accident — through the
+ * whole suffix reaching the CLI untouched. The embedded editor takes a
+ * structured selection instead, so the string has to be taken apart somewhere,
+ * and doing it at the boundary keeps the two routes landing on the same line
+ * instead of one of them silently opening at the top.
+ *
+ * **Only a trailing `:<digits>` counts**, which is what keeps a Windows drive
+ * letter a drive letter: `C:\src\foo.ts` has a colon with no digits after it
+ * and comes back whole. `C:\src\foo.ts:42` still splits, because the match is
+ * anchored at the end rather than at the first colon.
+ *
+ * Exported for tests: it is a pure function over strings and the interesting
+ * cases are all shapes of path rather than states of the app.
+ */
+export function splitFileLocation(raw: string): {
+  path: string
+  line: number | null
+  column: number | null
+} {
+  const match = /^(.*?):(\d+)(?::(\d+))?$/.exec(raw)
+  const [, file, lineText, columnText] = match ?? []
+  /*
+   * A path that is *only* a position — `:42` — is not a file, and resolving it
+   * against the project root would open the folder. Left whole, so containment
+   * and the editor deal with it as the nonsense it is.
+   */
+  if (file === undefined || file === '' || lineText === undefined) {
+    return { path: raw, line: null, column: null }
+  }
+  return {
+    path: file,
+    line: Number(lineText),
+    column: columnText === undefined ? null : Number(columnText),
+  }
+}
+
+/**
  * Exported for tests.
  *
  * The folder chooser is a native modal: it cannot be opened and dismissed by a
  * driver, so the only way to exercise picking *and* cancelling is to call the
  * handler with `dialog` stubbed.
  */
+/**
+ * What a renderer is told about the credentials main holds: that they exist.
+ *
+ * One function rather than a spread at each call site, so there is a single
+ * place to read when the question is "can the renderer see the key" — and a
+ * single place to change if another agent ever needs one.
+ */
+function withSecretState(settings: Settings): SettingsWithSecrets {
+  return { ...settings, deepseekKeySet: agentKeyIsSet(app.getPath('userData'), 'deepseek') }
+}
+
 export function buildHandlers(runtime: ChorusRuntime): Handlers {
   return {
     'app:getInfo': () =>
@@ -148,7 +205,7 @@ export function buildHandlers(runtime: ChorusRuntime): Handlers {
         home: homedir(),
       }),
 
-    'agents:probe': () => probeAgents(),
+    'agents:probe': () => probeAgents(app.getPath('userData')),
 
     'limits:refresh': async () => {
       await runtime.refreshLimits()
@@ -245,14 +302,14 @@ export function buildHandlers(runtime: ChorusRuntime): Handlers {
     },
 
     'conversation:start': (request: {
-      agents: ('codex' | 'claude')[]
       projectId: string
       profileId?: string
+      continueFrom?: string
     }) =>
       runtime.startConversation({
-        agents: request.agents,
         projectId: request.projectId,
         ...(request.profileId === undefined ? {} : { profileId: request.profileId }),
+        ...(request.continueFrom === undefined ? {} : { continueFrom: request.continueFrom }),
       }),
 
     'conversation:send': async (request: {
@@ -269,14 +326,6 @@ export function buildHandlers(runtime: ChorusRuntime): Handlers {
       await runtime.interrupt(request.conversationId)
       return OK
     },
-
-    'conversation:addAgent': (request: { conversationId: string; agentId: 'codex' | 'claude' }) =>
-      runtime.addParticipant(request.conversationId, request.agentId),
-
-    'conversation:removeAgent': (request: {
-      conversationId: string
-      agentId: 'codex' | 'claude'
-    }) => runtime.removeParticipant(request.conversationId, request.agentId),
 
     'conversation:restore': () => runtime.restoreOpenConversations(),
 
@@ -298,11 +347,7 @@ export function buildHandlers(runtime: ChorusRuntime): Handlers {
       })),
     }),
 
-    'tasks:stop': async (request: {
-      conversationId: string
-      agentId: 'codex' | 'claude'
-      taskId: string
-    }) => {
+    'tasks:stop': async (request: { conversationId: string; agentId: AgentId; taskId: string }) => {
       await runtime.stopTask(request.conversationId, request.agentId, request.taskId)
       return OK
     },
@@ -345,6 +390,13 @@ export function buildHandlers(runtime: ChorusRuntime): Handlers {
       return { planning: runtime.planning(request.conversationId) }
     },
 
+    'conversation:answerStyle': async (request: { conversationId: string; on?: boolean }) => {
+      // No `on` is a read. See the channel's own comment for why it is one
+      // channel rather than two.
+      if (request.on !== undefined) await runtime.setAnswerStyle(request.conversationId, request.on)
+      return { styleOn: runtime.answerStyle(request.conversationId) }
+    },
+
     'conversation:draft': (request: { conversationId: string; draft: string }) => {
       runtime.rememberDraft(request.conversationId, request.draft)
       return Promise.resolve(OK)
@@ -359,6 +411,9 @@ export function buildHandlers(runtime: ChorusRuntime): Handlers {
       Promise.resolve({
         path: stashFile(app.getPath('userData'), request.name, request.base64),
       }),
+
+    'files:stashNoteImage': (request: { url: string }) =>
+      copyNoteImageTo(app.getPath('userData'), request.url),
 
     'files:preview': (request: { path: string }) => Promise.resolve(previewFile(request.path)),
 
@@ -438,8 +493,48 @@ export function buildHandlers(runtime: ChorusRuntime): Handlers {
     'project:setProfile': (request: { projectId: string; profileId: string }) =>
       Promise.resolve(runtime.setProjectProfile(request.projectId, request.profileId)),
 
-    'project:setAgents': (request: { projectId: string; agentIds: ('codex' | 'claude')[] }) =>
-      runtime.setProjectAgents(request.projectId, request.agentIds),
+    'project:setNotes': (request: { projectId: string; notes: string }) =>
+      Promise.resolve(runtime.setProjectNotes(request.projectId, request.notes)),
+
+    'app:getNote': () => Promise.resolve(runtime.getAppNote()),
+
+    'app:setNote': (request: { notes: string }) =>
+      Promise.resolve(runtime.setAppNote(request.notes)),
+
+    'app:listKeptNotes': () => Promise.resolve(runtime.listKeptNotes()),
+
+    'app:createKeptNote': () => Promise.resolve(runtime.createKeptNote()),
+
+    'app:setKeptNote': (request: { id: string; notes: string }) =>
+      Promise.resolve(runtime.setKeptNote(request.id, request.notes)),
+
+    'app:removeKeptNote': (request: { id: string }) =>
+      Promise.resolve(runtime.removeKeptNote(request.id)),
+
+    'app:reorderKeptNotes': (request: { ids: string[] }) =>
+      Promise.resolve(runtime.reorderKeptNotes(request.ids)),
+
+    'app:setNoteSize': (request: { width: number; height: number | null }) =>
+      Promise.resolve(runtime.setAppNoteSize(request.width, request.height)),
+
+    'project:setNoteSize': (request: {
+      projectId: string
+      width: number | null
+      height: number | null
+    }) =>
+      Promise.resolve(runtime.setProjectNoteSize(request.projectId, request.width, request.height)),
+
+    'app:addNoteImage': (request: { data: string; extension: string }) =>
+      saveNoteImage(
+        app.getPath('userData'),
+        new Uint8Array(Buffer.from(request.data, 'base64')),
+        request.extension
+      ),
+
+    'app:pickNoteImage': () => pickNoteImage(app.getPath('userData')),
+
+    'app:fetchNoteImage': (request: { address: string }) =>
+      fetchNoteImage(app.getPath('userData'), request.address),
 
     'conversation:close': async (request: { conversationId: string }) => {
       // Before the close, while the conversation still resolves: a watcher held
@@ -507,7 +602,7 @@ export function buildHandlers(runtime: ChorusRuntime): Handlers {
 
     'approval:decide': async (request: {
       conversationId: string
-      agentId: 'codex' | 'claude'
+      agentId: AgentId
       approvalId: string
       outcome: 'allow' | 'deny' | 'cancel'
       scope: 'once' | 'session'
@@ -536,7 +631,7 @@ export function buildHandlers(runtime: ChorusRuntime): Handlers {
 
     'userinput:answer': async (request: {
       conversationId: string
-      agentId: 'codex' | 'claude'
+      agentId: AgentId
       userInputId: string
       outcome: 'answered' | 'cancel'
       answers: { questionId: string; values: string[] }[]
@@ -557,11 +652,22 @@ export function buildHandlers(runtime: ChorusRuntime): Handlers {
 
     'policy:profiles': () => Promise.resolve(runtime.availableProfiles()),
 
-    'settings:read': () => Promise.resolve(readSettings(app.getPath('userData'))),
+    'settings:read': () => Promise.resolve(withSecretState(readSettings(app.getPath('userData')))),
 
-    'settings:write': (request: Partial<Settings>) => {
+    'settings:write': (request: Partial<Settings> & { deepseekApiKey?: string }) => {
       const path = app.getPath('userData')
       const current = readSettings(path)
+      /*
+       * The credential is handled before the preferences and never reaches
+       * `writeSettings` — it does not belong in `settings.json` and an empty
+       * string is a real instruction rather than a missing value: it is how the
+       * field clears a key that is already there.
+       */
+      const { deepseekApiKey, ...preferences } = request
+      if (deepseekApiKey !== undefined) {
+        if (deepseekApiKey === '') clearAgentKey(path, 'deepseek')
+        else writeAgentKey(path, 'deepseek', deepseekApiKey)
+      }
       /*
        * Merged over what is on disk, so a field the renderer did not send keeps
        * whatever the menu or a previous session left there. Zod drops absent
@@ -574,10 +680,11 @@ export function buildHandlers(runtime: ChorusRuntime): Handlers {
        */
       const written = writeSettings(path, {
         ...current,
-        ...request,
-        models: { ...current.models, ...request.models },
-        efforts: { ...current.efforts, ...request.efforts },
+        ...preferences,
+        models: { ...current.models, ...preferences.models },
+        efforts: { ...current.efforts, ...preferences.efforts },
       })
+      const answer = withSecretState(written)
       /*
        * Appearance is the one setting that is not just data to hand back.
        *
@@ -597,9 +704,9 @@ export function buildHandlers(runtime: ChorusRuntime): Handlers {
        * question of which writes need answering and which do not.
        */
       for (const window of BrowserWindow.getAllWindows()) {
-        if (!window.isDestroyed()) window.webContents.send(SETTINGS_PUSH_CHANNEL, written)
+        if (!window.isDestroyed()) window.webContents.send(SETTINGS_PUSH_CHANNEL, answer)
       }
-      return Promise.resolve(written)
+      return Promise.resolve(answer)
     },
 
     'diagnostics:read': () =>
@@ -672,7 +779,8 @@ export function buildHandlers(runtime: ChorusRuntime): Handlers {
       } catch {
         return { ok: false, reason: 'outside-project' as const, path: request.path, project: '' }
       }
-      const target = resolve(cwd, request.path)
+      const at = splitFileLocation(request.path)
+      const target = resolve(cwd, at.path)
       /*
        * Two ways to say yes, and the order is the design.
        *
@@ -699,7 +807,41 @@ export function buildHandlers(runtime: ChorusRuntime): Handlers {
         // be told apart from a bug in the check itself.
         return { ok: false, reason: 'outside-project' as const, path: target, project: cwd }
       }
-      return openFileInEditor(target, extensionDeps())
+
+      /*
+       * The editor in this window first, external VS Code only if there is none
+       * — the same ordering `ide:snapshot` uses below, and the same reason.
+       * "The editor owns what the editor owns": the workbench the person is
+       * looking at should win over an application that may not even be running.
+       *
+       * `undefined` is the only thing that falls through, and that is load
+       * bearing. It means this project has no surface — the Editor switch is
+       * off — which is exactly the case the external editor still serves. A
+       * surface that answered and refused is a real answer about a real editor,
+       * and spawning VS Code on top of it would open a second window for a file
+       * the person can already see is missing.
+       */
+      const revealed = await requestWorkbenchReveal(cwd, {
+        path: target,
+        line: at.line,
+        column: at.column,
+      })
+      if (revealed !== undefined) {
+        return revealed.ok
+          ? { ok: true, reason: null }
+          : { ok: false, reason: 'open-failed' as const, path: target, project: cwd }
+      }
+
+      /*
+       * The line goes back onto the path for `code -g`, which takes
+       * `path[:line[:column]]` — so the fallback lands where the click asked
+       * for, not at the top of the file.
+       */
+      const goto =
+        at.line === null
+          ? target
+          : `${target}:${String(at.line)}${at.column === null ? '' : `:${String(at.column)}`}`
+      return openFileInEditor(goto, extensionDeps())
     },
 
     'ide:snapshot': async (request: { conversationId: string }) => {
@@ -810,10 +952,30 @@ export function buildHandlers(runtime: ChorusRuntime): Handlers {
       } as const
     },
 
+    'collaborate:start': (request: {
+      conversationId: string
+      sourceEventId: string
+      preset: 'delivery' | 'build'
+    }) =>
+      Promise.resolve(
+        runtime.startCollaboration(request.conversationId, {
+          sourceEventId: request.sourceEventId,
+          preset: request.preset,
+        })
+      ),
+
+    'collaborate:stop': (request: { conversationId: string }) => {
+      runtime.stopCollaboration(request.conversationId)
+      return Promise.resolve({ ok: true } as const)
+    },
+
+    'collaborate:status': (request: { conversationId: string }) =>
+      Promise.resolve({ status: runtime.collaborationStatus(request.conversationId) }),
+
     'handoff:prepare': (request: {
       conversationId: string
-      from: 'codex' | 'claude'
-      to: 'codex' | 'claude'
+      from: AgentId
+      to: AgentId
       sourceEventIds: string[]
       includeDiff?: boolean
       intent?: 'implement' | 'review' | 'discuss'
@@ -832,8 +994,8 @@ export function buildHandlers(runtime: ChorusRuntime): Handlers {
 
     'handoff:send': (request: {
       conversationId: string
-      from: 'codex' | 'claude'
-      to: 'codex' | 'claude'
+      from: AgentId
+      to: AgentId
       sourceEventIds: string[]
       brief: string
     }) =>
@@ -994,6 +1156,21 @@ export function forwardContextUsageToRenderer(runtime: ChorusRuntime): void {
 }
 
 /** Sends what each conversation's agents have left running, as it changes. */
+/**
+ * A collaboration's state, to every open window.
+ *
+ * Pushed on every transition **including the one where `draining` becomes
+ * false**, so the UI can say when the two buttons work again instead of leaving
+ * the user to guess.
+ */
+export function forwardCollaborationToRenderer(runtime: ChorusRuntime): void {
+  runtime.onCollaborationStatusReported((status) => {
+    for (const window of BrowserWindow.getAllWindows()) {
+      if (!window.isDestroyed()) window.webContents.send(COLLABORATION_PUSH_CHANNEL, status)
+    }
+  })
+}
+
 export function forwardTasksToRenderer(runtime: ChorusRuntime): void {
   runtime.onTasksReported((push) => {
     for (const window of BrowserWindow.getAllWindows()) {

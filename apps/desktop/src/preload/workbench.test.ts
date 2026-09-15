@@ -102,7 +102,7 @@ describe('the workbench preload', () => {
     expect(CLIPBOARD_READ_CHANNEL).toBe(WORKBENCH_CLIPBOARD_READ_CHANNEL)
   })
 
-  it('exposes exactly seventeen methods, and no eighteenth', () => {
+  it('exposes exactly nineteen methods, and no twentieth', () => {
     // The list, not the count: a method named here is a capability a document
     // running extension code is handed, so which ones they are is the assertion.
     expect(Object.keys(exposed ?? {})).toEqual([
@@ -188,6 +188,15 @@ describe('the workbench preload', () => {
        * memory for as long as the card is open.
        */
       'onAskDiffRequest',
+      /*
+       * The third of the ask-this-document trio, and the narrowest. Like
+       * `onAskDiffRequest` it can put a tab in front of the person and like it,
+       * it only ever shows — it reveals something already on disk rather than
+       * carrying content or writing any. Bounded the same way `onEditRequest`
+       * is: the handler is Chorus's own module and the project root is closed
+       * over rather than named by the caller.
+       */
+      'onRevealRequest',
       'onEditRequest',
     ])
   })

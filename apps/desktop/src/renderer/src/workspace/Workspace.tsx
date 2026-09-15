@@ -6,12 +6,14 @@ import type { WorkspaceLayoutNode } from '../../../shared/workspace-layout.js'
 import type { AgentId, SessionInfo } from '../Session.js'
 import { QuickRail } from './QuickRail.js'
 import { ConversationTree } from './ConversationTree.js'
+import { ProjectNotes } from './ProjectNotes.js'
+import type { NoteSize } from '../noteSize.js'
 import { useConversationDrag } from './useConversationDrag.js'
 import { useShellOverlay } from './overlay.js'
 import { createPreviewController, ProjectPreviewHost } from './SessionPreview.js'
 import { TerminalPanel } from '../TerminalPanel.js'
 import type { TerminalRefShape } from '../../../shared/ipc.js'
-import { leafPaneIds, type SplitDirection } from './layout.js'
+import { leafPaneIds, resizeBranch, type SplitDirection } from './layout.js'
 import { WorkbenchFrame } from '../workbench/WorkbenchFrame.js'
 import {
   useConversationGroups,
@@ -19,12 +21,10 @@ import {
   useWorkbenchShown,
   usePane,
   useGlobalTerminal,
-  useSessionRowState,
   useWorkspaceActions,
   useWorkspaceLayout,
 } from './hooks.js'
-import { stateOf } from './session-row.js'
-import { StateMark } from './SessionRow.js'
+import { TabState } from './TabState.js'
 import type { ProjectInfo } from './session-row.js'
 import { countRender } from './render-count.js'
 import { monogramOf, stepSlot } from './session-row.js'
@@ -73,19 +73,11 @@ interface WorkspaceProps {
     readonly summary: string
   }[]
   readonly installed: readonly AgentId[]
-  readonly onToggleAgent: (
-    conversationId: string,
-    agentId: AgentId,
-    present: boolean
-  ) => Promise<void>
   readonly projects: readonly ProjectInfo[]
   readonly onRenameProject: (projectId: string, name: string) => void
-  /** Project-level, and it reaches every conversation in the project. */
-  readonly onToggleProjectAgent: (
-    projectId: string,
-    agentId: AgentId,
-    present: boolean
-  ) => Promise<void>
+  readonly onSetProjectNotes: (projectId: string, notes: string) => void
+  readonly onSetProjectNoteSize: (projectId: string, size: NoteSize) => void
+  readonly onSendProjectNoteSelection: (conversationId: string, text: string) => void
   readonly onChooseProjectProfile: (projectId: string, profileId: string) => Promise<void>
   /** Both only offered on a project whose folder is missing. */
   readonly onRelocateProject: (projectId: string) => Promise<void>
@@ -107,24 +99,6 @@ interface WorkspaceProps {
     focused: boolean,
     paneId: string
   ) => React.ReactNode
-}
-
-/**
- * A tab's own state mark, in its own component because of the hook.
- *
- * `useSessionRowState` subscribes to one conversation's slice of the pulse, and
- * the tabs are produced by a `map` — so this cannot be inlined without calling a
- * hook in a loop. Splitting it also means a session going busy re-renders one
- * tab rather than the whole strip.
- */
-function TabState({ conversationId }: { conversationId: string }): React.JSX.Element {
-  const row = useSessionRowState(conversationId)
-  const state = stateOf(row)
-  return (
-    <span className="workspace-tab-state" data-state={state}>
-      <StateMark state={state} voice={row.working.length === 1 ? (row.working[0] ?? null) : null} />
-    </span>
-  )
 }
 
 function directionFromKey(key: string): SplitDirection | null {
@@ -517,6 +491,11 @@ export function Workspace(props: WorkspaceProps): React.JSX.Element {
             onClose={closeTab}
             onReorder={reorderTab}
             onRename={props.onRename}
+            projects={props.projects}
+            onRenameProject={props.onRenameProject}
+            onSetProjectNotes={props.onSetProjectNotes}
+            onSetProjectNoteSize={props.onSetProjectNoteSize}
+            onSendProjectNoteSelection={props.onSendProjectNoteSelection}
             onCommitLayout={props.onCommitLayout}
             renderSession={props.renderSession}
           />
@@ -563,7 +542,6 @@ export function Workspace(props: WorkspaceProps): React.JSX.Element {
         home={props.home}
         installed={props.installed}
         onRename={props.onRenameProject}
-        onToggleAgent={props.onToggleProjectAgent}
         onChooseProfile={props.onChooseProjectProfile}
         onRelocate={props.onRelocateProject}
         onForget={props.onForgetProject}
@@ -604,6 +582,21 @@ interface LayoutViewProps {
   readonly onClose: (paneId: string, conversationId: string) => void
   readonly onReorder: (paneId: string, fromIndex: number, slotBefore: number) => void
   readonly onRename: (conversationId: string, title: string) => void
+  /**
+   * Every project, because a tab is a project and now says so.
+   *
+   * The strip had only the session map, so it named a tab with its project's
+   * newest conversation — the one string it could reach. That read correctly
+   * while a conversation defaulted to its folder's name and became wrong the
+   * moment either could be renamed.
+   */
+  readonly projects: readonly ProjectInfo[]
+  /** Names the project. The folder it points at is never touched. */
+  readonly onRenameProject: (projectId: string, name: string) => void
+  /** Writes the project's scratchpad. Debounced by the pad, not here. */
+  readonly onSetProjectNotes: (projectId: string, notes: string) => void
+  readonly onSetProjectNoteSize: (projectId: string, size: NoteSize) => void
+  readonly onSendProjectNoteSelection: (conversationId: string, text: string) => void
   readonly onCommitLayout: () => void
   readonly renderSession: (
     session: SessionInfo,
@@ -644,8 +637,8 @@ function LayoutView(props: LayoutViewProps): React.JSX.Element {
  *
  * Sizes go to the store as the pointer moves — a split is a handful of panes,
  * not a transcript per frame — and the layout is persisted only on release.
- * 240px is the floor a pane may not be dragged below, expressed as a fraction of
- * the branch so it holds at any window width.
+ * The floor a pane may not be dragged below is `resizeBranch`'s, shared with the
+ * conversation divider so one gesture cannot mean two things.
  */
 function Sash(props: {
   readonly orientation: 'row' | 'column'
@@ -669,7 +662,8 @@ function Sash(props: {
     const after = props.sizes[props.index + 1]
     if (before === undefined || after === undefined) return
     const pair = before + after
-    const minimum = Math.min(240 / axis, pair / 2)
+    if (pair <= 0) return
+    const pairPx = pair * axis
     const pointerId = event.pointerId
     try {
       element.setPointerCapture(pointerId)
@@ -681,11 +675,8 @@ function Sash(props: {
     const onMove = (move: globalThis.PointerEvent): void => {
       if (move.pointerId !== pointerId) return
       const at = props.orientation === 'row' ? move.clientX : move.clientY
-      const nextBefore = Math.max(minimum, Math.min(pair - minimum, before + (at - start) / axis))
-      const sizes = [...props.sizes]
-      sizes[props.index] = nextBefore
-      sizes[props.index + 1] = pair - nextBefore
-      setSizes(props.path, sizes)
+      const along = (before + (at - start) / axis) / pair
+      setSizes(props.path, resizeBranch(props.sizes, props.index, along, pairPx))
     }
     const stop = (end: globalThis.PointerEvent): void => {
       if (end.pointerId !== pointerId) return
@@ -720,15 +711,19 @@ function Sash(props: {
             : 0
     if (delta === 0) return
     event.preventDefault()
+    const branch = event.currentTarget.closest('.split-branch')
+    if (branch === null) return
+    const rect = branch.getBoundingClientRect()
+    const axis = props.orientation === 'row' ? rect.width : rect.height
     const before = props.sizes[props.index]
     const after = props.sizes[props.index + 1]
     if (before === undefined || after === undefined) return
     const pair = before + after
-    const nextBefore = Math.max(0.08, Math.min(pair - 0.08, before + delta))
-    const sizes = [...props.sizes]
-    sizes[props.index] = nextBefore
-    sizes[props.index + 1] = pair - nextBefore
-    setSizes(props.path, sizes)
+    if (pair <= 0 || axis <= 0) return
+    setSizes(
+      props.path,
+      resizeBranch(props.sizes, props.index, (before + delta) / pair, pair * axis)
+    )
   }
 
   return (
@@ -827,11 +822,24 @@ function EditorPane(props: LayoutViewProps & { readonly paneId: string }): React
    * Together, the pointer decides and the list heals it.
    */
   const projectId = pane?.activeTabId ?? null
+  /* The row the pad is drawn from — its text and the box it is read in, which
+     travel together precisely so they cannot be one refresh apart. */
+  const note = props.projects.find((project) => project.id === projectId)
   const chorusWidth = useChorusWidth(projectId)
   const workbenchShown = useWorkbenchShown(projectId)
   const arrangement = useConversationGroups(projectId)
-  const { splitConversation, placeConversation, setConversationSizes, focusConversationGroup } =
-    useWorkspaceActions()
+  const focusedConversationGroupId = arrangement?.focusedPaneId ?? null
+  const activeConversationId =
+    focusedConversationGroupId === null
+      ? null
+      : (arrangement?.panes[focusedConversationGroupId]?.activeTabId ?? null)
+  const {
+    splitConversation,
+    placeConversation,
+    setConversationSizes,
+    equalizeConversationBranch,
+    focusConversationGroup,
+  } = useWorkspaceActions()
   const commitLayout = props.onCommitLayout
   /*
    * One drag per pane, not one per app. A conversation cannot leave its project
@@ -954,6 +962,35 @@ function EditorPane(props: LayoutViewProps & { readonly paneId: string }): React
           data-full={!workbenchShown}
         >
           {/*
+            The project's scratchpad, above its conversations.
+
+            **Keyed by project, and the key is load-bearing.** The pad seeds its
+            draft from props once, so without it switching tabs would leave the
+            previous project's note in the box — the worst failure available to
+            something you type into, because the next keystroke files it against
+            the wrong project.
+
+            First child of the Chorus column rather than anywhere nicer: the
+            editor beside it is a native view composited over the window, so a
+            pad that floated across that edge would vanish at it rather than
+            overlap. Everything Chorus draws stays on Chorus's side.
+          */}
+          {projectId !== null && (
+            <ProjectNotes
+              key={projectId}
+              projectId={projectId}
+              /* Only the focused pane's pad answers ⌘⇧N — see the effect that
+                 reads this. Four panes are four mounted pads. */
+              active={focused}
+              conversationId={activeConversationId}
+              notes={note?.notes ?? null}
+              size={{ width: note?.noteWidth ?? null, height: note?.noteHeight ?? null }}
+              onSave={props.onSetProjectNotes}
+              onSaveSize={props.onSetProjectNoteSize}
+              onSendSelection={props.onSendProjectNoteSelection}
+            />
+          )}
+          {/*
             The project's conversation tree, which is usually one group.
             
             Rendered the way the workspace renders its panes, one level in —
@@ -994,6 +1031,13 @@ function EditorPane(props: LayoutViewProps & { readonly paneId: string }): React
               drag={conversationDrag}
               onSizes={(path, sizes) => {
                 setConversationSizes(projectId, path, sizes)
+                props.onCommitLayout()
+              }}
+              /* Wired exactly as `onSizes` is, commit included: an arrangement
+                 that evened out and came back uneven on relaunch would be the
+                 same gesture failing silently. */
+              onEqualize={(path) => {
+                equalizeConversationBranch(projectId, path)
                 props.onCommitLayout()
               }}
               /*
@@ -1132,6 +1176,34 @@ function ChorusSash({
   )
 }
 
+/**
+ * The last segment of a root, by either platform's separator.
+ *
+ * Both, rather than the host's: a registry written on Windows can be read on a
+ * Mac and the stored root keeps the separators it was adopted with.
+ */
+function folderOf(root: string): string {
+  const segments = root.split(/[\\/]/).filter((segment) => segment !== '')
+  return segments.at(-1) ?? root
+}
+
+/**
+ * What a project tab reads: the name, and the folder it can never rename.
+ *
+ * `subscriber feature (tpa-web-2)` — the name leads because it is the thing that
+ * was chosen, and the folder trails because it is the thing that identifies. A
+ * project renames its *row*, never its directory, so the parenthesis is the only
+ * place the two can be told apart once several projects are open under names
+ * that describe work rather than paths.
+ *
+ * Omitted when they are the same string, which is every project nobody has
+ * renamed — `tpa-web-2 (tpa-web-2)` says nothing twice.
+ */
+function projectLabel(project: ProjectInfo): string {
+  const folder = folderOf(project.root)
+  return project.name === folder ? project.name : `${project.name} (${folder})`
+}
+
 function PaneTabStrip(
   props: LayoutViewProps & {
     readonly paneId: string
@@ -1140,6 +1212,16 @@ function PaneTabStrip(
 ): React.JSX.Element {
   const { t } = useTranslation()
   const tabRefs = useRef<(HTMLButtonElement | null)[]>([])
+  /*
+   * Which tab is being renamed, and how wide it was when the rename began.
+   *
+   * The conversation strip carries the same pair for the same reason: the width
+   * comes from the label, and the label is gone the moment the field replaces
+   * it. See `ConversationColumn` — the two strips are one behaviour here as
+   * everywhere else, and a fix that landed on only one of them would be the
+   * thing that makes them drift.
+   */
+  const [renaming, setRenaming] = useState<{ id: string; width: number } | null>(null)
 
   /* A strip that scrolls can hold the active tab off screen. */
   useEffect(() => {
@@ -1179,117 +1261,205 @@ function PaneTabStrip(
         */}
         {props.pane.tabs.flatMap((projectId, index) => {
           /*
-           * The project's newest conversation names the tab, matching what
-           * `EditorPane` chooses to render inside it. A project with no open
-           * conversation has nothing to title a tab with and is dropped, which
-           * is the one case the old `flatMap` handled correctly by accident.
+           * The project's newest conversation, which is still what the tab's
+           * state mark and its drag are about — a pane shows one conversation
+           * per project. A project with none of them open has nothing to draw
+           * and is dropped, which is the one case the old `flatMap` handled
+           * correctly by accident.
+           *
+           * It no longer *names* the tab. That was the only string the strip
+           * could reach, and it read correctly only for as long as a
+           * conversation was titled after its folder.
            */
-          const session = [...props.sessions.values()]
-            .filter((candidate) => candidate.projectId === projectId)
-            .at(-1)
+          const projectSessions = [...props.sessions.values()].filter(
+            (candidate) => candidate.projectId === projectId
+          )
+          const session = projectSessions.at(-1)
           if (session === undefined) return []
           const conversationId = session.conversationId
+          /* Every conversation in the project, because the mark folds them —
+             see `TabState`. The drag and the pane still follow the newest. */
+          const conversationIds = projectSessions.map((candidate) => candidate.conversationId)
           const active = props.pane.activeTabId === projectId
+          const project = props.projects.find((candidate) => candidate.id === projectId) ?? null
+          /* A project the registry cannot resolve has no name to show, and the
+             conversation's title is the same string it used to show anyway. */
+          const label = project === null ? session.title : projectLabel(project)
           return [
             <div
               key={projectId}
               className="workspace-tab"
               data-active={active}
               data-dragging={props.drag?.conversationId === conversationId}
+              /*
+               * Held at the width it had, for as long as the field is open —
+               * the conversation strip's rule, with the conversation strip's
+               * reasoning. A project tab carries a name *and* its folder in
+               * parentheses, so it is usually the wider of the two and the
+               * collapse to the 160px floor is that much more visible.
+               */
+              style={
+                renaming !== null && renaming.id === projectId && renaming.width > 0
+                  ? { width: renaming.width }
+                  : undefined
+              }
             >
               {active && <TabJoin />}
-              {/*
-                No rename here any more; it lives on the hover card's title.
+              {renaming !== null && renaming.id === projectId && project !== null ? (
+                /*
+                 * Renaming happens here now, and the note this replaces argued
+                 * it could not: a tab was 160px of truncated name, too narrow a
+                 * box to edit a title in, so the rename lived on the hover
+                 * card. The tab grows to its content now, which removes that
+                 * objection — and the card keeps its own field, because this is
+                 * a second way in rather than a move.
+                 *
+                 * **Only the name is editable.** The folder sits beside the
+                 * field as static text, so the part that cannot change is
+                 * visible while you change the part that can — a project's
+                 * directory is renamed by moving it, never by typing here.
+                 *
+                 * Uncontrolled, and blur commits: both are the conversation
+                 * tab's rules one level in, and the two strips being one
+                 * behaviour is worth more than either rule on its own.
+                 */
+                <span className="workspace-tab-rename">
+                  <input
+                    className="workspace-tab-rename-field"
+                    defaultValue={project.name}
+                    /* See the conversation tab's note: `size` defaults to 20,
+                       which is a 20-character intrinsic width, and the tab takes
+                       its width from its content. */
+                    size={1}
+                    autoFocus
+                    aria-label={t('project.renameTitle')}
+                    placeholder={t('project.namePlaceholder')}
+                    onKeyDown={(event) => {
+                      if (event.key === 'Escape') {
+                        setRenaming(null)
+                        return
+                      }
+                      /* `isComposing` guards an IME: Enter while a candidate is
+                         open picks the candidate, not the name. */
+                      if (event.key === 'Enter' && !event.nativeEvent.isComposing) {
+                        props.onRenameProject(projectId, event.currentTarget.value)
+                        setRenaming(null)
+                      }
+                    }}
+                    onBlur={(event) => {
+                      props.onRenameProject(projectId, event.currentTarget.value)
+                      setRenaming(null)
+                    }}
+                  />
+                  <span className="workspace-tab-folder">{`(${folderOf(project.root)})`}</span>
+                </span>
+              ) : (
+                <>
+                  <button
+                    ref={(element) => {
+                      tabRefs.current[index] = element
+                    }}
+                    type="button"
+                    className="workspace-tab-main"
+                    data-workspace-tab={projectId}
+                    id={`tab-${props.paneId}-${projectId}`}
+                    role="tab"
+                    tabIndex={active ? 0 : -1}
+                    aria-selected={active}
+                    aria-controls={`panel-${props.paneId}-${projectId}`}
+                    title={label}
+                    onPointerDown={(event) => {
+                      /*
+                       * The **project**, matching `data-workspace-tab` two lines
+                       * up and `onClick` below — and the last place in this file
+                       * that was still handing a conversation id to something
+                       * keyed by projects.
+                       *
+                       * Dragging a tab carried the conversation, so
+                       * `splitWithSession` looked it up in `pane.tabs` (project
+                       * ids), found nothing, and took its *insert* branch: a new
+                       * pane whose only tab was a conversation id.
+                       * `WorkbenchFrame` then opened that as a project and main
+                       * answered `UnknownProjectError`, which is the one place
+                       * the mistake finally became visible. Everything before
+                       * it — the drag, the drop, the split, the new pane — was a
+                       * silent success.
+                       */
+                      props.onTabPointerDown(projectId, label, props.paneId, event)
+                    }}
+                    onClick={() => {
+                      if (props.consumeSuppressedClick()) return
+                      /*
+                       * The project, not the conversation. `activateTab` matches
+                       * against `pane.tabs`, which holds project ids — so a
+                       * conversation id matched nothing and clicking a tab did
+                       * nothing at all, silently, because activating an absent
+                       * tab is a no-op rather than an error.
+                       */
+                      props.onActivate(props.paneId, projectId)
+                    }}
+                    /*
+                     * Both clicks of the double run `onClick` first, and that is
+                     * wanted rather than tolerated — the same reading the
+                     * conversation tab gives: renaming a project you were not in
+                     * switches to it on the way, so the pane under the name is
+                     * the one being named.
+                     */
+                    /* Measured before the swap; see the conversation tab's note.
+                       The wrapper is the rectangle that matters — it holds the
+                       icon, the label and the × — and a miss pins nothing. */
+                    onDoubleClick={(event) => {
+                      const tab = event.currentTarget.closest<HTMLElement>('.workspace-tab')
+                      setRenaming({ id: projectId, width: tab === null ? 0 : tab.offsetWidth })
+                    }}
+                    onAuxClick={(event) => {
+                      if (event.button === 1) props.onClose(props.paneId, projectId)
+                    }}
+                    onKeyDown={(event) => {
+                      onTabKeyDown(index, event)
+                    }}
+                  >
+                    <svg className="workspace-tab-icon" viewBox="0 0 24 24" aria-hidden="true">
+                      <path d="M20 12a8 8 0 0 1-8 8H5l-1.5 2v-4.5A8 8 0 1 1 20 12Z" />
+                    </svg>
+                    <span className="workspace-tab-title">{label}</span>
+                    {/*
+                      What the session is *doing*, where its cast used to be.
 
-                A tab is 160px of truncated name in a strip whose single click
-                switches panes — so renaming was a double-click on the one
-                control whose click already means something else, editing a title
-                in a box too narrow to show it. The card shows the whole name and
-                is already where you go to ask about a session.
-              */}
-              <button
-                ref={(element) => {
-                  tabRefs.current[index] = element
-                }}
-                type="button"
-                className="workspace-tab-main"
-                data-workspace-tab={projectId}
-                id={`tab-${props.paneId}-${projectId}`}
-                role="tab"
-                tabIndex={active ? 0 : -1}
-                aria-selected={active}
-                aria-controls={`panel-${props.paneId}-${projectId}`}
-                title={session.title}
-                onPointerDown={(event) => {
-                  /*
-                   * The **project**, matching `data-workspace-tab` two lines up
-                   * and `onClick` below — and the last place in this file that
-                   * was still handing a conversation id to something keyed by
-                   * projects.
-                   *
-                   * Dragging a tab carried the conversation, so `splitWithSession`
-                   * looked it up in `pane.tabs` (project ids), found nothing, and
-                   * took its *insert* branch: a new pane whose only tab was a
-                   * conversation id. `WorkbenchFrame` then opened that as a
-                   * project and main answered `UnknownProjectError`, which is the
-                   * one place the mistake finally became visible. Everything
-                   * before it — the drag, the drop, the split, the new pane — was
-                   * a silent success.
-                   */
-                  props.onTabPointerDown(projectId, session.title, props.paneId, event)
-                }}
-                onClick={() => {
-                  if (props.consumeSuppressedClick()) return
-                  /*
-                   * The project, not the conversation. `activateTab` matches
-                   * against `pane.tabs`, which holds project ids — so a
-                   * conversation id matched nothing and clicking a tab did
-                   * nothing at all, silently, because activating an absent tab
-                   * is a no-op rather than an error.
-                   */
-                  props.onActivate(props.paneId, projectId)
-                }}
-                onAuxClick={(event) => {
-                  if (event.button === 1) props.onClose(props.paneId, projectId)
-                }}
-                onKeyDown={(event) => {
-                  onTabKeyDown(index, event)
-                }}
-              >
-                <svg className="workspace-tab-icon" viewBox="0 0 24 24" aria-hidden="true">
-                  <path d="M20 12a8 8 0 0 1-8 8H5l-1.5 2v-4.5A8 8 0 1 1 20 12Z" />
-                </svg>
-                <span className="workspace-tab-title">{session.title}</span>
-                {/*
-                  What the session is *doing*, where its cast used to be.
+                      The dots said which agents were in the room, which does not
+                      change and so is never news. What a tab has to say is the
+                      thing that changed while you were looking at another one: an
+                      approval holding a tool, a question waiting, an agent
+                      working, an agent that stopped.
 
-                  The dots said which agents were in the room, which does not
-                  change and so is never news. What a tab has to say is the thing
-                  that changed while you were looking at another one: an approval
-                  holding a tool, a question waiting, an agent working, an agent
-                  that stopped.
+                      The same `StateMark` the sidebar card draws, folded from the
+                      same pulses. Deliberately not a second derivation: a tab
+                      and its card disagreeing about whether a session is blocked
+                      is worse than either being wrong alone.
 
-                  The same `StateMark` the sidebar card draws, from the same
-                  `useSessionRowState`. Deliberately not a second derivation:
-                  a tab and its card disagreeing about whether a session is
-                  blocked is worse than either being wrong alone.
-                */}
-                <TabState conversationId={conversationId} />
-              </button>
-              <button
-                type="button"
-                className="workspace-tab-close"
-                aria-label={t('workspace.closeTab', { title: session.title })}
-                title={t('workspace.closeTab', { title: session.title })}
-                onClick={(event) => {
-                  event.stopPropagation()
-                  // The tab is the project, so this closes the project's tab —
-                  // the conversations inside it keep running in main.
-                  props.onClose(props.paneId, projectId)
-                }}
-              >
-                <span aria-hidden="true">×</span>
-              </button>
+                      **Every conversation in the project, not just the one this
+                      pane shows.** A tab is a project, so what it reports has to
+                      be the most urgent thing anybody in the project is waiting
+                      for — the rail's tile has always folded them this way.
+                    */}
+                    <TabState conversationIds={conversationIds} />
+                  </button>
+                  <button
+                    type="button"
+                    className="workspace-tab-close"
+                    aria-label={t('workspace.closeTab', { title: label })}
+                    title={t('workspace.closeTab', { title: label })}
+                    onClick={(event) => {
+                      event.stopPropagation()
+                      // The tab is the project, so this closes the project's tab —
+                      // the conversations inside it keep running in main.
+                      props.onClose(props.paneId, projectId)
+                    }}
+                  >
+                    <span aria-hidden="true">×</span>
+                  </button>
+                </>
+              )}
             </div>,
           ]
         })}

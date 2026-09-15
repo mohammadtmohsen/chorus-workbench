@@ -28,6 +28,8 @@ function displayName(actor: TranscriptMessage['actor'] | undefined): string {
       return 'Codex'
     case 'claude':
       return 'Claude'
+    case 'deepseek':
+      return 'DeepSeek'
     case 'user':
       return 'you'
     case 'system':
@@ -54,6 +56,8 @@ function speakerKey(actor: TranscriptMessage['actor']): string {
       return 'actor.codex'
     case 'claude':
       return 'actor.claude'
+    case 'deepseek':
+      return 'actor.deepseek'
     case 'user':
       return 'actor.user'
     case 'system':
@@ -538,6 +542,7 @@ export const Entry = memo(function Entry({
   onExplain,
   onRecap,
   onGo,
+  onCollaborate,
   answersThinking = false,
   final = false,
   grouped = false,
@@ -574,6 +579,19 @@ export const Entry = memo(function Entry({
    * the newest one.
    */
   onQuickHandOff?: ((message: TranscriptMessage, intent: HandoffIntent) => void) | undefined
+  /**
+   * Starts a review loop over this reply, rather than one transfer of it.
+   *
+   * Two presses rather than a menu, because the row already stacks its choices
+   * one per line and each label can carry what it will cost — `One-shot` is a
+   * single review, `Guided` reviews, hands the objections back, and checks the
+   * answer. A popover would be a third way to say the same thing, drawn over a
+   * pane that cannot host it.
+   *
+   * `final` only, like the quick intents: the offer is about the reply you are
+   * looking at.
+   */
+  onCollaborate?: ((message: TranscriptMessage, preset: 'delivery' | 'build') => void) | undefined
   /**
    * Who the quick actions would hand to, so the labels can say so.
    *
@@ -1191,6 +1209,26 @@ export const Entry = memo(function Entry({
                         data-entry-action={`handoff-${intent}`}
                         onClick={() => {
                           onQuickHandOff(message, intent)
+                        }}
+                      >
+                        {t(key, { to: displayName(handOffTo) })}
+                      </button>
+                    ))}
+                  {final &&
+                    onCollaborate !== undefined &&
+                    (
+                      [
+                        ['delivery', 'collaborate.delivery'],
+                        ['build', 'collaborate.build'],
+                      ] as const
+                    ).map(([preset, key]) => (
+                      <button
+                        key={preset}
+                        type="button"
+                        className="entry-action entry-action--quick"
+                        data-entry-action={`collaborate-${preset}`}
+                        onClick={() => {
+                          onCollaborate(message, preset)
                         }}
                       >
                         {t(key, { to: displayName(handOffTo) })}

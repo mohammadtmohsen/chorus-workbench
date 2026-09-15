@@ -10,6 +10,7 @@ import {
   type Query,
 } from '@anthropic-ai/claude-agent-sdk'
 import { editorMcpServer } from './editor-tool.js'
+import { READ_TRANSCRIPT_TOOL, transcriptMcpServer } from './transcript-tool.js'
 import type {
   AccountSummary,
   AgentAdapter,
@@ -97,6 +98,25 @@ export const CLAUDE_CAPABILITIES: AgentCapabilities = {
   sandboxPolicy: 'emulated',
 }
 
+/**
+ * Environment this adapter owns, and therefore clears before setting its own.
+ *
+ * Both halves matter. The exact names are the provider pointers and credentials;
+ * the two prefixes cover the model pins and context-window settings a gateway
+ * recipe sets, which would otherwise survive from the user's shell and silently
+ * contradict the ones being injected.
+ */
+function ownedEnv(key: string): boolean {
+  return (
+    key === 'ANTHROPIC_API_KEY' ||
+    key === 'ANTHROPIC_AUTH_TOKEN' ||
+    key === 'ANTHROPIC_BASE_URL' ||
+    key === 'ANTHROPIC_MODEL' ||
+    key.startsWith('ANTHROPIC_DEFAULT_') ||
+    key.startsWith('CLAUDE_CODE_')
+  )
+}
+
 /** What a resolver hands back: the SDK's path, and a command we can spawn. */
 export interface ResolvedExecutable {
   /**
@@ -110,6 +130,49 @@ export interface ResolvedExecutable {
 }
 
 export interface ClaudeAdapterOptions {
+  /**
+   * Which agent this instance *is*, defaulting to Claude.
+   *
+   * The class serves more than one: DeepSeek is the same `claude` binary with
+   * `ANTHROPIC_BASE_URL` pointed at its Anthropic-compatible endpoint, and the
+   * only things that distinguish the two instances are this id and `env`.
+   */
+  readonly id?: AgentId
+  /**
+   * Variables to hand the child process, replacing what this adapter controls.
+   *
+   * **A function, called at every spawn rather than a value read once.** The
+   * DeepSeek instance builds its variables from a stored API key, and a key that
+   * was captured at construction would be the key the app started with — adding,
+   * rotating or removing one would need a restart to take effect.
+   *
+   * Absent means "inherit ours exactly", which is what Claude wants and what
+   * every caller did before this existed. See `childEnv` for why a partial
+   * value here would be a bug rather than a convenience.
+   */
+  readonly env?: () => Readonly<Record<string, string | undefined>> | undefined
+  /**
+   * Why this adapter cannot run right now, or null when it can.
+   *
+   * Exists because "installed" and "usable" are different questions and only
+   * the caller knows the second. `agent-probe.ts` asks a binary for its version;
+   * for DeepSeek the binary is `claude` and is very likely present, while the
+   * thing actually missing is an API key — a state that file cannot express and
+   * that would otherwise surface as an authentication failure mid-turn.
+   */
+  readonly precondition?: () => string | null
+  /**
+   * A catalogue this adapter already knows, instead of asking the CLI for one.
+   *
+   * `supportedModels` asks the running query, and the query answers with the
+   * models *Claude Code* ships knowing about. That is right for Claude and wrong
+   * for DeepSeek, which is the same CLI pointed at a different provider: it
+   * would offer Opus and Sonnet for an endpoint that has neither, and the names
+   * would be mapped on DeepSeek's side into something nobody chose.
+   *
+   * Absent means ask, which is what Claude wants.
+   */
+  readonly models?: readonly ModelChoice[]
   readonly command?: string
   readonly executablePath?: string
   /**
@@ -234,7 +297,15 @@ export class ClaudeSession implements AgentSession {
     /** The same queue the SDK drains as its prompt — `send` pushes onto it. */
     private readonly inbox: AsyncQueue<unknown>,
     private readonly approvalTtlMs: number,
-    private readonly now: () => number
+    private readonly now: () => number,
+    /**
+     * Whose events these are. One class, more than one agent: DeepSeek is this
+     * same CLI pointed at an Anthropic-compatible endpoint, so every emission
+     * below reads this rather than naming Claude.
+     */
+    private readonly agentId: AgentId,
+    /** A known catalogue, or undefined to ask the CLI — see `ClaudeAdapterOptions`. */
+    private readonly knownModels: readonly ModelChoice[] | undefined
   ) {
     this.resolvedSessionRef = sessionRef
     void this.pump()
@@ -263,7 +334,7 @@ export class ClaudeSession implements AgentSession {
     if (!this.turnOpen) {
       this.turnOpen = true
       this.emit({
-        agentId: 'claude',
+        agentId: this.agentId,
         seq: ++this.seq,
         at: this.now(),
         type: 'turn.started',
@@ -298,7 +369,7 @@ export class ClaudeSession implements AgentSession {
     const queued = (receipt as { still_queued?: unknown } | undefined)?.still_queued
     if (Array.isArray(queued) && queued.length > 0) {
       this.emit({
-        agentId: 'claude',
+        agentId: this.agentId,
         seq: ++this.seq,
         at: this.now(),
         type: 'notice',
@@ -580,7 +651,12 @@ export class ClaudeSession implements AgentSession {
     input: Record<string, unknown>,
     options?: CanUseToolOptions
   ): Promise<PermissionResult> {
-    const ctx = { seq: this.seq + 1, now: this.now(), approvalTtlMs: this.approvalTtlMs }
+    const ctx = {
+      agentId: this.agentId,
+      seq: this.seq + 1,
+      now: this.now(),
+      approvalTtlMs: this.approvalTtlMs,
+    }
 
     const questionId = newUserInputId()
     const question = mapUserInputRequest(toolName, input, ctx, questionId)
@@ -588,7 +664,7 @@ export class ClaudeSession implements AgentSession {
       return new Promise<PermissionResult>((resolve) => {
         this.pendingUserInputs.set(questionId, { resolve, input })
         this.emit({
-          agentId: 'claude',
+          agentId: this.agentId,
           seq: ++this.seq,
           at: this.now(),
           type: 'userinput.requested',
@@ -634,7 +710,7 @@ export class ClaudeSession implements AgentSession {
         () => {
           if (!this.pendingApprovals.delete(id)) return
           this.emit({
-            agentId: 'claude',
+            agentId: this.agentId,
             seq: ++this.seq,
             at: this.now(),
             type: 'approval.withdrawn',
@@ -646,7 +722,7 @@ export class ClaudeSession implements AgentSession {
       )
 
       this.emit({
-        agentId: 'claude',
+        agentId: this.agentId,
         seq: ++this.seq,
         at: this.now(),
         type: 'approval.requested',
@@ -683,6 +759,7 @@ export class ClaudeSession implements AgentSession {
         for (const event of mapSdkMessage(message as never, {
           seq: this.seq + 1,
           now: this.now(),
+          agentId: this.agentId,
           approvalTtlMs: this.approvalTtlMs,
           usageSoFar: this.usageSoFar,
           streamMessageRef: this.streamMessageRef,
@@ -693,7 +770,7 @@ export class ClaudeSession implements AgentSession {
       }
     } catch (error) {
       this.emit({
-        agentId: 'claude',
+        agentId: this.agentId,
         seq: ++this.seq,
         at: this.now(),
         type: 'error',
@@ -772,7 +849,7 @@ export class ClaudeSession implements AgentSession {
     try {
       const usage = await ask.call(this.q)
       const events = mapPlanUsage(usage, {
-        agentId: 'claude',
+        agentId: this.agentId,
         seq: this.seq + 1,
         at: this.now(),
       })
@@ -806,7 +883,7 @@ export class ClaudeSession implements AgentSession {
     try {
       const usage = await ask.call(this.q)
       for (const event of mapContextUsage(usage, {
-        agentId: 'claude',
+        agentId: this.agentId,
         seq: this.seq + 1,
         at: this.now(),
       })) {
@@ -826,6 +903,13 @@ export class ClaudeSession implements AgentSession {
    * CLI that cannot answer offers no choice rather than failing a session.
    */
   async supportedModels(): Promise<readonly ModelChoice[]> {
+    /*
+     * Answered without asking when the caller already knows. The CLI's own list
+     * describes Claude's catalogue whatever provider it is pointed at, so for
+     * DeepSeek asking is not a slower way to the right answer — it is a fast way
+     * to the wrong one.
+     */
+    if (this.knownModels !== undefined) return this.knownModels
     const ask = (this.q as unknown as { supportedModels?: () => Promise<unknown> }).supportedModels
     /*
      * A CLI too old to be asked is a failure to read, not an empty catalogue.
@@ -879,7 +963,7 @@ export class ClaudeSession implements AgentSession {
   /** Called from the PostCompact hook, which fires outside the message stream. */
   noteCompacted(): void {
     this.emit({
-      agentId: 'claude',
+      agentId: this.agentId,
       seq: ++this.seq,
       at: this.now(),
       type: 'context.compacted',
@@ -891,7 +975,7 @@ export class ClaudeSession implements AgentSession {
     this.queue.push({ ...event, seq: ++this.seq })
     if (bypassedEdit) {
       this.queue.push({
-        agentId: 'claude',
+        agentId: this.agentId,
         seq: ++this.seq,
         at: this.now(),
         type: 'notice',
@@ -947,7 +1031,7 @@ export class ClaudeSession implements AgentSession {
 }
 
 export class ClaudeAdapter implements AgentAdapter {
-  readonly id: AgentId = 'claude'
+  readonly id: AgentId
   readonly capabilities = CLAUDE_CAPABILITIES
 
   private readonly command: string
@@ -963,8 +1047,15 @@ export class ClaudeAdapter implements AgentAdapter {
   /** Undefined when the host has no editor to offer; see `editorMcpServer`. */
   private readonly editorEdit: EditorEditCapability | undefined
   private readonly sessions: ClaudeSession[] = []
+  private readonly env: (() => Readonly<Record<string, string | undefined>> | undefined) | undefined
+  private readonly precondition: (() => string | null) | undefined
+  private readonly models: readonly ModelChoice[] | undefined
 
   constructor(options: ClaudeAdapterOptions = {}) {
+    this.id = options.id ?? 'claude'
+    this.env = options.env
+    this.precondition = options.precondition
+    this.models = options.models
     this.command = options.command ?? 'claude'
     this.executablePath = options.executablePath
     this.resolveExecutable = options.resolveExecutable
@@ -972,6 +1063,27 @@ export class ClaudeAdapter implements AgentAdapter {
     this.now = options.now ?? (() => Date.now())
     this.createQuery = options.createQuery
     this.editorEdit = options.editorEdit
+  }
+
+  /**
+   * The child's environment, or undefined to inherit ours untouched.
+   *
+   * **`Options.env` replaces rather than merges** — the SDK's own comment says
+   * so — so `process.env` is spread here, or the CLI is handed a process with no
+   * `PATH` and the failure blames the binary instead of the caller.
+   *
+   * The scrub is the other half and is not optional. This process may already
+   * carry an `ANTHROPIC_API_KEY` or an `ANTHROPIC_BASE_URL` from the user's own
+   * shell, and an inherited credential takes precedence over a saved login — so
+   * a DeepSeek session would quietly authenticate, and bill, as their Claude
+   * account. Everything this adapter means to control is removed first and then
+   * set, rather than layered over whatever happened to be there.
+   */
+  private childEnv(): Record<string, string | undefined> | undefined {
+    const injected = this.env?.()
+    if (injected === undefined) return undefined
+    const inherited = Object.entries(process.env).filter(([key]) => !ownedEnv(key))
+    return { ...Object.fromEntries(inherited), ...injected }
   }
 
   /** Asked once, and only when the usual locations came up empty. */
@@ -1020,9 +1132,19 @@ export class ClaudeAdapter implements AgentAdapter {
         timeout: 10_000,
       })
       const version = /\d+\.\d+\.\d+[\w.-]*/.exec(stdout.trim())?.[0]
-      return version === undefined
-        ? { state: 'unavailable', reason: `could not parse version from "${stdout.trim()}"` }
-        : { state: 'ready', version }
+      if (version === undefined) {
+        return { state: 'unavailable', reason: `could not parse version from "${stdout.trim()}"` }
+      }
+      /*
+       * Asked *after* the probe, not before, so a missing binary still reports
+       * as a missing binary. "Needs a key" is only the useful answer once
+       * everything else about the install is fine; reported first it would send
+       * someone to fetch a key for a CLI that is not there.
+       */
+      const blocked = this.precondition?.() ?? null
+      return blocked === null
+        ? { state: 'ready', version }
+        : { state: 'unavailable', reason: blocked }
     } catch (error) {
       return {
         state: 'unavailable',
@@ -1032,6 +1154,14 @@ export class ClaudeAdapter implements AgentAdapter {
   }
 
   async start(opts: SessionOpts): Promise<AgentSession> {
+    /*
+     * Refused here rather than left to the CLI. Without this the session starts,
+     * the first turn reaches the provider with no credential, and what the user
+     * sees is an authentication error from an agent they never configured —
+     * which names neither the cause nor the fix.
+     */
+    const blocked = this.precondition?.() ?? null
+    if (blocked !== null) throw new Error(blocked)
     await this.resolveOnce()
     return Promise.resolve(this.spawn(opts, undefined))
   }
@@ -1172,11 +1302,14 @@ export class ClaudeAdapter implements AgentAdapter {
      * theirs. Same reasoning as `settingSources` being omitted below.
      */
     const editorServer = editorMcpServer(this.editorEdit, opts.cwd)
+    const transcriptServer = transcriptMcpServer(opts.transcript)
 
     const options: Options = {
       cwd: opts.cwd,
       includePartialMessages: true,
-      ...(editorServer === undefined ? {} : { mcpServers: editorServer }),
+      ...(editorServer === undefined && transcriptServer === undefined
+        ? {}
+        : { mcpServers: { ...editorServer, ...transcriptServer } }),
       /*
        * Hook activity, which was mapped and never arrived.
        *
@@ -1261,6 +1394,46 @@ export class ClaudeAdapter implements AgentAdapter {
       ...(this.executablePath === undefined
         ? {}
         : { pathToClaudeCodeExecutable: this.executablePath }),
+      /*
+       * Omitted entirely when this instance inherits, because the field
+       * *replaces* the child's environment rather than adding to it — passing
+       * `undefined` and passing a partial map are both worse than not passing.
+       */
+      ...(() => {
+        const env = this.childEnv()
+        return env === undefined ? {} : { env }
+      })(),
+      /*
+       * The standing instruction, **appended** rather than replacing.
+       *
+       * The `preset` arm keeps the CLI's own prompt and adds to it, which is
+       * what `SessionOpts.instructions` promises: the arm that *replaces*
+       * exists on this SDK too and is deliberately unreachable from the port,
+       * because nothing above the adapters knows what it would be discarding.
+       *
+       * **This was the missing half of a documented pair.** `adapter.ts` says
+       * "append, in both adapters, or the option means two different things" —
+       * Codex implemented it and this did not, so a bilingual conversation was
+       * bilingual only when Codex answered. DeepSeek runs on this adapter and
+       * so never saw the instruction at all.
+       *
+       * Omitted entirely when absent or empty, rather than sent blank, so a
+       * conversation with no instruction is byte-for-byte the session it was
+       * before this existed.
+       *
+       * **Never on a fork.** `ForkOpts` extends `SessionOpts`, so the field is
+       * reachable from an aside — and an aside already carries its own language
+       * prompt. Two instructions about how to write, in one context, argue.
+       */
+      ...(fork !== undefined || opts.instructions === undefined || opts.instructions === ''
+        ? {}
+        : {
+            systemPrompt: {
+              type: 'preset' as const,
+              preset: 'claude_code' as const,
+              append: opts.instructions,
+            },
+          }),
       ...(resume === undefined ? {} : { resume }),
       /*
        * A branch, not a continuation — and one the CLI must not keep.
@@ -1279,6 +1452,9 @@ export class ClaudeAdapter implements AgentAdapter {
        */
       ...(fork?.inherits === 'nothing' ? { settingSources: [] } : {}),
       canUseTool: (toolName, input, options) => {
+        if (toolName === READ_TRANSCRIPT_TOOL) {
+          return Promise.resolve<PermissionResult>({ behavior: 'allow', updatedInput: input })
+        }
         const session = holder.session
         if (session === undefined) {
           // Fail closed: a permission we cannot route is a permission we deny.
@@ -1298,7 +1474,15 @@ export class ClaudeAdapter implements AgentAdapter {
         query({ prompt: prompt as never, options: o }))
 
     const q = factory(options, inbox)
-    const session = new ClaudeSession(resume ?? '', q, inbox, this.approvalTtlMs, this.now)
+    const session = new ClaudeSession(
+      resume ?? '',
+      q,
+      inbox,
+      this.approvalTtlMs,
+      this.now,
+      this.id,
+      this.models
+    )
     holder.session = session
 
     // Not awaited: the caller wants a session, not a quota. It fills the

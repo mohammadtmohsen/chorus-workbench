@@ -89,6 +89,8 @@ function label(actor: AgentId | 'user' | 'system'): string {
       return 'Codex'
     case 'claude':
       return 'Claude'
+    case 'deepseek':
+      return 'DeepSeek'
     case 'user':
       return 'the developer'
     case 'system':

@@ -1,6 +1,8 @@
+import { isAgentId, type AgentId } from '@chorus/shared'
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import type { Attachment } from './Attachments.js'
+import { NOTE_IMAGE_DRAG_TYPE, noteImageUrls } from './attach.js'
 import { formatDiagnosticBlock } from './editor-context.js'
 import { fitCard, type AsidePurpose } from './aside.js'
 import { Composer, type ComposerHandle, type ComposerState } from './Composer.js'
@@ -19,7 +21,8 @@ import {
   type PaneAnchor,
   type SourceEntry,
 } from './quote.js'
-import type { ActivityPush, TranscriptEvent } from '../../shared/ipc.js'
+import type { ActivityPush, CollaborationPush, TranscriptEvent } from '../../shared/ipc.js'
+
 import { askableQuestion, questionText } from '../../shared/question-text.js'
 import {
   useSessionActivity,
@@ -41,6 +44,68 @@ import {
   type TranscriptMessage,
   type TranscriptView,
 } from './transcript.js'
+
+type CollaborationState = CollaborationPush['state']
+type CollaborationPhase<P extends CollaborationState['phase']> = Extract<
+  CollaborationState,
+  { phase: P }
+>
+
+/*
+ * Total maps over the unions, not a lookup with a fallback.
+ *
+ * `Record` over each union fails to compile when a phase, an outcome, a cause
+ * or a reason is added, where a template key degrades silently — and the
+ * symptom is a raw `collaborate.failed.somethingNew` in the status row at
+ * exactly the moment something went wrong. Typecheck cannot see a missing
+ * translation, so this is the only place the exhaustiveness can live.
+ */
+export const COLLABORATION_STEP: Record<CollaborationPhase<'running'>['step'], string> = {
+  reviewPlan: 'collaborate.step.reviewPlan',
+  split: 'collaborate.step.split',
+  implement: 'collaborate.step.implement',
+  accept: 'collaborate.step.accept',
+  report: 'collaborate.step.report',
+}
+
+const COLLABORATION_OUTCOME: Record<CollaborationPhase<'finished'>['outcome'], string> = {
+  agreed: 'collaborate.outcome.agreed',
+  unresolved: 'collaborate.outcome.unresolved',
+  unsplit: 'collaborate.outcome.unsplit',
+  tooManyTasks: 'collaborate.outcome.tooManyTasks',
+}
+
+const COLLABORATION_CANCELLED: Record<CollaborationPhase<'cancelled'>['by'], string> = {
+  stop: 'collaborate.cancelled.stop',
+  userMessage: 'collaborate.cancelled.userMessage',
+  manualHandoff: 'collaborate.cancelled.manualHandoff',
+  shutdown: 'collaborate.cancelled.shutdown',
+}
+
+const COLLABORATION_FAILED: Record<CollaborationPhase<'failed'>['reason'], string> = {
+  delivery: 'collaborate.failed.delivery',
+  acknowledgement: 'collaborate.failed.acknowledgement',
+  idle: 'collaborate.failed.idle',
+  turnFailed: 'collaborate.failed.turnFailed',
+  noReply: 'collaborate.failed.noReply',
+  sessionEnded: 'collaborate.failed.sessionEnded',
+}
+
+/** Exported for a test: every terminal state has to name a key that exists. */
+export function collaborationStateKey(state: CollaborationState): string {
+  switch (state.phase) {
+    case 'running':
+      return COLLABORATION_STEP[state.step]
+    case 'finished':
+      return COLLABORATION_OUTCOME[state.outcome]
+    case 'cancelled':
+      return COLLABORATION_CANCELLED[state.by]
+    case 'interrupted':
+      return 'collaborate.interrupted'
+    case 'failed':
+      return COLLABORATION_FAILED[state.reason]
+  }
+}
 
 /**
  * Things a click must not be taken away from.
@@ -88,16 +153,25 @@ function sourceEntryAt(node: Node | null): SourceEntry | null {
   }
 }
 
-export type AgentId = 'codex' | 'claude'
+export type { AgentId }
 /**
  * Every agent Chorus knows how to seat, present or not.
  *
  * The order is read, so it is not arbitrary: this drives the cast toggles and
- * the composer's placeholder — _Ask Claude or Codex…_ — and something has to be
- * named first. It matches `DEFAULT_SETTINGS.agents`, and the two should move
- * together or the sheet will disagree with the room.
+ * the composer's placeholder, and something has to be named first. It matches
+ * `DEFAULT_SETTINGS.agents`, and the two should move together or the sheet will
+ * disagree with the room.
+ *
+ * **The order is the pipeline's, roughly.** Codex and Claude lead because they
+ * are the two that think; DeepSeek is last because it is the one that is handed
+ * work rather than asked what the work is. Reading the row top to bottom should
+ * suggest that.
+ *
+ * **Deliberately not derived from `AGENT_IDS`.** That tuple is declaration
+ * order; this is reading order, and they differ. A new agent has to be placed
+ * here by hand, which is the cost of the sentence reading well.
  */
-export const ALL_AGENTS: AgentId[] = ['claude', 'codex']
+export const ALL_AGENTS: AgentId[] = ['codex', 'claude', 'deepseek']
 
 export interface SessionInfo {
   readonly conversationId: string
@@ -216,6 +290,14 @@ export function Session(props: {
    * handover.
    */
   onRestart: () => void
+  /**
+   * Opening a fresh conversation that carries this one's transcript.
+   *
+   * On `App` for the same reason `onRestart` is: it creates a conversation, and
+   * only `App` knows how to put one in the workspace. The pane knows which room
+   * is being continued and nothing else about it.
+   */
+  onContinue: () => void
   /*
    * Undefined is spelled out because `exactOptionalPropertyTypes` is on: the
    * caller reads this out of a Map, and a miss is a real value it has to be
@@ -223,6 +305,20 @@ export function Session(props: {
    */
   carry?: SessionCarry | undefined
   onCarry: (conversationId: string, carry: SessionCarry) => void
+  /**
+   * Lends the shell a way to read the draft, without ever pushing it there.
+   *
+   * A getter rather than the text, and that is the whole point. `onCarry` fires
+   * on unmount, so the draft of the conversation you are *looking at* is exactly
+   * the one the shell cannot see — and that is the one most likely to be
+   * unsent. Sending it up on every keystroke would undo the arrangement the
+   * carry comment above describes: the draft lives in the composer so a
+   * keystroke repaints a textarea rather than a conversation.
+   *
+   * Registered on mount and withdrawn on unmount. The shell calls it at most
+   * once, when somebody asks to end the room.
+   */
+  onDraftReader: (conversationId: string, read: (() => string) | null) => void
   /**
    * Whether this pane owns the caret.
    *
@@ -304,7 +400,7 @@ export function Session(props: {
    */
   const quickHandOff = useCallback(
     (message: TranscriptMessage, intent: HandoffIntent): void => {
-      if (message.actor !== 'claude' && message.actor !== 'codex') return
+      if (!isAgentId(message.actor)) return
       const from = message.actor
       const to = participants.find((p) => p !== from)
       if (to === undefined) return
@@ -325,6 +421,62 @@ export function Session(props: {
         })
     },
     [conversationId, participants]
+  )
+
+  const [collaboration, setCollaboration] = useState<CollaborationPush | null>(null)
+
+  /*
+   * A snapshot on mount, then the pushes.
+   *
+   * Only the active tab of each group is mounted, so a pane in the background
+   * misses the completion it was waiting for and remounts with nothing. The
+   * higher `statusVersion` always wins, whichever run it belongs to — the
+   * counter is per conversation and across runs, so a snapshot answered after a
+   * newer push arrived loses rather than overwriting it.
+   */
+  useEffect(() => {
+    let live = true
+    setCollaboration(null)
+    const keepNewer = (next: CollaborationPush): void => {
+      setCollaboration((current) =>
+        current !== null && current.statusVersion >= next.statusVersion ? current : next
+      )
+    }
+    window.chorus
+      .collaborationStatus({ conversationId })
+      .then((answer) => {
+        if (live && answer.status !== null) keepNewer(answer.status)
+      })
+      .catch(() => {
+        // A snapshot nobody answered is a row that fills in at the next push.
+      })
+    const stop = window.chorus.onCollaborationStatus((status) => {
+      if (status.conversationId === conversationId) keepNewer(status)
+    })
+    return () => {
+      live = false
+      stop()
+    }
+  }, [conversationId])
+
+  const startCollaboration = useCallback(
+    (message: TranscriptMessage, preset: 'delivery' | 'build'): void => {
+      window.chorus
+        .startCollaboration({ conversationId, sourceEventId: message.eventId, preset })
+        .then((answer) => {
+          if (answer.outcome !== 'refused') return
+          const agent = answer.agentId ?? ''
+          setError(
+            t(`collaborate.refused.${answer.reason}`, {
+              agent: agent === '' ? '' : agent.charAt(0).toUpperCase() + agent.slice(1),
+            })
+          )
+        })
+        .catch((e: unknown) => {
+          setError(e instanceof Error ? e.message : String(e))
+        })
+    },
+    [conversationId, t]
   )
 
   /** A passage selected in this pane's transcript, and where to offer to quote it. */
@@ -953,7 +1105,7 @@ export function Session(props: {
    */
   const openRecap = useCallback(
     (message: TranscriptMessage, from: DOMRect) => {
-      if (message.actor !== 'codex' && message.actor !== 'claude') return
+      if (!isAgentId(message.actor)) return
       if (message.eventId === '' || message.text === '') return
 
       const paneEl = pane.current
@@ -1030,7 +1182,12 @@ export function Session(props: {
   )
 
   /**
-   * Opens a file a transcript row names, in VS Code, at this conversation.
+   * Opens a file a transcript row names, in this project's editor.
+   *
+   * **Unchanged when the destination changed**, which is the point of sending a
+   * path rather than a decision: main picks the embedded workbench over
+   * external VS Code, and a row that wants a line says so in the path it
+   * already holds (`file.ts:42`). Nothing here had to learn about either.
    *
    * **The path is sent as the row holds it and resolved in main.** It comes off
    * agent output, and the renderer is the least trustworthy thing in the process
@@ -1083,7 +1240,7 @@ export function Session(props: {
    */
   const openExplain = useCallback(
     (message: TranscriptMessage, from: DOMRect) => {
-      if (message.actor !== 'codex' && message.actor !== 'claude') return
+      if (!isAgentId(message.actor)) return
       if (message.eventId === '' || message.text === '') return
 
       const paneEl = pane.current
@@ -1156,7 +1313,7 @@ export function Session(props: {
       from: DOMRect
     ): void => {
       const actor = question.agentId
-      if (actor !== 'codex' && actor !== 'claude') return
+      if (!isAgentId(actor)) return
       if (question.eventId === '' || !askableQuestion(field)) return
 
       const paneEl = pane.current
@@ -1213,7 +1370,7 @@ export function Session(props: {
    */
   const accept = useCallback(
     (message: TranscriptMessage) => {
-      if (message.actor !== 'codex' && message.actor !== 'claude') return
+      if (!isAgentId(message.actor)) return
       following.current = true
       window.chorus
         .sendMessage({ conversationId, text: `@${message.actor} Go ahead.`, intent: 'go' })
@@ -1337,6 +1494,19 @@ export function Session(props: {
     }
   }, [awaiting])
 
+  const sendSelection = useCallback(() => {
+    const passage = selected
+    if (passage === null) return
+    setSelected(null)
+    window.getSelection()?.removeAllRanges()
+    following.current = true
+    setAwaiting(true)
+    window.chorus.sendMessage({ conversationId, text: passage.text }).catch((error: unknown) => {
+      setAwaiting(false)
+      fail(setError)(error)
+    })
+  }, [conversationId, selected])
+
   /*
    * What VS Code is showing for *this* pane's project.
    *
@@ -1385,6 +1555,16 @@ export function Session(props: {
     },
     [conversationId, props.onCarry]
   )
+
+  // Lent on mount, withdrawn on unmount. Reading `box` rather than copying it is
+  // what keeps this free: nothing runs while somebody types.
+  const lend = props.onDraftReader
+  useEffect(() => {
+    lend(conversationId, () => box.current.draft)
+    return () => {
+      lend(conversationId, null)
+    }
+  }, [conversationId, lend])
 
   /**
    * Putting the view back where it was, after a drag or a split remounted us.
@@ -1494,7 +1674,7 @@ export function Session(props: {
       window.chorus
         .decideApproval({
           conversationId,
-          agentId: approval.agentId === 'claude' ? 'claude' : 'codex',
+          agentId: isAgentId(approval.agentId) ? approval.agentId : 'codex',
           approvalId: approval.approvalId,
           outcome,
           scope,
@@ -1514,7 +1694,7 @@ export function Session(props: {
    * answer. `actor` spans the whole cast including `system`, and only a real
    * agent has a session to send an answer back to.
    */
-  const asking = view.questions.find((q) => q.agentId === 'codex' || q.agentId === 'claude')
+  const asking = view.questions.find((q) => isAgentId(q.agentId))
 
   const answerQuestion = useCallback(
     (
@@ -1522,7 +1702,7 @@ export function Session(props: {
       outcome: 'answered' | 'cancel',
       answers: { questionId: string; values: string[] }[]
     ) => {
-      if (request.agentId !== 'codex' && request.agentId !== 'claude') return
+      if (!isAgentId(request.agentId)) return
       window.chorus
         .answerQuestion({
           conversationId,
@@ -1583,9 +1763,7 @@ export function Session(props: {
   const finalKey =
     view.busy || view.messages.length === 0
       ? null
-      : (view.messages.findLast(
-          (m) => (m.actor === 'codex' || m.actor === 'claude') && m.kind === 'message'
-        )?.key ?? null)
+      : (view.messages.findLast((m) => isAgentId(m.actor) && m.kind === 'message')?.key ?? null)
 
   /**
    * The newest message of each speaker still working, so its dot can say so.
@@ -1634,9 +1812,9 @@ export function Session(props: {
       onHandOff={
         // Only offered when there is somebody to hand to, and only for an
         // agent's own words — handing the user's message back is noise.
-        participants.length > 1 && (message.actor === 'codex' || message.actor === 'claude')
+        participants.length > 1 && isAgentId(message.actor)
           ? (m) => {
-              const from = m.actor === 'claude' ? 'claude' : 'codex'
+              const from = isAgentId(m.actor) ? m.actor : 'codex'
               const to = participants.find((p) => p !== from)
               if (to !== undefined) {
                 setHandoff({ from, to, sourceEventIds: [m.eventId] })
@@ -1646,9 +1824,7 @@ export function Session(props: {
       }
       /* Same condition as `onHandOff`; `Entry` narrows it to the last reply. */
       onQuickHandOff={
-        participants.length > 1 && (message.actor === 'codex' || message.actor === 'claude')
-          ? quickHandOff
-          : undefined
+        participants.length > 1 && isAgentId(message.actor) ? quickHandOff : undefined
       }
       /*
        * Who would take it over, so the quick labels can say so rather than
@@ -1658,6 +1834,18 @@ export function Session(props: {
        * participant — and passed rather than derived in `Entry`, which knows
        * this message's speaker and nothing about the cast.
        */
+      /*
+       * The loop, offered only under Claude's own replies.
+       *
+       * Main refuses anything else anyway — the source has to be a completed
+       * `agent.message.completed` whose actor is `claude` — so showing it
+       * elsewhere would be offering a press that can only be refused.
+       */
+      onCollaborate={
+        participants.includes('codex') && message.actor === 'claude'
+          ? startCollaboration
+          : undefined
+      }
       handOffTo={participants.find((p) => p !== message.actor)}
       /*
        * Absent until a language is set, which is the gate the selection offer
@@ -1665,11 +1853,7 @@ export function Session(props: {
        * language it would answer in is worse than an absent one. `Entry` decides
        * nothing here — it has no way to know — so this is the whole condition.
        */
-      onExplain={
-        explainLanguage !== '' && (message.actor === 'codex' || message.actor === 'claude')
-          ? openExplain
-          : undefined
-      }
+      onExplain={explainLanguage !== '' && isAgentId(message.actor) ? openExplain : undefined}
       /* Passed for every row: whether a row *has* a file to open is the row's
          own business, and `Entry` is the only thing that knows. */
       onOpenFile={openFile}
@@ -1678,12 +1862,12 @@ export function Session(props: {
        * unconditionally for every agent message rather than filtered here, so
        * the one rule about which reply may be recapped lives in one place.
        */
-      onRecap={message.actor === 'codex' || message.actor === 'claude' ? openRecap : undefined}
+      onRecap={isAgentId(message.actor) ? openRecap : undefined}
       /*
        * Whether the reply *offered* anything is `Entry`'s to decide — it reads
        * the words, and this only supplies the ability to answer.
        */
-      onGo={message.actor === 'codex' || message.actor === 'claude' ? accept : undefined}
+      onGo={isAgentId(message.actor) ? accept : undefined}
     />
   )
 
@@ -1787,7 +1971,10 @@ export function Session(props: {
       onDragOver={(e) => {
         // Workspace tabs use pointer events. HTML drag here now means a file
         // from outside the app, and remains scoped to the composer.
-        if (e.dataTransfer.types.includes('Files')) {
+        if (
+          e.dataTransfer.types.includes('Files') ||
+          e.dataTransfer.types.includes(NOTE_IMAGE_DRAG_TYPE)
+        ) {
           e.preventDefault()
           e.dataTransfer.dropEffect = 'copy'
           setFileOver(true)
@@ -1804,6 +1991,18 @@ export function Session(props: {
           void composer.current?.attach([...e.dataTransfer.files])
           return
         }
+        const urls = noteImageUrls(e.dataTransfer.getData(NOTE_IMAGE_DRAG_TYPE))
+        if (urls.length === 0) return
+        e.preventDefault()
+        void (async () => {
+          const results = await Promise.allSettled(
+            urls.map((url) => window.chorus.stashNoteImage({ url }))
+          )
+          const paths = results.flatMap((result) =>
+            result.status === 'fulfilled' ? [result.value.path] : []
+          )
+          await composer.current?.addPaths(paths)
+        })()
       }}
       data-file-over={fileOver}
     >
@@ -1984,6 +2183,17 @@ export function Session(props: {
                   e.preventDefault()
                 }}
               >
+                {/*
+                  Send first, and the order is the point rather than taste.
+
+                  Quoting drops the passage into a draft you then still have to
+                  write; sending is the whole action in one press. The pill wraps
+                  on a narrow pane, so first is also the one guaranteed to be on
+                  the row nearest the selection.
+                */}
+                <button type="button" className="quote-offer-action" onClick={sendSelection}>
+                  {t('conversation.sendSelection')}
+                </button>
                 <button type="button" className="quote-offer-action" onClick={quoteSelection}>
                   {t('conversation.quoteInMessage')}
                 </button>
@@ -2174,6 +2384,59 @@ export function Session(props: {
           />
         )}
 
+        {/*
+          What the run is doing, and what would clear it when it cannot finish.
+          Whenever the state is terminal and the agents are still owned, this
+          says so and names Restart — for `owned` exactly as much as for
+          `unattributable`, because an acknowledgement timeout paired with an
+          ambiguous delivery rejection leaves both release proofs unreachable.
+        */}
+        {collaboration !== null && (
+          <div className="collaboration-row" role="status">
+            <span className="collaboration-row-state">
+              {collaboration.state.phase === 'running'
+                ? /*
+                   * Two strings rather than a number that might be null. The
+                   * delivery pipeline does not know how long it is until the
+                   * planner's split has been read, and "3 of null" is worse
+                   * than a line that simply does not claim a length yet.
+                   */
+                  collaboration.stepTotal === null
+                  ? t('collaborate.runningUnknown', {
+                      step: t(COLLABORATION_STEP[collaboration.state.step]),
+                      index: collaboration.stepIndex,
+                    })
+                  : t('collaborate.running', {
+                      step: t(COLLABORATION_STEP[collaboration.state.step]),
+                      index: collaboration.stepIndex,
+                      total: collaboration.stepTotal,
+                    })
+                : t(collaborationStateKey(collaboration.state))}
+            </span>
+            {collaboration.state.phase === 'running' && (
+              <button
+                type="button"
+                className="collaboration-row-stop"
+                onClick={() => {
+                  window.chorus.stopCollaboration({ conversationId }).catch((e: unknown) => {
+                    setError(e instanceof Error ? e.message : String(e))
+                  })
+                }}
+              >
+                {t('collaborate.stop')}
+              </button>
+            )}
+            {collaboration.state.phase !== 'running' && collaboration.draining && (
+              <span className="collaboration-row-drain">
+                {t('collaborate.draining')}
+                <button type="button" className="collaboration-row-stop" onClick={props.onRestart}>
+                  {t('collaborate.restart')}
+                </button>
+              </span>
+            )}
+          </div>
+        )}
+
         <Composer
           ref={composer}
           conversationId={conversationId}
@@ -2181,11 +2444,20 @@ export function Session(props: {
           onToggleWorkbench={() => {
             toggleWorkbench(props.session.projectId)
           }}
-          participants={participants}
+          /*
+           * The cast, not the live map, and the two differ only when a start
+           * failed. An agent whose CLI is missing or whose key is not saved yet
+           * is absent from `participants` — and an addressing control that drops
+           * it offers no way to ask for it, so the person cannot even find out
+           * why it is not answering. Main seats it on the first message sent to
+           * it, or appends the reason it could not.
+           */
+          participants={ALL_AGENTS}
           busy={view.busy}
           working={view.working}
           ide={ide}
           onRestart={props.onRestart}
+          onContinue={props.onContinue}
           report={box}
           history={spoken}
           {...(props.carry === undefined

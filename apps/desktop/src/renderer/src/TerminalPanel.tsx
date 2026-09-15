@@ -6,11 +6,11 @@ import type { TerminalPanelState } from '../../shared/workspace-layout.js'
 import { ConfirmKillTerminal } from './ConfirmKillTerminal.js'
 import { TerminalView } from './TerminalView.js'
 
-/** The bounds a drag is clamped to, and where a panel opens. */
-export const TERMINAL_HEIGHT = { default: 240, min: 96, max: 720 } as const
+/** The floor a drag is clamped to, and where a panel opens. No ceiling. */
+export const TERMINAL_HEIGHT = { default: 240, min: 100 } as const
 
 export function clampTerminalHeight(value: number): number {
-  return Math.min(TERMINAL_HEIGHT.max, Math.max(TERMINAL_HEIGHT.min, Math.round(value)))
+  return Math.max(TERMINAL_HEIGHT.min, Math.round(value))
 }
 
 export interface TerminalPanelProps {

@@ -4,7 +4,7 @@ import { ILogService } from '@codingame/monaco-vscode-api/vscode/vs/platform/log
 import { URI } from '@codingame/monaco-vscode-api/vscode/vs/base/common/uri'
 import { prepareWorkbench } from './services.js'
 import { reportEditorContext } from './context.js'
-import { serveWorkbenchEdits, serveWorkbenchSnapshot } from './edit.js'
+import { serveWorkbenchEdits, serveWorkbenchReveal, serveWorkbenchSnapshot } from './edit.js'
 import { serveAskDiff } from './ask-diff.js'
 import { installGateHandle } from './gate-handle.js'
 import { announceSharedExtensionScope } from './extension-scope.js'
@@ -136,6 +136,7 @@ async function main(): Promise<void> {
   serveWorkbenchEdits(connection.projectRoot)
   serveWorkbenchSnapshot(connection.projectRoot)
   serveAskDiff(connection.remoteAuthority)
+  serveWorkbenchReveal(connection.remoteAuthority)
 
   /*
    * Phase 6 slice 6a. After `initialize` like the two above, and given the root

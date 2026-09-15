@@ -1,4 +1,4 @@
-import { redactPayload, uuidv7 } from '@chorus/shared'
+import { AgentIdSchema, redactPayload, uuidv7 } from '@chorus/shared'
 import { z } from 'zod'
 import {
   ChorusEventPayload,
@@ -594,7 +594,7 @@ export class EventStore {
 
 const OrphanedSessionRow = z.object({
   conversation_id: z.string(),
-  agent_id: z.enum(['codex', 'claude']),
+  agent_id: AgentIdSchema,
   session_ref: z.string(),
 })
 

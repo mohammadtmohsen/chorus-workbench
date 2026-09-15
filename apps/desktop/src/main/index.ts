@@ -9,6 +9,7 @@ import {
   forwardEventsToRenderer,
   forwardIdeContextToRenderer,
   forwardContextUsageToRenderer,
+  forwardCollaborationToRenderer,
   forwardTasksToRenderer,
   forwardActivityToRenderer,
   forwardDiagnosticsToRenderer,
@@ -18,6 +19,7 @@ import {
   registerIpcHandlers,
 } from './ipc.js'
 import { createLogger } from './logging.js'
+import { registerNoteImageScheme, serveNoteImages } from './note-images.js'
 import { createQuitGate } from './quit-gate.js'
 import { installMenu } from './menu.js'
 import { readSettings } from './settings.js'
@@ -122,8 +124,16 @@ let ideBridge: IdeBridge | null = null
  */
 let mainLog: ReturnType<typeof createLogger> | null = null
 
+/*
+ * Before ready, because Electron only accepts scheme privileges before then and
+ * throws afterwards. Nothing is served yet — this is the declaration, and
+ * `serveNoteImages` below is the handler.
+ */
+registerNoteImageScheme()
+
 void app.whenReady().then(async () => {
   applyContentSecurityPolicy(session.defaultSession, devServerUrl !== undefined)
+  serveNoteImages(app.getPath('userData'))
 
   // Before anything is spawned: launched from Finder we get `/usr/bin:/bin:…`,
   // and the agent CLIs are not there — nor, for a shebang script, is the `node`
@@ -280,6 +290,7 @@ void app.whenReady().then(async () => {
   forwardLimitsToRenderer(runtime)
   forwardContextUsageToRenderer(runtime)
   forwardTasksToRenderer(runtime)
+  forwardCollaborationToRenderer(runtime)
   forwardActivityToRenderer(runtime)
   forwardTerminalToRenderer(runtime)
   // Takes no runtime: the watches are keyed by the conversations that ask for

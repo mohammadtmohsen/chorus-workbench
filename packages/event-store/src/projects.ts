@@ -59,6 +59,28 @@ export interface Project {
    * `create` assigns the next value.
    */
   readonly sortOrder: number | null
+  /**
+   * The person's own scratchpad for this project — what is pending, what to
+   * check after something.
+   *
+   * Free text, and the store has no opinion about what is in it. It is not
+   * trimmed and not validated: a note is for its writer, and a registry that
+   * tidied one would be editing something nobody asked it to read.
+   *
+   * `''` is a note that was emptied. Null is one never written. Nothing depends
+   * on the difference yet — see migration 7 for why it is kept anyway.
+   */
+  readonly notes: string | null
+  /**
+   * How big that note's panel was left, as fractions of the window.
+   *
+   * Beside the note rather than in the workspace layout, because it is a fact
+   * about this project's note and follows it: forget the project and the box it
+   * was read in goes with it. Null for either axis means never dragged, which is
+   * what leaves the stylesheet's own ceiling in charge — see `NOTE_SIZE`.
+   */
+  readonly noteWidth: number | null
+  readonly noteHeight: number | null
 }
 
 /**
@@ -152,6 +174,9 @@ interface ProjectRow {
   created_at: number
   last_opened_at: number
   sort_order: number | null
+  notes: string | null
+  note_width: number | null
+  note_height: number | null
 }
 
 function toProject(row: ProjectRow): Project {
@@ -166,7 +191,22 @@ function toProject(row: ProjectRow): Project {
     profileId: row.permission_profile_id,
     agentIds: parseAgentIds(row.agent_ids),
     sortOrder: row.sort_order,
+    notes: row.notes,
+    noteWidth: measure(row.note_width),
+    noteHeight: measure(row.note_height),
   }
+}
+
+/**
+ * A stored measurement, or null for one that cannot be trusted.
+ *
+ * SQLite does not enforce a column's type, so a torn write or an edited file can
+ * leave a string or a NaN here. Degrading to null puts the default box back;
+ * refusing to load the project over it would make one bad number cost the whole
+ * project, note included.
+ */
+function measure(value: number | null): number | null {
+  return typeof value === 'number' && Number.isFinite(value) ? value : null
 }
 
 /**
@@ -190,7 +230,7 @@ function parseAgentIds(raw: string | null): readonly string[] | null {
   }
 }
 
-const COLUMNS = `id, name, root, canonical_root, workspace_file, permission_profile_id, agent_ids, created_at, last_opened_at, sort_order`
+const COLUMNS = `id, name, root, canonical_root, workspace_file, permission_profile_id, agent_ids, created_at, last_opened_at, sort_order, notes, note_width, note_height`
 
 /**
  * The project registry — create, find, rename, relocate, forget.
@@ -281,6 +321,12 @@ export class ProjectStore {
         profileId: null,
         agentIds: null,
         sortOrder: next,
+        // Never written. A new project's pad is empty rather than absent, but
+        // the column says which, and `create` has nothing to say here.
+        notes: null,
+        // Never dragged, so the stylesheet decides how big the pad opens.
+        noteWidth: null,
+        noteHeight: null,
       }
     })
 
@@ -489,6 +535,40 @@ export class ProjectStore {
     const changed = this.db
       .prepare(`UPDATE projects SET agent_ids = @value WHERE id = @projectId`)
       .run({ value, projectId }).changes
+    if (changed === 0) throw new UnknownProjectError(projectId)
+    return this.require(projectId)
+  }
+
+  /**
+   * Records the project's scratchpad.
+   *
+   * **Stored verbatim.** No trim, no length cap, no markdown parsing — see
+   * `Project.notes`. The one thing this does guarantee is the same thing
+   * `setProfile` guarantees: that the project exists, so writing a note for a
+   * project nobody adopted is a caller bug rather than a silent no-op that
+   * reaches a person as "my notes do not save".
+   */
+  setNotes(projectId: string, notes: string | null): Project {
+    const changed = this.db
+      .prepare(`UPDATE projects SET notes = @notes WHERE id = @projectId`)
+      .run({ notes, projectId }).changes
+    if (changed === 0) throw new UnknownProjectError(projectId)
+    return this.require(projectId)
+  }
+
+  /**
+   * How big the note's panel was left, as fractions of the window.
+   *
+   * Both axes in one statement, because the corner handle moves both in one
+   * gesture and two writes for one drag is two chances to store half of it.
+   * Null for either is a real value and means never dragged.
+   */
+  setNoteSize(projectId: string, width: number | null, height: number | null): Project {
+    const changed = this.db
+      .prepare(
+        `UPDATE projects SET note_width = @width, note_height = @height WHERE id = @projectId`
+      )
+      .run({ width, height, projectId }).changes
     if (changed === 0) throw new UnknownProjectError(projectId)
     return this.require(projectId)
   }

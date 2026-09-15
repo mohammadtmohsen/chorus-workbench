@@ -5,15 +5,20 @@ import type { TFunction } from 'i18next'
 import type { AgentProbeResult, IpcResponse } from '../../shared/ipc.js'
 import { ChorusLogo } from './ChorusLogo.js'
 import { LogViewer } from './LogViewer.js'
-import { fail, Session, type AgentId, type SessionCarry, type SessionInfo } from './Session.js'
+import { fail, Session, type SessionCarry, type SessionInfo } from './Session.js'
 import { trimCarry } from './carry.js'
 import { EMPTY_VIEW } from './transcript.js'
 import { noticesFrom, roomsWaiting, shouldRaise, trackPending, type Notice } from './notify.js'
 import { HistoryPanel } from './HistoryPanel.js'
 import { INSTALL, Settings, type Defaults } from './Settings.js'
 import { Workspace } from './workspace/Workspace.js'
+import { GlobalNotes } from './GlobalNotes.js'
+import { KeptNotes } from './KeptNotes.js'
+import type { NoteSize } from './noteSize.js'
+import { ConfirmEndSession } from './ConfirmEndSession.js'
 import { sameWorkspaceSnapshot, useWorkspaceStore, workspaceSnapshot } from './workspace/store.js'
 import { reorderSessions } from './workspace/session-row.js'
+import { NOTE_SIZE } from '../../shared/workspace-layout.js'
 import { setRunningPlatform } from './shortcuts.js'
 
 /**
@@ -60,11 +65,29 @@ export function App(): React.JSX.Element {
   const [profiles, setProfiles] = useState<{ id: string; name: string; summary: string }[]>([])
   /** The registry, most recently opened first — the order the rail draws in. */
   const [projects, setProjects] = useState<IpcResponse<'project:list'>['projects']>([])
+  /**
+   * The note that belongs to no project, and how wide it was last dragged.
+   *
+   * Held here rather than in the workspace store, and the two are different
+   * kinds of thing: the store holds the arrangement, which is written to a
+   * snapshot file on every change, while this is one row in the database read
+   * once at start. It is also read by exactly one component, so a store slice
+   * would be reach without a second reader to justify it.
+   *
+   * **Null until the row has been read, and the note is not mounted before
+   * that.** The editor seeds its document once, from the value it is handed at
+   * mount. Rendering it against a placeholder and letting the real note arrive a
+   * moment later would mean either ignoring what was read — the note appears
+   * empty forever, which is what happened — or writing into a document somebody
+   * may already be typing in. Waiting for the read costs one IPC and removes the
+   * choice.
+   */
+  const [appNote, setAppNote] = useState<IpcResponse<'app:getNote'> | null>(null)
   const [defaults, setDefaults] = useState<Defaults>({
     /* Matches the main process's default, and has to keep matching it: this
        stands only until `readSettings` answers, but a session started inside
-       that window opens with whatever is written here. */
-    agents: ['claude', 'codex'],
+       that window opens with whatever is written here. The cast used to be part
+       of it and is not a default any more — main seats every agent. */
     cwd: '',
     profileId: 'read-only',
   })
@@ -95,6 +118,20 @@ export function App(): React.JSX.Element {
   /** So the opening session of a launch is opened once, and only on a launch. */
   const autoStarted = useRef(false)
   const carries = useRef(new Map<string, SessionCarry>())
+  /**
+   * A way to read each mounted session's draft, lent by the session itself.
+   *
+   * A ref rather than state: nothing here renders, and the map changes whenever
+   * a tab mounts. It is read once, when somebody asks to end a room.
+   */
+  const draftReaders = useRef(new Map<string, () => string>())
+  /** The room somebody asked to end, and what ending it would throw away. */
+  const [confirmingEnd, setConfirmingEnd] = useState<{
+    readonly conversationId: string
+    readonly working: readonly string[]
+    readonly decisions: number
+    readonly draft: boolean
+  } | null>(null)
   /**
    * Unanswered approvals and questions per conversation, for the dock badge.
    *
@@ -171,6 +208,15 @@ export function App(): React.JSX.Element {
       useWorkspaceStore.getState().openProject(reopened.projectId)
       useWorkspaceStore.getState().adoptConversation(reopened.projectId, reopened.conversationId)
       useWorkspaceStore.getState().clearConversationUnread(reopened.conversationId)
+      /*
+       * After the unread clear, not before: one is about what was missed and
+       * the other about what is still outstanding, and a room reopened from
+       * history can easily be caught up and blocked at the same time.
+       */
+      useWorkspaceStore.getState().seedPendingDecisions(reopened.conversationId, {
+        approvalIds: reopened.pendingApprovalIds,
+        questionIds: reopened.pendingQuestionIds,
+      })
     },
     [updateSessions]
   )
@@ -186,6 +232,40 @@ export function App(): React.JSX.Element {
         useWorkspaceStore.getState().ingestEvents(events)
       }),
     []
+  )
+
+  /*
+   * A rename the shell did not ask for.
+   *
+   * Renaming used to be something only a person did here, so the tab was updated
+   * by the same call that requested it and nothing listened. The topic namer
+   * renames from main, on its own schedule, and a tab that only learns about
+   * renames it initiated would keep showing the old name until relaunch.
+   *
+   * The log is the channel, and no new one was needed: `conversation.renamed` is
+   * appended like anything else and forwarded to every window unfiltered. It is
+   * marked `ignore` for the *transcript*, which is a statement about drawing it
+   * as an entry — not about whether it arrives.
+   *
+   * The last rename in a batch wins, because they are ordered and an older one
+   * is a name that has already been superseded.
+   */
+  useEffect(
+    () =>
+      window.chorus.onEvents((events) => {
+        const renames = events.filter((event) => event.type === 'conversation.renamed')
+        if (renames.length === 0) return
+        updateSessions((current) =>
+          current.map((session) => {
+            const latest = renames
+              .filter((event) => event.conversationId === session.conversationId)
+              .at(-1)
+            const title = latest?.payload['title']
+            return typeof title === 'string' ? { ...session, title } : session
+          })
+        )
+      }),
+    [updateSessions]
   )
 
   /*
@@ -399,6 +479,9 @@ export function App(): React.JSX.Element {
      */
     window.chorus.probeAgents().then(setProbes).catch(fail(setError))
     window.chorus.profiles().then(setProfiles).catch(fail(setError))
+    // Read once and kept in state after that. The only writer is the panel this
+    // feeds, so there is nothing to re-read from and no second view to drift.
+    window.chorus.getAppNote({}).then(setAppNote).catch(fail(setError))
     window.chorus
       .listProjects({})
       .then(({ projects: listed }) => {
@@ -407,8 +490,8 @@ export function App(): React.JSX.Element {
       .catch(fail(setError))
     window.chorus
       .readSettings()
-      .then(({ agents, cwd, profileId, explainLanguage: language }) => {
-        setDefaults({ agents, cwd, profileId })
+      .then(({ cwd, profileId, explainLanguage: language }) => {
+        setDefaults({ cwd, profileId })
         setExplainLanguage(language)
       })
       .catch(fail(setError))
@@ -497,7 +580,21 @@ export function App(): React.JSX.Element {
             merged.reduce<Record<string, string[]>>((byProject, session) => {
               ;(byProject[session.projectId] ??= []).push(session.conversationId)
               return byProject
-            }, {})
+            }, {}),
+            /*
+             * What is still waiting to be answered, so a tab's mark says so from
+             * the first frame. Only `reopened` carries it — a session already in
+             * `current` has been folding its own events all along.
+             */
+            Object.fromEntries(
+              reopened.map((session) => [
+                session.conversationId,
+                {
+                  approvalIds: session.pendingApprovalIds,
+                  questionIds: session.pendingQuestionIds,
+                },
+              ])
+            )
           )
           /*
            * Plan mode, seeded after the hydrate that clears it.
@@ -653,7 +750,15 @@ export function App(): React.JSX.Element {
     [updateSessions]
   )
 
-  const endNow = useCallback(
+  /**
+   * Ends the room, with nothing asked and nothing checked.
+   *
+   * Split from `endNow` below because **restart already asks its own question**.
+   * `startIn`'s `replacing` runs this, so gating this function instead would put
+   * two dialogs in front of one gesture — `ConfirmRestart` and then the end
+   * confirmation, for the same conversation, one after the other.
+   */
+  const finishEnd = useCallback(
     (conversationId: string) => {
       const ending = sessionsRef.current.find((s) => s.conversationId === conversationId)
       carries.current.delete(conversationId)
@@ -683,6 +788,57 @@ export function App(): React.JSX.Element {
     [updateSessions, refreshProjects]
   )
 
+  /**
+   * What ending this room would throw away, or null when it would throw away
+   * nothing.
+   *
+   * **Three things, and each is unrecoverable in a different way.** A turn in
+   * flight is discarded by the provider. A decision nobody answered is a room
+   * that was waiting on a person. A draft exists nowhere else — the log holds
+   * what was sent, and an unsent line was never an event.
+   *
+   * Everything else about a conversation survives ending: the log is
+   * append-only and the transcript stays in History, which is why ending a quiet
+   * room asks nothing at all.
+   *
+   * The draft is read through a lent getter for the mounted session and out of
+   * the carry for one that is not, and that split is the whole reason the getter
+   * exists — `onCarry` fires on unmount, so the room you are looking at is
+   * exactly the one whose draft the carry does not have yet.
+   */
+  const wouldLose = useCallback(
+    (conversationId: string): { working: string[]; decisions: number; draft: boolean } | null => {
+      const pulse = useWorkspaceStore.getState().pulses[conversationId]
+      const working = [...(pulse?.working ?? [])]
+      const decisions = (pulse?.approvalIds.length ?? 0) + (pulse?.questionIds.length ?? 0)
+      const read = draftReaders.current.get(conversationId)
+      const draft = (read === undefined ? carries.current.get(conversationId)?.draft : read()) ?? ''
+      if (working.length === 0 && decisions === 0 && draft.trim() === '') return null
+      return { working, decisions, draft: draft.trim() !== '' }
+    },
+    []
+  )
+
+  /**
+   * What the UI calls, and the only path that asks.
+   *
+   * A conversation tab's × ends the room rather than hiding it — a conversation
+   * appears in exactly one place, so a × that merely closed the tab would leave
+   * agents running behind no door. That is why it comes through here and not
+   * through a lighter close.
+   */
+  const endNow = useCallback(
+    (conversationId: string) => {
+      const losing = wouldLose(conversationId)
+      if (losing === null) {
+        finishEnd(conversationId)
+        return
+      }
+      setConfirmingEnd({ conversationId, ...losing })
+    },
+    [wouldLose, finishEnd]
+  )
+
   /*
    * Starting a session, now in a project rather than in a directory.
    *
@@ -695,29 +851,55 @@ export function App(): React.JSX.Element {
   const startIn = useCallback(
     (
       projectId: string,
-      /**
-       * A conversation this one replaces, ended once the new one exists.
+      /*
+       * An object rather than two optional strings in a row, and that is a
+       * decision about the next mistake rather than about this call.
        *
-       * **After, never before**, and the ordering is the whole of why this is a
-       * parameter rather than two calls at the call site. `endNow` closes the
-       * project's tab when the conversation it ends was the last one in it — so
-       * ending first would tear the project down and rebuild it around the
-       * replacement, which is a visible flash and a pane that loses its place.
-       * Started first, the new conversation is the sibling that keeps the
-       * project open, and the end is a tab closing beside it.
-       *
-       * It also means a failed start ends nothing. The `catch` below is reached
-       * instead, and the person still has the conversation they were in.
+       * Both are conversation ids, both are optional, and they mean opposite
+       * things — one is the room being thrown away, the other the room being
+       * carried forward. Positionally, transposing them is invisible at the
+       * call site and silent at runtime: you would end the wrong conversation
+       * and carry the one you meant to end. Named, it cannot happen.
        */
-      replacing?: string
+      options: {
+        /**
+         * A conversation this one replaces, ended once the new one exists.
+         *
+         * **After, never before**, and the ordering is the whole of why this is
+         * a parameter rather than two calls at the call site. `endNow` closes
+         * the project's tab when the conversation it ends was the last one in
+         * it — so ending first would tear the project down and rebuild it
+         * around the replacement, which is a visible flash and a pane that
+         * loses its place. Started first, the new conversation is the sibling
+         * that keeps the project open, and the end is a tab closing beside it.
+         *
+         * It also means a failed start ends nothing. The `catch` below is
+         * reached instead, and the person still has the conversation they were
+         * in.
+         */
+        replacing?: string
+        /**
+         * A conversation the new one goes on from, transcript and all.
+         *
+         * **Always named by a caller, never inferred here.** An earlier build
+         * guessed it — the conversation active in the project's focused group —
+         * so every `+` silently carried whatever happened to be on screen. That
+         * makes the cheapest gesture in the app the expensive one, and gives no
+         * way to say "start clean" except by starting and restarting. Continuing
+         * is now its own control on the conversation you want to continue, and
+         * `+` means what it says again.
+         */
+        continueFrom?: string
+      } = {}
     ) => {
       setError(null)
       setStarting(true)
+
       window.chorus
         .startConversation({
-          agents: defaults.agents,
           projectId,
           profileId: defaults.profileId,
+          ...(options.continueFrom === undefined ? {} : { continueFrom: options.continueFrom }),
         })
         .then(async (session) => {
           updateSessions((current) => [...current, session])
@@ -726,7 +908,10 @@ export function App(): React.JSX.Element {
              streams into a project that has nowhere to show it until relaunch. */
           useWorkspaceStore.getState().adoptConversation(session.projectId, session.conversationId)
           useWorkspaceStore.getState().clearConversationUnread(session.conversationId)
-          if (replacing !== undefined) endNow(replacing)
+          // `finishEnd` and not `endNow`: restart has already asked its own
+          // question by the time this runs, and asking again would be two
+          // dialogs for one gesture.
+          if (options.replacing !== undefined) finishEnd(options.replacing)
           await refreshProjects()
         })
         .catch(fail(setError))
@@ -734,7 +919,7 @@ export function App(): React.JSX.Element {
           setStarting(false)
         })
     },
-    [defaults, updateSessions, refreshProjects, endNow]
+    [defaults, updateSessions, refreshProjects, finishEnd]
   )
 
   /*
@@ -902,34 +1087,24 @@ export function App(): React.JSX.Element {
     carries.current.set(conversationId, trimCarry(carry))
   }, [])
 
-  /**
-   * Who is in a conversation, changed from wherever the cast is shown.
+  // Stable, because `Session` registers in an effect that depends on it: a fresh
+  // function every render would withdraw and re-lend the reader on every paint.
+  const keepDraftReader = useCallback((conversationId: string, read: (() => string) | null) => {
+    if (read === null) draftReaders.current.delete(conversationId)
+    else draftReaders.current.set(conversationId, read)
+  }, [])
+
+  /*
+   * `setParticipants`, `toggleAgent` and `toggleProjectAgent` all stood here and
+   * all three are gone.
    *
-   * **A cast is not a preference, and this used to write one back as if it
-   * were** — `remember({ agents })` on every toggle, so bringing the other agent
-   * into one conversation silently decided what every future conversation would
-   * start with. The drift is invisible from where it is caused: the sheet says
-   * "new sessions start with", nobody edited it, and it now reads differently
-   * because of a chip pressed in a session days ago.
-   *
-   * It also costs real money in the wrong direction. A cast that grows never
-   * shrinks back on its own, so the sticky value is always the *more* expensive
-   * one — two provider processes and two waits on every new session, including
-   * the one the app opens for you at launch.
-   *
-   * So the default is only ever what the settings sheet says. Bringing an agent
-   * into this conversation changes this conversation.
+   * They were the renderer's half of a cast somebody chose — per conversation
+   * first, then per project. The choice is what produced the bug: a project card
+   * showing three agents, a settings file holding two, and a new chat opening
+   * with the file's answer. A room now holds every agent, main decides that, and
+   * the question the person actually has — which one am I asking — is the
+   * composer's, where it was all along.
    */
-  const setParticipants = useCallback(
-    (conversationId: string, participants: AgentId[]) => {
-      updateSessions((current) =>
-        current.map((candidate) =>
-          candidate.conversationId === conversationId ? { ...candidate, participants } : candidate
-        )
-      )
-    },
-    [updateSessions]
-  )
 
   /** What a conversation may do, changed from wherever the profile is shown. */
   const applyProfile = useCallback(
@@ -964,53 +1139,88 @@ export function App(): React.JSX.Element {
    * project rather than a string.
    */
 
-  /*
-   * The IPC and the error live here rather than in the control, because the
-   * cast is now shown in two places and neither of them owns a place to report
-   * a failure. The caller awaits this only to know when to stop disabling
-   * itself.
-   */
-  const toggleAgent = useCallback(
-    async (conversationId: string, agentId: AgentId, present: boolean) => {
-      const session = sessionsRef.current.find((s) => s.conversationId === conversationId)
-      if (session === undefined) return
-      try {
-        await (present
-          ? window.chorus.removeAgent({ conversationId, agentId })
-          : window.chorus.addAgent({ conversationId, agentId }))
-        setParticipants(
-          conversationId,
-          present
-            ? session.participants.filter((p) => p !== agentId)
-            : [...session.participants, agentId]
-        )
-      } catch (error) {
-        fail(setError)(error)
-      }
-    },
-    [setParticipants]
-  )
-
   /**
-   * The three project-level writes the rail's card makes.
+   * The project-level writes the rail's card makes.
    *
    * Each refreshes the project list rather than patching it. The list is small,
-   * main is the thing that decided what the value became — `setProjectAgents`
-   * folds duplicates, `setProjectProfile` resolves the id through the policy
-   * engine — and patching it here would be a second copy of that arithmetic,
-   * drifting. It is the same argument `refreshProjects` already makes for
-   * adopt and forget.
-   *
-   * Agents also reach every live conversation in the project, so the *session*
-   * list has to be refreshed too: main added or removed participants, and
-   * nothing else would tell the panes.
+   * main is the thing that decided what the value became — `setProjectProfile`
+   * resolves the id through the policy engine — and patching it here would be a
+   * second copy of that arithmetic, drifting. It is the same argument
+   * `refreshProjects` already makes for adopt and forget.
    */
   const renameProject = useCallback(
     (projectId: string, name: string) => {
-      const clean = name.trim()
-      if (clean === '') return
+      /* Sent blank and all, because main answers a blank with the folder's own
+         name — the rule conversation rename already has. Dropping it here made
+         an emptied field a no-op, so the only way back to the default was to
+         retype it exactly. */
       window.chorus
-        .renameProject({ projectId, name: clean })
+        .renameProject({ projectId, name })
+        .then(() => refreshProjects())
+        .catch(fail(setError))
+    },
+    [refreshProjects]
+  )
+
+  /*
+   * The project's scratchpad, already debounced by the pad that calls this.
+   *
+   * Refreshed after the write for one reason: the pad seeds its draft from the
+   * listing and is remounted on every tab switch, so a stale listing would show
+   * a note one edit behind the moment you came back to it.
+   */
+  const setProjectNotes = useCallback(
+    (projectId: string, notes: string) => {
+      window.chorus
+        .setProjectNotes({ projectId, notes })
+        .then(() => refreshProjects())
+        .catch(fail(setError))
+    },
+    [refreshProjects]
+  )
+
+  const sendNoteSelection = useCallback((conversationId: string, text: string) => {
+    window.chorus.sendMessage({ conversationId, text }).catch(fail(setError))
+  }, [])
+
+  /*
+   * The app's own note, written straight into state as well as to disk.
+   *
+   * Its project-scoped neighbour above re-lists the registry after every write,
+   * because the pad seeds from a listing that several other things also change.
+   * This row has one reader and one writer, so a round trip would only confirm
+   * what was just sent.
+   *
+   * `current` is never null in either of these: nothing can call them before the
+   * note is mounted, and it is not mounted until the read has answered.
+   */
+  const saveAppNote = useCallback((notes: string) => {
+    setAppNote((current) => (current === null ? current : { ...current, notes }))
+    window.chorus.setAppNote({ notes }).catch(fail(setError))
+  }, [])
+
+  const saveAppNoteSize = useCallback((size: NoteSize) => {
+    setAppNote((current) => (current === null ? current : { ...current, ...size }))
+    /*
+     * A width is never null for this note — the panel is drawn from the window's
+     * edge and has to be *some* width, so the default stands in before the first
+     * drag. A project's note is the one that can answer null, because until it is
+     * dragged it is simply as wide as its column.
+     */
+    window.chorus
+      .setAppNoteSize({ width: size.width ?? NOTE_SIZE.width.default, height: size.height })
+      .catch(fail(setError))
+  }, [])
+
+  /*
+   * The same for a project's note, and it re-lists for the same reason its text
+   * does: the pad seeds from the listing and is remounted on every tab switch,
+   * so a stale row would reopen at the size it had two drags ago.
+   */
+  const saveProjectNoteSize = useCallback(
+    (projectId: string, size: NoteSize) => {
+      window.chorus
+        .setProjectNoteSize({ projectId, ...size })
         .then(() => refreshProjects())
         .catch(fail(setError))
     },
@@ -1088,45 +1298,6 @@ export function App(): React.JSX.Element {
     [refreshProjects, updateSessions]
   )
 
-  const toggleProjectAgent = useCallback(
-    async (projectId: string, agentId: AgentId, present: boolean) => {
-      /*
-       * The cast to write is derived from what the card is showing, which for a
-       * never-asked project is the union of its conversations' participants —
-       * see `ProjectSettings`. Deriving it again here rather than passing it
-       * down keeps the toggle's argument a single agent, and the two derivations
-       * agree because both read the same session list.
-       */
-      const project = projects.find((candidate) => candidate.id === projectId)
-      if (project === undefined) return
-      const mine = sessionsRef.current.filter((session) => session.projectId === projectId)
-      const current: readonly AgentId[] = project.agentIds ?? [
-        ...new Set(mine.flatMap((session) => session.participants)),
-      ]
-      const next = present
-        ? current.filter((id) => id !== agentId)
-        : [...new Set([...current, agentId])]
-      try {
-        await window.chorus.setProjectAgents({ projectId, agentIds: next })
-        await refreshProjects()
-        /*
-         * Main reconciled every live conversation in the project, so the panes
-         * have to be told. Patched from `next` rather than re-listed: main's
-         * fanout is `allSettled`, so a conversation whose agent failed to launch
-         * would be overwritten here by a list that has not caught up either —
-         * and one extra `conversation:list` per toggle buys nothing over the
-         * value main just confirmed.
-         */
-        for (const session of mine) {
-          setParticipants(session.conversationId, [...next])
-        }
-      } catch (error) {
-        fail(setError)(error)
-      }
-    },
-    [projects, refreshProjects, setParticipants]
-  )
-
   /*
    * Writes the arrangement now, without waiting on the 180ms debounce.
    *
@@ -1164,6 +1335,27 @@ export function App(): React.JSX.Element {
 
   const sheets = (
     <>
+      {/*
+        Here rather than beside the × that opened it, because both ways in — the
+        card's End Session and a conversation tab's × — call one function in this
+        file. A dialog per call site would be the same question twice, and the
+        two would drift.
+      */}
+      {confirmingEnd !== null && (
+        <ConfirmEndSession
+          working={confirmingEnd.working.join(', ')}
+          decisions={confirmingEnd.decisions}
+          draft={confirmingEnd.draft}
+          onCancel={() => {
+            setConfirmingEnd(null)
+          }}
+          onConfirm={() => {
+            const { conversationId } = confirmingEnd
+            setConfirmingEnd(null)
+            finishEnd(conversationId)
+          }}
+        />
+      )}
       {showingHistory && (
         <HistoryPanel
           onClose={() => {
@@ -1291,7 +1483,42 @@ export function App(): React.JSX.Element {
             </span>
           )}
         </h1>
+        {/*
+          Inside the header, unlike the global note, and the difference is what
+          each one is.
+
+          That note *is* a note and has to be readable without opening anything,
+          so it is fixed to the window and grows over the app. This is a button
+          that opens one — 22px that never changes size — so it can live on the
+          row it belongs to. What it opens is portalled out of here, because the
+          row is one line tall inside a `.stage` that clips.
+        */}
+        <KeptNotes onSendSelection={sendNoteSelection} />
       </header>
+
+      {/*
+        Mounted as soon as the row has been read, and never unmounted after — it
+        is the note, not a way to reach one.
+
+        `ProjectNotes` is the same: one line always on screen, because a note you
+        have to open is a note you forget you wrote. There is no button and
+        nothing to toggle, so there is no open/closed state up here for it.
+
+        The gate is about seeding, not about visibility — see `appNote` above.
+
+        Not inside the header. It is fixed to the window's corner and grows down
+        over the app, and `.stage` clips its overflow — a child of the masthead
+        would be cut off at 31px the moment anyone typed a second line.
+      */}
+      {appNote !== null && (
+        <GlobalNotes
+          notes={appNote.notes}
+          size={{ width: appNote.width ?? NOTE_SIZE.width.default, height: appNote.height }}
+          onSave={saveAppNote}
+          onSaveSize={saveAppNoteSize}
+          onSendSelection={sendNoteSelection}
+        />
+      )}
 
       {error !== null && (
         <ErrorNotice
@@ -1323,9 +1550,10 @@ export function App(): React.JSX.Element {
         }}
         profiles={profiles}
         installed={installed}
-        onToggleAgent={toggleAgent}
         onRenameProject={renameProject}
-        onToggleProjectAgent={toggleProjectAgent}
+        onSetProjectNotes={setProjectNotes}
+        onSetProjectNoteSize={saveProjectNoteSize}
+        onSendProjectNoteSelection={sendNoteSelection}
         onChooseProjectProfile={chooseProjectProfile}
         onRelocateProject={relocateProject}
         onForgetProject={forgetProject}
@@ -1344,6 +1572,7 @@ export function App(): React.JSX.Element {
             }}
             carry={carries.current.get(session.conversationId)}
             onCarry={keepCarry}
+            onDraftReader={keepDraftReader}
             onPromoteAside={promoteAside}
             /*
              * Ending this room and opening a fresh one in the same project, in
@@ -1351,7 +1580,16 @@ export function App(): React.JSX.Element {
              * two — see there for why the new one has to exist first.
              */
             onRestart={() => {
-              startIn(session.projectId, session.conversationId)
+              startIn(session.projectId, { replacing: session.conversationId })
+            }}
+            /*
+             * Opening a fresh room that goes on from this one, and ending
+             * nothing. The exact opposite of Restart beside it, from the same
+             * conversation and through the same call — which is why the two
+             * pass different named fields rather than the same positional one.
+             */
+            onContinue={() => {
+              startIn(session.projectId, { continueFrom: session.conversationId })
             }}
             /* Read once here rather than per pane: it decides whether Explain
                exists under every reply, and four panes asking the same question

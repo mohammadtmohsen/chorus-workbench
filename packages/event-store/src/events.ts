@@ -1,3 +1,4 @@
+import { ActorSchema, AgentIdSchema } from '@chorus/shared'
 import { z } from 'zod'
 
 /**
@@ -13,7 +14,7 @@ import { z } from 'zod'
 
 export const SCHEMA_VERSION = 1
 
-const actor = z.enum(['user', 'system', 'codex', 'claude'])
+const actor = ActorSchema
 
 /**
  * `itemRef` is the provider's id for a streaming item. It is how a run of
@@ -26,6 +27,22 @@ export const ChorusEventPayload = z.discriminatedUnion('type', [
     type: z.literal('conversation.created'),
     projectId: z.string(),
     title: z.string(),
+    /**
+     * The conversation this one was started to continue, if any.
+     *
+     * The carried transcript itself is **not** stored here, and that is the
+     * point of keeping only the id: it already exists in the log under that
+     * conversation, and copying it would put a second, immediately divergent
+     * copy of every message in the store. What has to survive is the *fact* of
+     * the continuation, because the seed rides on the first message and a
+     * relaunch before that message loses it — with this the seed is rebuilt
+     * from the source, without it a person who quit and came back gets a blank
+     * room that was supposed to be carrying context.
+     *
+     * Optional, so every row ever appended still parses. Absent means the
+     * conversation starts fresh, which is what all of them did until now.
+     */
+    continuedFrom: z.string().optional(),
     /**
      * An aside: a conversation held in a fork of another conversation's agent,
      * about one passage of one reply.
@@ -84,7 +101,7 @@ export const ChorusEventPayload = z.discriminatedUnion('type', [
    */
   z.object({
     type: z.literal('session.started'),
-    agentId: z.enum(['codex', 'claude']),
+    agentId: AgentIdSchema,
     sessionRef: z.string(),
     cwd: z.string(),
     model: z.string().nullable(),
@@ -98,7 +115,7 @@ export const ChorusEventPayload = z.discriminatedUnion('type', [
   }),
   z.object({
     type: z.literal('session.ended'),
-    agentId: z.enum(['codex', 'claude']),
+    agentId: AgentIdSchema,
     sessionRef: z.string(),
     /** `shutdown` is the app quitting; the rest are things that happened to it. */
     reason: z.enum(['closed', 'crashed', 'replaced', 'shutdown']),
@@ -287,8 +304,8 @@ export const ChorusEventPayload = z.discriminatedUnion('type', [
   z.object({
     type: z.literal('handoff.created'),
     handoffId: z.string(),
-    from: z.enum(['codex', 'claude']),
-    to: z.enum(['codex', 'claude']),
+    from: AgentIdSchema,
+    to: AgentIdSchema,
     sourceEventIds: z.array(z.string()),
     brief: z.string(),
   }),
@@ -430,7 +447,12 @@ export const ChorusEventPayload = z.discriminatedUnion('type', [
     source: z.enum(['hook', 'command', 'retry', 'denial', 'system']),
     text: z.string(),
     code: z
-      .enum(['editWithoutApproval', 'editVisibilityUnavailable', 'staleEditPreview'])
+      .enum([
+        'editWithoutApproval',
+        'editVisibilityUnavailable',
+        'staleEditPreview',
+        'contextCarried',
+      ])
       .optional(),
     detail: z.string().nullable(),
     /**

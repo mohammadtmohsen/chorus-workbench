@@ -119,6 +119,24 @@ export interface ProjectInfo {
   /** Null is "never asked"; `[]` is a project deliberately emptied. Not the same. */
   readonly agentIds: readonly AgentId[] | null
   /**
+   * The project's scratchpad — pending work, things to check after something.
+   *
+   * Null is a project that has never had one, `''` is one that was emptied. The
+   * pad shows the same bar for both, and the column is kept only because
+   * inventing the distinction later is harder than carrying it.
+   */
+  readonly notes: string | null
+  /**
+   * How big the pad was last left, travelling with the text it sizes.
+   *
+   * Null is "never dragged", which is what lets the stylesheet's own ceiling stay
+   * in charge until somebody says otherwise — a zero could not say that. Carried
+   * on the listing beside `notes` for the reason given there: two reads would let
+   * the note and its box disagree by a refresh.
+   */
+  readonly noteWidth: number | null
+  readonly noteHeight: number | null
+  /**
    * The folder is not on disk right now. Read fresh from main on every listing,
    * so remounting a volume clears it without anything being written.
    *

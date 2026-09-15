@@ -13,6 +13,93 @@ import { useWorkbenchStill } from '../workspace/overlay.js'
 const ZERO_AREA_GRACE_FRAMES = 30
 
 /**
+ * How long a released surface waits before it is really closed.
+ *
+ * **A remount is not a close, and React offers no way to tell them apart.** The
+ * cleanup that releases and the effect that re-acquires run in the same commit,
+ * one straight after the other, so a surface parked here is adopted by the new
+ * frame long before this elapses.
+ *
+ * This is what makes splitting a pane survivable. `LayoutView` renders a leaf as
+ * `EditorPane` and a branch as a `div`, so splitting a pane turns a leaf into a
+ * branch and React sees the element *type* at that position change — the whole
+ * `EditorPane` subtree is torn down and rebuilt one level deeper. No key can
+ * prevent that, because the nesting really did change depth. Without parking,
+ * every split and every unsplit destroyed the target pane's `WebContents` and
+ * booted a fresh workbench: open editors gone, terminals gone, and the new
+ * extension host failing to activate against a server the old connection had
+ * just dropped — reported as "splitting reloads the editor and extension
+ * activation fails", which is exactly what it was.
+ *
+ * **Deliberately a few frames and not a second.** A released surface keeps its
+ * last rectangle and stays visible until it is closed, so the grace is also how
+ * long a genuinely closed project can hang over the layout that grew into its
+ * place. Hiding it first would mean sending `setWorkbenchVisible`, and that
+ * channel means "the Editor switch is off for this project" — main keys it by
+ * root and remembers it across surfaces, so borrowing it to veil a corpse would
+ * write the wrong thing about a project nobody had switched off. A hundred
+ * milliseconds is far more than a commit needs and short enough that the stale
+ * rectangle is not a thing anyone sees.
+ */
+const RELEASE_GRACE_MS = 100
+
+/**
+ * Surfaces released by an unmounted frame and not yet closed, by target.
+ *
+ * Module-level because the whole point is to outlive the component. At most one
+ * entry per target: a second release for a key closes the first immediately
+ * rather than letting two timers race over one slot.
+ */
+const parked = new Map<string, { readonly viewId: string; readonly timer: number }>()
+
+const targetKey = (target: { readonly grant: string } | { readonly projectId: string }): string =>
+  'grant' in target ? `grant:${target.grant}` : `project:${target.projectId}`
+
+/*
+ * A close that fails has already got what it wanted, and the refusal is
+ * deliberately unreadable.
+ *
+ * `closeSurface` throws for an id it does not hold, and it says the same thing
+ * for "already gone" as for "not yours" — on purpose, so that nothing here can
+ * learn whether an id exists. That makes the two cases indistinguishable to this
+ * caller, and the only one it can actually reach is the first: main tears a
+ * shell's surfaces down itself on reload and on window destruction, which races
+ * the close that would come from here. Left unhandled, that race is an unhandled
+ * promise rejection every time a shell reloads with a workbench open. It is not
+ * reported either — `onFailed` is about a surface that would not open, and this
+ * one is closed.
+ */
+const closeQuietly = (viewId: string): void => {
+  window.chorus.closeWorkbench({ viewId }).catch(() => {
+    /* the surface is gone, which is what the call was for */
+  })
+}
+
+const release = (key: string, viewId: string): void => {
+  const previous = parked.get(key)
+  if (previous !== undefined) {
+    window.clearTimeout(previous.timer)
+    closeQuietly(previous.viewId)
+  }
+  parked.set(key, {
+    viewId,
+    timer: window.setTimeout(() => {
+      parked.delete(key)
+      closeQuietly(viewId)
+    }, RELEASE_GRACE_MS),
+  })
+}
+
+/** The surface parked for this target, claimed and disarmed, or `null`. */
+const adopt = (key: string): string | null => {
+  const entry = parked.get(key)
+  if (entry === undefined) return null
+  window.clearTimeout(entry.timer)
+  parked.delete(key)
+  return entry.viewId
+}
+
+/**
  * The shell's handle on one surface — and it contains nothing.
  *
  * The workbench is composited by the window, not by this subtree: the element
@@ -80,44 +167,45 @@ export function WorkbenchFrame({
      */
     let live = true
     let opened: string | null = null
+    const key = targetKey(target)
 
     /*
-     * A close that fails has already got what it wanted, and the refusal is
-     * deliberately unreadable.
-     *
-     * `closeSurface` throws for an id it does not hold, and it says the same
-     * thing for "already gone" as for "not yours" — on purpose, so that nothing
-     * here can learn whether an id exists. That makes the two cases
-     * indistinguishable to this caller, and the only one it can actually reach is
-     * the first: main tears a shell's surfaces down itself on reload and on
-     * window destruction, which races the unmount that would close them from
-     * here. Left unhandled, that race is an unhandled promise rejection every
-     * time a shell reloads with a workbench open. It is not reported either —
-     * `onFailed` is about a surface that would not open, and this one is closed.
+     * The surface the last frame on this target left behind, if it is still
+     * within its grace — a split, an unsplit, or anything else that moves a pane
+     * to a different depth in the layout tree. Adopting is synchronous and does
+     * no IPC at all: the view is already open, already positioned and already
+     * showing the person's files, so the remount is invisible.
      */
-    const closeQuietly = (id: string): void => {
-      window.chorus.closeWorkbench({ viewId: id }).catch(() => {
-        /* the surface is gone, which is what the call was for */
-      })
+    const inherited = adopt(key)
+    if (inherited !== null) {
+      opened = inherited
+      setViewId(inherited)
+    } else {
+      window.chorus
+        .openWorkbench(target)
+        .then(({ viewId: id }) => {
+          opened = id
+          /*
+           * Closed rather than parked. Parking would let a remount adopt it, but
+           * that remount has already run its own effect and found nothing to
+           * adopt, so it opened a second surface — parking here would leak one of
+           * the two. Nothing is lost by closing: a surface still opening has no
+           * editors, no terminals and no activated extensions to preserve.
+           */
+          if (!live) {
+            closeQuietly(id)
+            return
+          }
+          setViewId(id)
+        })
+        .catch((error: unknown) => {
+          if (live) onFailed(error instanceof Error ? error.message : String(error))
+        })
     }
-
-    window.chorus
-      .openWorkbench(target)
-      .then(({ viewId: id }) => {
-        opened = id
-        if (!live) {
-          closeQuietly(id)
-          return
-        }
-        setViewId(id)
-      })
-      .catch((error: unknown) => {
-        if (live) onFailed(error instanceof Error ? error.message : String(error))
-      })
 
     return () => {
       live = false
-      if (opened !== null) closeQuietly(opened)
+      if (opened !== null) release(key, opened)
     }
     /*
      * Keyed on the target's own value, not the object. A parent that rebuilds

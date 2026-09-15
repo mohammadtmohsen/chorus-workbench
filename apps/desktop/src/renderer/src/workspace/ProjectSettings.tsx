@@ -36,7 +36,6 @@ export interface ProjectSettingsProps {
     readonly summary: string
   }[]
   readonly installed: readonly AgentId[]
-  readonly onToggleAgent: (agentId: AgentId, present: boolean) => Promise<void>
   readonly onChooseProfile: (profileId: string) => Promise<void>
   /** Opens the folder picker and points this project at what comes back. */
   readonly onRelocate: () => Promise<void>
@@ -49,48 +48,38 @@ export function ProjectSettings(props: ProjectSettingsProps): React.JSX.Element 
   const { setPlanning } = useWorkspaceActions()
   const planning = useEveryPlanning(props.sessions.map((session) => session.conversationId))
 
-  /*
-   * The cast the project has been *told*, falling back to what is actually in
-   * its conversations.
-   *
-   * A project that has never been asked has `agentIds === null`, and showing an
-   * empty cast for it would be wrong twice over: it has agents, and the toggles
-   * would offer to add one that is already there. The union of what is running
-   * is the honest answer for that case — it is what the person would see if they
-   * looked. **Only null falls back**: `[]` is a project somebody deliberately
-   * emptied and must render empty.
-   */
-  const cast = props.project.agentIds ?? [
-    ...new Set(props.sessions.flatMap((session) => session.participants)),
-  ]
-
   return (
     <div className="session-settings">
+      {/*
+        The cast, and it is a statement rather than a control.
+
+        These were toggles, backed by `project.agentIds` — and a project could
+        therefore disagree with the settings file about who a new conversation
+        starts with. It did: the card showed three agents, `conversation:start`
+        was handed the two out of `settings.json`, and DeepSeek was never seated
+        by anything a person could press.
+
+        Every conversation now holds every agent, so there is nothing to press.
+        Which one a piece of work goes to is asked where it is answered — in the
+        composer, per message — and that question was never the same as this one.
+
+        `installed` still dims a row, because "in every room" and "runnable on
+        this machine" are different claims and only the first is ours to make.
+      */}
       <p className="session-settings-label">{t('conversation.cast')}</p>
       <ul className="session-settings-agents">
         {ALL_AGENTS.map((agent) => {
-          const here = cast.includes(agent)
           const available = props.installed.includes(agent)
           return (
             <li key={agent}>
-              <button
-                type="button"
+              <p
                 className={`voice voice--${agent}`}
-                data-on={here}
-                aria-pressed={here}
-                disabled={!here && !available}
-                title={
-                  available
-                    ? t(here ? 'conversation.removeAgent' : 'conversation.addAgent', { agent })
-                    : t('agents.notFound', { agent })
-                }
-                onClick={() => {
-                  void props.onToggleAgent(agent, here)
-                }}
+                data-on={available}
+                title={available ? undefined : t('agents.notFound', { agent })}
               >
                 <span className="voice-dot" aria-hidden="true" />
                 {agent}
-              </button>
+              </p>
             </li>
           )
         })}

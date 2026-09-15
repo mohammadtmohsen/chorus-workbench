@@ -23,34 +23,47 @@ import {
   requestWorkbenchSnapshot,
 } from './workbench-surface.js'
 import {
+  AppNoteStore,
   EventStore,
+  KeptNoteStore,
   openSqlite,
   ProjectStore,
+  type AppNote,
   type AsideSummary,
   type ConversationSummary,
+  type KeptNote,
   type SqliteHandle,
   type StoredEvent,
   type TranscriptState,
 } from '@chorus/event-store'
 import {
+  callRule,
   composeBrief,
+  composeCarryover,
+  composeHistory,
   ConversationService,
   DEFAULT_PROFILE_ID,
   defaultIntent,
+  findReplyHandoff,
   parseMentions,
   profileById,
   PROFILES,
   SessionGrants,
   SupervisedSession,
   summariseHandoff,
+  withCallRule,
   withCatchup,
+  type CarryoverSource,
   type HandoffIntent,
   type HandoffSource,
   type PermissionProfile,
 } from '@chorus/orchestrator'
 import {
+  AGENT_IDS,
+  isAgentId,
   newConversationId,
   newHandoffId,
+  uuidv7,
   type AgentId,
   type ApprovalId,
   type Logger,
@@ -58,6 +71,18 @@ import {
 import { relativeWithin } from '@chorus/workspace'
 import type { ActivityPush, ContextUsagePush, TasksPush } from '../shared/ipc.js'
 import { UNREAD_EVENT_TYPES } from '../shared/unread.js'
+import {
+  CollaborationRun,
+  dispatchAndWatch,
+  PLANNER,
+  preflight,
+  rolesFor,
+  type CollaborationStart,
+  type CoordinatorPort,
+  type HandoffDispatch,
+  type Preset,
+  type RunStatus,
+} from './collaborate.js'
 import {
   openConversations,
   readOpenProjects,
@@ -70,6 +95,7 @@ import { containsPassage } from '../shared/plain-text.js'
 import { questionSetText } from '../shared/question-text.js'
 import { readRemembered, writeRemembered } from './remembered.js'
 
+import { readAgentKey } from './agent-secrets.js'
 import { readSettings } from './settings.js'
 import {
   TerminalService,
@@ -97,7 +123,21 @@ import { resolveCommand } from './which.js'
  */
 
 export interface StartConversationOptions {
-  readonly agents: readonly AgentId[]
+  /**
+   * Who to seat, and **absent is the ordinary case**: every conversation gets
+   * every agent.
+   *
+   * The cast used to be a preference — `DEFAULT_SETTINGS.agents` for a new room,
+   * `project.agentIds` for a project that had been asked — and `conversation:start`
+   * read neither of the two consistently, so a new chat in a project whose card
+   * showed three agents opened with the two the settings file happened to hold.
+   * DeepSeek was never seated by anything a person could reach.
+   *
+   * A cast is now a fact rather than a setting: the room holds everyone and the
+   * message says who it is for. What stays here is a narrower thing — a caller
+   * that genuinely means one agent, which today is only the tests.
+   */
+  readonly agents?: readonly AgentId[]
   /**
    * Which project the conversation belongs to — an id from the registry, and the
    * only way to say where a conversation is.
@@ -112,6 +152,15 @@ export interface StartConversationOptions {
   readonly title?: string
   /** Defaults to read-only. Permissive defaults ship by accident, not on purpose. */
   readonly profileId?: string
+  /**
+   * A conversation to go on from, whose transcript seeds every agent here.
+   *
+   * An id the store is asked about, never text a caller supplies — see the IPC
+   * field of the same name. Absent means a fresh room, and Restart depends on
+   * that: it starts a replacement through this same method and names no source,
+   * so restarting is the one gesture that reliably clears what was carried.
+   */
+  readonly continueFrom?: string
 }
 
 interface Participant {
@@ -153,6 +202,95 @@ interface Participant {
   catchupBudget?: number
   /** The provider's command list, asked for once per session. */
   commands?: readonly SlashCommandInfo[]
+  lastReply?: { readonly eventId: string; readonly text: string }
+  dispatchEpoch?: number
+}
+
+/**
+ * The session that names a conversation's current topic, and its one slot.
+ *
+ * `queue` serialises requests. Two messages sent in quick succession would
+ * otherwise both be in flight on one session, and the replies could be matched
+ * to the wrong questions — the second title landing for the first message. It
+ * is a promise chain rather than a lock because the failure mode of a lock here
+ * is a conversation whose titles stop forever, and nothing on screen says why.
+ *
+ * `resolve` is set only while a request is waiting, and the reader loop clears
+ * it as it hands the reply over. An event arriving with nothing waiting is the
+ * ordinary case — the session says other things — and is dropped.
+ */
+interface Namer {
+  /**
+   * Absent until the first message starts it.
+   *
+   * Lazy because a conversation nobody speaks in should cost no CLI at all —
+   * opening four projects would otherwise spawn four naming sessions to name
+   * four empty rooms. Created inside the queue, so two messages sent together
+   * cannot each start one.
+   */
+  session?: AgentSession
+  queue: Promise<void>
+  resolve?: (text: string) => void
+}
+
+/**
+ * What the namer is told once, when its session starts.
+ *
+ * Written as a standing instruction rather than repeated per message, because
+ * repeating it is what the persistent session exists to avoid.
+ *
+ * **The last three sentences are doing real work.** A namer inherits the user's
+ * configuration in full — `settingSources` is deliberately omitted in the
+ * adapters — so a `CLAUDE.md` that mandates a house style for answers applies
+ * here too, and a title that arrives as a paragraph, a translation or a bulleted
+ * list is the predictable result. Saying plainly that this is not a reply is the
+ * only lever available from this side; `cleanTitle` is the second line of
+ * defence for when it is not enough.
+ */
+const NAMER_INSTRUCTIONS = [
+  'You are naming a conversation for a tab label. You will be sent the user’s',
+  'messages one at a time, in the order they are sent. After each one, reply',
+  'with a title naming the topic the conversation is on right now.',
+  '',
+  'If the topic has not changed, repeat the previous title exactly.',
+  '',
+  'Your entire reply is the title. One line, at most six words, no quotes, no',
+  'punctuation at the end, no explanation, no preamble, no translation, no',
+  'formatting. Any house style you have been given about how to answer does not',
+  'apply here — this is a label, not a reply to a person.',
+].join('\n')
+
+/** Long enough for a small model, short enough that nothing waits on it. */
+const NAMER_TIMEOUT_MS = 20_000
+/** A tab is not a sentence. Past this it is truncated rather than refused. */
+const MAX_TITLE_CHARS = 60
+
+/**
+ * The one line of a namer's reply that can be used as a title, or null.
+ *
+ * Null rather than a fallback, and that is the point: a namer that answered with
+ * something unusable must leave the title alone. Substituting a guess would
+ * rename a conversation on the strength of a reply nobody could parse.
+ */
+function cleanTitle(reply: string | null): string | null {
+  if (reply === null) return null
+  const first = reply
+    .split('\n')
+    .map((line) => line.trim())
+    .find((line) => line !== '')
+  if (first === undefined) return null
+
+  // Quotes at either end are the most common way a model returns a label, and
+  // they are the only decoration stripped — anything more would start editing
+  // titles rather than reading them.
+  const stripped = first
+    .replace(/^["'`“”«»]+/, '')
+    .replace(/["'`“”«»]+$/, '')
+    .trim()
+  if (stripped === '') return null
+  return stripped.length <= MAX_TITLE_CHARS
+    ? stripped
+    : `${stripped.slice(0, MAX_TITLE_CHARS - 1)}…`
 }
 
 /** What the renderer needs to draw a promoted aside as a tab. */
@@ -194,6 +332,22 @@ interface ActiveConversation {
   draft: string
   /** Reading and reasoning, executing nothing, until a plan is approved. */
   planning: boolean
+  /**
+   * Whether this room's agents carry the user's standing instruction.
+   *
+   * Per conversation and in memory, which is `planning`'s shape rather than the
+   * log's. It was going to be an event; the precedent won, because this is a
+   * property of the running session in the same way a mode is — and the state
+   * that decides how an agent is *spawned* has to be readable before any event
+   * has been replayed.
+   *
+   * Seeded from `styleOnByDefault` when the conversation opens, so a relaunch
+   * returns a room to the global default rather than to whatever it was last
+   * toggled to. That is the cost of following `planning`, and it is deliberate:
+   * see `answer-in-your-language-2026-09-08/plan.md`.
+   */
+  styleOn: boolean
+  handoffEpoch: number
 }
 
 /**
@@ -204,6 +358,8 @@ interface ActiveConversation {
  * it does not know which half it is missing.
  */
 const JOINING_CATCHUP_CHARS = 60_000
+
+const HANDOFF_CONTEXT_CHARS = 20_000
 
 /**
  * What the fork is actually asked.
@@ -248,6 +404,70 @@ const KEEP_IN_ENGLISH = [
   'translated is one the reader has to translate back before they can search for',
   'it, or match it against the code in front of them.',
 ]
+
+/**
+ * The style the toggle turns on when nobody has written their own.
+ *
+ * **In code rather than in the settings file, and that is the whole design.** A
+ * prefilled settings box looks like something the user wrote, so it is edited by
+ * accident, half-deleted, and impossible to restore without a "reset" button
+ * nobody finds. A constant is the product's own answer: the box starts empty, the
+ * toggle starts off, and a first launch behaves exactly as every launch before
+ * this feature existed.
+ *
+ * What the box holds is therefore an **override**, not a seed. Empty means "use
+ * this"; anything at all means "use that instead". There is no merge, because a
+ * merge of two prompts about how to write is two prompts arguing — and the user's
+ * would be the one that lost, being second and shorter.
+ *
+ * The wording is `docs/plans/answer-in-your-language-2026-09-08/prompt-draft.md`,
+ * which was tuned against real replies over a dozen rounds. Three shapes were
+ * tried before this one: a single mixed text, unreadable to anyone who does not
+ * code-switch; whole-answer doubling, which put each Arabic paragraph screens away
+ * from the English it translates. Pairing per paragraph keeps a point beside its
+ * translation, which is what a reader actually compares.
+ */
+export const DEFAULT_STYLE_INSTRUCTION = [
+  'Write every reply as paired paragraphs: one paragraph in English, then the same',
+  'paragraph in Modern Standard Arabic immediately under it, then the next point',
+  'and the same again. The unit is the paragraph, never the whole answer — do not',
+  'write the entire reply in one language and then repeat it in the other.',
+  '',
+  'The Arabic is a full restatement rather than a summary. It says the same thing,',
+  'at the same length, and leaves nothing out.',
+  '',
+  ...KEEP_IN_ENGLISH,
+  '',
+  'Inside the Arabic paragraph, carry a further share of the sentence in English,',
+  'and put that share on verbs and nouns — appending, passing, field, value,',
+  'projects, agents. Not on connectives: "otherwise", "which means" and "once" read',
+  'as an English sentence interrupted by Arabic, while an English noun inside an',
+  'Arabic clause reads as how a developer actually speaks.',
+  '',
+  'Definite articles stay Arabic and attached — الـ Settings, never "the Settings".',
+  'Do not attach an Arabic prefix to an English word in any other position.',
+  '',
+  'Open every Arabic paragraph with an Arabic word. Direction is decided per block',
+  'from its own first strong character, so a paragraph that begins with an',
+  'identifier or a code span is laid out left to right however much Arabic follows',
+  'it, and nothing later in the paragraph can undo that.',
+  '',
+  'A status block, a table, or anything else whose value is that it can be scanned',
+  'stays in English and is not doubled. Doubling it produces a second essay where a',
+  'footer was wanted.',
+  '',
+  'Questions follow the same rule as a reply, and they matter most, being blocking',
+  'and dense. Write the question text in English, then the same text in Arabic as a',
+  'separate paragraph under it.',
+  '',
+  'Option labels and headers stay English — a label is a few words wide and a header',
+  'a dozen characters, so two languages truncate both. An option description carries',
+  'both languages, and they never share a paragraph: the English sentence first, the',
+  'Arabic sentence after it as its own paragraph. Do not mix the two inside one',
+  'sentence anywhere in a question card. That card does not resolve direction per',
+  'run, so a mixed sentence is laid out by whichever script opened it and the rest',
+  'reads backwards.',
+].join('\n')
 
 function asideQuestion(excerpt: string, question: string, language = ''): string {
   return [
@@ -1127,6 +1347,9 @@ interface RestoredConversations {
     cwd: string
     title: string
     unread: number
+    /** Still waiting to be answered — see `pendingDecisions`. */
+    pendingApprovalIds: string[]
+    pendingQuestionIds: string[]
     draft: string
     planning: boolean
   }[]
@@ -1179,6 +1402,22 @@ export class ChorusRuntime {
       language: string
     }
   >()
+  /**
+   * One small session per conversation whose whole job is to name the topic.
+   *
+   * **Its own session rather than the room's agents**, which is the rule asides
+   * already follow. Asking a participant would spend its context on bookkeeping,
+   * put a title request in the middle of the work it is doing, and — because
+   * every turn is logged — write the question into the transcript the title is
+   * describing.
+   *
+   * **Kept alive rather than started per message**, which is the whole reason a
+   * per-message check is affordable. It is fed one new message at a time and
+   * answers from what it has already read, so the cost of a check is the message
+   * rather than the conversation. Starting fresh each time would re-read
+   * everything and grow without bound.
+   */
+  private readonly namers = new Map<string, Namer>()
   /**
    * The terminal panels' shells.
    *
@@ -1244,8 +1483,26 @@ export class ChorusRuntime {
      * The project registry — Phase 2's domain, and the thing that turns a project
      * id into a root without putting a dialog in front of somebody.
      */
-    readonly projects: ProjectService
-  ) {}
+    readonly projects: ProjectService,
+    /**
+     * The note that belongs to no project — the same registry, one level up.
+     *
+     * Not folded into `ProjectService`: that class turns a project id into a
+     * root and reconciles what runs inside one, and this row has no project id
+     * to be about.
+     */
+    private readonly appNote: AppNoteStore,
+    /**
+     * The notes that belong to nothing, which is a different claim from the one
+     * above: that row is *the* note the app keeps, and these are a collection
+     * addressed by id, made and deleted one at a time.
+     */
+    private readonly keptNotes: KeptNoteStore
+  ) {
+    this.store.subscribe((events) => {
+      this.followHandoffs(events)
+    })
+  }
 
   static open(
     userDataPath: string,
@@ -1282,7 +1539,16 @@ export class ChorusRuntime {
      */
     const projects = new ProjectService(new ProjectStore(db), db)
 
-    return new ChorusRuntime(db, store, adapters ?? defaultAdapters(), log, userDataPath, projects)
+    return new ChorusRuntime(
+      db,
+      store,
+      adapters ?? defaultAdapters(userDataPath),
+      log,
+      userDataPath,
+      projects,
+      new AppNoteStore(db),
+      new KeptNoteStore(db)
+    )
   }
 
   /**
@@ -1384,10 +1650,11 @@ export class ChorusRuntime {
    * replace it with.
    */
   async startConversationIn(options: {
-    readonly agents: readonly AgentId[]
     readonly cwd: string
     readonly title?: string
     readonly profileId?: string
+    /** Narrower than the full cast, and only ever a test saying so. */
+    readonly agents?: readonly AgentId[]
   }): Promise<{
     conversationId: string
     participants: AgentId[]
@@ -1401,27 +1668,26 @@ export class ChorusRuntime {
     )
 
     /*
-     * The project's answers win over this call's defaults, and lose to an
+     * The project's answer wins over this call's default, and loses to an
      * explicit argument.
      *
-     * The order is the point of moving these settings up: a second conversation
+     * The order is the point of moving this setting up: a second conversation
      * in a directory whose profile is already Trusted should open Trusted, not
      * ask again. An explicit `profileId` still overrides, because a caller that
      * named one — restart, promotion, a side task inheriting its parent's — is
      * stating a fact rather than accepting a default.
      *
-     * `agentIds` is read with `??` and not a truthiness check: **an empty cast is
-     * a real answer** and must not fall back to the caller's list. Null is the
-     * only value that means "this project has never been asked".
+     * The cast used to be read here too, out of `project.agentIds`. It is no
+     * longer a project answer at all: every room holds every agent, so there is
+     * nothing left to inherit and nothing left to disagree about.
      */
-    const agents = project.agentIds === null ? options.agents : (project.agentIds as AgentId[])
     const profileId = options.profileId ?? project.profileId ?? undefined
 
     // Spread rather than assigned: under `exactOptionalPropertyTypes` an
     // explicit `undefined` is not the same as an absent optional field.
     return this.startConversation({
-      agents,
       projectId: project.id,
+      ...(options.agents === undefined ? {} : { agents: options.agents }),
       ...(options.title === undefined ? {} : { title: options.title }),
       ...(profileId === undefined ? {} : { profileId }),
     })
@@ -1435,7 +1701,12 @@ export class ChorusRuntime {
     cwd: string
     title: string
   }> {
-    if (options.agents.length === 0) throw new Error('A conversation needs at least one agent')
+    /*
+     * The whole cast unless a caller narrowed it, and a narrowed empty list is
+     * still refused rather than quietly widened.
+     */
+    const agents = options.agents ?? [...AGENT_IDS]
+    if (agents.length === 0) throw new Error('A conversation needs at least one agent')
 
     /*
      * The root comes from the registry, and the check comes with it.
@@ -1469,12 +1740,34 @@ export class ChorusRuntime {
       throw new Error('A conversation cannot be started: CHORUS_PROFILE_READONLY is set')
     }
 
+    /*
+     * Composed before anything is minted, so a source that is not there costs
+     * nothing.
+     *
+     * `carriedChain` returns nothing for an unknown id and `composeCarryover`
+     * answers `null` for rooms that said nothing — so a stale id, a purged
+     * conversation or one that never held a word all collapse to the same
+     * harmless outcome: an ordinary fresh room. Refusing to start would be the
+     * wrong trade, because the thing the person asked for is a conversation and
+     * the carry is what they wanted *in* it.
+     */
+    const carryover =
+      options.continueFrom === undefined
+        ? null
+        : composeCarryover(this.carriedChain(options.continueFrom))
+
     const conversationId = newConversationId()
     this.store.append({
       conversationId,
       actor: 'user',
       payload: {
         type: 'conversation.created',
+        // Recorded only when something was actually carried. Naming a source
+        // that turned out to be empty would make the reopen path below rebuild
+        // a seed that does not exist, every launch, forever.
+        ...(carryover === null || options.continueFrom === undefined
+          ? {}
+          : { continuedFrom: options.continueFrom }),
         /*
          * A real project id at last. This read `options.projectId ?? cwd`, so
          * every conversation ever started without one recorded its *path* in the
@@ -1489,16 +1782,62 @@ export class ChorusRuntime {
       },
     })
 
+    /*
+     * Said out loud, because an agent that silently knows things is worse than
+     * one that does not know them.
+     *
+     * Carrying a transcript changes what every answer in this room is based on,
+     * and none of it is on screen — the new transcript is empty. Without a line
+     * saying so, an agent referring to a decision made in the other room reads
+     * as a hallucination, and the person has no way to tell the two apart.
+     *
+     * Appended here, above the `lastSeenSeq` watermark taken further down, so
+     * the room it explains does not open already claiming to be unread.
+     */
+    if (carryover !== null) {
+      this.store.append({
+        conversationId,
+        actor: 'system',
+        payload: {
+          type: 'notice.raised',
+          level: 'info',
+          source: 'system',
+          code: 'contextCarried',
+          // The words live in `en.json`; this is the fallback a coded notice
+          // falls back to, never the string anyone is expected to read.
+          text: 'Continued from the previous conversation.',
+          detail: null,
+        },
+      })
+    }
+
     const profile = profileById(options.profileId ?? '')
 
     // One set of grants for the whole conversation: allowing something for
     // Codex should not mean being asked again the moment Claude does the same.
     const grants = this.newGrants()
 
+    /*
+     * Read once, and used by both the agents and the room they belong to.
+     *
+     * The agents are started before the `ActiveConversation` exists, so this
+     * cannot come from `conversation.styleOn` — and reading the sheet twice would
+     * let a settings write land between the two and produce a room whose flag
+     * says one thing while its agents were spawned under another.
+     *
+     * **This is the bug the first version shipped with.** The factory below
+     * passed a bare `{ cwd, profile }`, so a new conversation was always spawned
+     * without the instruction whatever the checkbox said — while the flag was
+     * seeded `true` from that same checkbox. The composer's toggle then did
+     * nothing on its first click, because `setAnswerStyle` returns early when the
+     * flag already matches what was asked for.
+     */
+    const styleOn = this.defaultStyleOn()
+
     // Started in parallel: two agents booting sequentially doubles the wait for
     // no reason, and one failing should not hide the other.
     const started = await Promise.allSettled(
-      options.agents.map((agentId) =>
+      agents.map((agentId) =>
         /*
          * Resolved per agent, and resolved *here*.
          *
@@ -1511,7 +1850,8 @@ export class ChorusRuntime {
         this.startParticipant(
           agentId,
           conversationId,
-          (resuming) => this.sessionOptsFor({ cwd, profile }, agentId, resuming),
+          (resuming) =>
+            this.sessionOptsFor({ conversationId, cwd, profile, styleOn }, agentId, resuming),
           profile,
           grants
         )
@@ -1527,11 +1867,13 @@ export class ChorusRuntime {
       cwd,
       title: options.title ?? folderName(cwd),
       lastAddressed: undefined,
-      // A new room has nothing unread in it, and the log's end is what "nothing"
+      handoffEpoch: 0,      // A new room has nothing unread in it, and the log's end is what "nothing"
       // means — seeding 0 would count the whole database as news.
       lastSeenSeq: this.store.lastSeq(),
       draft: '',
       planning: false,
+      // The same value the agents above were spawned under, not a second read.
+      styleOn,
     }
     const failures: string[] = []
 
@@ -1547,6 +1889,26 @@ export class ChorusRuntime {
 
     if (conversation.participants.size === 0) {
       throw new Error(failures.join('; ') || 'No agent could be started')
+    }
+
+    /*
+     * The carried transcript waits with the agents rather than being sent.
+     *
+     * Delivering it now would start a turn nobody asked for: the person opened
+     * a room, they have not said anything yet, and an agent handed a transcript
+     * with no question attached answers it. `seedContext` exists for exactly
+     * this shape — it costs nothing until the person speaks, and rides in front
+     * of their first message when they do.
+     *
+     * Every agent gets its own copy of the same text. They keep separate
+     * contexts, so seeding only the one that happens to be addressed first
+     * would produce a room where one agent remembers the earlier work and the
+     * other does not, which is worse than neither remembering it.
+     */
+    if (carryover !== null) {
+      for (const participant of conversation.participants.values()) {
+        participant.seedContext = carryover
+      }
     }
 
     // A partial start belongs in the transcript: it should say why an agent the
@@ -1585,9 +1947,41 @@ export class ChorusRuntime {
    */
   async send(conversationId: string, text: string, intent?: 'go'): Promise<SendResult> {
     const conversation = this.require(conversationId)
-    const participants = [...conversation.participants.keys()]
+    /*
+     * Synchronously, before the append and before any delivery: a message the
+     * person typed is never refused, so what pays is the run. It also costs
+     * attribution, because something other than the coordinator has now
+     * dispatched to an agent it holds and the log does not record the routing.
+     */
+    this.collaborations.get(conversationId)?.cancel('userMessage')
+    /*
+     * Addressable is the cast, not the live map, and the two differ exactly when
+     * something went wrong.
+     *
+     * An agent whose CLI is missing, or whose key is not saved yet, fails to
+     * start and is therefore absent from `participants` — so routing over that
+     * map made `@deepseek` unparseable as a mention, which `parseMentions`
+     * silently reads as "nobody named" and delivers to whoever spoke last. The
+     * message went to the wrong agent and nothing said so.
+     *
+     * Naming one is a decision, and the answer to it belongs in the transcript
+     * whichever way it goes. `ensureSeated` below either brings the agent in or
+     * says why it cannot.
+     *
+     * **The live ones come first, and the order is load-bearing.** With nobody
+     * named, `parseMentions` falls back to the head of this list — so a flat
+     * `AGENT_IDS` would send every unaddressed message to whichever agent the
+     * tuple happens to start with, including on a machine where that one is the
+     * agent that will not run. Listing the live ones first keeps the fallback on
+     * something that can answer, while a mention still reaches anybody.
+    */
+    const live = [...conversation.participants.keys()]
+    const liveInRoutingOrder: AgentId[] =
+      conversation.lastAddressed === undefined && live.includes('claude')
+        ? ['claude', ...live.filter((id) => id !== 'claude')]
+        : live
     const route = parseMentions(text, {
-      participants,
+      participants: [...liveInRoutingOrder, ...AGENT_IDS.filter((id) => !live.includes(id))],
       lastAddressed: conversation.lastAddressed,
     })
 
@@ -1602,6 +1996,7 @@ export class ChorusRuntime {
     // Delivering a message the log has no record of would be worse than not.
     if (stored === null) throw new Error('Chorus is shutting down')
     conversation.lastAddressed = route.targets.at(-1)
+    conversation.handoffEpoch += 1
 
     /*
      * Logged before the delivery is awaited, and again after it returns.
@@ -1617,6 +2012,26 @@ export class ChorusRuntime {
      * is a send that never reached main at all. Cheap, and only once per turn.
      */
     this.log.info('message accepted', { conversationId, targets: route.targets.join(',') })
+
+    /*
+     * Fired here and not awaited, so the naming runs alongside the turn instead
+     * of in front of it. `route.text` rather than the logged text: the mentions
+     * are addressing, not subject, and a namer told "@claude" every message
+     * would be reading the routing as part of the topic.
+     */
+    this.nameTopic(conversationId, route.text)
+
+    await this.ensureSeated(conversation, route.targets)
+
+    /*
+     * Who is in the room, read **after** seating and not before.
+     *
+     * This is the catch-up preamble's roster — it tells an agent whose voices it
+     * is about to read in the transcript. `live` above cannot serve: it was taken
+     * before `ensureSeated`, so an agent seated by this very message would be
+     * missing from the list the others are handed.
+     */
+    const roster = [...conversation.participants.keys()]
 
     // Filtered rather than optional-chained: `Promise.all` over a list that can
     // contain `undefined` is a silent no-op waiting to happen.
@@ -1660,12 +2075,13 @@ export class ChorusRuntime {
           const body = intent === 'go' ? goPrompt() : route.text
           const seeded = p.seedContext === undefined ? body : `${p.seedContext}\n\n${body}`
           delete p.seedContext
+          p.dispatchEpoch = conversation.handoffEpoch
 
           await p.service.deliver(
             withCatchup(
               {
                 recipient: p.agentId,
-                participants,
+                participants: roster,
                 events: missed,
                 ...(p.catchupBudget === undefined ? {} : { maxTotalChars: p.catchupBudget }),
               },
@@ -1773,7 +2189,7 @@ export class ChorusRuntime {
     }
 
     const agentId = source.actor
-    if (agentId !== 'codex' && agentId !== 'claude') {
+    if (!isAgentId(agentId)) {
       throw new Error('Only an agent can be asked about what it said')
     }
     const participant = parent.participants.get(agentId)
@@ -1899,7 +2315,7 @@ export class ChorusRuntime {
       .filter((e) => e.payload.type === 'user.message')
       .map((e) =>
         e.payload.type === 'user.message'
-          ? parseMentions(e.payload.text, { participants: ['codex', 'claude'] }).text
+          ? parseMentions(e.payload.text, { participants: [...AGENT_IDS] }).text
           : ''
       )
     const ledger = recapLedger(history, parent.cwd)
@@ -2306,9 +2722,19 @@ export class ChorusRuntime {
       cwd: parent.cwd,
       title: aside.excerpt.slice(0, 80),
       lastAddressed: agentId,
-      lastSeenSeq: 0,
+      handoffEpoch: 0,      lastSeenSeq: 0,
       draft: '',
       planning: false,
+      /*
+       * Never on for an aside, whatever the default says.
+       *
+       * An aside is already told how to write: `explainPrompt` and
+       * `translatePrompt` name a language and hold `KEEP_IN_ENGLISH`. Adding the
+       * standing instruction on top gives one context two rules about wording,
+       * and the one that loses is the card's own — which is the only reason the
+       * card exists.
+       */
+      styleOn: false,
     }
     this.active.set(asideId, conversation)
     this.rememberOpen()
@@ -2463,6 +2889,17 @@ export class ChorusRuntime {
     if (target === undefined) throw new Error(`"${options.to}" is not in this conversation`)
     if (options.brief.trim() === '') throw new Error('The brief is empty')
 
+    /*
+     * A press, not something typed — so refusing costs nothing and is the safe
+     * answer while a run still owns the agents. Once it does not, the manual
+     * handoff ends the run and takes its attribution with it.
+     */
+    const run = this.collaborations.get(conversationId)
+    if (run?.status().draining === true) {
+      throw new Error('A collaboration is still finishing in this conversation')
+    }
+    run?.cancel('manualHandoff')
+
     const handoffId = newHandoffId()
     this.store.append({
       conversationId,
@@ -2482,8 +2919,111 @@ export class ChorusRuntime {
     // The brief is context the user curated by hand; replaying the same events
     // as catch-up on the next message would say it all twice.
     target.seenSeq = this.store.lastSeq()
-    await target.service.deliver(options.brief)
+    const roster = [...conversation.participants.keys()]
+    await target.service.deliver(withCallRule(roster, options.brief))
     return { handoffId }
+  }
+
+  private followHandoffs(events: readonly StoredEvent[]): void {
+    for (const event of events) {
+      const from = event.actor
+      if (!isAgentId(from)) continue
+      const conversation = this.active.get(event.conversationId)
+      const participant = conversation?.participants.get(from)
+      if (conversation === undefined || participant === undefined) continue
+      const { payload } = event
+      if (payload.type === 'turn.started') {
+        delete participant.lastReply
+      } else if (payload.type === 'agent.message.completed') {
+        participant.lastReply = { eventId: event.id, text: payload.text }
+      } else if (payload.type === 'turn.completed') {
+        const reply = participant.lastReply
+        delete participant.lastReply
+        if (reply === undefined || payload.status !== 'completed') continue
+        if (participant.dispatchEpoch !== conversation.handoffEpoch) continue
+        queueMicrotask(() => {
+          void this.handOffOnward(conversation, from, reply)
+        })
+      }
+    }
+  }
+
+  private async handOffOnward(
+    conversation: ActiveConversation,
+    from: AgentId,
+    reply: { readonly eventId: string; readonly text: string }
+  ): Promise<void> {
+    const { conversationId } = conversation
+    const handoff = findReplyHandoff(reply.text, from, AGENT_IDS)
+    if (handoff === null) return
+    const run = this.collaborations.get(conversationId)?.status()
+    if (run !== undefined && (run.state.phase === 'running' || run.draining)) return
+
+    const epoch = conversation.handoffEpoch
+    try {
+      await this.ensureSeated(conversation, [handoff.to])
+      const target = conversation.participants.get(handoff.to)
+      if (target === undefined || conversation.handoffEpoch !== epoch) return
+      if (this.active.get(conversationId) !== conversation) return
+
+      const stored = this.store.append({
+        conversationId,
+        actor: from,
+        payload: {
+          type: 'handoff.created',
+          handoffId: newHandoffId(),
+          from,
+          to: handoff.to,
+          sourceEventIds: [reply.eventId],
+          brief: handoff.prompt,
+        },
+      })
+      if (stored === null) return
+      conversation.lastAddressed = handoff.to
+      target.dispatchEpoch = epoch
+
+      const missed = this.store
+        .read(conversationId, { afterSeq: target.seenSeq })
+        .filter((e) => e.seq < stored.seq && e.id !== reply.eventId)
+      const cut = handoff.above.length > HANDOFF_CONTEXT_CHARS
+      const above = cut ? handoff.above.slice(-HANDOFF_CONTEXT_CHARS) : handoff.above
+      const note = cut
+        ? `(only the last ${String(HANDOFF_CONTEXT_CHARS)} characters of it are shown)\n`
+        : ''
+      const body =
+        above === ''
+          ? handoff.prompt
+          : `${from}'s reply before calling you:\n${note}${above}\n\n${from} asks you:\n${handoff.prompt}`
+      const seeded = target.seedContext === undefined ? body : `${target.seedContext}\n\n${body}`
+      delete target.seedContext
+      await target.service.deliver(
+        withCatchup(
+          {
+            recipient: handoff.to,
+            participants: [...conversation.participants.keys()],
+            events: missed,
+            ...(target.catchupBudget === undefined ? {} : { maxTotalChars: target.catchupBudget }),
+          },
+          seeded,
+          from
+        )
+      )
+      target.seenSeq = stored.seq
+      delete target.catchupBudget
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      this.log.error('a hand-off could not be delivered', undefined, {
+        conversationId,
+        from,
+        to: handoff.to,
+        message,
+      })
+      this.store.append({
+        conversationId,
+        actor: 'system',
+        payload: { type: 'error.raised', message: `${handoff.to}: ${message}`, recoverable: true },
+      })
+    }
   }
 
   private sourcesFor(conversationId: string, eventIds: readonly string[]): HandoffSource[] {
@@ -2506,6 +3046,166 @@ export class ChorusRuntime {
     return last?.unifiedDiff
   }
 
+  /*
+   * Collaboration runs, in memory, one per conversation.
+   *
+   * Deliberately not durable: if the app dies the run dies, and the transcript
+   * still holds every dispatch and every reply because each hop was a
+   * `handoff.created` and each reply an ordinary agent message. There is no
+   * state left behind to be wrong about, which is the whole benefit.
+   */
+  private readonly collaborations = new Map<string, CollaborationRun>()
+  /** One monotonic counter per conversation, across runs. The renderer's only ordering key. */
+  private readonly statusVersions = new Map<string, number>()
+  /** Retained until the next run starts, so a remounting pane sees how the last one ended. */
+  private readonly lastCollaborationStatus = new Map<string, RunStatus>()
+  private onCollaborationStatus: ((status: RunStatus) => void) | undefined
+
+  onCollaborationStatusReported(listener: (status: RunStatus) => void): void {
+    this.onCollaborationStatus = listener
+  }
+
+  collaborationStatus(conversationId: string): RunStatus | null {
+    return this.lastCollaborationStatus.get(conversationId) ?? null
+  }
+
+  /**
+   * Starts a review loop over one completed Claude reply.
+   *
+   * Every check is here rather than in the renderer, which renders untrusted
+   * agent output and is the least trustworthy thing in the process tree. A
+   * refusal carries its reason, and `busy` carries the agent whose turn the log
+   * never closed — restarting that agent is what clears it.
+   */
+  startCollaboration(
+    conversationId: string,
+    options: { sourceEventId: string; preset: Preset }
+  ): CollaborationStart {
+    const conversation = this.require(conversationId)
+
+    const current = this.collaborations.get(conversationId)?.status()
+    if (current?.state.phase === 'running') {
+      return { outcome: 'refused', reason: 'running', agentId: null }
+    }
+    if (current?.draining === true) {
+      return { outcome: 'refused', reason: 'draining', agentId: null }
+    }
+
+    /*
+     * The roles this preset actually dispatches to, asked of the file that
+     * dispatches. A second hardcoded pair here would be a second place to
+     * disagree with `collaborate.ts` about who a run needs.
+     */
+    for (const agentId of rolesFor(options.preset)) {
+      if (!conversation.participants.has(agentId)) {
+        return { outcome: 'refused', reason: 'missingAgent', agentId }
+      }
+    }
+
+    const events = this.store.read(conversationId)
+    const source = events.find((event) => event.id === options.sourceEventId)
+    if (source === undefined) return { outcome: 'refused', reason: 'unknownEvent', agentId: null }
+    if (source.payload.type !== 'agent.message.completed') {
+      return { outcome: 'refused', reason: 'notAgentMessage', agentId: null }
+    }
+    /*
+     * A run starts from the planner's own reply, because the first hop reviews
+     * it. Which agent that is now comes from `collaborate.ts` rather than being
+     * spelled here — the guard is about the role and was named for the agent
+     * that happened to hold it.
+     */
+    if (source.actor !== PLANNER) {
+      return { outcome: 'refused', reason: 'notPlanner', agentId: null }
+    }
+
+    const ready = preflight(events)
+    if (!ready.ok) return { outcome: 'refused', reason: 'busy', agentId: ready.busy }
+
+    this.lastCollaborationStatus.delete(conversationId)
+    const run = new CollaborationRun(this.collaborationPort(), {
+      conversationId,
+      preset: options.preset,
+      sourceEventId: options.sourceEventId,
+    })
+    this.collaborations.set(conversationId, run)
+    this.log.info('collaboration started', {
+      conversationId,
+      preset: options.preset,
+      runId: run.runId,
+    })
+    // Not awaited: the run reports through the push channel, and an IPC call
+    // that waited for it would hold the renderer for the length of four turns.
+    void run.start()
+    return { outcome: 'started', runId: run.runId }
+  }
+
+  stopCollaboration(conversationId: string): void {
+    this.collaborations.get(conversationId)?.cancel('stop')
+  }
+
+  private collaborationPort(): CoordinatorPort {
+    return {
+      handoff: (input) => this.deliverCollaborationHandoff(input),
+      sessionRef: (conversationId, agentId) =>
+        this.active.get(conversationId)?.participants.get(agentId)?.session.sessionRef ?? null,
+      watch: (request) => dispatchAndWatch(this.store, request),
+      read: (conversationId) => this.store.read(conversationId),
+      nextStatusVersion: (conversationId) => {
+        const next = (this.statusVersions.get(conversationId) ?? 0) + 1
+        this.statusVersions.set(conversationId, next)
+        return next
+      },
+      onStatus: (status) => {
+        this.lastCollaborationStatus.set(status.conversationId, status)
+        this.onCollaborationStatus?.(status)
+      },
+      newRunId: () => uuidv7(),
+    }
+  }
+
+  /**
+   * One hop, recorded and delivered **without advancing `seenSeq`**.
+   *
+   * `sendHandoff` assigns `target.seenSeq = this.store.lastSeq()`, and a scalar
+   * watermark cannot say *which* events were shown — moving it would mark the
+   * user's original request as seen by an agent that was never shown it.
+   * Nothing restores an old value either: a restore is a race, and the point is
+   * never to move it. Not reachable over IPC.
+   *
+   * `actor: 'system'` rather than `'user'`, because a round Chorus is driving
+   * and a handoff a person made are different facts — and the actor is what
+   * separates them everywhere else in the log.
+   */
+  private async deliverCollaborationHandoff(input: HandoffDispatch): Promise<void> {
+    const conversation = this.require(input.conversationId)
+    const target = conversation.participants.get(input.to)
+    if (target === undefined) throw new Error(`"${input.to}" is not in this conversation`)
+
+    const { brief } = this.prepareHandoff(input.conversationId, {
+      from: input.from,
+      to: input.to,
+      sourceEventIds: input.sourceEventIds,
+      intent: input.intent,
+      note: input.note,
+    })
+
+    this.store.append({
+      conversationId: input.conversationId,
+      actor: 'system',
+      payload: {
+        type: 'handoff.created',
+        handoffId: newHandoffId(),
+        from: input.from,
+        to: input.to,
+        sourceEventIds: [...input.sourceEventIds],
+        brief,
+      },
+    })
+
+    conversation.lastAddressed = input.to
+    await target.service.deliver(brief)
+  }
+
   /**
    * Ends one conversation, leaving every other one running.
    *
@@ -2514,6 +3214,8 @@ export class ChorusRuntime {
    */
   async closeConversation(conversationId: string): Promise<void> {
     const conversation = this.require(conversationId)
+    this.collaborations.get(conversationId)?.cancel('shutdown')
+    this.collaborations.delete(conversationId)
     this.active.delete(conversationId)
     this.rememberOpen()
 
@@ -2524,6 +3226,11 @@ export class ChorusRuntime {
      */
     const orphans = [...this.asides].filter(([, a]) => a.parentId === conversationId)
     for (const [id] of orphans) this.asides.delete(id)
+
+    // The naming session goes the same way and for the same reason: it is a
+    // live CLI reachable only through this conversation, so leaving it running
+    // is a process nothing on screen can close.
+    this.disposeNamer(conversationId)
 
     /*
      * The conversation's terminal goes with it, and only its own.
@@ -2581,6 +3288,8 @@ export class ChorusRuntime {
       cwd: string
       title: string
       unread: number
+      pendingApprovalIds: string[]
+      pendingQuestionIds: string[]
       draft: string
       planning: boolean
     }[] = []
@@ -2598,6 +3307,7 @@ export class ChorusRuntime {
           cwd: open.cwd,
           title: open.title,
           unread: this.unreadSince(entry.conversationId, open.lastSeenSeq),
+          ...this.pendingDecisions(entry.conversationId),
           draft: open.draft,
           planning: open.planning,
         })
@@ -2630,6 +3340,7 @@ export class ChorusRuntime {
         cwd: conversation.cwd,
         title: conversation.title,
         unread: this.unreadSince(entry.conversationId, entry.lastSeenSeq),
+        ...this.pendingDecisions(entry.conversationId),
         draft: entry.draft,
         // Never restored: a mode is a property of a running session, and a
         // relaunch is a new one.
@@ -2664,11 +3375,24 @@ export class ChorusRuntime {
       title: entry.title,
       lastAddressed: undefined,
       lastSeenSeq: entry.lastSeenSeq,
-      draft: entry.draft,
+      handoffEpoch: 0,      draft: entry.draft,
       planning: false,
+      styleOn: this.defaultStyleOn(),
     }
+    /*
+     * The whole cast, not the cast this conversation was saved with.
+     *
+     * This is where a room opened before DeepSeek existed — or before it was
+     * seated by anything reachable — gets it. `entry.agents` is still read, one
+     * line down, for the only question it can still answer: whether a given
+     * agent is somebody this conversation already had. That decides the
+     * announcement, because "deepseek joined" is true of an arrival and false of
+     * a relaunch, and putting the line on every reopen is the noise the
+     * `resumed` flag exists to suppress.
+     */
     const started = await Promise.allSettled(
-      entry.agents.map(async (agentId) => {
+      AGENT_IDS.map(async (agentId) => {
+        const arriving = !entry.agents.includes(agentId)
         /*
          * Resolved inside the loop, and left undecided about resuming.
          *
@@ -2708,7 +3432,7 @@ export class ChorusRuntime {
             profile,
             grants,
             ref,
-            true
+            !arriving
           ),
           REOPEN_TIMEOUT_MS,
           `${agentId} did not come back within ${String(Math.round(REOPEN_TIMEOUT_MS / 1000))}s`
@@ -2747,8 +3471,97 @@ export class ChorusRuntime {
      * worth mounting.
      */
     if (conversation.participants.size === 0 && !readOnlyProfiling()) return null
+    this.reseedCarriedContext(conversation)
     this.active.set(entry.conversationId, conversation)
     return conversation
+  }
+
+  /**
+   * Puts back a carried transcript that a relaunch would otherwise have eaten.
+   *
+   * A continued conversation holds its seed in memory until the person speaks,
+   * which is the whole reason it costs nothing — and it is also why quitting
+   * before that first message loses it. The log says the room was continued;
+   * this rebuilds the seed from the source it names.
+   *
+   * **Only while the room is still silent.** One `user.message` means the seed
+   * was already handed over, and a resumed provider thread is still holding it;
+   * re-seeding then would deliver the same transcript a second time, in front
+   * of an unrelated message, and the agent would read it as new history. That
+   * is worse than the loss this repairs, so the check is the guard rather than
+   * an optimisation.
+   *
+   * Nothing here distinguishes a resumed agent from a restarted one, and it
+   * should not: neither ever received the seed, because nothing has been
+   * delivered to either.
+   */
+  private reseedCarriedContext(conversation: ActiveConversation): void {
+    const events = this.store.read(conversation.conversationId)
+    if (events.some((event) => event.payload.type === 'user.message')) return
+
+    const created = events.find((event) => event.payload.type === 'conversation.created')
+    const source =
+      created?.payload.type === 'conversation.created' ? created.payload.continuedFrom : undefined
+    if (source === undefined) return
+
+    const carryover = composeCarryover(this.carriedChain(source))
+    if (carryover === null) return
+
+    for (const participant of conversation.participants.values()) {
+      participant.seedContext = carryover
+    }
+  }
+
+  /**
+   * Every conversation a new room is continuing, oldest first.
+   *
+   * Only the *immediate* source is recorded on a conversation, because that is
+   * the one fact the moment knows. The rest of the chain is recovered by
+   * following each room's own `continuedFrom` back until one has none — which
+   * is what makes carrying transitive without storing a growing copy of the
+   * same transcript on every hop.
+   *
+   * **Restart is what ends a chain, and it ends it here.** A restarted room is
+   * started with no source at all, so the walk stops the moment it reaches one:
+   * everything before the restart is unreachable, which is exactly what
+   * restarting is for.
+   *
+   * The visited set is a guard, not an optimisation. Ids are minted forward in
+   * time so a cycle cannot arise from anything this code does — but the log is
+   * a file on disk, and a corrupt or hand-edited row pointing backwards would
+   * otherwise spin the main thread with the whole app on it.
+   */
+  private carriedChain(from: string): CarryoverSource[] {
+    const chain: CarryoverSource[] = []
+    const seen = new Set<string>()
+    let id: string | undefined = from
+
+    while (id !== undefined && !seen.has(id)) {
+      seen.add(id)
+      const events = this.store.read(id)
+      // An id the store knows nothing about. Stopping is the whole response —
+      // an ancestor that is gone cannot be reported as an empty room.
+      if (events.length === 0) break
+
+      const created = events.find((event) => event.payload.type === 'conversation.created')
+      const meta = created?.payload.type === 'conversation.created' ? created.payload : undefined
+      /*
+       * The name it goes by now, not the one it was born with. A person who
+       * renamed a room to say what it was about did so to be able to tell it
+       * apart, and a chain of blocks headed by the same folder name is the
+       * case where that matters most.
+       */
+      const renamed = events.filter((event) => event.payload.type === 'conversation.renamed').at(-1)
+      const title =
+        renamed?.payload.type === 'conversation.renamed'
+          ? renamed.payload.title
+          : (meta?.title ?? '')
+
+      chain.unshift({ title, events })
+      id = meta?.continuedFrom
+    }
+
+    return chain
   }
 
   /** Written after anything that changes what is open, or what it is. */
@@ -2905,6 +3718,29 @@ export class ChorusRuntime {
    * whatever the conversation last ran under. Reopening something from last week
    * should not silently restore permissions granted for a task nobody remembers.
    */
+  /**
+   * What is still waiting to be answered in one conversation, by id.
+   *
+   * `outcome IS NULL` and `answered_at IS NULL` are the whole definition, so
+   * this is as true after a relaunch as it was before one: an agent's process
+   * died, but the decision it was blocked on is a row, and the transcript has
+   * always drawn it. Handing it to the renderer is what lets a tab agree with
+   * the transcript instead of reading idle beside a visible approval card.
+   *
+   * Ids rather than counts, because the renderer clears them by id when the
+   * answer arrives — a count would have no way to know which one was decided.
+   */
+  private pendingDecisions(conversationId: string): {
+    pendingApprovalIds: string[]
+    pendingQuestionIds: string[]
+  } {
+    const state = this.store.transcriptState(conversationId)
+    return {
+      pendingApprovalIds: state.approvals.map((approval) => approval.approvalId),
+      pendingQuestionIds: state.questions.map((question) => question.userInputId),
+    }
+  }
+
   async reopenConversation(conversationId: string): Promise<{
     conversationId: string
     participants: AgentId[]
@@ -2913,6 +3749,8 @@ export class ChorusRuntime {
     cwd: string
     title: string
     unread: number
+    pendingApprovalIds: string[]
+    pendingQuestionIds: string[]
   }> {
     const open = this.active.get(conversationId)
     if (open !== undefined) {
@@ -2924,6 +3762,7 @@ export class ChorusRuntime {
         cwd: open.cwd,
         title: open.title,
         unread: this.unreadSince(conversationId, open.lastSeenSeq),
+        ...this.pendingDecisions(conversationId),
       }
     }
 
@@ -2936,8 +3775,14 @@ export class ChorusRuntime {
     // id nobody adopted and a project whose folder has gone.
     this.projects.resolveRoot(summary.projectId)
 
+    /*
+     * Who this conversation *had*, which `reopen` uses only to tell an arrival
+     * from a relaunch — it seats the whole cast either way. The refusal that
+     * stood here, "no agent from that conversation is available", went with the
+     * cast being a fact: a room from before an agent existed is not a room that
+     * cannot be opened.
+     */
     const agents = summary.agents.filter((id): id is AgentId => this.adapters.has(id as AgentId))
-    if (agents.length === 0) throw new Error('No agent from that conversation is available.')
 
     const conversation = await this.reopen(summary.projectId, {
       conversationId,
@@ -2962,6 +3807,13 @@ export class ChorusRuntime {
       cwd: conversation.cwd,
       title: conversation.title,
       unread: 0,
+      /*
+       * Unread is zero because the watermark was just moved to the log's head,
+       * but a pending decision is not something that was "missed" — it is still
+       * outstanding, and a conversation opened from history is exactly where one
+       * is most likely to have been left waiting.
+       */
+      ...this.pendingDecisions(conversationId),
     }
   }
 
@@ -3038,6 +3890,74 @@ export class ChorusRuntime {
   /** Whether this conversation is planning, for a control that has to say so. */
   planning(conversationId: string): boolean {
     return this.active.get(conversationId)?.planning ?? false
+  }
+
+  /**
+   * Turns the standing instruction on or off for one conversation.
+   *
+   * **This has to respawn, and that is a property of system prompts rather than
+   * a shortcoming here.** A system prompt is an argument to the session: Claude
+   * fixes it when the long-lived `query` opens, and Codex when the thread starts.
+   * Neither provider offers a way to change it mid-session, so the only honest
+   * implementations were injecting the text on every turn — which puts a standing
+   * instruction inside the conversation, competing with what the user actually
+   * asked — or this.
+   *
+   * **A respawn is not a reset.** Each agent is resumed onto the provider thread
+   * it was already on, and `seenSeq` moves across, so nothing is re-read as
+   * catch-up and nothing is said twice. `reopening` is passed for the same reason
+   * the relaunch path passes it: this must not put "claude joined" in a
+   * transcript where nobody joined.
+   *
+   * `planning` is reapplied by hand afterwards, because permission mode is
+   * session state too and a respawned session comes back in `default`. Losing
+   * plan mode silently on a language toggle is exactly the kind of coupling that
+   * makes a mode untrustworthy.
+   *
+   * The turn in flight is the one thing not handled here: the caller must refuse
+   * while an agent is streaming, because closing a service mid-turn discards a
+   * partial reply that the log cannot rebuild.
+   */
+  async setAnswerStyle(conversationId: string, on: boolean): Promise<void> {
+    const conversation = this.require(conversationId)
+    if (conversation.styleOn === on) return
+    conversation.styleOn = on
+
+    for (const previous of [...conversation.participants.values()]) {
+      const agentId = previous.agentId
+      const resumeFrom = previous.session.sessionRef.trim()
+      conversation.participants.delete(agentId)
+      await previous.service.close()
+
+      const participant = await this.startParticipant(
+        agentId,
+        conversationId,
+        (resuming) => this.sessionOptsFor(conversation, agentId, resuming),
+        conversation.profile,
+        conversation.grants,
+        resumeFrom === '' ? undefined : resumeFrom,
+        true
+      )
+      participant.seenSeq = previous.seenSeq
+      /*
+       * Guarded, not assigned through: both are optional under
+       * `exactOptionalPropertyTypes`, and writing `undefined` into one is not the
+       * same as leaving it absent. A one-off allowance that has already been
+       * spent must stay spent across the respawn.
+       */
+      if (previous.catchupBudget !== undefined) participant.catchupBudget = previous.catchupBudget
+      if (previous.seedContext !== undefined) participant.seedContext = previous.seedContext
+      conversation.participants.set(agentId, participant)
+      if (conversation.planning) await participant.session.setPermissionMode('plan')
+    }
+
+    this.rememberOpen()
+    this.log.info('answer style changed', { conversationId, on })
+  }
+
+  /** Whether this conversation carries the instruction, for the control that says so. */
+  answerStyle(conversationId: string): boolean {
+    return this.active.get(conversationId)?.styleOn ?? false
   }
 
   /**
@@ -3133,6 +4053,47 @@ export class ChorusRuntime {
   }
 
   /**
+   * Seats anyone a message is addressed to who is not running, and says so when
+   * that cannot be done.
+   *
+   * The cast is fixed, so an absent agent is never a choice somebody made — it
+   * is a start that failed, and the two reasons are a missing CLI and a key that
+   * was not saved yet. Both are fixable while the app is open, which is why this
+   * retries on every send rather than only at launch: saving a DeepSeek key in
+   * Settings has to be enough, with no restart and no new conversation.
+   *
+   * The cost is bounded by the failure being the unusual case. A seated agent
+   * short-circuits on the first line, so an ordinary turn pays one map lookup.
+   *
+   * **The error is appended, not thrown.** The message is already in the log by
+   * the time this runs, and refusing the send would leave a user message that
+   * nothing ever answered and nothing ever explained.
+   */
+  private async ensureSeated(
+    conversation: ActiveConversation,
+    targets: readonly AgentId[]
+  ): Promise<void> {
+    for (const agentId of targets) {
+      if (conversation.participants.has(agentId)) continue
+      try {
+        await this.addParticipant(conversation.conversationId, agentId)
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error)
+        this.log.error('an addressed agent could not be started', undefined, {
+          conversationId: conversation.conversationId,
+          agentId,
+          message,
+        })
+        this.store.append({
+          conversationId: conversation.conversationId,
+          actor: 'system',
+          payload: { type: 'error.raised', message: `${agentId}: ${message}`, recoverable: true },
+        })
+      }
+    }
+  }
+
+  /**
    * Brings an agent into a conversation already under way.
    *
    * Its watermark starts at zero, so the first thing it is asked comes with the
@@ -3159,28 +4120,18 @@ export class ChorusRuntime {
     return { agentId }
   }
 
-  /**
-   * Takes an agent out without ending the conversation.
+  /*
+   * `removeParticipant` stood here and is gone.
    *
-   * Its session closes, which appends `session.ended` — the transcript keeps
-   * everything it said, and the log explains the silence that follows.
+   * It took an agent out without ending the conversation, which is an operation
+   * a fixed cast does not have. Nothing asks for it now — and keeping it as a
+   * primitive "in case" would leave the one method able to produce the state the
+   * rest of this file no longer expects: a room missing an agent on purpose,
+   * indistinguishable from one whose start failed.
+   *
+   * Ending a conversation still closes every session. That is `endConversation`,
+   * and it is a different question.
    */
-  async removeParticipant(conversationId: string, agentId: AgentId): Promise<{ agentId: AgentId }> {
-    const conversation = this.require(conversationId)
-    const participant = conversation.participants.get(agentId)
-    if (participant === undefined) return { agentId }
-
-    conversation.participants.delete(agentId)
-    if (conversation.lastAddressed === agentId) conversation.lastAddressed = undefined
-    await participant.service.close()
-    this.rememberOpen()
-    this.log.info('agent left', {
-      conversationId,
-      agentId,
-      remaining: conversation.participants.size,
-    })
-    return { agentId }
-  }
 
   /** The provider sandbox mirrors the profile, so it is rebuilt when either moves. */
   /**
@@ -3194,6 +4145,19 @@ export class ChorusRuntime {
    */
   private preferredModelFor(agentId: AgentId): string {
     return readSettings(this.userDataPath).models[agentId]
+  }
+
+  /**
+   * Whether a conversation opens in the bilingual style.
+   *
+   * The checkbox and nothing else. There was a settings box overriding
+   * `DEFAULT_STYLE_INSTRUCTION` for one build and it was removed: the style is
+   * the product's answer, and offering a blank textarea beside it made a settled
+   * decision look like a question the user was expected to answer. The whole
+   * choice is now one switch — this style, or plain.
+   */
+  private defaultStyleOn(): boolean {
+    return readSettings(this.userDataPath).styleOnByDefault
   }
 
   /**
@@ -3213,16 +4177,49 @@ export class ChorusRuntime {
      * `startConversation` has them before an `ActiveConversation` exists, and a
      * cast to pretend otherwise would be a lie the type system believed.
      */
-    where: { readonly cwd: string; readonly profile: PermissionProfile },
+    where: {
+      readonly cwd: string
+      readonly profile: PermissionProfile
+      /*
+       * Absent means "not a conversation" — the probe and the aside paths call
+       * this with a bare `{ cwd, profile }` and neither should ever carry the
+       * instruction. Optional rather than required so that stays true by
+       * omission instead of by every call site remembering to pass `false`.
+       */
+      readonly styleOn?: boolean
+      readonly conversationId?: string
+    },
     agentId: AgentId,
     resuming = false
   ): SessionOpts {
     // Read at call time rather than held: changing the sheet should affect the
     // next session without the app having to be restarted.
     const preferred = resuming ? '' : this.preferredModelFor(agentId)
+    /*
+     * Carried on a resume, unlike the model.
+     *
+     * The model is dropped when resuming because the provider's own record of
+     * the thread already holds one. A system prompt is the opposite: it is not
+     * part of the thread's record, it is an argument to the session, and a
+     * resume that omitted it would silently return a conversation to English on
+     * the next relaunch.
+     */
+    const instructions = [
+      where.styleOn === true ? DEFAULT_STYLE_INSTRUCTION : '',
+      where.styleOn === undefined ? '' : callRule(AGENT_IDS),
+    ]
+      .filter((part) => part !== '')
+      .join('\n\n')
+    const { conversationId } = where
+    const transcript: SessionOpts['transcript'] =
+      conversationId === undefined
+        ? undefined
+        : (request) => composeHistory(this.store.read(conversationId), request)
     return {
       cwd: where.cwd,
       ...(preferred === '' ? {} : { model: preferred }),
+      ...(instructions === '' ? {} : { instructions }),
+      ...(transcript === undefined ? {} : { transcript }),
       sandbox:
         where.profile.id === 'read-only'
           ? { mode: 'readOnly', writableRoots: [], networkAccess: false }
@@ -3236,6 +4233,146 @@ export class ChorusRuntime {
    * Recorded like everything else: a name is how you will refer to this in a
    * week, and the log is the only thing that will still have it.
    */
+  /**
+   * Keeps the tab naming the topic the conversation is actually on.
+   *
+   * Called for every message the user sends and never awaited. A title is worth
+   * nothing next to the turn it describes, so it must not delay delivery, must
+   * not fail a send, and must not surface an error anywhere the person can see
+   * one — the whole path swallows into a log line.
+   *
+   * **It renames over a name you typed, by decision rather than by oversight.**
+   * The alternative was considered and refused: a conversation that keeps its
+   * hand-typed name forever stops tracking the topic the moment you touch it,
+   * which is the opposite of what this exists for. If that turns out to be
+   * wrong, the fix is a flag on the conversation set by `renameConversation`
+   * and read here, not a change to what the namer does.
+   */
+  private nameTopic(conversationId: string, message: string): void {
+    if (message.trim() === '') return
+    const conversation = this.active.get(conversationId)
+    if (conversation === undefined) return
+
+    let namer = this.namers.get(conversationId)
+    if (namer === undefined) {
+      namer = { queue: Promise.resolve() }
+      this.namers.set(conversationId, namer)
+    }
+    const held = namer
+
+    held.queue = held.queue
+      .then(async () => {
+        if (held.session === undefined) {
+          const started = await this.startNamer(conversation, held)
+          // No agent to ask. The next message tries again rather than marking
+          // the conversation permanently unnameable — an adapter can be absent
+          // for a moment and present later.
+          if (started === null) return
+          held.session = started
+        }
+
+        const title = cleanTitle(await this.askNamer(held, message))
+        if (title === null) return
+        // Closed while the namer was thinking. `renameConversation` would throw
+        // on a conversation `require` can no longer find.
+        if (!this.active.has(conversationId)) return
+        if (title === conversation.title) return
+        this.renameConversation(conversationId, title)
+      })
+      .catch((error: unknown) => {
+        this.log.error('the topic namer failed', error instanceof Error ? error : undefined, {
+          conversationId,
+        })
+      })
+  }
+
+  /**
+   * Starts the naming session and the one reader that serves it.
+   *
+   * The reader is started here, once, rather than per request: `events` is a
+   * single async iterable, so a second `for await` over it competes with the
+   * first for the same events and each would see roughly half of them.
+   */
+  private async startNamer(
+    conversation: ActiveConversation,
+    namer: Namer
+  ): Promise<AgentSession | null> {
+    const agentId = [...conversation.participants.keys()][0]
+    if (agentId === undefined) return null
+    const adapter = this.adapters.get(agentId)
+    if (adapter === undefined) return null
+
+    /*
+     * Read-only, and it never asks. The namer is handed the user's words and
+     * replies with a label — it has no business touching the working tree, and
+     * a sandbox says so at the process rather than trusting a prompt.
+     */
+    const session = await adapter.start({
+      cwd: conversation.cwd,
+      sandbox: { mode: 'readOnly', writableRoots: [], networkAccess: false },
+      instructions: NAMER_INSTRUCTIONS,
+    })
+
+    void (async () => {
+      try {
+        for await (const event of session.events) {
+          if (event.type !== 'message.completed') continue
+          const waiting = namer.resolve
+          // Cleared before the hand-off, so a second completed message in one
+          // turn cannot resolve the same request twice.
+          delete namer.resolve
+          waiting?.(event.text)
+        }
+      } catch {
+        // The session ended or the provider went away. Anything waiting on it
+        // times out on its own, which is the same outcome by a slower route.
+      }
+    })()
+
+    return session
+  }
+
+  /**
+   * One question, one answer, with a deadline.
+   *
+   * The timeout is not defensive dressing: without it a provider that accepts a
+   * message and never completes it leaves this promise pending forever, and the
+   * queue behind it never moves again — so one silent turn would stop the
+   * conversation being renamed for the rest of the session.
+   */
+  private async askNamer(namer: Namer, text: string): Promise<string | null> {
+    const session = namer.session
+    if (session === undefined) return null
+
+    return new Promise<string | null>((resolve) => {
+      const timer = setTimeout(() => {
+        delete namer.resolve
+        resolve(null)
+      }, NAMER_TIMEOUT_MS)
+
+      namer.resolve = (reply) => {
+        clearTimeout(timer)
+        resolve(reply)
+      }
+
+      void session.send({ text }).catch(() => {
+        clearTimeout(timer)
+        delete namer.resolve
+        resolve(null)
+      })
+    })
+  }
+
+  /** The naming session goes when the conversation does. */
+  private disposeNamer(conversationId: string): void {
+    const namer = this.namers.get(conversationId)
+    if (namer === undefined) return
+    this.namers.delete(conversationId)
+    void namer.session?.close().catch(() => {
+      // Closing something already gone is not a failure worth raising.
+    })
+  }
+
   renameConversation(conversationId: string, title: string): { title: string } {
     const conversation = this.require(conversationId)
     // Emptying the field is a request for the default back, not for no name.
@@ -3295,6 +4432,9 @@ export class ChorusRuntime {
     openConversations: number
     profileId: string | null
     agentIds: AgentId[] | null
+    notes: string | null
+    noteWidth: number | null
+    noteHeight: number | null
     missing: boolean
   }[] {
     const open = new Map<string, number>()
@@ -3316,10 +4456,17 @@ export class ChorusRuntime {
        * no icon or launcher for — and dropping it beats refusing the whole
        * project list over one stale name.
        */
-      agentIds:
-        project.agentIds === null
-          ? null
-          : project.agentIds.filter((id): id is AgentId => id === 'codex' || id === 'claude'),
+      agentIds: project.agentIds === null ? null : project.agentIds.filter(isAgentId),
+      /*
+       * On the listing rather than behind a read of its own, because the rail
+       * and the column both want it and neither wants a second round trip. It is
+       * a short string on a short list.
+       */
+      notes: project.notes,
+      /* And how big its pad was left, which travels with the text for the same
+         reason: two reads would let the note and its box disagree by a refresh. */
+      noteWidth: project.noteWidth,
+      noteHeight: project.noteHeight,
       /*
        * Whether the folder is still on disk, answered here so the renderer never
        * has to find out by failing.
@@ -3358,8 +4505,22 @@ export class ChorusRuntime {
       .map((conversation) => conversation.conversationId)
   }
 
+  /**
+   * Emptying the field asks for the folder's own name back, not for no name.
+   *
+   * The rule `renameConversation` already follows, and it lives here for the
+   * reason that one does: `projects.rename` rejects a blank string, so a
+   * renderer that guarded the empty case would be deciding what empty *means*,
+   * and every surface offering a rename would have to keep deciding it the same
+   * way. There are two of them now — the tab and the hover card.
+   *
+   * An unknown project falls through with the blank intact, so it fails as
+   * `UnknownProjectError` rather than as a name it never had.
+   */
   renameProject(projectId: string, name: string): { name: string } {
-    return { name: this.projects.rename(projectId, name).name }
+    const project = this.projects.get(projectId)
+    const next = name.trim() === '' && project !== null ? folderName(project.root) : name
+    return { name: this.projects.rename(projectId, next).name }
   }
 
   /**
@@ -3426,35 +4587,118 @@ export class ChorusRuntime {
    * conversations half-done. The project's row is already correct, so a failure
    * here is a conversation that will pick the cast up when it next starts.
    */
-  async setProjectAgents(
-    projectId: string,
-    agentIds: readonly AgentId[]
-  ): Promise<{ agentIds: AgentId[] }> {
-    const wanted = [...new Set(agentIds)]
-    this.projects.setAgents(projectId, wanted)
-
-    const additions: Promise<unknown>[] = []
-    const removals: Promise<unknown>[] = []
-    for (const conversation of [...this.active.values()]) {
-      if (conversation.projectId !== projectId) continue
-      const present = [...conversation.participants.keys()]
-      for (const agentId of wanted) {
-        if (!present.includes(agentId)) {
-          additions.push(this.addParticipant(conversation.conversationId, agentId))
-        }
-      }
-      for (const agentId of present) {
-        if (!wanted.includes(agentId)) {
-          removals.push(this.removeParticipant(conversation.conversationId, agentId))
-        }
-      }
-    }
-    await Promise.allSettled(additions)
-    await Promise.allSettled(removals)
-
-    this.log.info('project cast changed', { projectId, agentIds: wanted })
-    return { agentIds: wanted }
+  /**
+   * Records the project's scratchpad, and tells nothing.
+   *
+   * Its two neighbours reconcile live conversations — a profile changes what
+   * agents may do, a cast starts and stops them. A note changes neither, so
+   * this is a write and a returned value, and it is synchronous for the same
+   * reason.
+   */
+  setProjectNotes(projectId: string, notes: string): { notes: string } {
+    const saved = this.projects.setNotes(projectId, notes)
+    return { notes: saved.notes ?? '' }
   }
+
+  /**
+   * The app's own scratchpad. Tells nothing, for the reason above.
+   *
+   * Synchronous like its project-scoped neighbour, and read whole: the panel
+   * needs the text and the width in the same breath to open at the size it was
+   * left at, and two round trips would open it at the default and then jump.
+   */
+  getAppNote(): AppNote {
+    return this.appNote.read()
+  }
+
+  setAppNote(notes: string): { notes: string } {
+    const saved = this.appNote.setNotes(notes)
+    return { notes: saved.notes ?? '' }
+  }
+
+  /**
+   * Fractions of the window, already bounded by the IPC schema.
+   *
+   * Returned rather than assumed, so the caller writes what was stored instead
+   * of what it sent.
+   */
+  setAppNoteSize(width: number, height: number | null): { width: number; height: number | null } {
+    const saved = this.appNote.setSize(width, height)
+    return { width: saved.width ?? width, height: saved.height }
+  }
+
+  /**
+   * The notes the masthead's menu lists, whole.
+   *
+   * Not paged, and that is a judgement rather than an omission: the list is read
+   * by looking down it, so it is short by construction. A cursor would be
+   * machinery for a case that cannot arise without a feature nobody has asked
+   * for.
+   */
+  listKeptNotes(): { notes: KeptNote[] } {
+    return { notes: this.keptNotes.list() }
+  }
+
+  /**
+   * Makes one and answers only its id.
+   *
+   * The row itself is not returned because the caller has to re-read the list
+   * anyway: where a new note sits is the store's decision, and a caller that
+   * spliced the row in itself would be guessing at an order it does not own.
+   */
+  createKeptNote(): { id: string } {
+    return { id: this.keptNotes.create(Date.now()).id }
+  }
+
+  /**
+   * Records one, and says plainly when there was nothing to record.
+   *
+   * The editor saves on a debounce, so a write can land after its note was
+   * deleted — ordinary rather than exceptional, for the reason the store's own
+   * `setNotes` gives. It answers instead of throwing and the renderer drops it.
+   *
+   * The clock is this side's because the store takes one: the same split that
+   * lets the store be tested without pretending about time.
+   */
+  setKeptNote(id: string, notes: string): { saved: boolean } {
+    return { saved: this.keptNotes.setNotes(id, notes, Date.now()) !== null }
+  }
+
+  removeKeptNote(id: string): { removed: boolean } {
+    return { removed: this.keptNotes.remove(id) }
+  }
+
+  /**
+   * The whole sequence, because a move changes where everything after it sits.
+   *
+   * Answers nothing but acknowledgement: the caller already knows the order — it
+   * is the one it just sent — and re-reading the list here would only let the
+   * renderer replace its own arrangement with an identical copy of it.
+   */
+  reorderKeptNotes(ids: readonly string[]): { ordered: boolean } {
+    this.keptNotes.reorder(ids)
+    return { ordered: true }
+  }
+
+  /** The same, for the note that belongs to a project. */
+  setProjectNoteSize(
+    projectId: string,
+    width: number | null,
+    height: number | null
+  ): { width: number | null; height: number | null } {
+    const saved = this.projects.setNoteSize(projectId, width, height)
+    return { width: saved.noteWidth, height: saved.noteHeight }
+  }
+
+  /*
+   * `setProjectAgents` stood here and is gone with the channel that called it.
+   *
+   * It wrote a project's cast and then reconciled every live conversation to it,
+   * adding and removing participants — the fan-out that made a project's answer
+   * feel authoritative while `conversation:start` was quietly using a different
+   * one. The reconciliation has nothing left to reconcile: every room already
+   * holds every agent, from the moment it opens.
+   */
 
   /**
    * Deletes a project and everything it recorded, closing its open rooms first.
@@ -4302,14 +5546,127 @@ function readOnlyProfiling(): boolean {
   return process.env['CHORUS_PROFILE_READONLY'] === '1'
 }
 
-function defaultAdapters(): Map<AgentId, AgentAdapter> {
+function defaultAdapters(userDataPath: string): Map<AgentId, AgentAdapter> {
   return new Map<AgentId, AgentAdapter>([
     // The command is resolved lazily, on first use: asking a login shell at
     // module load would delay the window for something not needed until a
     // session starts.
     ['codex', new CodexAdapter(codexOptions())],
     ['claude', new ClaudeAdapter(claudeOptions())],
+    /*
+     * The same class and the same binary, pointed elsewhere.
+     *
+     * **Registered unconditionally, even with no key.** Building the map is a
+     * one-off at construction and `settings:write` does not rebuild it, so an
+     * adapter registered only when a key happened to exist at launch would be
+     * absent after the key was first saved and stale after it was rotated —
+     * both needing a restart. Present-but-refusing is a state the UI already
+     * knows how to draw, and `deepseekOptions` reads the key at each spawn.
+     */
+    ['deepseek', new ClaudeAdapter(deepseekOptions(userDataPath))],
   ])
+}
+
+/**
+ * DeepSeek through the `claude` CLI, pointed at its Anthropic-compatible
+ * endpoint.
+ *
+ * Every variable here is from DeepSeek's own Claude Code recipe, and the four
+ * model pins are not decoration: without them a subagent or an aliased model
+ * resolves through DeepSeek's `claude-opus` mapping to `deepseek-v4-pro` and
+ * bills at Pro rates. `CLAUDE_CODE_AUTO_COMPACT_WINDOW` is what makes the 1M
+ * context usable rather than compacting at Claude's threshold.
+ *
+ * The key is read **at each spawn**, not captured here, which is what lets it be
+ * added, rotated or removed without restarting.
+ */
+function deepseekOptions(userDataPath: string): {
+  id: AgentId
+  resolveExecutable: () => Promise<ResolvedExecutable | null>
+  env: () => Record<string, string> | undefined
+  precondition: () => string | null
+  models: readonly ModelChoice[]
+} {
+  const key = (): string | null => readAgentKey(userDataPath, 'deepseek')
+  return {
+    id: 'deepseek',
+    // The same binary as Claude's, so the same lookup answers for both.
+    resolveExecutable: async () => {
+      if (readOnlyProfiling()) return null
+      const resolved = await resolveCommand('claude')
+      if (resolved === null) return null
+      return { sdkPath: sdkExecutablePath(resolved), launch: spawnSpec(resolved) }
+    },
+    env: () => {
+      const token = key()
+      return token === null ? undefined : deepseekEnv(token)
+    },
+    precondition: () => (key() === null ? 'DeepSeek needs an API key. Add one in Settings.' : null),
+    models: DEEPSEEK_MODELS,
+  }
+}
+
+/**
+ * `deepseek-flash` is V4.1-Flash; the `[1m]` suffix asks for the million-token
+ * context. Both names are DeepSeek's, not Claude's — the endpoint maps
+ * `claude-*` names on its side and an opus-shaped one bills at V4-Pro rates.
+ */
+const DEEPSEEK_MODEL = 'deepseek-flash'
+const DEEPSEEK_LONG_CONTEXT_MODEL = 'deepseek-flash[1m]'
+
+/**
+ * DeepSeek's catalogue, stated rather than discovered.
+ *
+ * `supportedModels` asks the running CLI, and the CLI answers with the models
+ * *Claude Code* knows about whatever provider it points at — Opus and Sonnet for
+ * an endpoint that has neither. Those names are then mapped on DeepSeek's side
+ * into something nobody chose, and an opus-shaped one maps to the expensive
+ * route. A short published list is the honest answer.
+ *
+ * **Order is reading order and the first is not special.** What a session gets
+ * when nobody has chosen is the `ANTHROPIC_MODEL` this adapter injects, which is
+ * the 1M Flash — so "the provider's default" in the picker already *is* the top
+ * entry here, and these three are overrides of it.
+ *
+ * No `effortLevels`: the recipe pins `CLAUDE_CODE_EFFORT_LEVEL=max` for every
+ * one of them, so offering a control that changes nothing would be a lie.
+ */
+export const DEEPSEEK_MODELS: readonly ModelChoice[] = [
+  { value: DEEPSEEK_LONG_CONTEXT_MODEL, label: 'V4.1 Flash (1M context)' },
+  { value: DEEPSEEK_MODEL, label: 'V4.1 Flash' },
+  /*
+   * Named for what it will be. Today `deepseek-v4-pro` is routed to V4.1-Flash
+   * and billed at Flash rates because no V4.1 Pro exists yet; choosing it is
+   * therefore currently free of consequence and will stop being so the moment
+   * DeepSeek ships one.
+   */
+  { value: 'deepseek-v4-pro', label: 'V4 Pro' },
+]
+
+/**
+ * Every variable DeepSeek's own Claude Code recipe sets, given a key.
+ *
+ * Exported and pure so the recipe can be read back in a test without a keychain
+ * or an Electron app behind it — the judgement is the list, and the list is the
+ * thing that would silently drift from DeepSeek's docs.
+ *
+ * **The three `ANTHROPIC_DEFAULT_*` pins and the subagent model are not
+ * decoration.** Left unset, an aliased or delegated model resolves through
+ * DeepSeek's `claude-opus` mapping to `deepseek-v4-pro` and bills at Pro rates
+ * for work nobody asked to be expensive.
+ */
+export function deepseekEnv(token: string): Record<string, string> {
+  return {
+    ANTHROPIC_BASE_URL: 'https://api.deepseek.com/anthropic',
+    ANTHROPIC_AUTH_TOKEN: token,
+    ANTHROPIC_MODEL: DEEPSEEK_LONG_CONTEXT_MODEL,
+    ANTHROPIC_DEFAULT_OPUS_MODEL: DEEPSEEK_LONG_CONTEXT_MODEL,
+    ANTHROPIC_DEFAULT_SONNET_MODEL: DEEPSEEK_LONG_CONTEXT_MODEL,
+    ANTHROPIC_DEFAULT_HAIKU_MODEL: DEEPSEEK_MODEL,
+    CLAUDE_CODE_SUBAGENT_MODEL: DEEPSEEK_MODEL,
+    CLAUDE_CODE_EFFORT_LEVEL: 'max',
+    CLAUDE_CODE_AUTO_COMPACT_WINDOW: '786432',
+  }
 }
 
 /**

@@ -28,8 +28,14 @@ describe('parseMentions', () => {
     // "ask @codex to review this" reads differently without the name, and the
     // agent needs to know who it is being asked about.
     const route = parseMentions('@claude ask @codex to review this', BOTH)
-    expect(route.targets).toEqual(['claude', 'codex'])
+    expect(route.targets).toEqual(['claude'])
     expect(route.text).toBe('ask @codex to review this')
+  })
+
+  it('routes to the first agent named when no name leads the message', () => {
+    const route = parseMentions('ask @codex and @claude about this', BOTH)
+    expect(route.targets).toEqual(['codex'])
+    expect(route.text).toBe('ask @codex and @claude about this')
   })
 
   it('ignores an unknown mention', () => {

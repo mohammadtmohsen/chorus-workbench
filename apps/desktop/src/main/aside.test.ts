@@ -42,6 +42,34 @@ const adapters = (): Map<AgentId, AgentAdapter> => {
   return new Map<AgentId, AgentAdapter>([['claude', adapter]])
 }
 
+/**
+ * What the newest session in an actual conversation was last handed.
+ *
+ * **Not `sessions.at(-1)`, and the difference is a second session nobody
+ * expected.** `send` fires `nameTopic`, which starts its *own* session on the
+ * same adapter to turn the message into a title, and hands it `route.text`. From
+ * that point `sessions.at(-1)` stopped meaning "the agent in this room" and
+ * started meaning "whichever session was created last" — usually the namer's.
+ *
+ * The failure it caused was quiet in the worst way: an assertion that the agent
+ * received the user's words still **passed**, because the namer is handed those
+ * same words. Only the two claims about text the namer never sees — the `Go`
+ * intent's prompt and an aside's carryover — could see the difference, and they
+ * read as the feature being broken rather than the reading being wrong.
+ *
+ * `instructions` is set on exactly one path in the whole runtime — `startNamer`
+ * — so it is the namer's own mark rather than a guess about ordering. Read off
+ * the session rather than out of `adapter.startedOpts`: that array is fed by
+ * `start` and `resume` but not by `fork`, so indexing it by a session's position
+ * is aligned only until the first fork. An aside *is* a fork, so every test here
+ * is past that point, and the skewed read still type-checks and still passes —
+ * it just answers about a different session.
+ */
+const sentToAgent = (): string => {
+  const own = adapter.sessions.filter((s) => s.startedWith?.instructions === undefined)
+  return own.at(-1)?.sent.at(-1)?.text ?? ''
+}
+
 const tick = (): Promise<void> => new Promise((resolve) => setTimeout(resolve, 0))
 
 /** Puts a finished agent reply in the log and hands back its event id. */
@@ -1321,12 +1349,32 @@ describe('a reply from a session that has since been replaced', () => {
   it('refuses, even for Claude whose session ref starts empty', async () => {
     const sourceEventId = reply('The projection lags behind the log.')
 
-    // Claude is removed and brought back, which gives it a new session. The old
-    // check compared `sessionRef` and skipped empty ones — and Claude's is empty
-    // when `session.started` is written, so it never fired for the provider it
-    // most needed to fire for.
-    await runtime.removeParticipant(conversationId, 'claude')
-    await runtime.addParticipant(conversationId, 'claude')
+    /*
+     * A fresh start for an agent that was already here — written, not driven.
+     *
+     * This used to remove Claude and bring it back, and that operation is gone:
+     * the cast is fixed, so nothing takes an agent out any more. The guard reads
+     * the log rather than the live session, so the event is the whole input, and
+     * the sibling test below already drives it this way for the resumed case.
+     *
+     * `sessionRef: ''` is the point of the test. Claude's real id arrives with
+     * its first message, so a start is written with an empty ref — and the old
+     * check compared refs and skipped empty ones, which meant it never fired for
+     * the provider it most needed to fire for.
+     */
+    runtime.store.append({
+      conversationId,
+      actor: 'system',
+      payload: {
+        type: 'session.started',
+        agentId: 'claude',
+        sessionRef: '',
+        cwd: process.cwd(),
+        model: null,
+        cliVersion: null,
+        resumed: false,
+      },
+    })
 
     await expect(
       runtime.openAside({
@@ -1505,13 +1553,13 @@ describe('promoting an aside into a conversation', () => {
     await runtime.promoteAside(asideId, 'workspace-write')
 
     await runtime.send(asideId, 'now fix it')
-    const first = adapter.sessions.at(-1)?.sent.at(-1)?.text ?? ''
+    const first = sentToAgent()
     expect(first).toContain('began as a side question')
     expect(first).toContain('The projection lags')
     expect(first).toContain('now fix it')
 
     await runtime.send(asideId, 'and again')
-    const second = adapter.sessions.at(-1)?.sent.at(-1)?.text ?? ''
+    const second = sentToAgent()
     expect(second).not.toContain('began as a side question')
     expect(second).toContain('and again')
   })
@@ -1923,7 +1971,6 @@ describe('recapPrompt', () => {
  * agent — and that half is the whole point of the intent.
  */
 describe('sending with the go intent', () => {
-  const sentToAgent = (): string => adapter.sessions.at(-1)?.sent.at(-1)?.text ?? ''
   const logged = (): string[] =>
     runtime.store
       .read(conversationId)

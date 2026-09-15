@@ -1,4 +1,4 @@
-type AgentId = 'codex' | 'claude'
+import type { AgentId } from '@chorus/shared'
 
 /**
  * The `@` picker's logic, with no DOM in it.
@@ -240,6 +240,23 @@ export function commandOptions(commands: readonly CommandInfo[], query: string):
       detail: command.argumentHint === '' ? command.description : command.argumentHint,
       agents: [],
     }))
+}
+
+export function teamCommandOption(
+  participants: readonly AgentId[],
+  query: string,
+  text: { readonly detail: string; readonly message: string }
+): MentionOption[] {
+  if (participants.length < 2 || !'team'.includes(query)) return []
+  return [
+    {
+      insert: `${participants.map((id) => `@${id}`).join(' ')} ${text.message}`,
+      bare: true,
+      label: 'team',
+      detail: text.detail,
+      agents: participants,
+    },
+  ]
 }
 
 /**

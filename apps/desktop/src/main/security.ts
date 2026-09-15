@@ -1,5 +1,6 @@
 import { shell, type Session, type WebContents } from 'electron'
 import { isSafeHref } from '../shared/markdown.js'
+import { NOTE_IMAGE_SCHEME } from './note-images.js'
 
 /**
  * Chorus renders untrusted model output. Without these, an injection in an
@@ -11,7 +12,16 @@ const BASE_CSP = [
   "default-src 'none'",
   // Vite injects styles at runtime; scripts stay strict, which is what matters.
   "style-src 'self' 'unsafe-inline'",
-  "img-src 'self' data:",
+  /*
+   * `chorus-note:` is main's own scheme and nothing else can answer on it.
+   *
+   * Named rather than the directive being widened to a class: the handler in
+   * `note-images.ts` serves one folder under `userData` and refuses any name it
+   * did not generate, so what this admits is a fixed set of files this process
+   * wrote. The alternative was a data URL, which needs no directive at all and
+   * would put every pasted screenshot inside the note's database row.
+   */
+  `img-src 'self' data: ${NOTE_IMAGE_SCHEME}:`,
   "font-src 'self' data:",
   "base-uri 'none'",
   "form-action 'none'",

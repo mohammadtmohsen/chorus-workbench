@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process'
-import { existsSync, readdirSync, readFileSync, rmSync, statSync } from 'node:fs'
+import { existsSync, readdirSync, readFileSync, renameSync, rmSync, statSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -81,16 +81,41 @@ if (existsSync(destination)) {
 /* Overwriting a running bundle leaves the running copy reading files that are
    no longer there. Ask it to quit rather than killing it — it owns a SQLite
    event store and agent subprocesses, and both deserve an orderly shutdown. */
+/* Asked of Launch Services rather than of the process table. `pgrep -x Chorus`
+   never matched: the main process is not named after the product, so only the
+   helpers showed up and they match `-f` rather than `-x`. Measured on
+   2026-09-13, with Chorus running: `pgrep -x Chorus` and
+   `pgrep -f 'Chorus.app/Contents/MacOS/'` both exit 1, and this exits 0 saying
+   `true`. It is also the same appId the quit below is addressed to, so the
+   check and the remedy can no longer disagree about what is running. */
 const isRunning = () => {
   try {
-    execFileSync('pgrep', ['-x', productName], { stdio: 'pipe' })
-    return true
+    const answer = execFileSync('osascript', ['-e', `application id "${appId}" is running`], {
+      encoding: 'utf8',
+    })
+    return answer.trim() === 'true'
   } catch {
     return false
   }
 }
 
-if (isRunning()) {
+/**
+ * Install over a running copy instead of asking it to quit.
+ *
+ * **Opt-in, because the default is right and this is a trade.** Quitting first
+ * is what lets the old bundle be deleted outright; keeping it running means the
+ * old one has to survive the install, which leaves a folder behind.
+ *
+ * What it does *not* do is overwrite a live bundle. `rm -rf` followed by a copy
+ * pulls files out from under a process that has not loaded them yet — a window
+ * opened afterwards, a lazily imported chunk, an icon — and the symptom is a
+ * running app that half works. Moving the old bundle aside by rename costs
+ * nothing and breaks nothing: the running copy keeps every file by inode under
+ * the new name, and only its path changed.
+ */
+const keepRunning = process.env.CHORUS_INSTALL_KEEP_RUNNING === '1'
+
+if (isRunning() && !keepRunning) {
   console.log(`quitting the running ${productName}…`)
   execFileSync('osascript', ['-e', `tell application id "${appId}" to quit`], { stdio: 'pipe' })
   const deadline = Date.now() + 10_000
@@ -106,7 +131,16 @@ if (isRunning()) {
 /* `ditto` rather than `cp -R`: it is the copy that preserves extended
    attributes and the code signature intact, and a broken seal here would land
    us back at "damaged". */
-rmSync(destination, { recursive: true, force: true })
+if (keepRunning && existsSync(destination)) {
+  /* Aside rather than away. Deleting it would be the same hazard as overwriting
+     it — same inodes, same running process — so it is left for you to remove
+     once you have quit the copy that is using it. */
+  const aside = `${destination}.replaced-${String(Date.now())}`
+  renameSync(destination, aside)
+  console.log(`the running copy is now ${aside} — delete it after you quit it`)
+} else {
+  rmSync(destination, { recursive: true, force: true })
+}
 execFileSync('ditto', [source, destination], { stdio: 'inherit' })
 execFileSync('codesign', ['--verify', '--deep', '--strict', destination], { stdio: 'inherit' })
 

@@ -70,6 +70,29 @@ export function toSandboxMode(
   }
 }
 
+/**
+ * The user's standing instruction, in the shape `thread/*` wants.
+ *
+ * `developerInstructions` and not `baseInstructions`: the second one replaces the
+ * agent's own instructions, and a preference about wording must not be able to
+ * take Codex's tool discipline with it. Same reasoning as the claude adapter's
+ * refusal to send a bare `systemPrompt` string.
+ *
+ * **Spread rather than a nullable field**, so an absent instruction sends no key
+ * at all. `developerInstructions: null` is a value the server may read as "clear
+ * whatever is there", which is not the same thing as not mentioning it — and on
+ * `thread/resume` that difference is the difference between keeping a thread's
+ * instruction and wiping it.
+ *
+ * One shape here rather than two call sites: `start` and `resume` must agree, and
+ * a resume that quietly omitted this would restore a conversation that answers in
+ * a different language than it did before the relaunch.
+ */
+function developerInstructions(opts: SessionOpts): { developerInstructions?: string } {
+  const text = opts.instructions ?? ''
+  return text === '' ? {} : { developerInstructions: text }
+}
+
 /** Enough to cover any in-flight turn without growing without bound. */
 const MAX_REMEMBERED_ITEMS = 200
 
@@ -512,6 +535,7 @@ export class CodexAdapter implements AgentAdapter {
       approvalPolicy: 'on-request',
       sandbox: toSandboxMode(opts.sandbox),
       ...(opts.model === undefined ? {} : { model: opts.model }),
+      ...developerInstructions(opts),
     })) as { thread: { id: string } }
 
     const session = new CodexSession(started.thread.id, rpc, this.approvalTtlMs, this.now)
@@ -528,6 +552,7 @@ export class CodexAdapter implements AgentAdapter {
       cwd: opts.cwd,
       approvalPolicy: 'on-request',
       sandbox: toSandboxMode(opts.sandbox),
+      ...developerInstructions(opts),
     })
     const session = new CodexSession(sessionRef, rpc, this.approvalTtlMs, this.now)
     void session.readLimits()

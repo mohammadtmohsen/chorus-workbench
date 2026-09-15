@@ -410,6 +410,43 @@ export type WorkbenchEditResult =
       readonly version: number | null
     }
 
+/**
+ * Show a file the transcript named, in this project's own editor.
+ *
+ * **A sibling of `workbench:askDiff`'s `revealPath`, not a reuse of it.** That
+ * one rides on a card settling and only exists as a tail on a close; this is a
+ * person clicking a path in a reply, which happens with no approval in flight
+ * and no diff to close. Folding the two together would mean the close path
+ * grew a mode, and a click would then depend on an approval lifecycle it has
+ * nothing to do with.
+ *
+ * **Absolute, and that is the same rule `revealPath` follows.** Main is the
+ * only side that resolved the path against the project root and checked
+ * containment, so what crosses is the answer rather than the question — the
+ * surface builds a URI from it and does not re-decide whether it was allowed.
+ *
+ * `line` and `column` are 1-based, like everything else at this boundary, and
+ * null where the click carried no position. They come off the text an agent
+ * wrote (`src/foo.ts:42`), so they are a hint and not a guarantee: a line past
+ * the end of the file reveals what there is rather than failing.
+ */
+export const WORKBENCH_REVEAL_CHANNEL = 'workbench:reveal'
+export const WORKBENCH_REVEAL_RESULT_CHANNEL = 'workbench:reveal:result'
+
+export interface WorkbenchRevealRequest {
+  readonly requestId: string
+  /** Absolute, already resolved and contained by main. */
+  readonly path: string
+  readonly line: number | null
+  readonly column: number | null
+}
+
+export interface WorkbenchRevealResult {
+  readonly requestId: string
+  readonly ok: boolean
+  readonly message?: string
+}
+
 export const WorkbenchContext = z
   .object({
     /** Project-relative, POSIX separators, or null when nothing is open. */
@@ -711,6 +748,8 @@ export interface ChorusWorkbenchApi {
   readonly onAskDiffRequest: (
     handler: (request: unknown) => Promise<WorkbenchAskDiffResult>
   ) => void
+  /** Opens a file the transcript named, at a line when the click carried one. */
+  readonly onRevealRequest: (handler: (request: unknown) => Promise<WorkbenchRevealResult>) => void
   /** Hands main the current text of the user's settings file, to store as-is. */
   readonly writeUserSettings: (text: string) => Promise<void>
   /** Hands main the current browser extension registry, without exposing a path. */

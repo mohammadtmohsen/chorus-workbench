@@ -37,26 +37,53 @@ export type WorkspacePane = z.infer<typeof WorkspacePane>
 /**
  * Matches `--sidebar` in `styles.css`, and the clamp the resize handle uses.
  *
- * Narrowed from 336/240/640 when the drawer stopped being the daily state. It
- * holds names, a search field and one overflow button now — everything that
- * used to need 336px moved to the preview or the menu — and the ceiling is a
- * ceiling because a temporary management panel should not be able to take half
- * the window and stay there. A width persisted from the old range is clamped
- * into this one on the way in.
+ * There is no ceiling: the drawer takes whatever width it is dragged to. The
+ * floor is only there to stop a persisted or dragged value collapsing it to
+ * nothing, since the width comes from a file a person can edit.
  */
-export const SIDEBAR_WIDTH = { default: 248, min: 220, max: 320 } as const
+export const SIDEBAR_WIDTH = { default: 248, min: 100 } as const
 
 /**
  * How wide Chorus sits beside the workbench in a project pane.
  *
- * A wider range than the sidebar's because the two sides trade against each
- * other: 360 is about the narrowest a transcript reads at, and past 720 the
- * editor starts wrapping code, which is the failure the fixed split shipped
- * with. One width for every pane rather than one each — panes are a way of
- * seeing several projects at once, and a divider that meant something different
- * in each would make the layout unreadable.
+ * No ceiling: the divider goes wherever it is dragged, and squeezing the editor
+ * is the person's call to make. One width for every pane rather than one each —
+ * panes are a way of seeing several projects at once, and a divider that meant
+ * something different in each would make the layout unreadable.
  */
-export const CHORUS_WIDTH = { default: 420, min: 300, max: 720 } as const
+export const CHORUS_WIDTH = { default: 420, min: 100 } as const
+
+/**
+ * How big a note is, as fractions of the window. Both notes, one set of bounds.
+ *
+ * Fractions rather than pixels, unlike its three neighbours here, and the
+ * difference is what each one is measured against. A sidebar and a divider live
+ * inside a layout that reflows around them, so a pixel width stays meaningful at
+ * any window size. A note is drawn over the window, so the only thing its size
+ * means anything relative to *is* the window — and a stored pixel count would
+ * reopen wider than the screen on a smaller display.
+ *
+ * **The window even for a project's note, which floats over a column rather than
+ * over the app.** Measuring that one against its column would be the more
+ * obvious answer and is the wrong one: the column's width is itself dragged, so
+ * a note stored as a fraction of it would change size when the panes moved. The
+ * window is the one frame both notes share and the only one that holds still.
+ * What keeps that note inside its column is a `max-width` in CSS, which costs
+ * nothing and cannot disagree with the layout.
+ *
+ * Ceilings, unlike its neighbours, because there is nothing on the other side of
+ * these to stop at. A divider dragged too far leaves a squeezed editor that is
+ * still visibly there; a note dragged to the far edge covers the app with no
+ * visible handle to pull it back from.
+ *
+ * `height` has no default on purpose. Never dragged means "as tall as it needs
+ * to be, up to the cap the stylesheet sets" — a number here would replace that
+ * with a fixed box for everyone who has never asked for one.
+ */
+export const NOTE_SIZE = {
+  width: { default: 0.25, min: 0.25, max: 0.9 },
+  height: { min: 0.08, max: 0.9 },
+} as const
 
 /**
  * Matches `--terminal-height` and the clamp the panel's grip uses.
@@ -66,7 +93,7 @@ export const CHORUS_WIDTH = { default: 420, min: 300, max: 720 } as const
  * room than the two things framing it. 212 holds ten lines of shell output at
  * the terminal's own size, which is what the approved composition shows.
  */
-export const TERMINAL_HEIGHT = { default: 212, min: 96, max: 720 } as const
+export const TERMINAL_HEIGHT = { default: 212, min: 100 } as const
 
 /**
  * One terminal in a panel's roster. **Not the shell** — that lives in main.

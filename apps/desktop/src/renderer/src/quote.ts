@@ -1,3 +1,5 @@
+import { isAgentId } from '@chorus/shared'
+
 /**
  * Asking about one part of what an agent said.
  *
@@ -64,7 +66,7 @@ export function askableSource(
 ): SourceEntry | null {
   if (start === null || end === null) return null
   if (start.eventId === '' || start.eventId !== end.eventId) return null
-  if (start.actor !== 'codex' && start.actor !== 'claude') return null
+  if (!isAgentId(start.actor)) return null
   if (start.kind !== 'message') return null
   if (start.status !== 'complete') return null
 

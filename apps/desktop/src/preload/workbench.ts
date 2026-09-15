@@ -75,6 +75,9 @@ export const EDIT_RESULT_CHANNEL = 'workbench:edit:result'
 /* The proposed-edit diff — open, replace or close. */
 export const ASK_DIFF_CHANNEL = 'workbench:askDiff'
 export const ASK_DIFF_RESULT_CHANNEL = 'workbench:askDiff:result'
+/* Opening a file a transcript row named, in this project's editor. */
+export const REVEAL_CHANNEL = 'workbench:reveal'
+export const REVEAL_RESULT_CHANNEL = 'workbench:reveal:result'
 
 /**
  * A hand-written check instead of a schema, for the reason above — and it is now
@@ -340,6 +343,26 @@ const api: ChorusWorkbenchApi = {
           ipcRenderer.send(ASK_DIFF_RESULT_CHANNEL, await handler(request))
         } catch (error) {
           ipcRenderer.send(ASK_DIFF_RESULT_CHANNEL, {
+            requestId,
+            ok: false,
+            message: error instanceof Error ? error.message : String(error),
+          })
+        }
+      })()
+    })
+  },
+
+  onRevealRequest: (handler) => {
+    ipcRenderer.on(REVEAL_CHANNEL, (_event, request: unknown) => {
+      void (async () => {
+        const requestId =
+          typeof request === 'object' && request !== null && 'requestId' in request
+            ? String(request.requestId)
+            : ''
+        try {
+          ipcRenderer.send(REVEAL_RESULT_CHANNEL, await handler(request))
+        } catch (error) {
+          ipcRenderer.send(REVEAL_RESULT_CHANNEL, {
             requestId,
             ok: false,
             message: error instanceof Error ? error.message : String(error),

@@ -9,6 +9,7 @@ import {
 } from 'react'
 import { createPortal } from 'react-dom'
 import { useTranslation } from 'react-i18next'
+import { isAgentId } from '@chorus/shared'
 import type { IdeContextPush } from '../../shared/ipc.js'
 import { quotePath } from './attach.js'
 import { ComposerMenu, type MenuItem } from './ComposerMenu.js'
@@ -24,6 +25,7 @@ import {
   mentionOptions,
   menuTakesKeys,
   menuVisible,
+  teamCommandOption,
   type CommandInfo,
   type StampedMention,
 } from './mention-menu.js'
@@ -72,6 +74,7 @@ export interface ComposerHandle {
    * have files, which is the only thing this ever wanted.
    */
   attach: (files: readonly File[]) => Promise<void>
+  addPaths: (paths: readonly string[]) => Promise<void>
 }
 
 /** What the pane has to carry across an unmount on the composer's behalf. */
@@ -101,6 +104,7 @@ export interface ComposerProps {
    * whole value is being one.
    */
   readonly onRestart: () => void
+  readonly onContinue: () => void
   /**
    * The session's own actions, in the row where the work happens.
    *
@@ -184,6 +188,29 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(
      * the click, because the log is append-only and nothing is lost.
      */
     const [confirmingRestart, setConfirmingRestart] = useState(false)
+    /*
+     * Whether this room carries the standing instruction.
+     *
+     * Read from the runtime rather than from settings, because a conversation
+     * may have been toggled away from the default — and read again whenever the
+     * conversation changes, because only the active tab of a group is mounted, so
+     * this component is remounted against a different room routinely.
+     */
+    const [styleOn, setStyleOn] = useState(false)
+    const [stylePending, setStylePending] = useState(false)
+
+    useEffect(() => {
+      let live = true
+      window.chorus
+        .setAnswerStyle({ conversationId: props.conversationId })
+        .then((result) => {
+          if (live) setStyleOn(result.styleOn)
+        })
+        .catch(() => undefined)
+      return () => {
+        live = false
+      }
+    }, [props.conversationId])
     /**
      * How many times the draft has been written, ever.
      *
@@ -683,7 +710,13 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(
       active === null
         ? []
         : active.trigger === '/'
-          ? commandOptions(commands, active.query)
+          ? [
+              ...teamCommandOption(participants.filter(isAgentId), active.query, {
+                detail: t('conversation.teamDetail'),
+                message: t('conversation.teamMessage', { agents: participants.join(', ') }),
+              }),
+              ...commandOptions(commands, active.query),
+            ]
           : [...mentionOptions(participants as never, active.query), ...fileOptions(files)]
     /*
      * The menu opens for a state as well as for rows.
@@ -914,8 +947,8 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(
        * characters of noise.
        */
       const paths = attached.map((item) => quotePath(item.path)).join(' ')
-      const text = [draft.trim(), paths].filter((part) => part !== '').join(' ')
-      if (text === '') return
+      const text = draft.trim()
+      if (text === '' && paths === '') return
 
       /*
        * The editor context is captured now, not when the pill was drawn.
@@ -956,6 +989,27 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(
         return withEditorContext(text, block)
       }
 
+      /*
+       * The paths go on the very end, after the editor context — and that is a
+       * fix rather than a preference.
+       *
+       * They used to be joined onto the draft before `compose` ran, which was
+       * correct until the editor context moved from above the draft to below
+       * it: the block then landed *after* the paths, and `splitTrailingPaths`
+       * only recognises a path at the end of a message. The result was silent —
+       * nothing failed, the agent still received everything it always did, and
+       * your own screenshot simply read back as forty characters of
+       * `/Users/…/1788962404424-8-image.png` instead of the picture you attached.
+       *
+       * Their own paragraph rather than the trailing space they had before, so
+       * a message carrying words, a context block and a screenshot reads as
+       * three things instead of one run-on line.
+       */
+      const withAttachments = (body: string): string => {
+        if (paths === '') return body
+        return body === '' ? paths : `${body}\n\n${paths}`
+      }
+
       // You just spoke; you want to see the answer.
       onSending()
       compose()
@@ -964,7 +1018,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(
           // the draft and its attachments exactly as they were.
           writeDraft('')
           setAttached([])
-          await window.chorus.sendMessage({ conversationId, text: body })
+          await window.chorus.sendMessage({ conversationId, text: withAttachments(body) })
         })
         .catch((error: unknown) => {
           // Nothing is coming: the message never left, so the row would be
@@ -989,8 +1043,9 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(
           input.current?.focus()
         },
         attach,
+        addPaths,
       }),
-      [attach]
+      [attach, addPaths]
     )
 
     return (
@@ -1373,11 +1428,13 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(
               mention. `#` stays a character button, because the thing it opens is
               a file picker over a list nobody can enumerate in a toolbar.
               
-              **Only the conversation's own participants.** Mentioning an agent
-              that is not in the room addresses nobody, and the cast is a project
-              setting reachable from the project card — offering `@codex` where
-              codex was deliberately removed would be offering to talk to an empty
-              chair.
+              **Every agent, because every room holds every agent.** This said
+              "only the conversation's own participants", and that was right while
+              a cast was something you chose: offering `@codex` where codex had
+              been deliberately removed was offering an empty chair. Nobody
+              removes one now, so the only way an agent is missing from the live
+              map is that it failed to start — and hiding it there is the worst
+              moment to, because asking it is how the person finds out why.
             */}
             {/*
              * Everything that can be added, behind one button — and now the only
@@ -1453,6 +1510,37 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(
               </svg>
             </button>
             {/*
+              Carry on somewhere else: a fresh room that starts holding this
+              transcript, with this one left exactly as it is.
+
+              **Third in a row that is entirely about what the next message
+              carries**, which is the argument for the whole group living here.
+              The `+` adds to what the agent will see, Start over empties it,
+              and this moves it to a new room.
+
+              It never asks, and the contrast with its neighbour is the reason.
+              Start over confirms while a turn is running because that work is
+              discarded; nothing is discarded here. This conversation keeps its
+              agents, its transcript and its turn in flight — the only outcome
+              is one more room beside it, and closing that is a click.
+
+              The source is *this* conversation, named rather than inferred. The
+              button exists on the room being continued, which is what makes
+              "from a specific chat" a thing you can point at instead of a rule
+              you have to remember.
+            */}
+            <button
+              type="button"
+              className="composer-more"
+              aria-label={t('conversation.continue')}
+              title={t('conversation.continue')}
+              onClick={props.onContinue}
+            >
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M13 4H5v15h15v-8M15 4h5v5M20 4l-8 8" />
+              </svg>
+            </button>
+            {/*
              * The editor switch, on the same row as the cast.
              *
              * It sat above, on the context row, which is where the pill and the
@@ -1487,6 +1575,45 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(
              * state strings are kept because the accessible name should still
              * say which way the click goes.
              */}
+            {/*
+              Refused while a turn is in flight, and disabled rather than hidden.
+
+              Toggling respawns each agent onto its own thread, and closing a
+              service mid-stream discards a partial reply the log cannot rebuild
+              — Codex drops interrupted assistant output, which is the reason the
+              log exists in the shape it does. A control that is visibly
+              unavailable says "not now"; one that vanishes says nothing, and one
+              that works says something untrue.
+            */}
+            <button
+              type="button"
+              className="composer-style"
+              aria-pressed={styleOn}
+              disabled={stylePending || props.busy || props.working.length > 0}
+              aria-label={styleOn ? t('conversation.styleOff') : t('conversation.styleOn')}
+              onClick={() => {
+                const next = !styleOn
+                setStylePending(true)
+                window.chorus
+                  .setAnswerStyle({ conversationId: props.conversationId, on: next })
+                  /*
+                   * Trust the answer, not the request. The runtime owns whether a
+                   * room ends up styled — it can refuse, and a respawn can fail —
+                   * so a click may legitimately come back as the state it started
+                   * in, and the control must show what happened rather than what
+                   * was asked for.
+                   */
+                  .then((result) => {
+                    setStyleOn(result.styleOn)
+                  })
+                  .catch(() => undefined)
+                  .finally(() => {
+                    setStylePending(false)
+                  })
+              }}
+            >
+              {styleOn ? t('conversation.styleBadgeOn') : t('conversation.styleBadgeOff')}
+            </button>
             <button
               type="button"
               className="ide-source"

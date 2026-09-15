@@ -9,23 +9,23 @@ import {
   type WorkspaceSnapshot,
 } from '../../../shared/workspace-layout.js'
 
-/** Matches the panel grip's own clamp, so a stored height cannot open absurd. */
+/** Matches the panel grip's own clamp: a floor only, no ceiling. */
 export function clampTerminalHeight(height: number): number {
   if (!Number.isFinite(height)) return TERMINAL_HEIGHT.default
-  return Math.round(Math.min(TERMINAL_HEIGHT.max, Math.max(TERMINAL_HEIGHT.min, height)))
+  return Math.round(Math.max(TERMINAL_HEIGHT.min, height))
 }
 
-/** Keeps a persisted or dragged width inside what the shell can actually show. */
+/** Keeps a persisted or dragged width off the floor. There is no ceiling. */
 export function clampSidebarWidth(width: number): number {
   if (!Number.isFinite(width)) return SIDEBAR_WIDTH.default
-  return Math.round(Math.min(SIDEBAR_WIDTH.max, Math.max(SIDEBAR_WIDTH.min, width)))
+  return Math.round(Math.max(SIDEBAR_WIDTH.min, width))
 }
 
 /** The same treatment for the workbench/Chorus divider, and for the same reason:
  *  the width comes from a file a person can edit, so it is repaired not trusted. */
 export function clampChorusWidth(width: number): number {
   if (!Number.isFinite(width)) return CHORUS_WIDTH.default
-  return Math.round(Math.min(CHORUS_WIDTH.max, Math.max(CHORUS_WIDTH.min, width)))
+  return Math.round(Math.max(CHORUS_WIDTH.min, width))
 }
 
 /**
@@ -124,6 +124,28 @@ function normalizedSizes(sizes: readonly number[], count: number): number[] {
   const sum = safe.reduce((total, value) => total + value, 0)
   if (sum <= 0) return Array.from({ length: count }, () => 1 / count)
   return safe.map((value) => value / sum)
+}
+
+export const PANE_MIN_PX = 320
+
+export function resizeBranch(
+  sizes: readonly number[],
+  index: number,
+  along: number,
+  pairPx: number
+): number[] {
+  const shares = normalizedSizes(sizes, sizes.length)
+  const before = shares[index]
+  const after = shares[index + 1]
+  if (before === undefined || after === undefined) return shares
+  const pair = before + after
+  if (pair <= 0) return shares
+  const floor = pairPx > 0 ? Math.min(PANE_MIN_PX / pairPx, 0.5) : 0.5
+  const first = pair * Math.min(Math.max(along, floor), 1 - floor)
+  const next = [...shares]
+  next[index] = first
+  next[index + 1] = pair - first
+  return next
 }
 
 export function leafPaneIds(layout: WorkspaceLayoutNode | null): string[] {

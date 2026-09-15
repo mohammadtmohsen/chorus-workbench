@@ -1,9 +1,14 @@
 import { getService } from '@codingame/monaco-vscode-api'
 import { ITextModelService } from '@codingame/monaco-vscode-api/vscode/vs/editor/common/services/resolverService.service'
 import { IFileService } from '@codingame/monaco-vscode-api/vscode/vs/platform/files/common/files.service'
+import { IEditorService } from '@codingame/monaco-vscode-api/vscode/vs/workbench/services/editor/common/editorService.service'
 import { URI } from '@codingame/monaco-vscode-api/vscode/vs/base/common/uri'
 import { readEditorSnapshot } from './context.js'
-import type { WorkbenchEditRequest, WorkbenchEditResult } from '../../../shared/workbench-ipc.js'
+import type {
+  WorkbenchEditRequest,
+  WorkbenchEditResult,
+  WorkbenchRevealResult,
+} from '../../../shared/workbench-ipc.js'
 
 /**
  * Applies an agent's edit to the **live model**, not to the file — Phase 6d.
@@ -263,4 +268,66 @@ export function serveWorkbenchEdits(projectRoot: string): void {
  */
 export function serveWorkbenchSnapshot(projectRoot: string): void {
   window.chorusWorkbench.onSnapshotRequest(async () => readEditorSnapshot(projectRoot))
+}
+
+/**
+ * Opens a file the person clicked in a transcript, in this project's editor.
+ *
+ * **`vscode-remote:`, not `file:`, and `ask-diff.ts` records why**: the
+ * workspace folder is built on that scheme against the remote authority, so a
+ * `file:` URI for a project file resolves to nothing here and the editor reports
+ * a missing file over one that is plainly in the explorer.
+ *
+ * **A preview tab that takes focus**, matching the file revealed when an
+ * approval settles. Clicking a path is a request to look at something, so
+ * focus follows the click; it is not pinned, because the next path clicked
+ * should replace it rather than accumulate a tab per link followed.
+ *
+ * The path arrives absolute and is used as given. Main resolved it against the
+ * project root and refused anything outside — re-deciding that here would be a
+ * second boundary that can disagree with the first, and the one that matters is
+ * the one holding the project root.
+ */
+export function serveWorkbenchReveal(remoteAuthority: string): void {
+  window.chorusWorkbench.onRevealRequest(async (raw): Promise<WorkbenchRevealResult> => {
+    const request = (typeof raw === 'object' && raw !== null ? raw : {}) as Record<string, unknown>
+    const requestId = typeof request['requestId'] === 'string' ? request['requestId'] : ''
+    const path = typeof request['path'] === 'string' ? request['path'] : ''
+    if (path === '') return { requestId, ok: false, message: 'The reveal request named no file.' }
+
+    /*
+     * A line is a hint, so it is taken only when it is one — an integer of at
+     * least 1. It comes off text an agent wrote, and `selection` with a zero or
+     * a fraction in it is rejected by the editor rather than ignored, which
+     * would turn "the line was odd" into "the file did not open".
+     */
+    const at = (key: string): number | null => {
+      const held = request[key]
+      return typeof held === 'number' && Number.isInteger(held) && held >= 1 ? held : null
+    }
+    const line = at('line')
+    const column = at('column')
+
+    try {
+      const editors = await getService(IEditorService)
+      const pane = await editors.openEditor({
+        resource: URI.from({ scheme: 'vscode-remote', authority: remoteAuthority, path }),
+        options: {
+          preserveFocus: false,
+          ...(line === null
+            ? {}
+            : { selection: { startLineNumber: line, startColumn: column ?? 1 } }),
+        },
+      })
+      return pane === undefined
+        ? { requestId, ok: false, message: `"${path}" could not be opened in this editor.` }
+        : { requestId, ok: true }
+    } catch (error) {
+      return {
+        requestId,
+        ok: false,
+        message: error instanceof Error ? error.message : String(error),
+      }
+    }
+  })
 }

@@ -83,10 +83,25 @@ export class FakeAgentSession implements AgentSession {
   private ended = false
   private seq = 0
 
+  /**
+   * What this session was started with, or undefined for a fork.
+   *
+   * **`FakeAdapter.startedOpts` cannot answer this, and the reason is a trap.**
+   * `start` and `resume` push to both that array and `sessions`, while `fork`
+   * pushes a session and no opts — so the two are index-aligned right up until
+   * the first fork and silently skewed after it. A test that indexed
+   * `startedOpts` by a session's position read another session's options and
+   * still passed, because the shapes match.
+   *
+   * Recording it here removes the correspondence problem rather than documenting
+   * it. A fork leaves it undefined, which is the honest answer: a fork was not
+   * started with anything, it inherited.
+   */
   constructor(
     readonly sessionRef: string,
     private readonly agentId: AgentId,
-    private readonly models?: readonly ModelChoice[] | Error | undefined
+    private readonly models?: readonly ModelChoice[] | Error | undefined,
+    readonly startedWith?: SessionOpts
   ) {}
 
   send(input: AgentInput): Promise<void> {
@@ -214,7 +229,8 @@ export class FakeAdapter implements AgentAdapter {
     const session = new FakeAgentSession(
       this.startsWithoutRef ? '' : `fake-session-${String(++this.counter)}`,
       this.id,
-      this.models
+      this.models,
+      opts
     )
     this.sessions.push(session)
     return Promise.resolve(session)
@@ -246,7 +262,7 @@ export class FakeAdapter implements AgentAdapter {
   resume(sessionRef: string, opts: SessionOpts): Promise<AgentSession> {
     if (this.failResume) return Promise.reject(new Error('no such thread'))
     this.startedOpts.push(opts)
-    const session = new FakeAgentSession(sessionRef, this.id, this.models)
+    const session = new FakeAgentSession(sessionRef, this.id, this.models, opts)
     this.sessions.push(session)
     if (this.refuseResumeOnStream) {
       queueMicrotask(() => {

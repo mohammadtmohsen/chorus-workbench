@@ -7,6 +7,8 @@ import {
   EVENTS_PUSH_CHANNEL,
   IDE_PUSH_CHANNEL,
   IdeContextPush,
+  COLLABORATION_PUSH_CHANNEL,
+  CollaborationPush,
   CONTEXT_PUSH_CHANNEL,
   ContextUsagePush,
   TasksPush,
@@ -80,12 +82,11 @@ const api: ChorusApi = {
   sendMessage: invoke('conversation:send'),
   interrupt: invoke('conversation:interrupt'),
   closeConversation: invoke('conversation:close'),
-  addAgent: invoke('conversation:addAgent'),
-  removeAgent: invoke('conversation:removeAgent'),
   restoreConversations: () => invoke('conversation:restore')({}),
   markSeen: invoke('conversation:markSeen'),
   rememberDraft: invoke('conversation:draft'),
   setPlanMode: invoke('conversation:planMode'),
+  setAnswerStyle: invoke('conversation:answerStyle'),
   completeFiles: invoke('files:complete'),
   listCommands: invoke('conversation:commands'),
   transcript: invoke('conversation:transcript'),
@@ -98,6 +99,7 @@ const api: ChorusApi = {
   reopenConversation: invoke('conversation:reopen'),
   previewFile: invoke('files:preview'),
   stashFile: invoke('files:stash'),
+  stashNoteImage: invoke('files:stashNoteImage'),
   // Renderers cannot read a File's path any more; only the bridge can.
   pathForFile: (file: File) => webUtils.getPathForFile(file),
   writeConversationLayout: invoke('conversation:layout'),
@@ -122,7 +124,19 @@ const api: ChorusApi = {
   forgetProject: invoke('project:forget'),
   relocateProject: invoke('project:relocate'),
   setProjectProfile: invoke('project:setProfile'),
-  setProjectAgents: invoke('project:setAgents'),
+  setProjectNotes: invoke('project:setNotes'),
+  getAppNote: invoke('app:getNote'),
+  setAppNote: invoke('app:setNote'),
+  listKeptNotes: invoke('app:listKeptNotes'),
+  createKeptNote: invoke('app:createKeptNote'),
+  setKeptNote: invoke('app:setKeptNote'),
+  removeKeptNote: invoke('app:removeKeptNote'),
+  reorderKeptNotes: invoke('app:reorderKeptNotes'),
+  setAppNoteSize: invoke('app:setNoteSize'),
+  setProjectNoteSize: invoke('project:setNoteSize'),
+  addNoteImage: invoke('app:addNoteImage'),
+  pickNoteImage: invoke('app:pickNoteImage'),
+  fetchNoteImage: invoke('app:fetchNoteImage'),
   chooseDirectory: invoke('files:chooseDirectory'),
   readSettings: () => invoke('settings:read')({}),
   writeSettings: invoke('settings:write'),
@@ -140,6 +154,9 @@ const api: ChorusApi = {
   ideOpenFile: invoke('ide:openFile'),
   prepareHandoff: invoke('handoff:prepare'),
   sendHandoff: invoke('handoff:send'),
+  startCollaboration: invoke('collaborate:start'),
+  stopCollaboration: invoke('collaborate:stop'),
+  collaborationStatus: invoke('collaborate:status'),
   openAside: invoke('aside:open'),
   askAside: invoke('aside:ask'),
   restateAside: invoke('aside:restate'),
@@ -190,6 +207,16 @@ const api: ChorusApi = {
     ipcRenderer.on(CONTEXT_PUSH_CHANNEL, wrapped)
     return () => {
       ipcRenderer.removeListener(CONTEXT_PUSH_CHANNEL, wrapped)
+    }
+  },
+  onCollaborationStatus: (listener) => {
+    const wrapped = (_event: unknown, payload: unknown): void => {
+      const parsed = CollaborationPush.safeParse(payload)
+      if (parsed.success) listener(parsed.data)
+    }
+    ipcRenderer.on(COLLABORATION_PUSH_CHANNEL, wrapped)
+    return () => {
+      ipcRenderer.removeListener(COLLABORATION_PUSH_CHANNEL, wrapped)
     }
   },
   onTasks: (listener) => {

@@ -1,5 +1,6 @@
+import { ActorSchema, AgentIdSchema, agentRecord } from '@chorus/shared'
 import { z } from 'zod'
-import { WorkspaceSnapshot } from './workspace-layout.js'
+import { NOTE_SIZE, WorkspaceSnapshot } from './workspace-layout.js'
 import type { WorkbenchShellApi } from './workbench-ipc.js'
 
 /**
@@ -11,7 +12,7 @@ import type { WorkbenchShellApi } from './workbench-ipc.js'
  */
 
 export const AgentProbeResult = z.object({
-  id: z.enum(['codex', 'claude']),
+  id: AgentIdSchema,
   installed: z.boolean(),
   version: z.string().nullable(),
   /**
@@ -33,7 +34,15 @@ export const AgentProbeResult = z.object({
    *
    * A key, because main has no translator: the renderer turns it into words.
    */
-  reason: z.enum(['missing', 'failed']).nullable(),
+  /**
+   * `needsKey` is the third state and is not a failure of the install.
+   *
+   * DeepSeek runs on the same `claude` binary, so "is it installed" is answered
+   * by Claude's own probe and is usually yes. What is missing is an API key —
+   * a state neither `missing` nor `failed` describes, and one whose advice is a
+   * Settings field rather than an install command.
+   */
+  reason: z.enum(['missing', 'failed', 'needsKey']).nullable(),
   /** Where it was found, when it was found and still would not run. */
   foundAt: z.string().nullable(),
 })
@@ -66,7 +75,7 @@ export const TranscriptEvent = z.object({
   seq: z.number().int(),
   id: z.string(),
   conversationId: z.string(),
-  actor: z.enum(['user', 'system', 'codex', 'claude']),
+  actor: ActorSchema,
   type: z.string(),
   payload: z.record(z.string(), z.unknown()),
   createdAt: z.number().int(),
@@ -99,26 +108,39 @@ export function normaliseExplainLanguage(raw: string): string {
   return raw.replace(/\s+/g, ' ').trim().slice(0, MAX_EXPLAIN_LANGUAGE)
 }
 
+/**
+ * What main hands back: the stored settings, plus what it will say about the
+ * credentials it holds.
+ *
+ * `deepseekKeySet` is not stored in `settings.json` and is not a preference — it
+ * is derived, at every read, from whether `agent-secrets.ts` has a key. The
+ * value itself never crosses the boundary in this direction.
+ */
 export const SettingsShape = z.object({
-  agents: z.array(z.enum(['codex', 'claude'])),
+  /* `agents` was here, and went with the cast becoming main's. See the comment
+     on the field's grave in `settings.ts`. */
   cwd: z.string(),
   profileId: z.string(),
   /** Empty means the provider's own choice, which is not a model name. */
   model: z.string().default(''),
   effortLevel: z.string().default(''),
   /** Per agent, because the two providers share no model. */
-  models: z
-    .object({ codex: z.string().default(''), claude: z.string().default('') })
-    .default({ codex: '', claude: '' }),
-  efforts: z
-    .object({ codex: z.string().default(''), claude: z.string().default('') })
-    .default({ codex: '', claude: '' }),
+  models: z.object(agentRecord(() => z.string().default(''))).default(agentRecord(() => '')),
+  efforts: z.object(agentRecord(() => z.string().default(''))).default(agentRecord(() => '')),
   /**
    * The language an explanation comes back in. Empty means the action is not
    * offered — see the plan: there is no sensible guess at someone's own language,
    * and the system locale is a fact about the machine rather than the person.
    */
   explainLanguage: z.string().default('').transform(normaliseExplainLanguage),
+  /**
+   * Whether a new conversation starts in the bilingual style.
+   *
+   * The default only. A conversation owns its own on/off from the moment it is
+   * created, because the ordinary case is reading in one language while pasting a
+   * reply to someone who reads another — one app-wide value cannot express that.
+   */
+  styleOnByDefault: z.boolean().default(false),
   /**
    * Appearance, global rather than per conversation.
    *
@@ -128,6 +150,19 @@ export const SettingsShape = z.object({
    */
   theme: z.enum(['system', 'light', 'dark']).default('system'),
 })
+
+/**
+ * The settings, plus whether main holds a credential — never which one.
+ *
+ * A separate shape rather than a field on `SettingsShape`, because the two
+ * directions are genuinely different: `settings:write` takes a key and this
+ * comes back without one. Folding them together would make the write request
+ * accept `deepseekKeySet` and invite exactly the symmetry that is wrong here.
+ */
+export const SettingsWithSecrets = SettingsShape.extend({
+  deepseekKeySet: z.boolean().default(false),
+})
+export type SettingsWithSecrets = z.infer<typeof SettingsWithSecrets>
 
 /**
  * One side of a file comparison, mirroring `FileVersion` in `@chorus/workspace`.
@@ -148,7 +183,7 @@ export type FileVersionShape = z.infer<typeof FileVersionShape>
 export const ApprovalChoice = z.object({
   conversationId: z.string(),
   /** Which agent asked — several can have approvals pending at once. */
-  agentId: z.enum(['codex', 'claude']),
+  agentId: AgentIdSchema,
   approvalId: z.string(),
   outcome: z.enum(['allow', 'deny', 'cancel']),
   /**
@@ -185,7 +220,7 @@ export type ApprovalChoice = z.infer<typeof ApprovalChoice>
 export const QuestionAnswer = z.object({
   conversationId: z.string(),
   /** Which agent asked — several can be waiting at once in a shared room. */
-  agentId: z.enum(['codex', 'claude']),
+  agentId: AgentIdSchema,
   userInputId: z.string(),
   outcome: z.enum(['answered', 'cancel']),
   answers: z.array(z.object({ questionId: z.string(), values: z.array(z.string()) })),
@@ -415,7 +450,27 @@ export const ListedProject = z.object({
    * deliberately emptied, and the two must render differently or the second one
    * silently regains its agents.
    */
-  agentIds: z.array(z.enum(['codex', 'claude'])).nullable(),
+  agentIds: z.array(AgentIdSchema).nullable(),
+  /**
+   * The person's scratchpad for this project — pending work, things to check
+   * after something.
+   *
+   * On the listing because the pad is drawn from the same array the rail is,
+   * and a separate read would mean the note and the project it belongs to could
+   * be one refresh apart. Null is a project that has never had one; `''` is one
+   * that was emptied.
+   */
+  notes: z.string().nullable(),
+  /**
+   * How big that note's panel was left, as fractions of the window.
+   *
+   * On the listing for the same reason the note is: the pad and the box it is
+   * read in are drawn from one array, so they cannot be one refresh apart. Null
+   * on either axis is a note nobody has dragged, which leaves the size the
+   * stylesheet picks.
+   */
+  noteWidth: z.number().nullable(),
+  noteHeight: z.number().nullable(),
   /**
    * The folder is not on disk right now — renamed, deleted, or on a volume that
    * is not mounted.
@@ -433,6 +488,70 @@ export const ListedProject = z.object({
   missing: z.boolean(),
 })
 
+/**
+ * A collaboration run's state, pushed on every transition and answerable on
+ * demand.
+ *
+ * Both, because only the active tab of each group is mounted: a background pane
+ * misses the completion it was waiting for and remounts with nothing. The
+ * snapshot makes it correct immediately rather than at the next transition.
+ */
+export const COLLABORATION_PUSH_CHANNEL = 'collaborate:state'
+
+const CollaborationRunState = z.discriminatedUnion('phase', [
+  z.object({
+    phase: z.literal('running'),
+    step: z.enum(['reviewPlan', 'split', 'implement', 'accept', 'report']),
+  }),
+  z.object({
+    phase: z.literal('finished'),
+    outcome: z.enum(['agreed', 'unresolved', 'unsplit', 'tooManyTasks']),
+  }),
+  z.object({
+    phase: z.literal('cancelled'),
+    by: z.enum(['stop', 'userMessage', 'manualHandoff', 'shutdown']),
+  }),
+  z.object({ phase: z.literal('interrupted'), reason: z.literal('foreignTurn') }),
+  z.object({
+    phase: z.literal('failed'),
+    reason: z.enum([
+      'delivery',
+      'acknowledgement',
+      'idle',
+      'turnFailed',
+      'noReply',
+      'sessionEnded',
+    ]),
+  }),
+])
+
+export const CollaborationPush = z.object({
+  conversationId: z.string(),
+  /**
+   * Monotonic per conversation, **across runs**, and the only ordering key.
+   *
+   * Per-run numbering could not order two runs: a delayed snapshot for an old
+   * run at version 8 would beat a push for a new one at version 1.
+   */
+  statusVersion: z.number().int(),
+  runId: z.string(),
+  state: CollaborationRunState,
+  /** True while either agent is still owned. Nothing the user types is affected. */
+  draining: z.boolean(),
+  ownership: z.enum(['owned', 'unattributable', 'free']),
+  preset: z.enum(['delivery', 'build']),
+  stepIndex: z.number().int(),
+  /**
+   * Null while the length is not yet known.
+   *
+   * The delivery pipeline cannot answer until the planner's split has been
+   * read, so the row that draws this has to survive not knowing rather than
+   * print a number nobody computed.
+   */
+  stepTotal: z.number().int().nullable(),
+})
+export type CollaborationPush = z.infer<typeof CollaborationPush>
+
 export const IPC_CONTRACT = {
   'app:getInfo': { request: z.void(), response: AppInfo },
   /**
@@ -443,9 +562,17 @@ export const IPC_CONTRACT = {
   'agents:probe': { request: z.void(), response: z.array(AgentProbeResult) },
 
   'conversation:start': {
-    /** Several agents share one conversation — that is the point of Chorus. */
+    /**
+     * Several agents share one conversation — that is the point of Chorus, and
+     * it is no longer something the caller states.
+     *
+     * `agents` stood here and the renderer filled it from the settings file, so
+     * a new chat opened with whatever that happened to hold and a project's own
+     * cast was never consulted. Every conversation now seats every agent, which
+     * is a fact main owns; the renderer cannot ask for less and cannot get it
+     * wrong.
+     */
     request: z.object({
-      agents: z.array(z.enum(['codex', 'claude'])).min(1),
       /*
        * The project it belongs to, and the `cwd` that used to be here is gone.
        *
@@ -458,10 +585,24 @@ export const IPC_CONTRACT = {
        */
       projectId: z.string().min(1),
       profileId: z.string().optional(),
+      /**
+       * A conversation whose transcript the new room starts holding.
+       *
+       * An id, never the text. The renderer naming a conversation can only
+       * choose between rooms the log already has, and main reads the transcript
+       * out of the store itself — the same rule `aside:open` states for its
+       * source event, and for the same reason: a caller that could pass prose
+       * here could put words into an agent's history and have them believed as
+       * something the user said earlier.
+       *
+       * Absent means a fresh start, which is what Restart relies on: it goes
+       * through this channel too and simply does not name a source.
+       */
+      continueFrom: z.string().optional(),
     }),
     response: z.object({
       conversationId: z.string(),
-      participants: z.array(z.enum(['codex', 'claude'])),
+      participants: z.array(AgentIdSchema),
       profileId: z.string(),
       /** The project's root, resolved. Still returned because the UI shows it. */
       projectId: z.string(),
@@ -491,7 +632,7 @@ export const IPC_CONTRACT = {
       intent: z.enum(['go']).optional(),
     }),
     /** Which agents the mention router picked, so the UI can show it. */
-    response: z.object({ targets: z.array(z.enum(['codex', 'claude'])) }),
+    response: z.object({ targets: z.array(AgentIdSchema) }),
   },
   'conversation:interrupt': {
     request: z.object({ conversationId: z.string() }),
@@ -505,18 +646,17 @@ export const IPC_CONTRACT = {
    * Ends one conversation. Others keep running — the grid holds several at once,
    * and closing one pane must not touch the agents in the next.
    */
-  /**
-   * Brings an agent in, or takes one out, without ending the conversation.
-   * A joining agent reads the whole transcript on the first thing it is asked.
+  /*
+   * `conversation:addAgent` and `conversation:removeAgent` stood here and both
+   * are gone.
+   *
+   * They were the cast being chosen a room at a time. Every conversation holds
+   * every agent now, so there is nobody to bring in and nobody to take out —
+   * and a live channel would still let anything holding the preload bridge empty
+   * a room, which is the state the cast being fixed exists to make unreachable.
+   * An agent that is absent is a start that failed, and the fix for that is a
+   * key or an install, not a channel.
    */
-  'conversation:addAgent': {
-    request: z.object({ conversationId: z.string(), agentId: z.enum(['codex', 'claude']) }),
-    response: z.object({ agentId: z.enum(['codex', 'claude']) }),
-  },
-  'conversation:removeAgent': {
-    request: z.object({ conversationId: z.string(), agentId: z.enum(['codex', 'claude']) }),
-    response: z.object({ agentId: z.enum(['codex', 'claude']) }),
-  },
 
   /**
    * Asks for a directory with the system's folder chooser, and applies it.
@@ -537,13 +677,24 @@ export const IPC_CONTRACT = {
       sessions: z.array(
         z.object({
           conversationId: z.string(),
-          participants: z.array(z.enum(['codex', 'claude'])),
+          participants: z.array(AgentIdSchema),
           profileId: z.string(),
           projectId: z.string(),
           cwd: z.string(),
           title: z.string(),
           /** Counted out of the log against the saved watermark, not remembered. */
           unread: z.number().int().min(0),
+          /**
+           * Decisions still outstanding, by id.
+           *
+           * Ids and not counts, because the renderer clears them by id when the
+           * answer arrives. They are rows with no outcome rather than a memory
+           * of what was asked, so they are as true after a relaunch as before
+           * one — the transcript has always drawn them; the tab's mark had no
+           * way to know.
+           */
+          pendingApprovalIds: z.array(z.string()).default([]),
+          pendingQuestionIds: z.array(z.string()).default([]),
           /** A message typed and not sent when the app last closed. */
           draft: z.string().default(''),
           /** Reading and reasoning, executing nothing. Never survives a restart. */
@@ -593,7 +744,7 @@ export const IPC_CONTRACT = {
   'tasks:stop': {
     request: z.object({
       conversationId: z.string(),
-      agentId: z.enum(['codex', 'claude']),
+      agentId: AgentIdSchema,
       taskId: z.string(),
     }),
     response: z.object({ ok: z.literal(true) }),
@@ -649,7 +800,7 @@ export const IPC_CONTRACT = {
     response: z.object({
       agents: z.array(
         z.object({
-          agentId: z.enum(['codex', 'claude']),
+          agentId: AgentIdSchema,
           /**
            * Why the list is what it is. An empty `ready` and an empty `failed`
            * look identical without this, and the sheet has to say different
@@ -705,12 +856,19 @@ export const IPC_CONTRACT = {
     request: z.object({ conversationId: z.string() }),
     response: z.object({
       conversationId: z.string(),
-      participants: z.array(z.enum(['codex', 'claude'])),
+      participants: z.array(AgentIdSchema),
       profileId: z.string(),
       projectId: z.string(),
       cwd: z.string(),
       title: z.string(),
       unread: z.number().int().min(0),
+      /**
+       * Still outstanding, by id — the same fields `conversation:restore`
+       * carries, for the same reason. A conversation reached from history is
+       * the likeliest place to find a decision nobody answered.
+       */
+      pendingApprovalIds: z.array(z.string()).default([]),
+      pendingQuestionIds: z.array(z.string()).default([]),
     }),
   },
 
@@ -761,6 +919,30 @@ export const IPC_CONTRACT = {
    * Returns what the mode actually is afterwards, so a control cannot show a
    * state the session did not reach.
    */
+  /**
+   * Turns the standing instruction on or off for one conversation.
+   *
+   * `planMode`'s twin, including the return: what the conversation actually is
+   * afterwards, never what was asked for. The two differ in cost — this one
+   * respawns each agent onto its existing thread, because a system prompt cannot
+   * be changed on a live session — so a caller must not fire it while a turn is
+   * streaming.
+   */
+  'conversation:answerStyle': {
+    /*
+     * `on` is optional, and omitting it is a read.
+     *
+     * The alternative was a second channel whose only job was to report a
+     * boolean the setter already returns. This shape exists because the control
+     * lives in the composer, which unmounts with its tab — so it has to be able
+     * to ask what the conversation is currently doing, and the answer has to come
+     * from the runtime rather than from a settings default the room may have been
+     * toggled away from.
+     */
+    request: z.object({ conversationId: z.string(), on: z.boolean().optional() }),
+    response: z.object({ styleOn: z.boolean() }),
+  },
+
   'conversation:planMode': {
     request: z.object({ conversationId: z.string(), on: z.boolean() }),
     response: z.object({ planning: z.boolean() }),
@@ -797,6 +979,11 @@ export const IPC_CONTRACT = {
    */
   'files:stash': {
     request: z.object({ name: z.string(), base64: z.string() }),
+    response: z.object({ path: z.string() }),
+  },
+
+  'files:stashNoteImage': {
+    request: z.object({ url: z.string() }),
     response: z.object({ path: z.string() }),
   },
 
@@ -970,16 +1157,204 @@ export const IPC_CONTRACT = {
     response: z.object({ profileId: z.string() }),
   },
 
-  /**
-   * Sets the project's cast, and reconciles every live conversation to it.
+  /*
+   * `project:setAgents` stood here and is gone with the two conversation-level
+   * ones above.
    *
-   * An empty array is accepted and means it: a project with no agents. What
-   * cannot be expressed here is "never asked" — that is the absence of an
-   * answer, and only a project that has never been set is in it.
+   * A project's cast was the setting the project card wrote, and it is what made
+   * the bug possible: the card could say three agents while `conversation:start`
+   * was handed two out of `settings.json`, and the two answers had no reason to
+   * agree. There is one answer now and main holds it.
+   *
+   * The `agent_ids` column and `Project.agentIds` stay, unread. Dropping a column
+   * is a migration, and nothing is served by running one to delete a value that
+   * no longer decides anything.
    */
-  'project:setAgents': {
-    request: z.object({ projectId: z.string(), agentIds: z.array(z.enum(['codex', 'claude'])) }),
-    response: z.object({ agentIds: z.array(z.enum(['codex', 'claude'])) }),
+
+  /**
+   * Sets the project's scratchpad.
+   *
+   * **Nothing is told about it**, which is what separates this from its two
+   * neighbours: a profile reconciles live conversations and a cast starts and
+   * stops agents, while a note changes nothing that is running. It is a write.
+   *
+   * Sent whole rather than as a patch. The pad is one text box with one writer,
+   * so there is no merge to do and a diff would be ceremony over a string.
+   */
+  'project:setNotes': {
+    request: z.object({ projectId: z.string(), notes: z.string() }),
+    response: z.object({ notes: z.string() }),
+  },
+
+  /**
+   * How big that project's note was left — the twin of `app:setNoteSize`.
+   *
+   * Nullable on both axes where the app's note is not, and that is the one real
+   * difference between the two notes: this one has no size of its own until it
+   * is given one, because a project's note is as wide as the column it sits in
+   * until somebody drags it narrower.
+   */
+  'project:setNoteSize': {
+    request: z.object({
+      projectId: z.string(),
+      width: z.number().min(NOTE_SIZE.width.min).max(NOTE_SIZE.width.max).nullable(),
+      height: z.number().min(NOTE_SIZE.height.min).max(NOTE_SIZE.height.max).nullable(),
+    }),
+    response: z.object({ width: z.number().nullable(), height: z.number().nullable() }),
+  },
+
+  /**
+   * The app's own note, and how big its panel was left.
+   *
+   * Read as one call because they are written to one row and wanted at one
+   * moment — the panel cannot open at the right size without both. Written as
+   * two, because they change for unrelated reasons: text on a debounce while
+   * typing, size once at the end of a drag.
+   *
+   * `notes` is null for an app whose note has never been written, which the
+   * renderer shows as an empty field. That is the same distinction
+   * `project:setNotes` keeps, and nothing reads it yet here either.
+   */
+  'app:getNote': {
+    request: z.object({}),
+    response: z.object({
+      notes: z.string().nullable(),
+      width: z.number().nullable(),
+      height: z.number().nullable(),
+    }),
+  },
+
+  'app:setNote': {
+    request: z.object({ notes: z.string() }),
+    response: z.object({ notes: z.string() }),
+  },
+
+  /**
+   * The notes the masthead's menu keeps, all of them.
+   *
+   * Whole rather than paged, because the list is read by looking down it. Each
+   * row's `notes` is nullable for the same reason `app:getNote`'s is: null means
+   * never written, which is not the same as emptied.
+   *
+   * No title field anywhere on this surface. A row is labelled by its note's own
+   * first line, derived in the renderer from the document it already holds.
+   */
+  'app:listKeptNotes': {
+    request: z.object({}),
+    response: z.object({
+      notes: z.array(
+        z.object({
+          id: z.string(),
+          notes: z.string().nullable(),
+          createdAt: z.number(),
+          updatedAt: z.number(),
+        })
+      ),
+    }),
+  },
+
+  /**
+   * Makes an empty note and answers its id.
+   *
+   * The row is not returned, so the caller re-reads the list: where a new note
+   * sits is the store's decision, and a caller that spliced it in would be
+   * guessing at an order it does not own. One extra call on a deliberate action.
+   */
+  'app:createKeptNote': {
+    request: z.object({}),
+    response: z.object({ id: z.string() }),
+  },
+
+  /**
+   * Records one, and answers whether there was still one to record.
+   *
+   * **False is not a failure.** The editor saves on a debounce, so a write can
+   * land after its note was deleted, and the delete is the later intention. The
+   * renderer drops it rather than reporting anything.
+   */
+  'app:setKeptNote': {
+    request: z.object({ id: z.string(), notes: z.string() }),
+    response: z.object({ saved: z.boolean() }),
+  },
+
+  'app:removeKeptNote': {
+    request: z.object({ id: z.string() }),
+    response: z.object({ removed: z.boolean() }),
+  },
+
+  /**
+   * The order of the whole list, after a row has been dragged.
+   *
+   * **The sequence rather than one row's new index**, because a move changes
+   * where everything after it sits — sending one would leave the renderer and
+   * the store each doing half the arithmetic and agreeing about the half they
+   * cannot see.
+   *
+   * Answers nothing but acknowledgement. The caller already knows the order: it
+   * is the one it just sent, and it is already drawing it.
+   */
+  'app:reorderKeptNotes': {
+    request: z.object({ ids: z.array(z.string()) }),
+    response: z.object({ ordered: z.boolean() }),
+  },
+
+  /**
+   * Stores an image the note will refer to, and answers with its URL.
+   *
+   * **Base64 rather than bytes**, because every payload on this surface is
+   * validated by the schema beside it and a `Uint8Array` is not something zod
+   * can describe at a boundary that also has to survive structured cloning. The
+   * cost is a third more bytes on one IPC call, once per image.
+   *
+   * The renderer never learns a path. It hands over content and receives a
+   * `chorus-note:` URL — see `note-images.ts` for why that is a scheme rather
+   * than a file reference.
+   */
+  'app:addNoteImage': {
+    request: z.object({ data: z.string(), extension: z.string() }),
+    response: z.object({ url: z.string() }),
+  },
+
+  /**
+   * Opens the picker in main and stores what was chosen.
+   *
+   * Null for a cancelled dialog, which is an answer rather than a failure — the
+   * caller draws nothing and reports nothing.
+   */
+  'app:pickNoteImage': {
+    request: z.object({}),
+    response: z.object({ url: z.string().nullable() }),
+  },
+
+  /**
+   * Brings a remote image across and stores it.
+   *
+   * The fetch is main's because it has to be: `connect-src 'self'` stops the
+   * renderer reaching the network, and `img-src` would not display the result
+   * anyway. What comes back is this process's own scheme, like every other way
+   * an image gets in.
+   */
+  'app:fetchNoteImage': {
+    request: z.object({ address: z.string() }),
+    response: z.object({ url: z.string() }),
+  },
+
+  /**
+   * Fractions of the window, bounded here rather than only in the panel.
+   *
+   * The panel clamps as you drag, so this can only ever be reached by a bug or
+   * by something that is not the panel — and an unbounded write is how a stored
+   * size becomes one nobody can drag back, since the handle would be off screen.
+   *
+   * Both axes in one call because one corner drag moves both, and a null height
+   * is the value that means "never dragged" rather than a missing field.
+   */
+  'app:setNoteSize': {
+    request: z.object({
+      width: z.number().min(NOTE_SIZE.width.min).max(NOTE_SIZE.width.max),
+      height: z.number().min(NOTE_SIZE.height.min).max(NOTE_SIZE.height.max).nullable(),
+    }),
+    response: z.object({ width: z.number(), height: z.number().nullable() }),
   },
 
   /**
@@ -1107,8 +1482,8 @@ export const IPC_CONTRACT = {
   'handoff:prepare': {
     request: z.object({
       conversationId: z.string(),
-      from: z.enum(['codex', 'claude']),
-      to: z.enum(['codex', 'claude']),
+      from: AgentIdSchema,
+      to: AgentIdSchema,
       sourceEventIds: z.array(z.string()).min(1),
       includeDiff: z.boolean().optional(),
       intent: z.enum(['implement', 'review', 'discuss']).optional(),
@@ -1124,12 +1499,54 @@ export const IPC_CONTRACT = {
   'handoff:send': {
     request: z.object({
       conversationId: z.string(),
-      from: z.enum(['codex', 'claude']),
-      to: z.enum(['codex', 'claude']),
+      from: AgentIdSchema,
+      to: AgentIdSchema,
       sourceEventIds: z.array(z.string()),
       brief: z.string().min(1),
     }),
     response: z.object({ handoffId: z.string() }),
+  },
+  /**
+   * Starts a review loop over one completed Claude reply.
+   *
+   * No roles and no counters cross this boundary: the preset names the shape and
+   * main assigns Claude as the worker and Codex as the reviewer, which is what
+   * makes v1's one-direction promise true rather than merely stated. A caller
+   * cannot ask for a twelve-round run because there is no number to send.
+   */
+  'collaborate:start': {
+    request: z.object({
+      conversationId: z.string(),
+      sourceEventId: z.string().min(1),
+      preset: z.enum(['delivery', 'build']),
+    }),
+    response: z.discriminatedUnion('outcome', [
+      z.object({ outcome: z.literal('started'), runId: z.string() }),
+      z.object({
+        outcome: z.literal('refused'),
+        reason: z.enum([
+          'running',
+          'draining',
+          'missingAgent',
+          'unknownEvent',
+          'notAgentMessage',
+          'notPlanner',
+          'busy',
+        ]),
+        /** Set for `busy` and `missingAgent`, so the row can name the remedy. */
+        agentId: AgentIdSchema.nullable(),
+      }),
+    ]),
+  },
+  /** Ends the run now. The agent's turn is never interrupted. */
+  'collaborate:stop': {
+    request: z.object({ conversationId: z.string() }),
+    response: z.object({ ok: z.literal(true) }),
+  },
+  /** The snapshot a remounting pane asks for. Null when this room has had no run. */
+  'collaborate:status': {
+    request: z.object({ conversationId: z.string() }),
+    response: z.object({ status: CollaborationPush.nullable() }),
   },
   /**
    * A small question about one passage of one reply, asked in a fork.
@@ -1217,7 +1634,7 @@ export const IPC_CONTRACT = {
      */
     response: z.object({
       conversationId: z.string(),
-      participants: z.array(z.enum(['codex', 'claude'])),
+      participants: z.array(AgentIdSchema),
       profileId: z.string(),
       projectId: z.string(),
       cwd: z.string(),
@@ -1240,7 +1657,7 @@ export const IPC_CONTRACT = {
    */
   'aside:forward': {
     request: z.object({ asideId: z.string(), directive: z.string().min(1) }),
-    response: z.object({ targets: z.array(z.enum(['codex', 'claude'])) }),
+    response: z.object({ targets: z.array(AgentIdSchema) }),
   },
   /** Ends the fork. The transcript stays in the log. */
   'aside:close': {
@@ -1266,7 +1683,7 @@ export const IPC_CONTRACT = {
    */
   'settings:read': {
     request: z.object({}),
-    response: SettingsShape,
+    response: SettingsWithSecrets,
   },
   /** A patch: sending only what changed keeps one field from clobbering another. */
   'settings:write': {
@@ -1277,10 +1694,25 @@ export const IPC_CONTRACT = {
      * place. Their fields are optional here, and main merges a level deeper.
      */
     request: SettingsShape.partial().extend({
-      models: z.object({ codex: z.string(), claude: z.string() }).partial().optional(),
-      efforts: z.object({ codex: z.string(), claude: z.string() }).partial().optional(),
+      models: z
+        .object(agentRecord(() => z.string()))
+        .partial()
+        .optional(),
+      efforts: z
+        .object(agentRecord(() => z.string()))
+        .partial()
+        .optional(),
+      /**
+       * Write-only, and the asymmetry with the response is the design.
+       *
+       * An empty string clears the stored key; absent leaves it alone. It is
+       * never echoed back and never appears in `SettingsWithSecrets`, because a
+       * renderer that can read a provider credential is a renderer that can put
+       * one in a transcript.
+       */
+      deepseekApiKey: z.string().optional(),
     }),
-    response: SettingsShape,
+    response: SettingsWithSecrets,
   },
   'diagnostics:read': {
     request: z.void(),
@@ -1344,7 +1776,7 @@ export const IPC_CONTRACT = {
   },
 
   /**
-   * Open one file from this conversation in VS Code.
+   * Open one file from this conversation, in this project's own editor.
    *
    * **The request names a conversation and a path, never a directory.** Main
    * resolves the path against that conversation's own project directory and
@@ -1352,8 +1784,18 @@ export const IPC_CONTRACT = {
    * the same reason: a path arriving from the renderer is untrusted input about
    * to be handed to a process.
    *
+   * **The embedded workbench wins, and external VS Code is the fallback** for a
+   * project whose Editor switch is off. `ide:snapshot` resolves the same way.
+   *
+   * **A position rides in `path`** as `file.ts:42`, rather than as fields of
+   * its own. That is the form agents write and the form `code -g` already
+   * takes, so the request shape did not have to grow to carry it;
+   * `splitFileLocation` in `main/ipc.ts` is the one place it is taken apart.
+   *
    * `reason` mirrors `ide:openProject`'s: `cli-missing`, `open-failed`, plus
-   * `outside-project` for a path that failed containment.
+   * `outside-project` for a path that failed containment. A workbench that
+   * refused — no such file, an editor that would not open it — reports
+   * `open-failed`, which is what it is from the clicker's side.
    */
   'ide:openFile': {
     request: z.object({ conversationId: z.string(), path: z.string() }),
@@ -1593,7 +2035,7 @@ export const UsageWindowShape = z.object({
 export type UsageWindowShape = z.infer<typeof UsageWindowShape>
 
 export const LimitsPush = z.object({
-  agentId: z.enum(['codex', 'claude']),
+  agentId: AgentIdSchema,
   windows: z.array(UsageWindowShape),
 })
 export type LimitsPush = z.infer<typeof LimitsPush>
@@ -1626,7 +2068,7 @@ export const CONTEXT_PUSH_CHANNEL = 'agents:context'
 
 export const ContextUsagePush = z.object({
   conversationId: z.string(),
-  agentId: z.enum(['codex', 'claude']),
+  agentId: AgentIdSchema,
   usedTokens: z.number().int(),
   maxTokens: z.number().int(),
   percentUsed: z.number(),
@@ -1648,7 +2090,7 @@ export const TASKS_PUSH_CHANNEL = 'agents:tasks'
 
 export const TasksPush = z.object({
   conversationId: z.string(),
-  agentId: z.enum(['codex', 'claude']),
+  agentId: AgentIdSchema,
   tasks: z.array(
     z.object({
       id: z.string(),
@@ -1682,7 +2124,7 @@ export const ACTIVITY_PUSH_CHANNEL = 'agents:activity'
 
 export const ActivityPush = z.object({
   conversationId: z.string(),
-  agentId: z.enum(['codex', 'claude']),
+  agentId: AgentIdSchema,
   activity: z.enum(['requesting', 'compacting', 'thinking', 'awaitingInput']).nullable(),
 })
 export type ActivityPush = z.infer<typeof ActivityPush>
@@ -1761,18 +2203,15 @@ export interface ChorusApi extends WorkbenchShellApi {
   ) => Promise<IpcResponse<'conversation:send'>>
   readonly interrupt: (request: IpcRequest<'conversation:interrupt'>) => Promise<{ ok: true }>
   readonly closeConversation: (request: IpcRequest<'conversation:close'>) => Promise<{ ok: true }>
-  readonly addAgent: (
-    request: IpcRequest<'conversation:addAgent'>
-  ) => Promise<IpcResponse<'conversation:addAgent'>>
-  readonly removeAgent: (
-    request: IpcRequest<'conversation:removeAgent'>
-  ) => Promise<IpcResponse<'conversation:removeAgent'>>
   readonly restoreConversations: () => Promise<IpcResponse<'conversation:restore'>>
   readonly markSeen: (request: IpcRequest<'conversation:markSeen'>) => Promise<{ ok: true }>
   readonly rememberDraft: (request: IpcRequest<'conversation:draft'>) => Promise<{ ok: true }>
   readonly setPlanMode: (
     request: IpcRequest<'conversation:planMode'>
   ) => Promise<IpcResponse<'conversation:planMode'>>
+  readonly setAnswerStyle: (
+    request: IpcRequest<'conversation:answerStyle'>
+  ) => Promise<IpcResponse<'conversation:answerStyle'>>
   readonly completeFiles: (
     request: IpcRequest<'files:complete'>
   ) => Promise<IpcResponse<'files:complete'>>
@@ -1787,6 +2226,9 @@ export interface ChorusApi extends WorkbenchShellApi {
     request: IpcRequest<'files:preview'>
   ) => Promise<IpcResponse<'files:preview'>>
   readonly stashFile: (request: IpcRequest<'files:stash'>) => Promise<IpcResponse<'files:stash'>>
+  readonly stashNoteImage: (
+    request: IpcRequest<'files:stashNoteImage'>
+  ) => Promise<IpcResponse<'files:stashNoteImage'>>
   /** Opens a folder chooser and returns what was picked, or null if cancelled. */
   readonly chooseDirectory: () => Promise<IpcResponse<'files:chooseDirectory'>>
   /** The real path of a dropped file; `File.path` was removed in Electron 32. */
@@ -1818,15 +2260,55 @@ export interface ChorusApi extends WorkbenchShellApi {
   readonly setProjectProfile: (
     request: IpcRequest<'project:setProfile'>
   ) => Promise<IpcResponse<'project:setProfile'>>
-  readonly setProjectAgents: (
-    request: IpcRequest<'project:setAgents'>
-  ) => Promise<IpcResponse<'project:setAgents'>>
+  readonly setProjectNotes: (
+    request: IpcRequest<'project:setNotes'>
+  ) => Promise<IpcResponse<'project:setNotes'>>
+  readonly getAppNote: (request: IpcRequest<'app:getNote'>) => Promise<IpcResponse<'app:getNote'>>
+  readonly setAppNote: (request: IpcRequest<'app:setNote'>) => Promise<IpcResponse<'app:setNote'>>
+  readonly listKeptNotes: (
+    request: IpcRequest<'app:listKeptNotes'>
+  ) => Promise<IpcResponse<'app:listKeptNotes'>>
+  readonly createKeptNote: (
+    request: IpcRequest<'app:createKeptNote'>
+  ) => Promise<IpcResponse<'app:createKeptNote'>>
+  readonly setKeptNote: (
+    request: IpcRequest<'app:setKeptNote'>
+  ) => Promise<IpcResponse<'app:setKeptNote'>>
+  readonly removeKeptNote: (
+    request: IpcRequest<'app:removeKeptNote'>
+  ) => Promise<IpcResponse<'app:removeKeptNote'>>
+  readonly reorderKeptNotes: (
+    request: IpcRequest<'app:reorderKeptNotes'>
+  ) => Promise<IpcResponse<'app:reorderKeptNotes'>>
+  readonly setAppNoteSize: (
+    request: IpcRequest<'app:setNoteSize'>
+  ) => Promise<IpcResponse<'app:setNoteSize'>>
+  readonly setProjectNoteSize: (
+    request: IpcRequest<'project:setNoteSize'>
+  ) => Promise<IpcResponse<'project:setNoteSize'>>
+  readonly addNoteImage: (
+    request: IpcRequest<'app:addNoteImage'>
+  ) => Promise<IpcResponse<'app:addNoteImage'>>
+  readonly pickNoteImage: (
+    request: IpcRequest<'app:pickNoteImage'>
+  ) => Promise<IpcResponse<'app:pickNoteImage'>>
+  readonly fetchNoteImage: (
+    request: IpcRequest<'app:fetchNoteImage'>
+  ) => Promise<IpcResponse<'app:fetchNoteImage'>>
   readonly onScale: (listener: (scale: number) => void) => () => void
   readonly onSettings: (listener: (settings: IpcResponse<'settings:read'>) => void) => () => void
   readonly onDiagnostic: (listener: (diagnostic: DiagnosticPush) => void) => () => void
   readonly onLimits: (listener: (limits: LimitsPush) => void) => () => void
   readonly onContextUsage: (listener: (usage: ContextUsagePush) => void) => () => void
   readonly onTasks: (listener: (tasks: TasksPush) => void) => () => void
+  readonly startCollaboration: (
+    request: IpcRequest<'collaborate:start'>
+  ) => Promise<IpcResponse<'collaborate:start'>>
+  readonly stopCollaboration: (request: IpcRequest<'collaborate:stop'>) => Promise<{ ok: true }>
+  readonly collaborationStatus: (
+    request: IpcRequest<'collaborate:status'>
+  ) => Promise<IpcResponse<'collaborate:status'>>
+  readonly onCollaborationStatus: (listener: (status: CollaborationPush) => void) => () => void
   readonly onActivity: (listener: (activity: ActivityPush) => void) => () => void
 
   /**

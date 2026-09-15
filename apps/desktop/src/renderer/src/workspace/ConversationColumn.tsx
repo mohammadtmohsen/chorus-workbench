@@ -1,9 +1,31 @@
-import { useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import type { SessionInfo } from '../Session.js'
 import { useWorkspaceActions } from './hooks.js'
+import { TabState } from './TabState.js'
 import type { ConversationDrag } from './useConversationDrag.js'
 import type { WorkspacePane } from '../../../shared/workspace-layout.js'
+
+/**
+ * The hover tooltip's position, as an edge and a distance from it.
+ *
+ * Not a left coordinate, because which edge it hangs from is the decision: see
+ * `showHint`. Storing a single `left` would make a tooltip on the last tab of a
+ * narrow column open away from the screen.
+ */
+interface Hint {
+  readonly id: string
+  readonly title: string
+  readonly side: 'left' | 'right'
+  readonly offset: number
+}
+
+/**
+ * Long enough not to flash while the pointer crosses a strip, short enough to
+ * feel like part of the hover. The native tooltip this replaces takes about a
+ * second, which was the complaint.
+ */
+const HINT_DELAY_MS = 120
 
 /**
  * One group of a project's conversations: a strip of tabs and the one on screen.
@@ -75,7 +97,83 @@ export function ConversationColumn(props: {
    * time by construction — a second double-click replaces the first, and the
    * first input's `blur` commits what was typed on the way out.
    */
-  const [renaming, setRenaming] = useState<string | null>(null)
+  /*
+   * Which tab is being renamed, and how wide it was when the rename began.
+   *
+   * The width is carried because it cannot be recovered later: the moment the
+   * field replaces the label, the thing that was giving the tab its width is
+   * gone from the DOM. Measured on the double-click, held for the length of the
+   * edit, discarded with it.
+   */
+  const [renaming, setRenaming] = useState<{ id: string; width: number } | null>(null)
+
+  /*
+   * The full title under the tab, on hover.
+   *
+   * **This replaces the native `title` rather than joining it.** Two tooltips on
+   * one element open on the same hover and draw over each other — the fault
+   * `QuickRail` already records against the rail's preview card — and the OS one
+   * takes about a second, which is a long time to wait to read a name that is
+   * three characters wide.
+   */
+  const [hint, setHint] = useState<Hint | null>(null)
+  const dock = useRef<HTMLDivElement | null>(null)
+  const hintTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+
+  // A pending timer outlives the component that scheduled it, and its callback
+  // would then call `setHint` on something unmounted.
+  useEffect(
+    () => () => {
+      if (hintTimer.current !== null) clearTimeout(hintTimer.current)
+    },
+    []
+  )
+
+  const hideHint = (): void => {
+    if (hintTimer.current !== null) clearTimeout(hintTimer.current)
+    hintTimer.current = null
+    setHint(null)
+  }
+
+  /*
+   * `target` is read by the caller, synchronously, and passed in.
+   *
+   * React nulls `currentTarget` once a handler returns, so reading it inside the
+   * timeout below would find nothing. The element itself stays valid; it is the
+   * event's reference to it that does not.
+   */
+  const showHint = (session: SessionInfo, target: HTMLElement): void => {
+    if (hintTimer.current !== null) clearTimeout(hintTimer.current)
+    hintTimer.current = setTimeout(() => {
+      hintTimer.current = null
+      // Started dragging while the timer was pending. A tooltip following a tab
+      // being torn out of a strip is noise on top of a gesture.
+      if (props.drag.drag !== null) return
+
+      const frame = dock.current?.getBoundingClientRect()
+      if (frame === undefined) return
+      const tab = target.getBoundingClientRect()
+      // Detached: the tab closed or re-rendered away while the timer ran.
+      if (tab.width === 0) return
+
+      /*
+       * Anchored to whichever edge the tab is nearer, so it always opens
+       * inwards. This is not cosmetic: a left-anchored tooltip on a right-hand
+       * tab runs past the column and into the workbench, which is a native view
+       * composited over the window — so it would not be clipped, it would be
+       * drawn *underneath* and simply vanish at the boundary.
+       */
+      const nearRight = tab.left - frame.left > frame.width / 2
+      setHint({
+        id: session.conversationId,
+        title: session.title,
+        side: nearRight ? 'right' : 'left',
+        offset: nearRight
+          ? Math.max(0, frame.right - tab.right)
+          : Math.max(0, tab.left - frame.left),
+      })
+    }, HINT_DELAY_MS)
+  }
 
   /*
    * Resolved from the group's own tab order, not from the project's session
@@ -131,7 +229,7 @@ export function ConversationColumn(props: {
         right while the strip only switched. It carries the `+` now, so hiding
         it would hide the only way to start a second conversation in a project.
       */}
-      <div className="conversation-dock">
+      <div className="conversation-dock" ref={dock}>
         <div className="conversation-dock-tabs" role="tablist" aria-label={t('dock.conversations')}>
           {tabs.map((session) => (
             /*
@@ -151,8 +249,29 @@ export function ConversationColumn(props: {
                 props.drag.drag?.conversationId === session.conversationId ? 'true' : undefined
               }
               data-active={session.conversationId === active?.conversationId}
+              /*
+               * Held at the width it had, for as long as the field is open.
+               *
+               * The tab takes its width from its content (`flex: 0 1 auto`), and
+               * the content during a rename is a one-character field — so a tab
+               * that had grown to fit a long name collapsed to its 160px floor
+               * the instant you double-clicked it, and sprang back on commit.
+               * The note on `size` below used to claim this could not happen;
+               * it was measuring the case where the name was short enough that
+               * the tab was already sitting at the floor.
+               *
+               * Pinned rather than computed, because there is nothing left to
+               * compute from once the label is unmounted. `flex-shrink` is
+               * untouched, so a pinned tab still gives way under crowding
+               * exactly as the same tab did while it was showing its name.
+               */
+              style={
+                renaming !== null && renaming.id === session.conversationId && renaming.width > 0
+                  ? { width: renaming.width }
+                  : undefined
+              }
             >
-              {renaming === session.conversationId ? (
+              {renaming !== null && renaming.id === session.conversationId ? (
                 /*
                  * The input takes the whole tab, replacing the × as well as the
                  * label. A destructive control sitting beside a text field you
@@ -175,7 +294,8 @@ export function ConversationColumn(props: {
                   className="conversation-dock-tab-rename"
                   defaultValue={session.title}
                   /*
-                   * **Not styling — this is what stops the tab resizing.**
+                   * **Not styling — this stops the field having a say in the
+                   * tab's width at all.**
                    *
                    * `size` defaults to 20, so an input's max-content width is
                    * about twenty characters. The tab wrapper is `flex: 0 1 auto`
@@ -185,8 +305,11 @@ export function ConversationColumn(props: {
                    * while the parent's intrinsic size is being computed, which is
                    * exactly the step that was reading 20 characters.
                    *
-                   * At 1 the input contributes nothing, the wrapper falls to its
-                   * `min-width: 160px`, and the tab keeps the width it had.
+                   * At 1 the field contributes nothing either way, which is what
+                   * lets the pinned width on the wrapper be the only thing
+                   * deciding. On its own it was not enough — it stopped the tab
+                   * growing and left it free to *shrink* to the 160px floor,
+                   * which is the bug the wrapper's `style` now fixes.
                    */
                   size={1}
                   autoFocus
@@ -225,8 +348,17 @@ export function ConversationColumn(props: {
                     role="tab"
                     className="conversation-dock-tab-main"
                     aria-selected={session.conversationId === active?.conversationId}
-                    title={session.title}
+                    /* No `title`: the hover tooltip below is this element's one
+                       tooltip, and a second would open on the same hover. The
+                       accessible name still comes from the label inside. */
+                    onPointerEnter={(event) => {
+                      showHint(session, event.currentTarget)
+                    }}
+                    onPointerLeave={hideHint}
                     onPointerDown={(event) => {
+                      // Pressing is the start of a drag or a switch; either way
+                      // the pointer is no longer just resting here.
+                      hideHint()
                       props.drag.onPointerDown(
                         props.group.id,
                         session.conversationId,
@@ -251,11 +383,42 @@ export function ConversationColumn(props: {
                      * transcript under the name is the one being named. The
                      * second click is a no-op on an already-open conversation.
                      */
-                    onDoubleClick={() => {
-                      setRenaming(session.conversationId)
+                    /*
+                     * Measured before the swap, because after it there is
+                     * nothing to measure. The wrapper is what carries the width
+                     * — it holds the label *and* the × — so the rectangle read
+                     * here is the whole tab, which is what "keep it as it was"
+                     * has to mean.
+                     *
+                     * A miss stores 0 and pins nothing, leaving the old
+                     * behaviour rather than collapsing the tab to nothing.
+                     */
+                    onDoubleClick={(event) => {
+                      const tab =
+                        event.currentTarget.closest<HTMLElement>('[data-conversation-tab]')
+                      setRenaming({
+                        id: session.conversationId,
+                        width: tab === null ? 0 : tab.offsetWidth,
+                      })
                     }}
                   >
-                    {session.title}
+                    <span className="conversation-dock-tab-title">{session.title}</span>
+                    {/*
+                      The project tab's mark, in the project tab's place.
+
+                      A project tab reads the state of one conversation — the
+                      newest in that project — so a room going quiet or blocking
+                      on an approval showed on the outer tab and nowhere else,
+                      and a second conversation's approval showed nowhere at all.
+                      Same `TabState`, same `useSessionRowState`, so the two
+                      strips cannot disagree about what a session is doing.
+
+                      The title needs its own element for this: with the name as
+                      a bare text node it is an anonymous flex item, which cannot
+                      take the `min-width: 0` that lets it ellipsis instead of
+                      pushing the mark out of the tab.
+                    */}
+                    <TabState conversationIds={[session.conversationId]} />
                   </button>
                   {/*
                     **Ends the session, and does not merely close the tab.**
@@ -305,6 +468,28 @@ export function ConversationColumn(props: {
         >
           +
         </button>
+        {/*
+          Last child of the dock, and outside the scroller on purpose.
+
+          `.conversation-dock-tabs` is `overflow-x: auto`, so a tooltip inside it
+          would be clipped at the strip's own edge — which is the one place it
+          must not be, because the tab it describes is what pushed the strip to
+          scroll. The dock is already `position: relative`, so it is the frame
+          the offsets above were measured against.
+
+          Hidden while that tab is being renamed: the field is the answer to
+          "what is this called" at that moment, and a tooltip repeating the old
+          name over it is two answers at once.
+        */}
+        {hint !== null && renaming?.id !== hint.id && (
+          <div
+            className="conversation-dock-hint"
+            role="tooltip"
+            style={hint.side === 'left' ? { left: hint.offset } : { right: hint.offset }}
+          >
+            {hint.title}
+          </div>
+        )}
       </div>
       {/*
         No empty branch here. A group cannot stay empty — the tree collapses one

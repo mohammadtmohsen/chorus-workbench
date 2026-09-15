@@ -1,5 +1,6 @@
 import type { StoredEvent } from '@chorus/event-store'
 import type { AgentId } from '@chorus/shared'
+import { callRule } from './mentions.js'
 
 /**
  * Lets an agent read what it missed while somebody else was talking.
@@ -39,6 +40,7 @@ const MAX_MESSAGE_CHARS = 1_500
 const ACTIVITY_SHARE = 0.4
 const MAX_COMMAND_CHARS = 160
 const MAX_OUTPUT_CHARS = 400
+const HISTORY_MESSAGE_CHARS = 10_000
 
 export interface CatchupInput {
   /** The agent about to be addressed. Its own events are already its context. */
@@ -61,9 +63,101 @@ interface Line {
  * Returns the message to deliver: the catch-up plus `message`, or `message`
  * unchanged when nothing was missed.
  */
-export function withCatchup(input: CatchupInput, message: string): string {
+export function withCatchup(input: CatchupInput, message: string, from?: AgentId): string {
   const preamble = composeCatchup(input)
-  return preamble === null ? message : `${preamble}\n\nThe user now says to you:\n${message}`
+  const rule = callRuleLine(input.participants)
+  if (rule === null && preamble === null && from === undefined) return message
+  const intro =
+    from === undefined
+      ? 'The user now says to you:'
+      : `${from} now says to you (to answer ${from}, start a line with @${from}):`
+  return [rule, preamble, `${intro}\n${message}`].filter((part) => part !== null).join('\n\n')
+}
+
+export function withCallRule(participants: readonly AgentId[], message: string): string {
+  const rule = callRuleLine(participants)
+  return rule === null ? message : `${rule}\n\n${message}`
+}
+
+function callRuleLine(participants: readonly AgentId[]): string | null {
+  return participants.length > 1 ? `[Chorus] ${callRule(participants)}` : null
+}
+
+/** One earlier room in the chain, with the name it goes by now. */
+export interface CarryoverSource {
+  readonly title: string
+  readonly events: readonly StoredEvent[]
+}
+
+/**
+ * The whole of a chain of earlier conversations, for agents that were in none
+ * of them.
+ *
+ * A new conversation is a new provider session, so nothing carries by itself:
+ * start a second room to go on with the same work and both agents arrive blank,
+ * which is the thing that makes "continue where we left off" impossible without
+ * pasting. This composes what the earlier rooms contained so the new one can
+ * start from them.
+ *
+ * **A list, and the reason is that carrying does not compound on its own.** A
+ * carried transcript is delivered to the agents and never written into the
+ * receiving room's own log, so reading only the immediate source gives the
+ * second hop and loses everything before it: continue, continue again, and the
+ * third room holds only the second room's words. The caller walks the recorded
+ * chain back to its start and hands over every room it found, oldest first.
+ *
+ * **Blocked per room rather than merged into one stream.** Sorting the lot by
+ * `seq` would read as a single history, and it would be a wrong one — an
+ * earlier room stays open and can be spoken in *after* the room that continued
+ * it, so a global sort interleaves two conversations that were never one.
+ *
+ * **Unbudgeted, where `composeCatchup` is capped, and that is the difference
+ * between the two.** Catch-up fills a gap in a context the agent otherwise
+ * holds, so shedding the middle of it loses detail. Here the transcript *is*
+ * the context, and trimming it to 12,000 characters would mean "continue from
+ * these conversations" silently dropping the part being continued from. The
+ * cost is real and grows with the chain: every hop adds a whole room to the
+ * first message the person sends.
+ *
+ * **No recipient, deliberately.** `collect` skips events the recipient wrote,
+ * because replaying an agent's own words back to it pays twice — see
+ * `Participant.seedContext` for the same trap in the other direction. A fresh
+ * session wrote none of this, so everything counts, including what the agent
+ * of the same name said in the earlier rooms.
+ */
+export function composeCarryover(sources: readonly CarryoverSource[]): string | null {
+  // A room that said nothing is dropped rather than rendered as an empty block.
+  // Restart produces exactly that — a room holding only its own creation — and
+  // heading a block with it would announce a history that is not there.
+  const blocks = sources
+    .map((source) => ({
+      title: source.title,
+      lines: collect(source.events, null, Number.MAX_SAFE_INTEGER),
+    }))
+    .filter((block) => block.lines.length > 0)
+
+  if (blocks.length === 0) return null
+
+  const many = blocks.length > 1
+  return [
+    `[Chorus] You are continuing ${many ? 'a series of earlier conversations' : 'an earlier conversation'} in a new room. ` +
+      'You have no memory of ' +
+      `${many ? 'any of them' : 'it'} — everything below is what was said and done ` +
+      `${many ? 'in each, oldest first' : 'there, in order'}, including anything attributed ` +
+      'to you. Treat it as the history you are carrying on from. Lines starting ' +
+      'with · are actions that were taken, not requests to you now.',
+    '',
+    ...blocks.flatMap((block, index) => [
+      // Numbered as well as named, because rooms default to their folder's name
+      // and a chain of them would otherwise be several identical headings.
+      `--- earlier conversation ${String(index + 1)} of ${String(blocks.length)}: ${block.title} ---`,
+      ...block.lines.map((line) => line.text),
+      `--- end earlier conversation ${String(index + 1)} ---`,
+      '',
+    ]),
+  ]
+    .join('\n')
+    .trimEnd()
 }
 
 /** The catch-up block alone, or `null` when the recipient is already current. */
@@ -90,6 +184,23 @@ export function composeCatchup(input: CatchupInput): string | null {
   ].join('\n')
 }
 
+export function composeHistory(
+  events: readonly StoredEvent[],
+  request: { readonly skip: number; readonly count: number }
+): string {
+  const lines = collect(events, null, HISTORY_MESSAGE_CHARS)
+  const end = Math.max(lines.length - request.skip, 0)
+  const start = Math.max(end - request.count, 0)
+  if (start === end) {
+    return `Nothing there. This conversation has ${String(lines.length)} entries.`
+  }
+  return [
+    `Entries ${String(start + 1)} to ${String(end)} of ${String(lines.length)}, oldest first.`,
+    '',
+    ...lines.slice(start, end).map((line) => line.text),
+  ].join('\n')
+}
+
 /** Tracks a command from `started` to `completed`, which is where it renders. */
 interface RunningCommand {
   readonly seq: number
@@ -98,14 +209,19 @@ interface RunningCommand {
   output: string
 }
 
-function collect(events: readonly StoredEvent[], recipient: AgentId, maxMessage: number): Line[] {
+function collect(
+  events: readonly StoredEvent[],
+  recipient: AgentId | null,
+  maxMessage: number
+): Line[] {
   const lines: Line[] = []
   const running = new Map<string, RunningCommand>()
 
   for (const event of events) {
     // The recipient's own events are already in its context; replaying them
-    // would pay twice for the same words.
-    if (event.actor === recipient) continue
+    // would pay twice for the same words. `null` means there is no such context
+    // to double up — a carry-over into a session that has never run.
+    if (recipient !== null && event.actor === recipient) continue
     const payload = event.payload
     const who = event.actor
 

@@ -23,9 +23,16 @@ import type { AgentId, ApprovalId, UserInputId } from '@chorus/shared'
  * Pure, so it can be exercised by replaying recorded messages with no process.
  */
 
-const AGENT: AgentId = 'claude'
-
 export interface MapContext {
+  /**
+   * Whose events these are.
+   *
+   * Threaded rather than fixed to `'claude'`, because one `ClaudeAdapter` class
+   * now serves more than one agent: DeepSeek is the same CLI pointed at an
+   * Anthropic-compatible endpoint, and every event it produces has to be
+   * stamped with its own id or the transcript files it under Claude.
+   */
+  readonly agentId: AgentId
   readonly seq: number
   readonly now: number
   readonly approvalTtlMs: number
@@ -117,7 +124,7 @@ interface ContentBlock {
  * tool_use block — so this returns an array rather than one event or null.
  */
 export function mapSdkMessage(msg: SdkMessageLike, ctx: MapContext): AgentEvent[] {
-  const base = { agentId: AGENT, at: ctx.now, raw: msg } as const
+  const base = { agentId: ctx.agentId, at: ctx.now, raw: msg } as const
   const at = (i: number) => ({ ...base, seq: ctx.seq + i })
 
   switch (msg.type) {
@@ -1190,7 +1197,7 @@ const WINDOW_MINUTES: Record<string, number> = {
 }
 
 function mapResult(msg: SdkMessageLike, ctx: MapContext): AgentEvent[] {
-  const base = { agentId: AGENT, at: ctx.now, raw: msg } as const
+  const base = { agentId: ctx.agentId, at: ctx.now, raw: msg } as const
   const events: AgentEvent[] = []
 
   if (msg.usage !== undefined) {
@@ -1332,7 +1339,7 @@ export function mapUserInputRequest(
 
   if (questions.length === 0) return null
 
-  return { id, agentId: AGENT, questions, expiresAt: ctx.now + ctx.approvalTtlMs }
+  return { id, agentId: ctx.agentId, questions, expiresAt: ctx.now + ctx.approvalTtlMs }
 }
 
 /**
@@ -1461,7 +1468,7 @@ export function mapToolPermission(
   if (toolName === EDITOR_EDIT_TOOL) {
     const editor = editorEditApproval(input)
     if (editor !== null) {
-      return { id, agentId: AGENT, kind: 'editorEdit', expiresAt, ...said, ...editor }
+      return { id, agentId: ctx.agentId, kind: 'editorEdit', expiresAt, ...said, ...editor }
     }
   }
 
@@ -1470,7 +1477,7 @@ export function mapToolPermission(
     const target = describeTarget(input)
     return {
       id,
-      agentId: AGENT,
+      agentId: ctx.agentId,
       kind: 'mcpToolCall',
       expiresAt,
       ...said,
@@ -1485,7 +1492,7 @@ export function mapToolPermission(
     const command = input['command']
     return {
       id,
-      agentId: AGENT,
+      agentId: ctx.agentId,
       kind: 'command',
       expiresAt,
       ...said,
@@ -1499,7 +1506,7 @@ export function mapToolPermission(
     const path = input['file_path'] ?? input['notebook_path']
     return {
       id,
-      agentId: AGENT,
+      agentId: ctx.agentId,
       kind: 'fileChange',
       expiresAt,
       ...said,
@@ -1517,7 +1524,7 @@ export function mapToolPermission(
   // being spawned and a todo list being written.
   return {
     id,
-    agentId: AGENT,
+    agentId: ctx.agentId,
     kind: 'permissionGrant',
     expiresAt,
     ...said,

@@ -83,3 +83,21 @@ export function splitTrailingPaths(text: string): { body: string; paths: string[
   }
   return { body: body.replace(/\s+$/, ''), paths }
 }
+
+export const NOTE_IMAGE_DRAG_TYPE = 'application/x-chorus-note-image'
+
+export const NOTE_IMAGE_URL_PREFIX = 'chorus-note://image/'
+
+export function noteImageUrls(data: string): string[] {
+  if (data === '') return []
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(data)
+  } catch {
+    return []
+  }
+  if (!Array.isArray(parsed)) return []
+  return parsed.filter(
+    (item): item is string => typeof item === 'string' && item.startsWith(NOTE_IMAGE_URL_PREFIX)
+  )
+}

@@ -122,14 +122,44 @@ function stopHeartbeat(): void {
   heartbeat = null
 }
 
+/**
+ * Puts the views back, and drops the stills **after** they are up.
+ *
+ * Clearing first is what `hide()` spends a paragraph preventing, arriving from
+ * the other side: it unmounts the `<img>` while the surfaces are still down, so
+ * the editor region is empty for the length of one round trip. That is a black
+ * flash on *every* close, where the one on the way in only happens when there is
+ * no previous still to cover it.
+ *
+ * Holding the still a few milliseconds too long costs nothing, because it is
+ * painted underneath the view — the moment the surface is up, nobody can see
+ * what is behind it. There is no symmetrical risk to trade against.
+ *
+ * Dropped on a refusal too. A rejected call means the views are coming back
+ * anyway or the surface is gone, and a still left painted with nothing to clear
+ * it would freeze that region for the rest of the session.
+ */
 function show(): void {
-  stills.set({})
   // Same reason as `hide()` above: the optional chain is load-bearing wherever
-  // `window.chorus` is not injected.
+  // `window.chorus` is not injected. It short-circuits the whole chain, so the
+  // clear below does not run there either — and there are no surfaces in either
+  // of those documents, so there is nothing left painted.
   // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition
-  void window.chorus?.setWorkbenchVisible({ visible: true }).catch(() => {
-    /* nothing to undo; the views are already being asked to come back */
-  })
+  void window.chorus
+    ?.setWorkbenchVisible({ visible: true })
+    .catch(() => {
+      /* nothing to undo; the views are already being asked to come back */
+    })
+    .then(() => {
+      /*
+       * A hide that began while this was in flight owns the region now, and has
+       * already painted its own stills. Clearing here would blank the editor
+       * under the overlay that had just opened — the same race `hide()` answers
+       * by discarding a capture that arrives after `depth` is back to zero.
+       */
+      if (depth > 0) return
+      stills.set({})
+    })
 }
 
 /**
