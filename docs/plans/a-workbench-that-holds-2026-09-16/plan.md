@@ -6,7 +6,7 @@
 | ------------------------------------- | ---------------------- | ------ | ------------------------------------------------------------------------------------------------------- |
 | 0 — Research                          | ✅ done                | —      | Three agents, read-only. Findings below.                                                                |
 | 1 — The port in the name              | ⏸️ parked 2026-09-16   | —      | Its premise was already fixed by `workspaceIdFor`, and the residual is not observable.                  |
-| 2 — A workbench that is not throttled | ✅ written, unverified | —      | Realm survives; the page is hidden and throttled while detached. Was "a socket that outlives its view". |
+| 2 — A workbench that is not throttled | ✅ verified 2026-09-16 | `1de72c0` | Measured before and after. `detached` went from `hidden` to `visible`, and no `visibilitychange` fires at all. |
 | 3 — Focus, honestly                   | ⬜ not started         | —      | No documented API. Two architectural routes only.                                                       |
 | 4 — Extensions per workspace          | ⬜ not started         | —      | Closes C-063 with upstream machinery.                                                                   |
 | 5 — Remote over SSH                   | ⬜ not started         | —      | No resolver. One authority, pointed elsewhere.                                                          |
@@ -196,6 +196,24 @@ both-open     2  destroyed=false  before=hidden   detached=hidden               
 source-closes 1  destroyed=false  before=visible  detached=hidden                    after=hidden   frames=1
 source-closes 2  destroyed=false  before=hidden   detached=hidden  afterClose=hidden  after=hidden   frames=1
 ```
+
+**Verified after the fix, same probe, same machine, 2026-09-16:**
+
+```
+both-open 1  destroyed=false  before=visible  detached=visible  events=[]  after=visible  frames=6
+both-open 2  destroyed=false  before=visible  detached=visible  events=[]  after=visible  frames=57
+```
+
+`detached` went from `hidden` to `visible`, and `events=[]` throughout — the
+`visibilitychange` listener never fires, so the page is never told it is hidden.
+That is the claim, measured on the real path rather than argued.
+
+**One thing the fix does not do, stated so nobody reads more into it.** The frame
+counter did not climb across step 2's detached window (6 before, 6 after 500 ms).
+Frames come from the compositor and an unparented view has no surface to draw
+into, so rAF stalling there is expected and was never the target. The target was
+`visibilityState`, because that is what gates renderer timers — the client's
+reconnection schedule and `scm-refresh.ts`'s own debounce.
 
 **`source-closes` carries the case that matters.** Its `afterClose` reading is
 taken with the view detached _and_ the window it came from closed, and it still

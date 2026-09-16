@@ -84,8 +84,19 @@ function surfaceViews(window: BrowserWindow): WebContentsView[] {
 }
 
 export function runReparentCheck(main: BrowserWindow, mode: ReparentMode): void {
-  const target = new BrowserWindow({ width: 1_000, height: 720 })
-  const relay = mode === 'source-closes' ? new BrowserWindow({ width: 1_000, height: 720 }) : null
+  const spare = (): BrowserWindow => new BrowserWindow({ width: 1_000, height: 720 })
+
+  let target = spare()
+  let relay = mode === 'source-closes' ? spare() : null
+
+  const liveTarget = (): BrowserWindow => {
+    if (target.isDestroyed()) target = spare()
+    return target
+  }
+  const liveRelay = (): BrowserWindow => {
+    if (relay === null || relay.isDestroyed()) relay = spare()
+    return relay
+  }
 
   let current = main
   let step = 0
@@ -108,6 +119,7 @@ export function runReparentCheck(main: BrowserWindow, mode: ReparentMode): void 
         return
       }
 
+      if (current.isDestroyed()) current = main
       const candidates = surfaceViews(current)
       const view = chosen ?? candidates[0]
       if (view === undefined) {
@@ -129,26 +141,33 @@ export function runReparentCheck(main: BrowserWindow, mode: ReparentMode): void 
       let detached: string
       let afterClose = 'n/a'
 
-      if (mode === 'both-open') {
-        const to = current === main ? target : main
-        detached = await moveView(current, to, view)
-        current = to
-      } else if (step === 0) {
-        const spare = relay
-        if (spare === null) return
-        detached = await moveView(current, spare, view)
-        current = spare
-      } else {
-        const spare = relay
-        if (spare === null) return
-        spare.contentView.removeChildView(view)
-        await pause(SETTLE_MS)
-        detached = await evaluate(view, SAMPLE)
-        spare.close()
-        await pause(SETTLE_MS)
-        afterClose = await evaluate(view, SAMPLE)
-        place(target, view)
-        current = target
+      const origin = current
+      try {
+        if (mode === 'both-open') {
+          const to = current === main ? liveTarget() : main
+          detached = await moveView(current, to, view)
+          current = to
+        } else if (step === 0) {
+          const to = liveRelay()
+          detached = await moveView(current, to, view)
+          current = to
+        } else {
+          const held = liveRelay()
+          held.contentView.removeChildView(view)
+          await pause(SETTLE_MS)
+          detached = await evaluate(view, SAMPLE)
+          held.close()
+          await pause(SETTLE_MS)
+          afterClose = await evaluate(view, SAMPLE)
+          place(liveTarget(), view)
+          current = target
+        }
+      } catch (error: unknown) {
+        report('[reparent-check] move failed, returning the view:', String(error))
+        const home = origin.isDestroyed() ? main : origin
+        if (!home.isDestroyed() && !view.webContents.isDestroyed()) place(home, view)
+        current = home
+        return
       }
 
       await pause(SETTLE_MS)
@@ -170,8 +189,13 @@ export function runReparentCheck(main: BrowserWindow, mode: ReparentMode): void 
     }
   }
 
+  const guarded = (): Promise<void> =>
+    press().catch((error: unknown) => {
+      report('[reparent-check] press failed:', String(error))
+    })
+
   const registered = globalShortcut.register(SHORTCUT, () => {
-    void press()
+    void guarded()
   })
   report('[reparent-check]', registered ? 'armed' : 'shortcut unavailable', mode, SHORTCUT)
 
@@ -184,7 +208,7 @@ export function runReparentCheck(main: BrowserWindow, mode: ReparentMode): void 
     }
     await pause(WORKBENCH_WARMUP_MS)
     report('[reparent-check] auto run starting')
-    await press()
-    await press()
+    await guarded()
+    await guarded()
   })()
 }
