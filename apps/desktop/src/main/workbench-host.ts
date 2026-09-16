@@ -341,6 +341,38 @@ export interface WorkbenchRuntime {
   readonly quality: string
 }
 
+export interface RemoteWorkbenchOverride {
+  readonly runtime: WorkbenchRuntime
+  readonly root: string
+}
+
+export function remoteWorkbenchOverride(): RemoteWorkbenchOverride | null {
+  if (app.isPackaged) return null
+  const remoteAuthority = process.env['CHORUS_REMOTE_AUTHORITY']
+  const tokenFile = process.env['CHORUS_REMOTE_TOKEN_FILE']
+  const root = process.env['CHORUS_REMOTE_ROOT']
+  if (
+    remoteAuthority === undefined ||
+    remoteAuthority === '' ||
+    tokenFile === undefined ||
+    tokenFile === '' ||
+    root === undefined ||
+    root === ''
+  ) {
+    return null
+  }
+  const { manifest } = loadManifest(manifestPath())
+  return {
+    runtime: {
+      remoteAuthority,
+      connectionToken: readFileSync(tokenFile, 'utf8').trim(),
+      commit: manifest.client.vscodeCommit,
+      quality: manifest.client.quality,
+    },
+    root,
+  }
+}
+
 interface RunningHost {
   readonly child: ChildProcess
   readonly runtime: WorkbenchRuntime
@@ -1516,6 +1548,8 @@ export async function acquireWorkbenchRuntime(projectRoot: string): Promise<Work
    * to nothing — a legible refusal now beats an empty tree with no cause on screen.
    */
   if (shuttingDown) throw new Error('Chorus is shutting down; no workbench project can open.')
+  const remote = remoteWorkbenchOverride()
+  if (remote !== null) return remote.runtime
   if (hostFailure !== null) throw new Error(hostFailure)
 
   leases.add(projectRoot)

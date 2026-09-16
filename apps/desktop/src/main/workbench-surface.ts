@@ -57,6 +57,7 @@ import { applyWorkbenchContentSecurityPolicy, lockDownNavigation } from './secur
 import {
   acquireWorkbenchRuntime,
   releaseWorkbenchRuntime,
+  remoteWorkbenchOverride,
   type WorkbenchRuntime,
 } from './workbench-host.js'
 import {
@@ -672,8 +673,9 @@ function redeem(caller: WebContents, target: WorkbenchTarget): string {
 
 /** Everything a surface is told about itself. One project, one view, one server. */
 function describe(surface: Surface): WorkbenchConnection {
+  const remote = remoteWorkbenchOverride()
   return {
-    projectRoot: surface.projectRoot,
+    projectRoot: remote?.root ?? surface.projectRoot,
     remoteAuthority: surface.runtime.remoteAuthority,
     connectionToken: surface.runtime.connectionToken,
     commit: surface.runtime.commit,

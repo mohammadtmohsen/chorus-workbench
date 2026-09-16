@@ -191,6 +191,7 @@ const acquireWorkbenchRuntime = vi.fn((_root: string) => {
 const releaseWorkbenchRuntime = vi.fn((_root: string) => undefined)
 
 vi.mock('./workbench-host.js', () => ({
+  remoteWorkbenchOverride: () => null,
   acquireWorkbenchRuntime: (root: string) => acquireWorkbenchRuntime(root),
   // Braces, because the mock returns void and a shorthand arrow returning a void
   // expression is forbidden — the forwarding is the point, not the value.
