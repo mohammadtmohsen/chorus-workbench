@@ -25,7 +25,7 @@ import {
  * it; the renderer build now rejects Node built-ins so it cannot recur silently.
  */
 import { resolveDocument, type Provenance } from '@chorus/ide-protocol/document-identity'
-import { relativeInside, type Platform } from '@chorus/ide-protocol/paths'
+import { platformForRoot, relativeInside, type Platform } from '@chorus/ide-protocol/paths'
 import type { WorkbenchContext } from '../../../shared/workbench-ipc.js'
 
 /**
@@ -147,7 +147,7 @@ function resolveActive(
    * as an absolute path and which separator a relative one is written with, and
    * the root is the very path being compared against.
    */
-  const platform: Platform = root.startsWith('/') ? 'darwin' : 'win32'
+  const platform: Platform = platformForRoot(root, 'darwin')
   const resolved = resolveDocument(uri, platform)
   /*
    * An unresolvable scheme reports no path rather than guessing one. `untitled:`

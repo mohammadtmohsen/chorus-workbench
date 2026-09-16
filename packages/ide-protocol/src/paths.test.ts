@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { hasRoot, isInside, relativeInside } from './paths.js'
+import { hasRoot, isInside, platformForRoot, relativeInside } from './paths.js'
 
 const isWithin = isInside
 const relativeWithin = relativeInside
@@ -121,5 +121,48 @@ describe('hasRoot', () => {
   it('is plain isAbsolute on posix', () => {
     expect(hasRoot('/etc/passwd', 'darwin')).toBe(true)
     expect(hasRoot('src/a.ts', 'darwin')).toBe(false)
+  })
+})
+
+describe('a root that is a Windows drive path', () => {
+  const ROOT = 'C:/Users/user/chorus-reh'
+  const URI_ROOT = '/C:/Users/user/chorus-reh'
+  const FILE = 'c:/Users/user/chorus-reh/src/x.ts'
+
+  it('is recognised as Windows in either spelling, on any host', () => {
+    expect(platformForRoot(ROOT, 'darwin')).toBe('win32')
+    expect(platformForRoot(URI_ROOT, 'darwin')).toBe('win32')
+    expect(platformForRoot('/Users/me/proj', 'darwin')).toBe('darwin')
+    expect(platformForRoot('/Users/me/proj', 'win32')).toBe('win32')
+  })
+
+  it('contains a slash-stripped file path, whichever spelling the root uses', () => {
+    expect(isWithin(ROOT, FILE, platformForRoot(ROOT, 'darwin'))).toBe(true)
+    expect(isWithin(URI_ROOT, FILE, platformForRoot(URI_ROOT, 'darwin'))).toBe(true)
+  })
+
+  it('relativises to the same answer from either spelling', () => {
+    expect(relativeWithin(ROOT, FILE, platformForRoot(ROOT, 'darwin'))).toBe('src/x.ts')
+    expect(relativeWithin(URI_ROOT, FILE, platformForRoot(URI_ROOT, 'darwin'))).toBe('src/x.ts')
+  })
+
+  it('still refuses a sibling directory that merely shares a prefix', () => {
+    expect(isWithin(URI_ROOT, 'c:/Users/user/chorus-reh-old/x.ts', 'win32')).toBe(false)
+  })
+})
+
+describe('relativeWithin with a length-changing fold', () => {
+  it('does not shift the boundary on a lowercasing that widens', () => {
+    expect(relativeWithin('c:\\proj', 'C:\\proj\\İ\\x.ts', 'win32')).toBe('İ\\x.ts')
+    expect(relativeWithin('c:\\proj', 'C:\\proj\\src\\İ.ts', 'win32')).toBe('src\\İ.ts')
+  })
+})
+
+describe('relativeWithin across the two spellings of a drive root', () => {
+  it('returns the same relative path whichever side carries the leading slash', () => {
+    expect(relativeWithin('/C:/x', 'c:/x/y', 'win32')).toBe('y')
+    expect(relativeWithin('/C:/x', '/C:/x/y', 'win32')).toBe('y')
+    expect(relativeWithin('C:/x', '/C:/x/y', 'win32')).toBe('y')
+    expect(relativeWithin('C:/x', 'C:/x/y', 'win32')).toBe('y')
   })
 })

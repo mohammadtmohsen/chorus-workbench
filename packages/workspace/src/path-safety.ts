@@ -3,6 +3,7 @@ import { resolve } from 'node:path'
 import {
   hasRoot as hasRootOn,
   isInside as isInsideOn,
+  platformForRoot,
   relativeInside as relativeInsideOn,
 } from '@chorus/ide-protocol/paths'
 import { err, ok, type Result } from '@chorus/shared'
@@ -36,11 +37,11 @@ export function hasRoot(candidate: string): boolean {
 }
 
 export function isWithin(root: string, target: string): boolean {
-  return isInsideOn(root, target, process.platform)
+  return isInsideOn(root, target, platformForRoot(root, process.platform))
 }
 
 export function relativeWithin(root: string, target: string): string | null {
-  return relativeInsideOn(root, target, process.platform)
+  return relativeInsideOn(root, target, platformForRoot(root, process.platform))
 }
 
 export class PathEscapeError extends Error {

@@ -93,7 +93,13 @@ function endsWithSeparator(path: string, platform: Platform): boolean {
  * reason: Windows accepts both and VS Code emits `/` in places.
  */
 function normalize(p: string, platform: Platform): string {
-  return platform === 'win32' ? p.replace(/\//g, '\\').toLowerCase() : p
+  if (platform !== 'win32') return p
+  const folded = p.replace(/\//g, '\\').toLowerCase()
+  return /^\\[a-z]:/.test(folded) ? folded.slice(1) : folded
+}
+
+export function platformForRoot(root: string, otherwise: Platform): Platform {
+  return /^\/?[A-Za-z]:([\\/]|$)/.test(root) ? 'win32' : otherwise
 }
 
 /**
@@ -141,7 +147,17 @@ export function isInside(root: string, target: string, platform: Platform): bool
  */
 export function relativeInside(root: string, target: string, platform: Platform): string | null {
   if (!isInside(root, target, platform)) return null
-  return target.slice(endsWithSeparator(root, platform) ? root.length : root.length + 1)
+  const wanted = normalize(root, platform).length + (endsWithSeparator(root, platform) ? 0 : 1)
+  const skipped = platform === 'win32' && /^[\\/][A-Za-z]:/.test(target) ? 1 : 0
+  let folded = 0
+  let boundary = skipped
+  while (boundary < target.length && folded < wanted) {
+    const char = target[boundary]
+    if (char === undefined) break
+    folded += normalize(char, platform).length
+    boundary += 1
+  }
+  return target.slice(boundary)
 }
 
 /**
