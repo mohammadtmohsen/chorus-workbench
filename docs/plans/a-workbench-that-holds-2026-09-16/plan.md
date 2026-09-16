@@ -2,15 +2,15 @@
 
 ## Status
 
-| Phase                                 | Status                 | Commit | Notes                                                                                                   |
-| ------------------------------------- | ---------------------- | ------ | ------------------------------------------------------------------------------------------------------- |
-| 0 — Research                          | ✅ done                | —      | Three agents, read-only. Findings below.                                                                |
-| 1 — The port in the name              | ⏸️ parked 2026-09-16   | —      | Its premise was already fixed by `workspaceIdFor`, and the residual is not observable.                  |
+| Phase                                 | Status                 | Commit    | Notes                                                                                                          |
+| ------------------------------------- | ---------------------- | --------- | -------------------------------------------------------------------------------------------------------------- |
+| 0 — Research                          | ✅ done                | —         | Three agents, read-only. Findings below.                                                                       |
+| 1 — The port in the name              | ⏸️ parked 2026-09-16   | —         | Its premise was already fixed by `workspaceIdFor`, and the residual is not observable.                         |
 | 2 — A workbench that is not throttled | ✅ verified 2026-09-16 | `1de72c0` | Measured before and after. `detached` went from `hidden` to `visible`, and no `visibilitychange` fires at all. |
-| 3 — Focus, honestly                   | ⬜ not started         | —      | No documented API. Two architectural routes only.                                                       |
-| 4 — Extensions per workspace          | ⬜ not started         | —      | Closes C-063 with upstream machinery.                                                                   |
-| 5 — Remote over SSH                   | ⬜ not started         | —      | No resolver. One authority, pointed elsewhere.                                                          |
-| 6 — `33.0.9` → `36.2.7`               | ⬜ not started         | —      | Table stakes, not a fix. Its own migration.                                                             |
+| 3 — Focus, honestly                   | ⬜ not started         | —         | No documented API. Two architectural routes only.                                                              |
+| 4 — Extensions per workspace          | ⬜ not started         | —         | Closes C-063 with upstream machinery.                                                                          |
+| 5 — Remote over SSH                   | ⬜ not started         | —         | No resolver. One authority, pointed elsewhere.                                                                 |
+| 6 — `33.0.9` → `36.2.7`               | ⬜ not started         | —         | Table stakes, not a fix. Its own migration.                                                                    |
 
 Meta: written 2026-09-16, after a research round by `claude`, `codex` and `deepseek`.
 Nothing was run and nothing was changed. Every claim below is either a citation or
@@ -410,7 +410,49 @@ advertises focus management and exposes only fullscreen parameters, in both
 window focus as a recovery trigger, and no issue covers the multi-view embedder
 case.
 
-**So there are exactly two non-workaround routes, and both are large.** Compose
+**There is a third route, and it is the one being built.** Found by `codex` on
+2026-09-16, after both of the routes below had been written down as the only
+two. Do not fake focus, and do not reverse the architecture — instead give
+`BrowserHostService` an honest focus provider. The provider answers "is the
+`BrowserWindow` that currently contains this `WebContentsView` focused", which
+is VS Code's ordinary meaning of window focus, correctly restored for a host
+where one logical window holds several documents. Clicking the chat no longer
+reads as nobody watching, because the window is still focused.
+
+**What makes it bounded rather than open-ended.** The package already has the
+exact shape: `CustomBrowserHostService extends BrowserHostService` takes
+`_toggleFullScreen` and `_onDidChangeFullScreen` as leading static constructor
+args before the DI params, and overrides `onDidChangeFullScreen` with a getter
+that composes the injected event with `super`'s. Focus slots in the same way,
+beside it.
+
+**The wrinkle codex did not have, and it changes one sentence.** Chorus does not
+import `@codingame/monaco-vscode-host-service-override`, and it is not a direct
+dependency — `@codingame/monaco-vscode-api` depends on it
+(`pnpm-lock.yaml:4061`), so the api registers `IHostService` itself with no
+params. So this is not adding a registration, it is **overriding the api's own**,
+and Chorus's spread has to win. `BrowserHostService` is confirmed live in the
+built bundle — ten occurrences, plus `getActiveDocument().hasFocus` twice — so
+`scm-refresh.ts`'s account of the cause is correct rather than inferred.
+
+**The change, in five parts.**
+
+1. Add `@codingame/monaco-vscode-host-service-override@33.0.9` as a direct
+   dependency. It already resolves at that exact version transitively.
+2. `pnpm patch` it: `hasFocus?: () => boolean` and `onDidChangeFocus?: Event<boolean>`
+   on `BrowserHostServiceOverrideParams`, threaded as constructor args 2 and 3,
+   `__param` indices shifted by two, and getters that fall through to `super`
+   when the input is absent. Submit the identical change upstream.
+3. Main tracks the owning `BrowserWindow`'s focus per surface and pushes it to
+   the view. **The subscription has to follow the handoff**, because
+   `attachSurface` changes which window owns a surface.
+4. The preload exposes it and `services.ts` passes both into
+   `getHostServiceOverride`, spread late enough to win.
+5. `scm-refresh.ts` stays until the replacement is measured, then goes. Deleting
+   it first would trade a known workaround for a known bug.
+
+**The two routes this replaces, kept because they were the honest answer until
+the third was found.** Compose
 the chat and the workbench in one focus-bearing document, which trades away the
 native-view isolation that Preflight §4.1a chose deliberately. Or contribute a
 focus-provider parameter to the CodinGame host override upstream, and wait.

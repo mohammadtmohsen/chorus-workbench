@@ -61,6 +61,7 @@
     "@codingame/monaco-vscode-groovy-default-extension": "33.0.9",
     "@codingame/monaco-vscode-handlebars-default-extension": "33.0.9",
     "@codingame/monaco-vscode-hlsl-default-extension": "33.0.9",
+    "@codingame/monaco-vscode-host-service-override": "33.0.9",
     "@codingame/monaco-vscode-html-default-extension": "33.0.9",
     "@codingame/monaco-vscode-ini-default-extension": "33.0.9",
     "@codingame/monaco-vscode-java-default-extension": "33.0.9",
