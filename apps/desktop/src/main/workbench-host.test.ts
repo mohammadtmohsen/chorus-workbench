@@ -219,6 +219,13 @@ beforeEach(async () => {
   groups.clear()
   children.length = 0
   rmSync(TOKEN_FILE, { force: true })
+  /*
+   * And the port, for the same reason and one more: it is the file this phase
+   * exists for, and a test that leaves one behind would have the next test read a
+   * port it never chose — passing for the wrong reason in the exact place the
+   * phase's property is asserted.
+   */
+  rmSync(join(USER_DATA, 'workbench-server', 'chosen-port'), { force: true })
   processTable = ''
   psFails = false
   vi.resetModules()
@@ -722,5 +729,81 @@ describe('a server that goes without being asked', () => {
     expect(host.workbenchHostState().spawned).toBe(0)
     // And the credential goes with the process that needed it.
     expect(existsSync(TOKEN_FILE)).toBe(false)
+  })
+})
+
+/**
+ * Phase 1's property, and the only one that matters here: the *same* port on the
+ * next launch. Everything the phase buys — a stable authority, a stable
+ * `vscode-remote://` URI, the SCM view's stored repository key matching again —
+ * follows from two consecutive calls answering the same number, so that is what
+ * is asserted rather than the machinery that gets there.
+ */
+describe('the port this profile keeps', () => {
+  const portFile = (): string => {
+    mkdirSync(join(USER_DATA, 'workbench-server'), { recursive: true })
+    return join(USER_DATA, 'workbench-server', 'chosen-port')
+  }
+
+  it('chooses once, writes it down, and reuses it without probing again', async () => {
+    const file = portFile()
+    const probed: number[] = []
+    const probe = (port: number): Promise<boolean> => {
+      probed.push(port)
+      return Promise.resolve(port === 47_502)
+    }
+
+    expect(await host.chooseWorkbenchPort(file, probe)).toBe(47_502)
+    // First free in the range, and the two occupied ones are what it skipped.
+    expect(probed).toEqual([47_500, 47_501, 47_502])
+    expect(readFileSync(file, 'utf8')).toBe('47502')
+
+    /*
+     * The second call is the whole point. No probe at all, same answer — which is
+     * the difference between a port and a name.
+     */
+    probed.length = 0
+    expect(await host.chooseWorkbenchPort(file, probe)).toBe(47_502)
+    expect(probed).toEqual([])
+  })
+
+  it('keeps the recorded port even when it is no longer free, rather than moving on', async () => {
+    const file = portFile()
+    writeFileSync(file, '47510', { mode: 0o600 })
+
+    /*
+     * Failing closed, stated as an assertion. The probe says nothing in the range
+     * is free, and the answer is still the port on file — because a silent move to
+     * a different one would restore the churn this phase removes, and the workbench
+     * would forget everything again while looking like it started fine. The child
+     * is what reports the port is gone, in seconds and by name.
+     */
+    const probe = (): Promise<boolean> => Promise.resolve(false)
+    expect(await host.chooseWorkbenchPort(file, probe)).toBe(47_510)
+    expect(readFileSync(file, 'utf8')).toBe('47510')
+  })
+
+  it('replaces a file it cannot trust instead of handing it to the server', async () => {
+    const file = portFile()
+    // A truncated write, a hand edit, a value from some other program. Acting on
+    // any of these would put a number into `--port` that this code never chose.
+    writeFileSync(file, 'not-a-port', { mode: 0o600 })
+
+    expect(await host.chooseWorkbenchPort(file, () => Promise.resolve(true))).toBe(47_500)
+    expect(readFileSync(file, 'utf8')).toBe('47500')
+  })
+
+  it('refuses a file that only starts with a number', async () => {
+    const file = portFile()
+    /*
+     * The case a `parseInt` guard would have let through, which is why the check
+     * is on the string rather than on what `parseInt` makes of it:
+     * `parseInt('47510abc', 10)` is `47510`, a plausible port this code did not
+     * choose. In range, integer, and not ours.
+     */
+    writeFileSync(file, '47510abc', { mode: 0o600 })
+
+    expect(await host.chooseWorkbenchPort(file, () => Promise.resolve(true))).toBe(47_500)
+    expect(readFileSync(file, 'utf8')).toBe('47500')
   })
 })

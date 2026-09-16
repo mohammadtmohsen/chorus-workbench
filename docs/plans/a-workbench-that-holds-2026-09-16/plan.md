@@ -5,7 +5,7 @@
 | Phase                                 | Status                 | Commit               | Notes                                                                                                          |
 | ------------------------------------- | ---------------------- | -------------------- | -------------------------------------------------------------------------------------------------------------- |
 | 0 — Research                          | ✅ done                | —                    | Three agents, read-only. Findings below.                                                                       |
-| 1 — The port in the name              | ⏸️ parked 2026-09-16   | —                    | Its premise was already fixed by `workspaceIdFor`, and the residual is not observable.                         |
+| 1 — The port in the name              | 🔁 revived 2026-09-16  | —                    | The residual is observable after all: no branch in the status bar after every relaunch.                        |
 | 2 — A workbench that is not throttled | ✅ verified 2026-09-16 | `1de72c0`            | Measured before and after. `detached` went from `hidden` to `visible`, and no `visibilitychange` fires at all. |
 | 3 — Focus, honestly                   | ✅ verified 2026-09-16 | `1867518`, `2f07d03` | Measured with the workaround disabled: SCM refreshed with focus in the chat. `scm-refresh.ts` removed.         |
 | 4 — Extensions per workspace          | ⬜ not started         | —                    | Closes C-063 with upstream machinery.                                                                          |
@@ -70,8 +70,53 @@ The ordering below is by cost-to-benefit, not by severity.
 
 ## Phase 1 — The port in the name
 
+**🔁 Revived on 2026-09-16, the same day, because the revival condition below was
+met.** After relaunching with Phases 2 and 3 installed, Source Control showed one
+change while the status bar showed **no branch**. That is this phase's residual,
+and checking tabs was the wrong test for it.
+
+**The chain, read in the shipped `33.0.9` code.** The status bar branch is one of
+`provider.statusBarCommands`, drawn by `SCMActiveRepositoryController`, and
+`_updateStatusBar` returns immediately when there is no active repository
+(`activity.js:134-136`). The active repository is the latest of two sources —
+the active editor's repository, or the focused one (`scmViewService.js:224`). The
+SCM view remembers repositories by `getProviderStorageKey`, which is
+`providerId:label:rootUri` (`:37-38`), and `rootUri` is
+`vscode-remote://127.0.0.1:<port>/…`. After a relaunch the port differs, so the
+stored key never matches, `index === -1` at `:277`, and that branch **returns at
+`:293` — before the auto-focus at `:333-335`**. The repository is shown and never
+focused. With the editor area empty, both sources are undefined and there is no
+branch. Opening a file or the Source Control view sets one, which is why the
+branch reappears the moment you do.
+
+**Confirmed from the user's own storage, not only from the code.** `deepseek`
+computed `workspaceIdFor` for the project and matched it against the stored
+`scm:view:visibleRepositories`, which carries a previous launch's port (63821).
+
+**And a fix is what exposed it.** Before `workspaceIdFor`, every launch minted a
+new workspace bucket, so there was never a `previousState` to mismatch against —
+`:276` was false and auto-focus always ran. Stabilising the bucket made the stored
+state survive a relaunch, which is exactly what turned the port inside it from an
+invisible churn into a missing branch.
+
+**Do not clear the stale entries.** It would look like a fix and last exactly one
+launch. A stable port fixes it on the next launch after it lands: the first one
+still sees the old key, stores the new stable one, and every launch after matches.
+
+**The design, reconciled.** The user's decision was "persisted first-free port".
+Research since changes _how_ it is chosen, not that: not `bind(0)`, which returns
+from 49152–65535, the range the kernel hands to outbound connections; instead a
+free port probed from a sub-range below 49152 and outside `BROWSER_RESTRICTED_PORTS`,
+persisted beside the token under `serverDataDir()`, and passed as
+`--port <n>-<n>` so a taken port exits in seconds with the port named rather than
+logging silently for the full 60-second wait. The stdout readback stays exactly as
+it is, which is what keeps "never attach to a port Chorus did not open" true.
+
+---
+
 **⏸️ Parked on 2026-09-16, before a line was written, because the premise did not
-survive being checked.** Everything below is kept because the design work is
+survive being checked.** Kept below as the record of why it was parked, which was
+wrong in one respect: it tested tabs and not the SCM view. Everything below is kept because the design work is
 sound and the reasons it was parked are worth more than the phase was.
 
 **Its stated motivation is obsolete, and the plan was quoting a measurement its

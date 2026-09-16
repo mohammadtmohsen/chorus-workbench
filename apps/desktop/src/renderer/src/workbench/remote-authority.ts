@@ -1,13 +1,19 @@
 /**
  * Gives a project's *storage* one identity that survives a relaunch.
  *
- * **The problem is a port in a name.** The remote extension host is started with
- * `--port 0` and main reads the port back out of the child — deliberately, so
- * that Chorus can never attach to a server it did not start. The consequence is
- * that the workbench's authority is `127.0.0.1:<port>`, and so is every
- * `vscode-remote://` URI built from it. The port differs on every launch, so the
- * folder opened yesterday is a different folder today as far as the editor is
- * concerned.
+ * **The problem was a port in a name.** The workbench's authority is
+ * `127.0.0.1:<port>`, and so is every `vscode-remote://` URI built from it. The
+ * remote extension host used to be started with `--port 0`, so the port differed
+ * on every launch and the folder opened yesterday was a different folder today as
+ * far as the editor was concerned.
+ *
+ * **The port is fixed now** — Phase 1 gives each profile one persisted port, and
+ * the readback still confirms it — so the churn this file was written against is
+ * gone at its source. `workspaceIdFor` stays, and not only as a belt: it makes the
+ * identity a function of the **path** rather than of a URI, so a project keeps one
+ * storage bucket when its authority moves for a reason a stable port cannot help
+ * with — a remote host, a different profile, an installed build pointed at another
+ * root. Removing it would re-key every workspace the moment that happens.
  *
  * Measured rather than assumed: reimplementing VS Code's `stringHash` and
  * brute-forcing the port space matched all 35 `workspace:*` scopes in the durable

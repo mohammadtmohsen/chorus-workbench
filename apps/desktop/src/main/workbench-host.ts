@@ -12,6 +12,7 @@ import {
   statSync,
   writeFileSync,
 } from 'node:fs'
+import { createServer } from 'node:net'
 import { join } from 'node:path'
 import { promisify } from 'node:util'
 import { app, dialog } from 'electron'
@@ -192,6 +193,113 @@ function serverDataDir(): string {
   return join(app.getPath('userData'), 'workbench-server')
 }
 
+/**
+ * The port this profile uses, chosen once and kept — Phase 1.
+ *
+ * **Why a fixed port at all.** The authority is `127.0.0.1:<port>`, and it is
+ * written into every `vscode-remote://` URI the workbench builds. Anything the
+ * editor stores *inside* a workspace that names a resource therefore names a
+ * port, and anything keyed by such a name stops matching on the next launch. The
+ * storage identity was pinned by hand (`remote-authority.ts`, `workspaceIdFor`);
+ * the SCM view's repository keys were not, and the symptom was a Source Control
+ * panel that listed the change while the status bar showed no branch at all —
+ * `getProviderStorageKey` embeds the `rootUri`, the stored key never matches, and
+ * `scmViewService.js:293` returns before the auto-focus at `:333-335`.
+ *
+ * **The range, and why it is reasoned rather than copied.** Chromium restricts
+ * a set of ports a browser refuses to connect to, and VS Code vendors that list
+ * as `BROWSER_RESTRICTED_PORTS` — but `@codingame/monaco-vscode-api` does not
+ * ship `vs/base/node`, so it cannot be imported here and is not reproduced as 80
+ * lines that would drift. It does not need to be: the list runs from 1 to
+ * **10080**, so any range above that avoids every entry by construction. Below
+ * **49152**, this machine's `net.inet.ip.portrange.first`, so the choice never
+ * competes with the ports the kernel hands to outbound connections — which is
+ * what a `bind(0)` pick would have done. And clear of the ports a developer
+ * already has running: 3000, 5173, 8080, and this machine's own 30000–30040 from
+ * `~/bin/tpaDevPort.zsh`. Hence 47500–47999, five hundred wide, which is far more
+ * than one profile needs and still a single short range to reason about.
+ */
+const PORT_RANGE_FIRST = 47_500
+const PORT_RANGE_LAST = 47_999
+
+function chosenPortFile(): string {
+  return join(serverDataDir(), 'chosen-port')
+}
+
+/** Whether `127.0.0.1:<port>` can be bound here and now. */
+function canBind(port: number): Promise<boolean> {
+  return new Promise((resolve) => {
+    const probe = createServer()
+    probe.once('error', () => {
+      resolve(false)
+    })
+    probe.listen(port, '127.0.0.1', () => {
+      probe.close(() => {
+        resolve(true)
+      })
+    })
+  })
+}
+
+/**
+ * The persisted port, choosing one only when there is not one already.
+ *
+ * **Probed once and then never again.** The first free port in the range is
+ * written down and reused for every later launch, which is the property the whole
+ * phase exists for: a port that moves is a name that moves. Re-probing on each
+ * start would return the same number only by luck, and the storage keys that name
+ * it would churn exactly as before.
+ *
+ * **A persisted port that is later taken is not re-probed here.** Failing closed
+ * is the decision (see `start`), and silently choosing a new one would restore the
+ * churn this removes — a workbench that works today and has forgotten everything
+ * tomorrow, which is worse than one that says why it will not start.
+ *
+ * `file` and `probe` are parameters so the choice can be tested without a real
+ * filesystem or a real kernel, in the same spirit as `readServerPort` and
+ * `serverLauncher` above.
+ */
+export async function chooseWorkbenchPort(
+  file: string = chosenPortFile(),
+  probe: (port: number) => Promise<boolean> = canBind
+): Promise<number> {
+  /*
+   * Absent is the ordinary first run, not an error — so it is read through the
+   * same `catch` that treats any other unreadable file as "no port recorded yet",
+   * because the answer to both is the same probe.
+   */
+  let recorded: string
+  try {
+    recorded = readFileSync(file, 'utf8').trim()
+  } catch {
+    recorded = ''
+  }
+  /*
+   * **Digits and nothing else, before the range is even considered.** The value
+   * this file is written with is always `String(port)`, so a string that is not
+   * purely digits is a value this code did not write — and `parseInt` would accept
+   * one anyway: `parseInt('47510abc', 10)` is `47510`, and `'4751.5'` is `4751`.
+   * Both would be handed to `--port` as a number this code never chose — which is
+   * the whole of what this check is for.
+   *
+   * Anything rejected here is not an error. The range is about to be probed and
+   * the file overwritten, so a truncated or hand-edited file costs one probe
+   * rather than a refusal to start.
+   */
+  const held = /^\d+$/.test(recorded) ? Number.parseInt(recorded, 10) : Number.NaN
+  if (Number.isInteger(held) && held >= PORT_RANGE_FIRST && held <= PORT_RANGE_LAST) {
+    return held
+  }
+  for (let port = PORT_RANGE_FIRST; port <= PORT_RANGE_LAST; port += 1) {
+    if (!(await probe(port))) continue
+    writeFileSync(file, String(port), { mode: 0o600 })
+    return port
+  }
+  throw new Error(
+    `Chorus could not find a free port between ${String(PORT_RANGE_FIRST)} and ${String(PORT_RANGE_LAST)} for the workbench server. Something is holding all of them.`
+  )
+}
+
 async function download(
   url: string,
   into: string,
@@ -291,12 +399,20 @@ let startAbort: AbortController | null = null
  * Why the server is gone, when it went without being asked — and the reason this
  * is a dead end rather than a restart.
  *
- * Re-spawning would hand the next project a **new port**, and the workbench
- * session's CSP is built once with the first authority baked into it
- * (`workbench-surface.ts`'s `workbenchSession`). A second server would therefore
- * be refused by a `connect-src` that names the first one, and the surface would
- * open, connect to nothing, and render an empty tree — the same indistinguishable
- * failure the connection-token bug produced. Surface recreation and a dynamic CSP
+ * Re-spawning would hand the next project a **new connection token**, and every
+ * surface already open holds the old one in the descriptor it was given at
+ * creation. A second server mints a fresh token, so those surfaces would open,
+ * connect, fail to authenticate, and render an empty tree — the same
+ * indistinguishable failure the connection-token bug produced.
+ *
+ * **That reason used to be the port**, and Phase 1 is what changed it: the
+ * workbench session's CSP is built once with the first authority baked into it
+ * (`workbench-surface.ts`'s `workbenchSession`), so a re-spawn used to be refused
+ * by a `connect-src` naming a port the new server would not have. A fixed port
+ * means the authority now survives a restart, and the token is what does not.
+ * The conclusion is unchanged and this is still a dead end; what it is a dead end
+ * *for* is worth having right, because it is the difference between two fixes
+ * that look equally plausible from here. Surface recreation and a dynamic
  * authority have to be designed together; until they are, this fails closed and
  * says so.
  */
@@ -325,8 +441,12 @@ function noteDegradedServer(output: string): void {
 }
 
 /**
- * The port, read back out of the child's own stdout — never chosen, never
- * scanned, never assumed.
+ * The port, read back out of the child's own stdout — **requested now, but still
+ * never assumed**.
+ *
+ * It used to read "never chosen, never scanned, never assumed", and the first of
+ * those three stopped being true when Phase 1 gave the profile a fixed port. The
+ * other two are untouched, and the sentence below is the one that matters.
  *
  * This is `CLAUDE.md`'s e2e-harness rule one level out: attaching to a stale REH
  * from a previous run, possibly at a *different commit*, presents as a workbench
@@ -993,6 +1113,29 @@ async function start(): Promise<WorkbenchRuntime> {
     }
   }
 
+  /*
+   * **Requested rather than assigned, and confirmed either way.**
+   *
+   * `--port 0` asked the child to pick, so the authority was whatever it happened
+   * to get and every launch produced a different one. This asks for a number this
+   * profile has used before, which is what makes the authority — and every URI and
+   * storage key built from it — survive a relaunch.
+   *
+   * It does **not** weaken the readback below, which is the invariant this file's
+   * `:327-334` states: the authority is still built from what the child prints,
+   * never from what was requested. A port this process did not cause the child to
+   * open cannot become an authority, because the child would have to name it and
+   * it names only its own.
+   *
+   * **`<n>-<n>`, a one-element range, and not a plain `<n>`.** A plain integer is
+   * returned verbatim by the server's own `parsePort`, and on `EADDRINUSE` the
+   * server only logs — no fallback and no exit — so a taken port would leave a
+   * live, silent child and cost the full sixty-second port wait. The range form
+   * reaches `findFreePort`, which prints `--port: Could not find free port in
+   * range` on stderr and exits 1, landing on the exit arm below in seconds with
+   * the reason in hand.
+   */
+  const requestedPort = await chooseWorkbenchPort()
   const connectionToken = randomUUID()
   const tokenFile = join(data, 'connection-token')
   writeFileSync(tokenFile, connectionToken, { mode: 0o600 })
@@ -1002,9 +1145,8 @@ async function start(): Promise<WorkbenchRuntime> {
       script,
       '--host',
       '127.0.0.1',
-      // Zero, and the child tells us which one it got.
       '--port',
-      '0',
+      `${String(requestedPort)}-${String(requestedPort)}`,
       '--connection-token-file',
       tokenFile,
       '--server-data-dir',
@@ -1190,6 +1332,27 @@ async function start(): Promise<WorkbenchRuntime> {
   })
 
   /*
+   * **A disagreement is a fact to record, never an assumption to act on.**
+   *
+   * The child is asked for one port and could in principle bind another — a range
+   * of one leaves it nowhere to go but this is a fact about *this* build, not a
+   * promise `server-main.ts` makes. So it is logged rather than enforced: the
+   * authority is what the child reported in both cases, because that is the only
+   * value anything has confirmed is listening. Enforcing the requested number
+   * instead would be the "attach to a port Chorus did not open" failure with extra
+   * steps.
+   *
+   * It is not expected to fire. If it ever does, the persisted port is wrong for
+   * this profile and the log line is the only place that would say so.
+   */
+  if (port !== requestedPort) {
+    log.warn('the workbench server bound a different port than requested', {
+      requested: requestedPort,
+      bound: port,
+    })
+  }
+
+  /*
    * The window between the port being read and `host` being assigned, which was
    * open and is now closed.
    *
@@ -1289,6 +1452,21 @@ function awaitPort(
       // preferred when there is one, because ENOENT explains an exit that
       // "exited with null" does not.
       const failure = spawnError()
+      /*
+       * The saved port is taken, and the remedy is a file, so the message names it.
+       * `--port <n>-<n>` makes the server print this and exit rather than log
+       * silently, and failing closed is the decision: picking a new port here would
+       * silently move the authority and lose the editor's state for that launch.
+       */
+      const taken = /Could not find free port in range:\s*(\d+)/.exec(seen)?.[1]
+      if (failure === null && taken !== undefined) {
+        fail(
+          new Error(
+            `The workbench server could not use port ${taken}, because something else is holding it. Chorus keeps one port per profile so the editor remembers its state across relaunches, and it will not choose another one silently. Quit whatever is using that port, or delete ${chosenPortFile()} to let Chorus choose a new port the next time it starts.`
+          )
+        )
+        return
+      }
       fail(
         failure ??
           new Error(`The workbench server exited with ${String(code)}:\n${redactToken(seen)}`)
