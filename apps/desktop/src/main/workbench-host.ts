@@ -570,6 +570,13 @@ export function reapedOrphanedServers(
   return reapBarrier
 }
 
+/** One server still carrying this profile's marker when the sweep gave up. */
+export interface Survivor {
+  readonly pid: number
+  /** Its parent at listing time. `1` means an orphan; anything else is a live owner. */
+  readonly parent: number
+}
+
 export interface ReapResult {
   /** Confirmed dead — signalled **and** observed to have gone, never merely asked. */
   readonly killed: number
@@ -588,8 +595,16 @@ export interface ReapResult {
    *
    * Anything in here **owns this profile's server-data directory and token file**,
    * so `start` refuses to spawn beside it.
+   *
+   * Each one carries its **parent**, and the parent is what the refusal needs to
+   * say something true. A survivor whose parent is `1` is an orphan that outlived
+   * its Chorus and refused `SIGKILL`; a survivor with a live parent belongs to
+   * another running Chorus on this profile. The instruction for the person is
+   * opposite in the two cases — quit the other app, or kill a stray process — and
+   * one string covering both is how this refusal came to tell somebody to do
+   * something that could not work.
    */
-  readonly survivors: readonly number[]
+  readonly survivors: readonly Survivor[]
   /**
    * Why the sweep did not run, or `null` when it did — and the two reasons are
    * kept apart because a caller has to treat them oppositely.
@@ -644,14 +659,22 @@ export async function reapOrphanedWorkbenchServers(
     return { killed: 0, inspected: 0, survivors: [], skipped: 'sweep-failed' }
   }
 
-  const candidates: { pid: number; orphaned: boolean }[] = []
+  const candidates: { pid: number; ppid: number; orphaned: boolean }[] = []
   for (const line of listing.split('\n')) {
     // A substring match rather than a pattern: the data directory is a real path
     // and `pgrep -f` would read its punctuation as a regular expression.
     if (!line.includes(marker)) continue
     const [pid, ppid] = line.trim().split(/\s+/, 2).map(Number)
     if (pid === undefined || !Number.isInteger(pid) || pid === process.pid) continue
-    candidates.push({ pid, orphaned: ppid === 1 })
+    /*
+     * The parent is checked the same way the pid is, and for a reason the refusal
+     * made concrete: it is now printed. A `ps` line this could not parse used to
+     * cost nothing, because `orphaned` was simply false and the process was left
+     * alone. It would now reach the person as `pid NaN`, which is worse than
+     * saying nothing — so a malformed line is skipped rather than reported.
+     */
+    if (ppid === undefined || !Number.isInteger(ppid)) continue
+    candidates.push({ pid, ppid, orphaned: ppid === 1 })
   }
 
   const signalled: number[] = []
@@ -678,6 +701,13 @@ export async function reapOrphanedWorkbenchServers(
    * every connection — deleting it would refuse its handshakes silently, which is
    * §5.3's failure inflicted on somebody else's session. So: nothing alive for this
    * profile, or the file stays.
+   *
+   * The one exception is a child of *this* process that `host` does not hold, and
+   * it is named rather than handled: it is not reachable by any path this file
+   * knows of — every failure after the spawn reaps — and treating it as an orphan
+   * to kill would be a behaviour change nothing here has evidence for. If it ever
+   * is reachable, this condition would delete a token that child is still reading,
+   * which is the failure the paragraph above exists to prevent.
    */
   /*
    * Waited for, because a process that has just been `SIGKILL`ed still answers.
@@ -704,8 +734,15 @@ export async function reapOrphanedWorkbenchServers(
    * this profile's marker that is still there — the orphan that ignored `SIGKILL`
    * and the live session's server alike, because for the purpose of "may a new
    * server start here?" they are the same fact.
+   *
+   * They are **not** the same fact for the sentence the refusal prints, which is
+   * why each one keeps the parent it was listed with. "May a new server start
+   * here" is answered by liveness alone; "what should the person do about it" is
+   * not, and only the parent can tell the two apart.
    */
-  const survivors = candidates.map(({ pid }) => pid).filter((pid) => processAlive(pid))
+  const survivors = candidates
+    .filter(({ pid }) => processAlive(pid))
+    .map(({ pid, ppid }) => ({ pid, parent: ppid }))
   const killed = signalled.filter((pid) => !processAlive(pid)).length
 
   if (survivors.length === 0) rmSync(join(serverDataDir(), 'connection-token'), { force: true })
@@ -879,13 +916,26 @@ async function start(): Promise<WorkbenchRuntime> {
    * credential the older one is still reading — and neither of them wrong from its
    * own point of view.
    *
-   * So the survivors are re-checked **now** rather than trusted from the sweep:
-   * one may have been reaped by init in the meantime, and a refusal that outlives
-   * its reason is its own kind of wrong. Refusing happens **before the token is
-   * written and before anything is spawned**, so a refused start leaves the
-   * profile exactly as it found it.
+   * **So the survivors are re-checked now, and that takes two sweeps rather than
+   * one.** This used to read the memoised boot promise — `index.ts` starts it at
+   * `whenReady` — and a list frozen at boot cannot contain a server that appeared
+   * afterwards, while the refusal below prints it in the present tense. What the
+   * barrier guarantees is about *previous launches*; what the refusal reports is
+   * about *now*, and only a second sweep can answer that.
+   *
+   * The two are serialised rather than run together, and it is not politeness: the
+   * sweep removes the connection token when nothing is left alive for this profile,
+   * and a boot sweep still in flight could land that removal *after* the token is
+   * written below — leaving a running server reading a file that is not there.
+   *
+   * This cannot weaken the barrier. The fresh sweep still runs before anything is
+   * spawned and still refuses on a live survivor; all it adds is a survivor that
+   * appeared between boot and now, which is the one case the memo could not see.
+   * Refusing happens **before the token is written and before anything is spawned**,
+   * so a refused start leaves the profile exactly as it found it.
    */
-  const reaped = await reapedOrphanedServers()
+  await reapedOrphanedServers()
+  const reaped = await reapOrphanedWorkbenchServers()
   if (cancelled()) throw abortedError()
   /*
    * **A sweep that did not run is a refusal, not a clean bill of health.**
@@ -906,10 +956,33 @@ async function start(): Promise<WorkbenchRuntime> {
       'Chorus could not check for a workbench server left by an earlier session, so it will not start one. Restart Chorus and try again.'
     )
   }
-  const stillOwning = reaped.survivors.filter((pid) => processAlive(pid))
+  const stillOwning = reaped.survivors.filter((survivor) => processAlive(survivor.pid))
   if (stillOwning.length > 0) {
+    const listed = stillOwning.map((survivor) => `pid ${String(survivor.pid)}`).join(', ')
+    /*
+     * **Two facts, two sentences, because the instruction is opposite in each.**
+     *
+     * A survivor with a live parent belongs to another Chorus, and the only thing
+     * that helps is quitting *that* one. The old message said "Quit that process,
+     * or restart Chorus" — and restarting the Chorus showing the dialog is exactly
+     * the one action that cannot work, because the owner is the other app. That is
+     * not a wording problem: it sent somebody to the one remedy that was certain
+     * not to help, and the process table those words came from already knew which
+     * case it was.
+     *
+     * A survivor whose parent is `1` is an orphan that refused `SIGKILL`. Nothing
+     * here can name a different action for it, so the message says only what is
+     * true and leaves the remedy to the person.
+     */
+    const ownedByAnother = stillOwning.filter((survivor) => survivor.parent !== 1)
+    if (ownedByAnother.length > 0) {
+      const owners = [...new Set(ownedByAnother.map((survivor) => survivor.parent))]
+      throw new Error(
+        `Another Chorus is using this profile's workbench server (${listed}, belonging to pid ${owners.map(String).join(', ')}) and owns this profile's data directory. Quit that Chorus before opening a project here — restarting this one cannot help, because it does not own the server.`
+      )
+    }
     throw new Error(
-      `A workbench server from an earlier session is still running (pid ${stillOwning.join(', ')}) and owns this profile's data directory. Quit that process, or restart Chorus, before opening a project.`
+      `A workbench server from an earlier session is still running (${listed}) and owns this profile's data directory. It did not stop when asked, so quit that process before opening a project.`
     )
   }
 
@@ -1058,10 +1131,37 @@ async function start(): Promise<WorkbenchRuntime> {
    * `tkn=` cannot arrive here by a route nobody thought about.
    */
   const logFile = join(app.getPath('userData'), 'logs', 'workbench-server.log')
-  mkdirSync(join(app.getPath('userData'), 'logs'), { recursive: true })
+  /*
+   * **The one unguarded throw between the spawn and `host`, and it is wrapped for
+   * that reason rather than for its own.**
+   *
+   * A read-only home, a full disk, an `app.getPath` that does not exist — any of
+   * those throws here, in the window where a child is already running and nothing
+   * holds it. Every other failure below reaps what it spawned; this one would have
+   * returned the failure with the server still holding the port and the tree, which
+   * is the orphan shape the two `reapTree` calls below exist to prevent, reached by
+   * the one line nobody thought to wrap.
+   *
+   * Degrading rather than throwing: the log file is a diagnostic, and a workbench
+   * that cannot write one is still a workbench. `record` already swallows its own
+   * `appendFileSync` failure for the same reason.
+   */
+  let loggable = true
+  try {
+    mkdirSync(join(app.getPath('userData'), 'logs'), { recursive: true })
+  } catch {
+    loggable = false
+  }
   const record = (chunk: Buffer): void => {
     const output = chunk.toString()
     noteDegradedServer(output)
+    /*
+     * Skipped rather than attempted-and-caught, because this runs per stdout chunk
+     * and a server that has lost its log directory would otherwise pay a failing
+     * `open` on every one of them — a syscall that always throws, on the hot path,
+     * for a result already known.
+     */
+    if (!loggable) return
     try {
       appendFileSync(logFile, redactToken(output))
     } catch {

@@ -439,6 +439,12 @@ describe('the token a force-quit left behind', () => {
 
     expect(result.killed).toBe(0)
     expect(existsSync(TOKEN_FILE)).toBe(true)
+    /*
+     * And the parent it was listed with, which is the whole of what tells this
+     * case apart from an orphan. The refusal prints a different sentence for each,
+     * and it can only do that if the sweep carries the fact this far.
+     */
+    expect(result.survivors).toEqual([{ pid: 902, parent: 455 }])
   })
 })
 
@@ -506,7 +512,13 @@ describe('an orphan that will not die', () => {
     // sent, which would have read 1 here — success for having asked.
     expect(killed).toHaveBeenCalledWith(-901, 'SIGKILL')
     expect(result.killed).toBe(0)
-    expect(result.survivors).toEqual([901])
+    /*
+     * The parent travels with the survivor and is `1`, which is what makes this an
+     * orphan rather than another Chorus — and it is the fact the refusal reads to
+     * decide which sentence to print, so asserting the number alone would leave the
+     * message's only input untested.
+     */
+    expect(result.survivors).toEqual([{ pid: 901, parent: 1 }])
     expect(result.inspected).toBe(1)
     // And the token stays: something carrying this profile's marker is still
     // running, and it reads that file on every connection.
@@ -519,7 +531,15 @@ describe('an orphan that will not die', () => {
     wedgeOrphan(902)
 
     const started = host.acquireWorkbenchRuntime('/project').catch((error: unknown) => error)
-    await settle(4_000)
+    /*
+     * Two settle budgets, not one, and the number is the cost of the fresh sweep
+     * rather than slack. `start` awaits the boot sweep and then sweeps again, and
+     * a `SIGKILL`-proof orphan makes each of them spend its full three seconds
+     * waiting to see whether it went. So the worst case a person meets before
+     * being told anything doubled with that change — worth knowing, and worth the
+     * refusal being about the present rather than about boot.
+     */
+    await settle(7_000)
     const outcome = await started
 
     /*

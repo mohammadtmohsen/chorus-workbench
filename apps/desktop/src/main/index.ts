@@ -280,9 +280,17 @@ void app.whenReady().then(async () => {
        * what was found at boot.
        */
       if (survivors.length > 0) {
-        log.warn('a workbench server from an earlier session is still running', {
+        /*
+         * The same distinction the refusal makes, made here rather than left to
+         * the log reader. A survivor with a live parent is another Chorus on this
+         * profile and the app is about to refuse to open a project because of it;
+         * a survivor with parent `1` is an orphan that refused to die. Both words
+         * name what was found, and neither claims the other's cause.
+         */
+        log.warn('a workbench server is still running for this profile', {
           survivors,
           inspected,
+          ownedByAnotherChorus: survivors.some((survivor) => survivor.parent !== 1),
         })
       }
     })
