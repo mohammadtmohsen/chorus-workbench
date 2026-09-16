@@ -2,15 +2,15 @@
 
 ## Status
 
-| Phase                                 | Status                 | Commit               | Notes                                                                                                          |
-| ------------------------------------- | ---------------------- | -------------------- | -------------------------------------------------------------------------------------------------------------- |
-| 0 — Research                          | ✅ done                | —                    | Three agents, read-only. Findings below.                                                                       |
-| 1 — The port in the name              | 🔁 revived 2026-09-16  | —                    | The residual is observable after all: no branch in the status bar after every relaunch.                        |
-| 2 — A workbench that is not throttled | ✅ verified 2026-09-16 | `1de72c0`            | Measured before and after. `detached` went from `hidden` to `visible`, and no `visibilitychange` fires at all. |
-| 3 — Focus, honestly                   | ✅ verified 2026-09-16 | `1867518`, `2f07d03` | Measured with the workaround disabled: SCM refreshed with focus in the chat. `scm-refresh.ts` removed.         |
-| 4 — Extensions per workspace          | ⬜ not started         | —                    | Closes C-063 with upstream machinery.                                                                          |
-| 5 — Remote over SSH                   | ⬜ not started         | —                    | No resolver. One authority, pointed elsewhere.                                                                 |
-| 6 — `33.0.9` → `36.2.7`               | ⬜ not started         | —                    | Table stakes, not a fix. Its own migration.                                                                    |
+| Phase                                 | Status                 | Commit               | Notes                                                                                                                             |
+| ------------------------------------- | ---------------------- | -------------------- | --------------------------------------------------------------------------------------------------------------------------------- |
+| 0 — Research                          | ✅ done                | —                    | Three agents, read-only. Findings below.                                                                                          |
+| 1 — The port in the name              | ✅ verified 2026-09-16 | `2cb9885`            | The branch appears on the second launch with no click. Revived the same day, once the SCM symptom proved the residual observable. |
+| 2 — A workbench that is not throttled | ✅ verified 2026-09-16 | `1de72c0`            | Measured before and after. `detached` went from `hidden` to `visible`, and no `visibilitychange` fires at all.                    |
+| 3 — Focus, honestly                   | ✅ verified 2026-09-16 | `1867518`, `2f07d03` | Measured with the workaround disabled: SCM refreshed with focus in the chat. `scm-refresh.ts` removed.                            |
+| 4 — Extensions per workspace          | ⬜ not started         | —                    | Closes C-063 with upstream machinery.                                                                                             |
+| 5 — Remote over SSH                   | 🚧 5a–5b landed        | `a47c9f4`, `f12fa2e` | Dev-only seam through an SSH tunnel. An agent named a remote file's lines and quoted the selection. 5c–5e remain.                 |
+| 6 — `33.0.9` → `36.2.7`               | ⬜ not started         | —                    | Table stakes, not a fix. Its own migration.                                                                                       |
 
 Meta: written 2026-09-16, after a research round by `claude`, `codex` and `deepseek`.
 Nothing was run and nothing was changed. Every claim below is either a citation or
@@ -560,7 +560,173 @@ enablement, which is not established.
 
 ## Phase 5 — Remote over SSH
 
-**Goal.** Make "open a folder on another machine" work.
+**Revised 2026-09-16, after an evidence round with `deepseek`. Awaiting the user's
+approval; no code yet.**
+
+**What the evidence settled.**
+
+1. **The server outlives its SSH session.** Win32-OpenSSH issue #1751, "Child
+   processes is NOT killed on disconnect": deliberate, via
+   `JOB_OBJECT_LIMIT_BREAKAWAY_OK`, when there is no PTY (`ssh -t` kills them).
+   _The source-level confirmation is unproven_ — the tracker is the evidence. So a
+   remote server is not cleaned up by its session, and Phase 5 needs its own
+   cleanup.
+2. **Local and remote panes can coexist.** The one-authority limit is an
+   assumption, not a law: `WORKBENCH_PARTITION` is used once
+   (`workbench-surface.ts:216`), and the comment above the CSP call says "once" was
+   fine only because there was one server. `applyWorkbenchContentSecurityPolicy`
+   registers exactly three things, all on the `Session` it is passed —
+   `onHeadersReceived` (`security.ts:425`), `setPermissionRequestHandler` (`:487`),
+   `setPermissionCheckHandler` (`:494`). So the change is `configuredSession`
+   becoming a map keyed by authority, each with its own in-memory partition.
+3. **Identity comes from the token; the readback proves liveness.** The remote
+   port is requested — persisted, passed as `--port <n>-<n>` — so it is not learned.
+   The connection token is fresh per start, so a stale server on that port fails the
+   handshake loudly. A stale server _blocking_ the port makes the child exit 1 with
+   the range named, which is Phase 1's fail-closed path.
+4. **The tunnel is documented and rides over short drops.** `ssh -N -L` with
+   `ExitOnForwardFailure`, `ServerAliveInterval`/`ServerAliveCountMax` and
+   `ConnectTimeout`. The client retries on `[0, 5, 5, 10, 10, 10, 10, 10, 30]` with
+   the same `reconnectionToken`, and the server holds the session for
+   `--reconnection-grace-time 30` — so a tunnel back within thirty seconds on the
+   **same local port** is invisible. The tunnel's local port must therefore be
+   stable too.
+5. **Root paths: three sites fail loudly, the rest silently.** Loud:
+   `approveProjectRoot` (`workbench-surface.ts:282-301`) and `directoryExists` at
+   `project-service.ts:194,215`. Silent, and worse: `canonicalRoot`
+   (`project-match.ts:34`) resolves `C:/…` against this Mac's cwd into a
+   plausible wrong root, and `ide-bridge.ts:205,225`, `ipc.ts:119,926,1442`,
+   `file-write.ts:102` and `edit-preview.ts:92` compare against it without
+   complaint.
+6. **Drive-letter casing is a platform argument, not a missing comparison.**
+   VS Code lowercases the drive (`uri.js:344-346`), and `normalize`
+   (`ide-protocol/src/paths.ts:95-97`) folds case only for `'win32'` — but the
+   wrappers in `path-safety.ts:41-51` hardcode this Mac's platform. A remote root
+   must pass `'win32'`.
+7. **Upload the archive, extract on the host.** `tpa-be` is Windows 11
+   (`10.0.26200.0`) with `tar.exe` present and 385 GB free. The local extraction
+   patches the tree for _this_ platform (`platformKey()`, `workbench-host.ts:115`),
+   so a pre-patched Windows tree does not exist here. Upload the pinned `win32-x64`
+   `.tar.gz`, extract with the host's `tar.exe`, and patch `product.json` there.
+8. **Auto-shutdown is a companion, not a reaper.** `--enable-remote-auto-shutdown`
+   exits after a hardcoded five minutes with no clients
+   (`serverLifetimeService.ts:12`), and a tunnel drop cannot start it. But it calls
+   `process.exit(0)` without disposing the server (`:134-135`), so the forked
+   extension hosts are orphaned — C-065's leak. Use it to bound a forgotten server,
+   and still reap the tree properly.
+9. **There is no seam to point Chorus at a server it did not start** — by design.
+   `workbench-host.ts` reads one env var (`CHORUS_WORKBENCH_CACHE`), and
+   `WorkbenchTarget` is `.strict()` on `{grant}` or `{projectId}`
+   (`workbench-ipc.ts:560-564`). A hand proof needs a dev-only seam, built to be
+   deleted.
+
+**The slices, in order.**
+
+- **5a — Prove the chain by hand.** A dev-only seam that skips the spawn and takes
+  an authority and token; `configuredSession` keyed by authority; the server
+  started on `tpa-be` by hand and tunnelled by hand. Proves points 1, 2, 4 and 6
+  before any automation. **Needs a write on `tpa-be`**, which is Ahmad's machine.
+- **5b — The agent sees the open file.** Pass `'win32'` for a remote root through
+  the path wrappers so editor context is relativised correctly. This is the stated
+  "done".
+- **5c — A remote project identity.** `{ host, root }` in the registry, with remote
+  arms in `approveProjectRoot` and `directoryExists`, and `CanonicalRoot` meaning a
+  remote root where it is one.
+- **5d — Chorus runs it.** Upload once per commit, extract with `tar.exe`, patch
+  `product.json`, start with a persisted `--port <n>-<n>`, a fresh token and
+  `--enable-remote-auto-shutdown`, and supervise the tunnel on a stable local port.
+- **5e — Clean up on the host.** A PowerShell reaper that kills the server's
+  process tree by its `--server-data-dir` marker. **Before this is ever left
+  running unattended on a colleague's machine**, not after.
+
+**Still unproven, and carried as such.** The source-level Win32-OpenSSH behaviour.
+How auto-shutdown's orphaned extension hosts behave on Windows specifically.
+
+---
+
+**The draft this revision replaced — kept for what changed.**
+
+**Draft, 2026-09-16 — to be attacked with evidence before any code.**
+
+**Goal, in the user's words.** Open `tpa-be` → `C:/TPA-MEDEXA/MasterTPABackend`
+as a Chorus project, with no VS Code, from home or the office. The editor runs on
+that machine. The agents see what is open in it, as they do for a local project.
+**Done** when that project opens from Chorus and an agent can answer about the
+file in front of the user.
+
+**Decided with the user.**
+
+- First target is `tpa-be`: Windows, PowerShell 5.1, Ahmad's working tree.
+- Reach is solved. `ssh tpa-be` jumps through `officepc`, verified end to end on
+  2026-09-16. Nothing changed on Ahmad's machine.
+- **No local copy of the backend.** When the connection is down, nothing can be
+  edited. Accepted as the cost of keeping that rule.
+- Chorus uploads the server itself, as VS Code does.
+- A remote project is a host plus a path — the same two parts as
+  `vscode-remote://ssh-remote+tpa-be/C:/TPA-MEDEXA/MasterTPABackend`.
+- Agents keep editing with their own `ssh` commands for now. Reading editor
+  context is in scope. Editing through the editor is undecided.
+
+**Evidence already in hand.**
+
+1. **The matching Windows server is already pinned.**
+   `build/workbench-runtime.json` carries `win32-x64`, commit
+   `987c9597516278c9fcf10d963a0592ce1384ab93`, quality `stable` — the same pair
+   the client speaks. No new artifact is needed.
+2. **The CSP accepts a tunnel.** `security.ts:133` admits any
+   `^[A-Za-z0-9.\-[\]:]+:\d+$`, so a forward's local end, `127.0.0.1:<port>`, is a
+   valid authority as it stands.
+3. **A project is a local folder today.** `approveProjectRoot` canonicalises on
+   this disk, `project-service.ts:77` requires `statSync(path).isDirectory()`, and
+   the registry looks projects up by `canonicalRoot` (`:115`). A Windows path on
+   another machine passes none of those.
+4. **Agents are given a local `cwd`** (`runtime.ts:316`, `:339`, `:1361`, and both
+   adapters). A remote project has none.
+5. **One surface, one runtime.** `openSurface` calls
+   `acquireWorkbenchRuntime(projectRoot)` at `workbench-surface.ts:894`, which is
+   the single shared local server.
+
+**The shape, as a draft.**
+
+- A remote project identity, `{ host, root }`, stored beside local projects and
+  never canonicalised against this disk.
+- A remote runtime per host. Over `ssh`: ensure the pinned `win32-x64` server is
+  on the host, cached by commit so it uploads once; start it bound to
+  `127.0.0.1` on the host, with `--port <n>-<n>` and a fresh connection token; read
+  the port back from that server; then hold `ssh -N -L <local>:127.0.0.1:<remote>`
+  open. The authority is `127.0.0.1:<local>`.
+- `openSurface` picks the local lease or the remote runtime by project kind.
+- Editor context reaches the agents with remote paths.
+
+**Open questions — each needs proof, not reasoning.**
+
+1. **Does a process started over OpenSSH on Windows survive the session ending?**
+   If the session's job object takes it down, the server needs a documented way to
+   outlive it — and that decides everything about lifetime and cleanup.
+2. **How is "never attach to a port Chorus did not open" kept** when the server
+   runs detached on another machine and its stdout is not Chorus's to read?
+3. **The workbench partition is one constant, and its CSP is built with one
+   authority** (`:1009` of `workbench-host.ts`). Would a remote pane's
+   `127.0.0.1:<tunnel>` be refused by `connect-src` while a local pane is open?
+   If so, local and remote panes cannot coexist, and that is a design constraint.
+4. **How deep does "root is a local path" run?** The event store, the permission
+   engine (`resolveWithinRoot`), `projectRelativePath`, agent `cwd`. Which break for
+   a remote root, and which only need a different identity?
+5. **Do editor-context paths survive a Windows root?** A `vscode-remote://` path
+   for `C:/…` is `/c:/…`, and the relativising was written for POSIX roots.
+6. **Tunnel supervision.** How main holds `ssh -N -L` through a `ProxyJump`,
+   notices it dropping, and reconnects — and what the workbench sees meanwhile.
+7. **Upload and unpack on the host.** Whether `tar.exe` is present under
+   PowerShell 5.1 there, and whether the product-commit patch
+   (`patchProductCommit`) is applied to the remote copy or shipped pre-patched.
+
+**What this phase is not doing.** Microsoft's Remote-SSH, or `open-remote-ssh` as a
+resolver — both ruled out below. A local copy, or file sync. Agents editing through
+the editor. Linux or macOS hosts, until Windows works.
+
+---
+
+**Background: why this route.** Kept from the research round.
 
 **The Microsoft extension will never work and is not the route.**
 `ms-vscode-remote.remote-ssh` is proprietary and licensed to official VS Code
