@@ -58,6 +58,8 @@ import { ChorusStorageDatabase, ChorusStorageService } from './storage.js'
 import { IClipboardService } from '@codingame/monaco-vscode-api/vscode/vs/platform/clipboard/common/clipboardService.service'
 import { ChorusClipboardService } from './clipboard.js'
 import { workspaceIdFor } from './remote-authority.js'
+import { onDidChangeWindowFocus, windowHasFocus } from './window-focus.js'
+import getHostServiceOverride from '@codingame/monaco-vscode-host-service-override'
 import getLifecycleServiceOverride from '@codingame/monaco-vscode-lifecycle-service-override'
 import getEnvironmentServiceOverride from '@codingame/monaco-vscode-environment-service-override'
 import getWorkspaceTrustOverride from '@codingame/monaco-vscode-workspace-trust-service-override'
@@ -500,6 +502,29 @@ export function prepareWorkbench(connection: WorkbenchConnection): WorkbenchSetu
     ),
     ...getSecretStorageServiceOverride(),
     ...getLifecycleServiceOverride(),
+    /*
+     * **Overriding the library's own registration rather than adding one.**
+     *
+     * `@codingame/monaco-vscode-api` depends on this override and spreads it in
+     * itself, with no parameters, so `IHostService` is already registered by the
+     * time this map is read. `initialize` merges `{...defaults, ...overrides}` —
+     * the caller's map last — so this entry is what replaces it, and the one that
+     * has to be right is this one.
+     *
+     * Nothing here competes for the key, so the placement is not load-bearing the
+     * way `IClipboardService`'s at the bottom of this map is. It sits with the
+     * other ambient services because that is what it is.
+     *
+     * `hasFocus` is a getter over module state rather than a closure over
+     * anything in this function: `seedWindowFocus` has already run by the time
+     * this is called, and main keeps it current afterwards. `onDidChangeFocus` is
+     * `Event<void>` and carries nothing — the host service recomputes the value
+     * from `hasFocus`, and a payload would be a second source for one fact.
+     */
+    ...getHostServiceOverride({
+      hasFocus: windowHasFocus,
+      onDidChangeFocus: onDidChangeWindowFocus,
+    }),
     ...getEnvironmentServiceOverride(),
     ...getWorkspaceTrustOverride(),
     ...getWorkingCopyServiceOverride(),

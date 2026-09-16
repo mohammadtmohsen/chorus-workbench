@@ -2,7 +2,7 @@ import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSyn
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterAll, beforeEach, describe, expect, it, vi } from 'vitest'
-import { WorkbenchConnection } from '../shared/workbench-ipc.js'
+import { WORKBENCH_FOCUS_CHANNEL, WorkbenchConnection } from '../shared/workbench-ipc.js'
 
 /**
  * The whole class of defect here is a control that appears to exist because it
@@ -199,6 +199,21 @@ vi.mock('./workbench-host.js', () => ({
   },
 }))
 
+/**
+ * One window, with the focus state it reports.
+ *
+ * The focus members are here because main binds `focus` and `blur` on the owning
+ * `BrowserWindow` and reads `isFocused()` when it pushes. A double without them
+ * does not fail an assertion — it throws `TypeError: window.on is not a
+ * function` while `openSurface` is still running, taking thirty-five tests down
+ * at once. That is the same shape the `ipcMain.on` note above describes: a fake
+ * missing a method the production code calls reports as a broken suite rather
+ * than as a broken fake, which is the more expensive of the two to diagnose.
+ *
+ * `focused` and `gone` are flippable rather than fixed, because the two things
+ * worth asserting about a window here — the value a surface is told, and the
+ * teardown when its window closes under it — are both about a window *changing*.
+ */
 const fakeWindow = {
   contentView: {
     children: [] as unknown[],
@@ -208,6 +223,28 @@ const fakeWindow = {
     removeChildView(view: unknown) {
       this.children = this.children.filter((child) => child !== view)
     },
+  },
+  listeners: new Map<string, ((...args: unknown[]) => void)[]>(),
+  on(event: string, listener: (...args: unknown[]) => void): void {
+    this.listeners.set(event, [...(this.listeners.get(event) ?? []), listener])
+  },
+  off(event: string, listener: (...args: unknown[]) => void): void {
+    this.listeners.set(
+      event,
+      (this.listeners.get(event) ?? []).filter((held) => held !== listener)
+    )
+  },
+  /** A copy, because a listener that unbinds itself must not skip its neighbour. */
+  emit(event: string, ...args: unknown[]): void {
+    for (const listener of [...(this.listeners.get(event) ?? [])]) listener(...args)
+  },
+  focused: true,
+  isFocused(): boolean {
+    return this.focused
+  },
+  gone: false,
+  isDestroyed(): boolean {
+    return this.gone
   },
 }
 
@@ -261,6 +298,19 @@ beforeEach(() => {
   // the wrong reason.
   appState.isPackaged = false
   delete process.env['CHORUS_WORKBENCH_E2E_ROOTS']
+  /*
+   * Focus, on the window and on its listener list.
+   *
+   * `closeAllSurfaces` above should already have torn every watcher down, and
+   * this does not rely on it for two reasons. A test that flips `gone` leaves a
+   * teardown that deliberately returns early, so its listeners survive it — and a
+   * listener surviving into the next test fires a push into a surface that test
+   * never created, which reads as an unexplained extra entry in `sent` rather
+   * than as a leak.
+   */
+  fakeWindow.focused = true
+  fakeWindow.gone = false
+  fakeWindow.listeners.clear()
 })
 
 const lastView = (): FakeWebContentsView =>
@@ -1006,5 +1056,57 @@ describe('the shared server lease', () => {
       /needs a window/
     )
     expect(releaseWorkbenchRuntime).toHaveBeenCalledWith(ROOT_B)
+  })
+})
+
+describe('the window a surface reports on', () => {
+  it('answers the pull with the owning window, and never with a claim', async () => {
+    const grant = await grantFor(shell, ROOT_A)
+    await surface.openSurface(shell as never, { grant }, undefined)
+    const view = lastView()
+
+    /*
+     * The sender decides which surface is asked about, exactly as the connection
+     * channel does — the request carries no view id, because a name a renderer
+     * sends is a claim and a sender is a fact.
+     */
+    fakeWindow.focused = true
+    expect(handlers.get(WORKBENCH_FOCUS_CHANNEL)?.({ sender: view.webContents })).toBe(true)
+
+    fakeWindow.focused = false
+    expect(handlers.get(WORKBENCH_FOCUS_CHANNEL)?.({ sender: view.webContents })).toBe(false)
+  })
+
+  it('pushes a change to that surface rather than leaving it to be asked', async () => {
+    const grant = await grantFor(shell, ROOT_A)
+    await surface.openSurface(shell as never, { grant }, undefined)
+    const view = lastView()
+
+    fakeWindow.focused = false
+    fakeWindow.emit('blur')
+
+    /*
+     * The value, not the event: what the workbench does with this is recompute
+     * whether to keep refreshing, and a push that carried "something changed"
+     * would leave it to ask a question it is being told the answer to.
+     */
+    expect(view.webContents.sent).toEqual([false])
+  })
+
+  it('stops reporting on a window it no longer belongs to', async () => {
+    const grant = await grantFor(shell, ROOT_A)
+    await surface.openSurface(shell as never, { grant }, undefined)
+    expect(fakeWindow.listeners.get('focus')).toHaveLength(1)
+
+    surface.beginHandoff(shell as never, ROOT_A, new FakeWebContents() as never, 'detach')
+
+    /*
+     * A handoff leaves the surface owned by nobody until it lands in its new
+     * window, and a subscription that survived the trip would go on reporting the
+     * window the project was dragged *out of* — for the rest of the session,
+     * silently, because the answer is a boolean and both values are legal.
+     */
+    expect(fakeWindow.listeners.get('focus')).toHaveLength(0)
+    expect(fakeWindow.listeners.get('blur')).toHaveLength(0)
   })
 })

@@ -43,6 +43,8 @@ import type { ChorusWorkbenchApi, WorkbenchConnection } from '../shared/workbenc
  * an error.
  */
 export const CONNECTION_CHANNEL = 'workbench:connection'
+/* The window-focus pair, push and pull on one name, under the same test. */
+export const FOCUS_CHANNEL = 'workbench:focus'
 /*
  * Persistence channels are spelled out for the same reason and carry the same
  * risk. A test asserts them against the shared constants, because a channel name
@@ -164,6 +166,31 @@ const api: ChorusWorkbenchApi = {
     if (parsed === null) throw new Error('Malformed workbench connection descriptor')
     buffered = parsed
     return parsed
+  },
+
+  /*
+   * Not buffered, unlike the connection above, and the difference is the point.
+   *
+   * A descriptor is a fact about this document that never changes, so caching it
+   * is right. Focus changes constantly, and a cached answer would be a workbench
+   * that believes a window is focused after the person has gone somewhere else.
+   * Every ask goes to main, which is the only side that can see the window.
+   */
+  windowHasFocus: async () => {
+    const raw: unknown = await ipcRenderer.invoke(FOCUS_CHANNEL)
+    /*
+     * Anything that is not `true` is `false`. The value drives whether VS Code's
+     * git extension refreshes, and the safe direction for a malformed answer is
+     * "nothing changed" — the state the workbench was already in — rather than a
+     * claim of focus that nothing can corroborate.
+     */
+    return raw === true
+  },
+
+  onWindowFocusChanged: (handler: (hasFocus: boolean) => void) => {
+    ipcRenderer.on(FOCUS_CHANNEL, (_event, hasFocus: unknown) => {
+      if (typeof hasFocus === 'boolean') handler(hasFocus)
+    })
   },
 
   /*

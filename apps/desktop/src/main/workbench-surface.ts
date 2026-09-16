@@ -16,6 +16,7 @@ import {
 } from 'electron'
 import {
   WORKBENCH_CONNECTION_CHANNEL,
+  WORKBENCH_FOCUS_CHANNEL,
   WORKBENCH_SHELL_CHANNELS,
   WORKBENCH_SHELL_CONTRACT,
   WORKBENCH_CONTEXT_CHANNEL,
@@ -722,6 +723,78 @@ function watchOwner(owner: WebContents): Set<string> {
 }
 
 /**
+ * Whether the window holding this surface is the one the person is in.
+ *
+ * A question about a **window**, never about the document — and that distinction
+ * is the whole of Phase 3. The workbench and the chat beside it are two documents
+ * in one window, so `document.hasFocus()` inside the workbench is false whenever
+ * the person is typing in Chorus's own composer, on an editor that is fully on
+ * screen. VS Code's git extension reads exactly that and parks itself in
+ * `whenIdleAndFocused()`, which is why a working-tree change made from the chat
+ * never reached the SCM view.
+ *
+ * `owner.isDestroyed()` is checked before `fromWebContents`, not after: Electron
+ * throws on a destroyed `WebContents` rather than answering `null`, and both
+ * callers here can race a window that is going away — one of them is a window
+ * event.
+ */
+function windowHasFocus(surface: Surface): boolean {
+  if (surface.owner.isDestroyed()) return false
+  const window = BrowserWindow.fromWebContents(surface.owner)
+  return window !== null && !window.isDestroyed() && window.isFocused()
+}
+
+/**
+ * Teardown for one surface's window-focus listeners, by view id.
+ *
+ * Keyed by surface rather than by window, because `attachSurface` changes which
+ * window owns a surface. A subscription bound once at creation would keep
+ * reporting the window a project was dragged *out of*, which is the "wrong name
+ * survives a re-key" failure in `CLAUDE.md` with a listener in place of a field.
+ */
+const focusWatchers = new Map<string, () => void>()
+
+function stopWatchingFocus(viewId: string): void {
+  focusWatchers.get(viewId)?.()
+  focusWatchers.delete(viewId)
+}
+
+/**
+ * Binds this surface to its *current* owner's focus, replacing any earlier bind.
+ *
+ * Called from `attachSurface` as well as from creation, and that second call is
+ * the one that matters: a handoff moves a surface between windows, and the
+ * subscription has to move with it or the workbench spends the rest of its life
+ * reporting on the window it came from.
+ *
+ * No initial `send`. The view may have no document yet — Electron makes no
+ * promise that `send` queues for one — and `WORKBENCH_FOCUS_CHANNEL` carries a
+ * pull for exactly that reason, the same shape as the connection channel beside
+ * it. A push that lands too early is dropped and costs nothing, because the next
+ * focus change supersedes it.
+ */
+function watchWindowFocus(surface: Surface): void {
+  stopWatchingFocus(surface.id)
+  const window = BrowserWindow.fromWebContents(surface.owner)
+  if (window === null) return
+  const push = (): void => {
+    if (surface.view.webContents.isDestroyed()) return
+    surface.view.webContents.send(WORKBENCH_FOCUS_CHANNEL, windowHasFocus(surface))
+  }
+  window.on('focus', push)
+  window.on('blur', push)
+  focusWatchers.set(surface.id, () => {
+    /*
+     * A destroyed window's emitter is dead, so there is nothing left to remove —
+     * and `off` on one is not promised to be a no-op.
+     */
+    if (window.isDestroyed()) return
+    window.off('focus', push)
+    window.off('blur', push)
+  })
+}
+
+/**
  * Which surface sent someone to a browser, and when.
  *
  * **The callback cannot address itself, so this is the address.** An OAuth
@@ -894,6 +967,7 @@ export async function openSurface(
    * rather than arriving visible.
    */
   applyVisibility(surface)
+  watchWindowFocus(surface)
 
   /*
    * Pushed on the view's own load, not on its creation. Electron makes no promise
@@ -922,6 +996,7 @@ function attachSurface(surface: Surface, owner: WebContents): void {
   if (!surface.view.webContents.isDestroyed()) surface.view.webContents.backgroundThrottling = false
   surface.owner = owner
   watchOwner(owner).add(surface.id)
+  watchWindowFocus(surface)
   surface.state = 'active'
   applyVisibility(surface)
 }
@@ -945,6 +1020,7 @@ export function beginHandoff(
   }
   surface.state = 'handing-off'
   byOwner.get(caller)?.delete(viewId)
+  stopWatchingFocus(viewId)
   for (const [grant, held] of [...grants]) {
     if (held.owner === caller && held.projectRoot === projectRoot) grants.delete(grant)
   }
@@ -1015,6 +1091,7 @@ function destroySurface(viewId: string): void {
   byId.delete(viewId)
   byContents.delete(surface.view.webContents)
   byOwner.get(surface.owner)?.delete(viewId)
+  stopWatchingFocus(viewId)
   /*
    * Only when this was the project's *last* surface. Two panes on one project
    * share a root, and telling the shell the editor is gone while another is
@@ -1206,6 +1283,17 @@ export function registerWorkbenchHandlers(
     const surface = byContents.get(event.sender)
     if (surface === undefined) throw new Error('unknown workbench surface')
     return describe(surface)
+  })
+
+  /*
+   * The same shape, for the value a surface needs before its first push. Argument-
+   * free and resolved from the sender for the same reason: a view id in the
+   * payload would be a claim rather than a fact.
+   */
+  ipcMain.handle(WORKBENCH_FOCUS_CHANNEL, (event) => {
+    const surface = byContents.get(event.sender)
+    if (surface === undefined) throw new Error('unknown workbench surface')
+    return windowHasFocus(surface)
   })
 
   /*

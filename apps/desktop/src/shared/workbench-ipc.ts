@@ -108,6 +108,20 @@ export type WorkbenchConnection = z.infer<typeof WorkbenchConnection>
 export const WORKBENCH_CONNECTION_CHANNEL = 'workbench:connection'
 
 /**
+ * Whether the window that currently holds this surface has focus.
+ *
+ * Push and pull on one channel, the same shape as `WORKBENCH_CONNECTION_CHANNEL`
+ * beside it: `send` on every change, `invoke` for the value before the first one.
+ *
+ * It answers a question about a *window*, never about this document. A workbench
+ * and the chat beside it are two documents in one window, so `document.hasFocus()`
+ * says nobody is watching an editor that is fully on screen — which is what makes
+ * the git extension park in `whenIdleAndFocused()`. This is the honest answer to
+ * VS Code's own question rather than a way around it.
+ */
+export const WORKBENCH_FOCUS_CHANNEL = 'workbench:focus'
+
+/**
  * The two channels that make a preference outlive the app — E5.
  *
  * The workbench partition is in-memory (`'chorus-workbench'`, no `persist:`) and
@@ -717,6 +731,24 @@ export interface ChorusWorkbenchApi {
    * renderer cannot name a project, because main derives it from the sender.
    */
   readonly connection: () => Promise<WorkbenchConnection>
+  /**
+   * Whether the window holding this surface is the focused one.
+   *
+   * The pull half of `WORKBENCH_FOCUS_CHANNEL`, and it exists for the reason
+   * every other pull here does: the view can be asked before any push has
+   * arrived, and a reload re-executes this document with the push already gone
+   * by. No arguments — main derives the surface from the sender.
+   */
+  readonly windowHasFocus: () => Promise<boolean>
+  /**
+   * Receives every later change of that answer.
+   *
+   * Registered once for the life of the document, like the other push
+   * subscriptions: `ipcRenderer.on` accumulates listeners. A payload that is not
+   * a boolean is dropped rather than coerced, because `false` and "not a
+   * boolean" are different facts and only one of them is safe to guess.
+   */
+  readonly onWindowFocusChanged: (handler: (hasFocus: boolean) => void) => void
   /**
    * The user's own `settings.json` as main last stored it, or `null` when this
    * profile has never had one — which is how a clean profile keeps Code-OSS's

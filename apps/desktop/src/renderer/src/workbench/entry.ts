@@ -12,6 +12,7 @@ import { refreshScmOnFileChanges } from './scm-refresh.js'
 import { registerWorkbenchWorkers } from './workers.js'
 import { persistUserSettings, restoreUserSettings } from './user-settings.js'
 import { restoreBrowserExtensions, synchronizeBrowserExtensions } from './browser-extensions.js'
+import { seedWindowFocus } from './window-focus.js'
 
 /**
  * One workbench, in one document, in one process.
@@ -60,6 +61,19 @@ async function main(): Promise<void> {
    */
   await restoreUserSettings(await window.chorusWorkbench.readUserSettings())
   await restoreBrowserExtensions(await window.chorusWorkbench.readBrowserExtensions())
+
+  /*
+   * And for the same reason, before `initialize` — Phase 3.
+   *
+   * The host service the overrides pass a focus getter to is constructed inside
+   * `initialize`, so a value seeded afterwards would be a getter that had already
+   * been read. Seeding first means the first read is the true one, and there is
+   * no window in which the workbench believes a wrong answer.
+   *
+   * It does not throw into this path: see `window-focus.ts` for why a failed
+   * focus read must not be able to stop a workbench from opening.
+   */
+  await seedWindowFocus()
 
   const container = document.createElement('div')
   container.className = 'workbench-root'

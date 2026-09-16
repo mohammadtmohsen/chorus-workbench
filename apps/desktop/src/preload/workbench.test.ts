@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import {
   WORKBENCH_CONNECTION_CHANNEL,
+  WORKBENCH_FOCUS_CHANNEL,
   WORKBENCH_BROWSER_EXTENSIONS_CHANGED_CHANNEL,
   WORKBENCH_BROWSER_EXTENSIONS_READ_CHANNEL,
   WORKBENCH_BROWSER_EXTENSIONS_WRITE_CHANNEL,
@@ -64,6 +65,7 @@ vi.mock('electron', () => ({
 
 const {
   CONNECTION_CHANNEL,
+  FOCUS_CHANNEL,
   USER_SETTINGS_READ_CHANNEL,
   USER_SETTINGS_WRITE_CHANNEL,
   BROWSER_EXTENSIONS_READ_CHANNEL,
@@ -85,6 +87,7 @@ const {
 describe('the workbench preload', () => {
   it('names the same channels the shared contract does', () => {
     expect(CONNECTION_CHANNEL).toBe(WORKBENCH_CONNECTION_CHANNEL)
+    expect(FOCUS_CHANNEL).toBe(WORKBENCH_FOCUS_CHANNEL)
     expect(USER_SETTINGS_READ_CHANNEL).toBe(WORKBENCH_USER_SETTINGS_READ_CHANNEL)
     expect(USER_SETTINGS_WRITE_CHANNEL).toBe(WORKBENCH_USER_SETTINGS_WRITE_CHANNEL)
     expect(BROWSER_EXTENSIONS_READ_CHANNEL).toBe(WORKBENCH_BROWSER_EXTENSIONS_READ_CHANNEL)
@@ -102,11 +105,23 @@ describe('the workbench preload', () => {
     expect(CLIPBOARD_READ_CHANNEL).toBe(WORKBENCH_CLIPBOARD_READ_CHANNEL)
   })
 
-  it('exposes exactly nineteen methods, and no twentieth', () => {
+  it('exposes exactly twenty-one methods, and no twenty-second', () => {
     // The list, not the count: a method named here is a capability a document
     // running extension code is handed, so which ones they are is the assertion.
     expect(Object.keys(exposed ?? {})).toEqual([
       'connection',
+      /*
+       * The window-focus pair, and the narrowest additions to this list so far.
+       *
+       * They carry one boolean with no arguments and no way to name a project or
+       * a window — main derives the surface from the sender and answers about the
+       * window that holds it. It is the honest answer to a question VS Code's git
+       * extension asks, rather than a way around it: `document.hasFocus()` is
+       * false whenever the person is typing in Chorus's own composer, so the
+       * extension parked itself on an editor that was fully on screen.
+       */
+      'windowHasFocus',
+      'onWindowFocusChanged',
       'readUserSettings',
       'writeUserSettings',
       'readBrowserExtensions',
