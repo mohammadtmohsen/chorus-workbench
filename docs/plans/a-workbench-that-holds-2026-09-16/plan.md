@@ -2,15 +2,15 @@
 
 ## Status
 
-| Phase                                 | Status                 | Commit    | Notes                                                                                                          |
-| ------------------------------------- | ---------------------- | --------- | -------------------------------------------------------------------------------------------------------------- |
-| 0 — Research                          | ✅ done                | —         | Three agents, read-only. Findings below.                                                                       |
-| 1 — The port in the name              | ⏸️ parked 2026-09-16   | —         | Its premise was already fixed by `workspaceIdFor`, and the residual is not observable.                         |
-| 2 — A workbench that is not throttled | ✅ verified 2026-09-16 | `1de72c0` | Measured before and after. `detached` went from `hidden` to `visible`, and no `visibilitychange` fires at all. |
-| 3 — Focus, honestly                   | ⬜ not started         | —         | No documented API. Two architectural routes only.                                                              |
-| 4 — Extensions per workspace          | ⬜ not started         | —         | Closes C-063 with upstream machinery.                                                                          |
-| 5 — Remote over SSH                   | ⬜ not started         | —         | No resolver. One authority, pointed elsewhere.                                                                 |
-| 6 — `33.0.9` → `36.2.7`               | ⬜ not started         | —         | Table stakes, not a fix. Its own migration.                                                                    |
+| Phase                                 | Status                 | Commit               | Notes                                                                                                          |
+| ------------------------------------- | ---------------------- | -------------------- | -------------------------------------------------------------------------------------------------------------- |
+| 0 — Research                          | ✅ done                | —                    | Three agents, read-only. Findings below.                                                                       |
+| 1 — The port in the name              | ⏸️ parked 2026-09-16   | —                    | Its premise was already fixed by `workspaceIdFor`, and the residual is not observable.                         |
+| 2 — A workbench that is not throttled | ✅ verified 2026-09-16 | `1de72c0`            | Measured before and after. `detached` went from `hidden` to `visible`, and no `visibilitychange` fires at all. |
+| 3 — Focus, honestly                   | ✅ verified 2026-09-16 | `1867518`, `2f07d03` | Measured with the workaround disabled: SCM refreshed with focus in the chat. `scm-refresh.ts` removed.         |
+| 4 — Extensions per workspace          | ⬜ not started         | —                    | Closes C-063 with upstream machinery.                                                                          |
+| 5 — Remote over SSH                   | ⬜ not started         | —                    | No resolver. One authority, pointed elsewhere.                                                                 |
+| 6 — `33.0.9` → `36.2.7`               | ⬜ not started         | —                    | Table stakes, not a fix. Its own migration.                                                                    |
 
 Meta: written 2026-09-16, after a research round by `claude`, `codex` and `deepseek`.
 Nothing was run and nothing was changed. Every claim below is either a citation or
@@ -463,9 +463,27 @@ bottom of the stack, and `scm-refresh.ts`'s own comment already argues the case
 against it: every other focus-gated behaviour — autosave, dimming, third-party
 extensions — would read the lie as truth.
 
-**Until one of the two routes lands, `scm-refresh.ts` stays.** It is a
-workaround and it is labelled as one. Deleting it before its replacement exists
-trades a known workaround for a known bug.
+**Measured on 2026-09-16, and `scm-refresh.ts` is gone.**
+
+The workaround was disabled locally first, so it could not be what refreshed
+anything. With a project open and the cursor in **Chorus's own composer** — a
+sibling document in the same window, which is the exact state that used to park
+the git extension — a file created on disk from outside the app appeared in
+Source Control without the editor being clicked. The count went from one change
+to two while the workbench's own document was blurred.
+
+Two false starts are worth recording, because both looked like failures and
+neither was. The first attempt showed an empty Source Control, which was correct:
+the repository had no changes. The second showed nothing because the git
+extension had not activated yet — opening the view is what activates it, and a
+branch appearing in the status bar is activation rather than a refresh. And a
+third confound was the test setup itself: driving the test from a _different
+window_ blurs the window under test, so the provider correctly answered `false`
+and the extension correctly parked. That is the fix working, and it reads
+identically to the fix failing unless you know to look.
+
+Removed by ownership rather than by references: `scm-refresh.ts`, `scm-gate.ts`,
+`scm-gate.test.ts` and the `entry.ts` call site. Nothing else named them.
 
 ## Phase 4 — Extensions per workspace (closes C-063)
 
