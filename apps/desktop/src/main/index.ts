@@ -34,6 +34,7 @@ import { readSettings } from './settings.js'
 import { applyTheme } from './theme.js'
 import { applyScale, currentScale } from './scale.js'
 import { reapOrphanedAgents } from './reap.js'
+import { isReparentMode, runReparentCheck } from './reparent-check.js'
 import { ChorusRuntime } from './runtime.js'
 import { applyContentSecurityPolicy, lockDownNavigation } from './security.js'
 import { reapedOrphanedServers, setWorkbenchHostLog, stopWorkbenchHost } from './workbench-host.js'
@@ -391,6 +392,8 @@ void app.whenReady().then(async () => {
   applyTheme(readSettings(app.getPath('userData')).theme)
 
   mainWindow = createWindow({ kind: 'main' })
+  const reparentMode = process.env['CHORUS_REPARENT_CHECK']
+  if (isReparentMode(reparentMode)) runReparentCheck(mainWindow, reparentMode)
 
   app.on('activate', () => {
     if (mainWindow === null || mainWindow.isDestroyed()) mainWindow = createWindow({ kind: 'main' })

@@ -853,6 +853,7 @@ export async function openSurface(
       nodeIntegration: false,
       sandbox: true,
       webSecurity: true,
+      backgroundThrottling: false,
       /*
        * Off, and it is the property that makes this surface possible at all.
        * On, "all your preloads will load for every iframe" — and the workbench's
@@ -918,6 +919,7 @@ function attachSurface(surface: Surface, owner: WebContents): void {
   }
   surface.view.setBounds({ x: 0, y: 0, width: 0, height: 0 })
   parent.contentView.addChildView(surface.view)
+  if (!surface.view.webContents.isDestroyed()) surface.view.webContents.backgroundThrottling = false
   surface.owner = owner
   watchOwner(owner).add(surface.id)
   surface.state = 'active'
