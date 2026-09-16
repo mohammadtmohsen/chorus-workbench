@@ -11,6 +11,7 @@ import {
   explainPrompt,
   forwardedFromAside,
   goPrompt,
+  NAMER_INSTRUCTIONS,
   recapLedger,
   recapPrompt,
   taskAnchor,
@@ -66,7 +67,7 @@ const adapters = (): Map<AgentId, AgentAdapter> => {
  * it just answers about a different session.
  */
 const sentToAgent = (): string => {
-  const own = adapter.sessions.filter((s) => s.startedWith?.instructions === undefined)
+  const own = adapter.sessions.filter((s) => s.startedWith?.instructions !== NAMER_INSTRUCTIONS)
   return own.at(-1)?.sent.at(-1)?.text ?? ''
 }
 
@@ -2068,5 +2069,109 @@ describe('forwardedFromAside', () => {
 
   it('is just the directive when there is nothing to cite', () => {
     expect(forwardedFromAside('  hold on  ', '   ')).toBe('hold on')
+  })
+})
+
+describe('naming a conversation', () => {
+  let fakes: { claude: FakeAdapter; deepseek: FakeAdapter; codex: FakeAdapter }
+
+  const namerOf = (fake: FakeAdapter): FakeAdapter['sessions'] =>
+    fake.sessions.filter((s) => s.startedWith?.instructions?.includes('tab label') === true)
+
+  const titles = (): string[] =>
+    runtime.store
+      .read(conversationId)
+      .filter((e) => e.payload.type === 'conversation.renamed')
+      .map((e) => (e.payload as { title: string }).title)
+
+  const flush = async (): Promise<void> => {
+    for (let i = 0; i < 20; i += 1) await tick()
+  }
+
+  beforeEach(async () => {
+    await runtime.close()
+    fakes = {
+      claude: new FakeAdapter({ id: 'claude' }),
+      deepseek: new FakeAdapter({ id: 'deepseek' }),
+      codex: new FakeAdapter({ id: 'codex' }),
+    }
+    runtime = ChorusRuntime.open(
+      dataPath,
+      silent,
+      new Map<AgentId, AgentAdapter>([
+        ['claude', fakes.claude],
+        ['deepseek', fakes.deepseek],
+        ['codex', fakes.codex],
+      ])
+    )
+    const started = await runtime.startConversationIn({ agents: ['codex'], cwd: process.cwd() })
+    conversationId = started.conversationId
+  })
+
+  it('asks Claude first', async () => {
+    await runtime.send(conversationId, '@codex fix the parser')
+    await flush()
+    const claude = namerOf(fakes.claude)[0]
+    expect(claude?.sent.at(-1)?.text).toContain('fix the parser')
+    claude?.emit({ type: 'message.completed', itemRef: 'n1', text: 'Parser fix' })
+    await flush()
+    expect(titles()).toEqual(['Parser fix'])
+    expect(namerOf(fakes.deepseek)).toHaveLength(0)
+    expect(namerOf(fakes.codex)).toHaveLength(0)
+  })
+
+  it('starts each namer on the model chosen for that agent', async () => {
+    writeSettings(dataPath, {
+      ...DEFAULT_SETTINGS,
+      models: { ...DEFAULT_SETTINGS.models, claude: 'opus' },
+    })
+    await runtime.send(conversationId, '@codex fix the parser')
+    await flush()
+    expect(namerOf(fakes.claude)[0]?.startedWith?.model).toBe('opus')
+  })
+
+  it('falls back to DeepSeek when Claude’s naming turn fails', async () => {
+    await runtime.send(conversationId, '@codex fix the parser')
+    await flush()
+    const claude = namerOf(fakes.claude)[0]
+    claude?.emit({ type: 'turn.completed', turnRef: 't1', status: 'failed' })
+    await flush()
+    const deepseek = namerOf(fakes.deepseek)[0]
+    expect(claude?.closed).toBe(true)
+    expect(deepseek?.sent.at(-1)?.text).toContain('fix the parser')
+    deepseek?.emit({ type: 'message.completed', itemRef: 'n1', text: 'Parser fix' })
+    await flush()
+    expect(titles()).toEqual(['Parser fix'])
+    expect(namerOf(fakes.codex)).toHaveLength(0)
+  })
+
+  it('falls through to Codex when the others cannot start', async () => {
+    fakes.claude.start = () => Promise.reject(new Error('claude is unavailable'))
+    fakes.deepseek.start = () =>
+      Promise.reject(new Error('DeepSeek needs an API key. Add one in Settings.'))
+    await runtime.send(conversationId, '@codex fix the parser')
+    await flush()
+    const codex = namerOf(fakes.codex)[0]
+    expect(codex?.sent.at(-1)?.text).toContain('fix the parser')
+    codex?.emit({ type: 'message.completed', itemRef: 'n1', text: 'Parser fix' })
+    await flush()
+    expect(titles()).toEqual(['Parser fix'])
+  })
+
+  it('skips a demoted agent and tells the kept one the current title', async () => {
+    await runtime.send(conversationId, '@codex fix the parser')
+    await flush()
+    namerOf(fakes.claude)[0]?.emit({ type: 'turn.completed', turnRef: 't1', status: 'failed' })
+    await flush()
+    const deepseek = namerOf(fakes.deepseek)[0]
+    deepseek?.emit({ type: 'message.completed', itemRef: 'n1', text: 'Parser fix' })
+    await flush()
+
+    await runtime.send(conversationId, '@codex and the lexer too')
+    await flush()
+    expect(namerOf(fakes.claude)).toHaveLength(1)
+    expect(namerOf(fakes.deepseek)).toHaveLength(1)
+    expect(deepseek?.sent.at(-1)?.text).toMatch(/^Current title: Parser fix\n\n/)
+    expect(deepseek?.sent.at(-1)?.text).toContain('the lexer too')
   })
 })

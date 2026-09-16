@@ -69,6 +69,7 @@ interface SdkMessageLike {
    * live user message — every other property is identical.
    */
   isReplay?: boolean
+  shouldQuery?: boolean
   session_id?: string
   message?: { id?: string; content?: unknown[] }
   event?: {
@@ -169,6 +170,14 @@ export function mapSdkMessage(msg: SdkMessageLike, ctx: MapContext): AgentEvent[
        */
       return [notice(at(0), { level: 'info', source: 'system', text: msg.type })]
   }
+}
+
+export function opensTurn(msg: SdkMessageLike): boolean {
+  if (msg.isReplay === true) return false
+  if (msg.type === 'assistant' || msg.type === 'stream_event') return true
+  if (msg.type !== 'user' || msg.shouldQuery === false) return false
+  const blocks = (msg.message?.content ?? []) as ContentBlock[]
+  return blocks.some((block) => block.type === 'tool_result')
 }
 
 /**
@@ -1159,7 +1168,7 @@ function usageWindows(
   if (info === undefined) return []
   const windows: UsageWindow[] = []
 
-  if (typeof info.rateLimitType === 'string') {
+  if (typeof info.rateLimitType === 'string' && WINDOW_MINUTES[info.rateLimitType] !== undefined) {
     windows.push({
       id: info.rateLimitType,
       // A fraction here; a percentage in the other shape.
@@ -1191,9 +1200,6 @@ function usageWindows(
 const WINDOW_MINUTES: Record<string, number> = {
   five_hour: 300,
   seven_day: 10_080,
-  seven_day_oauth_apps: 10_080,
-  seven_day_opus: 10_080,
-  seven_day_sonnet: 10_080,
 }
 
 function mapResult(msg: SdkMessageLike, ctx: MapContext): AgentEvent[] {

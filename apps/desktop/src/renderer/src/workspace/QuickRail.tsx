@@ -1165,30 +1165,10 @@ function TerminalIcon(): React.JSX.Element {
  */
 function HistoryIcon(): React.JSX.Element {
   return (
-    <svg viewBox="0 0 16 16" aria-hidden="true" focusable="false">
-      <path
-        d="M8 3.2a4.8 4.8 0 1 1-4.53 6.4"
-        fill="none"
-        stroke="currentColor"
-        strokeWidth="1.4"
-        strokeLinecap="round"
-      />
-      <path
-        d="M3.2 5.9V3.4m0 2.5h2.5"
-        fill="none"
-        stroke="currentColor"
-        strokeWidth="1.4"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-      />
-      <path
-        d="M8 5.6V8l1.8 1.1"
-        fill="none"
-        stroke="currentColor"
-        strokeWidth="1.4"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-      />
+    <svg className="rail-icon" viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M12 4.8a7.2 7.2 0 1 1-6.8 9.6" />
+      <path d="M4.8 8.85V5.1m0 3.75h3.75" />
+      <path d="M12 8.4V12l2.7 1.65" />
     </svg>
   )
 }

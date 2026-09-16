@@ -4,6 +4,7 @@ import {
   mapApprovalRequest,
   mapNotification,
   mapUserInputRequest,
+  mergeRateLimits,
   toCodexDecision,
   toCodexUserInputResponse,
   USER_INPUT_METHOD,
@@ -477,6 +478,41 @@ describe('account rate limits', () => {
     expect(
       mapNotification({ method: 'account/rateLimits/updated', params: { rateLimits: {} } }, CTX)
     ).toBeNull()
+  })
+
+  const FIVE = { usedPercent: 12, windowDurationMins: 300, resetsAt: 1_786_000_000 }
+  const WEEK = { usedPercent: 55, windowDurationMins: 10_080, resetsAt: 1_786_176_677 }
+
+  it('takes an update whole when nothing is held yet', () => {
+    const update = { limitId: 'codex', primary: FIVE, secondary: null }
+    expect(mergeRateLimits(null, update)).toBe(update)
+  })
+
+  it('keeps the held side a sparse update leaves out', () => {
+    const held = { limitId: 'codex', primary: FIVE, secondary: WEEK }
+    const update = { limitId: 'codex', primary: { ...FIVE, usedPercent: 13 }, secondary: null }
+    const merged = mergeRateLimits(held, update)
+    expect(merged['primary']).toEqual({ ...FIVE, usedPercent: 13 })
+    expect(merged['secondary']).toEqual(WEEK)
+  })
+
+  it('keeps the held length and reset when an update leaves them null', () => {
+    const held = { limitId: 'codex', primary: FIVE, secondary: null }
+    const primary = { usedPercent: 14, windowDurationMins: null, resetsAt: null }
+    const merged = mergeRateLimits(held, { limitId: 'codex', primary, secondary: null })
+    expect(merged['primary']).toEqual({ ...FIVE, usedPercent: 14 })
+  })
+
+  it('ignores an update for another bucket', () => {
+    const held = { limitId: 'codex', primary: FIVE, secondary: WEEK }
+    const update = { limitId: 'other', primary: { ...FIVE, usedPercent: 0 }, secondary: null }
+    expect(mergeRateLimits(held, update)).toBe(held)
+  })
+
+  it('merges when either snapshot does not name its bucket', () => {
+    const held = { limitId: null, primary: FIVE, secondary: null }
+    const update = { limitId: 'codex', primary: { ...FIVE, usedPercent: 20 }, secondary: null }
+    expect(mergeRateLimits(held, update)['primary']).toEqual({ ...FIVE, usedPercent: 20 })
   })
 })
 

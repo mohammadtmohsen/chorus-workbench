@@ -51,6 +51,13 @@ const result = (uuid: string): unknown => ({
   usage: { input_tokens: 1, output_tokens: 1 },
 })
 
+const reply = (id: string): unknown => ({
+  type: 'assistant',
+  message: { id, content: [{ type: 'text', text: 'the readers are back' }] },
+  parent_tool_use_id: null,
+  session_id: 's1',
+})
+
 /**
  * The turn boundaries out of the stream, stopping once `count` have arrived.
  *
@@ -145,5 +152,37 @@ describe('turn boundaries', () => {
     feed(result('r1'))
 
     expect(await boundaries(session.events, 2)).toEqual(['turn.started', 'turn.completed'])
+  })
+
+  it('opens the follow-up turn the CLI starts on its own', async () => {
+    const { adapter, feed } = adapterFed()
+    const session = await adapter.start(OPTS)
+    const seen = collector(session.events)
+
+    await session.send({ text: 'read the backend in the background' })
+    feed(result('r1'))
+    await settle()
+
+    feed(reply('m1'))
+    feed(reply('m2'))
+    feed(result('r2'))
+    await settle()
+
+    expect(seen).toEqual(['turn.started', 'turn.completed', 'turn.started', 'turn.completed'])
+  })
+
+  it('does not open a turn for a background notification after a result', async () => {
+    const { adapter, feed } = adapterFed()
+    const session = await adapter.start(OPTS)
+    const seen = collector(session.events)
+
+    await session.send({ text: 'first' })
+    feed(result('r1'))
+    await settle()
+
+    feed({ type: 'system', subtype: 'task_notification', task_id: 't1', status: 'completed' })
+    await settle()
+
+    expect(seen).toEqual(['turn.started', 'turn.completed'])
   })
 })

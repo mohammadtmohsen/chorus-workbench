@@ -17,6 +17,7 @@ import type {
   UserInputResponse,
   EditorEditCapability,
 } from '@chorus/agent-protocol'
+import { mergeUsageWindows } from '@chorus/agent-protocol'
 import {
   requestWorkbenchAskDiff,
   requestWorkbenchEdit,
@@ -219,6 +220,11 @@ interface Participant {
  * it as it hands the reply over. An event arriving with nothing waiting is the
  * ordinary case — the session says other things — and is dropped.
  */
+type NamerOutcome =
+  | { readonly kind: 'title'; readonly text: string }
+  | { readonly kind: 'failed' }
+  | { readonly kind: 'timeout' }
+
 interface Namer {
   /**
    * Absent until the first message starts it.
@@ -228,9 +234,13 @@ interface Namer {
    * four empty rooms. Created inside the queue, so two messages sent together
    * cannot each start one.
    */
-  session?: AgentSession
+  readonly sessions: Map<AgentId, AgentSession>
+  readonly demoted: Set<AgentId>
   queue: Promise<void>
-  resolve?: (text: string) => void
+  pending?: {
+    readonly session: AgentSession
+    readonly settle: (outcome: NamerOutcome) => void
+  }
 }
 
 /**
@@ -247,12 +257,13 @@ interface Namer {
  * only lever available from this side; `cleanTitle` is the second line of
  * defence for when it is not enough.
  */
-const NAMER_INSTRUCTIONS = [
+export const NAMER_INSTRUCTIONS = [
   'You are naming a conversation for a tab label. You will be sent the user’s',
   'messages one at a time, in the order they are sent. After each one, reply',
   'with a title naming the topic the conversation is on right now.',
   '',
-  'If the topic has not changed, repeat the previous title exactly.',
+  'A message may start with "Current title:" and the title the tab shows now.',
+  'If the topic has not changed, repeat that title exactly.',
   '',
   'Your entire reply is the title. One line, at most six words, no quotes, no',
   'punctuation at the end, no explanation, no preamble, no translation, no',
@@ -264,6 +275,8 @@ const NAMER_INSTRUCTIONS = [
 const NAMER_TIMEOUT_MS = 20_000
 /** A tab is not a sentence. Past this it is truncated rather than refused. */
 const MAX_TITLE_CHARS = 60
+
+const NAMER_ORDER: readonly AgentId[] = ['claude', 'deepseek', 'codex']
 
 /**
  * The one line of a namer's reply that can be used as a title, or null.
@@ -284,6 +297,7 @@ function cleanTitle(reply: string | null): string | null {
   // they are the only decoration stripped — anything more would start editing
   // titles rather than reading them.
   const stripped = first
+    .replace(/^Current title:\s*/, '')
     .replace(/^["'`“”«»]+/, '')
     .replace(/["'`“”«»]+$/, '')
     .trim()
@@ -1872,7 +1886,7 @@ export class ChorusRuntime {
       cwd,
       title: options.title ?? folderName(cwd),
       lastAddressed: undefined,
-      handoffEpoch: 0,      // A new room has nothing unread in it, and the log's end is what "nothing"
+      handoffEpoch: 0, // A new room has nothing unread in it, and the log's end is what "nothing"
       // means — seeding 0 would count the whole database as news.
       lastSeenSeq: this.store.lastSeq(),
       draft: '',
@@ -1980,7 +1994,7 @@ export class ChorusRuntime {
      * tuple happens to start with, including on a machine where that one is the
      * agent that will not run. Listing the live ones first keeps the fallback on
      * something that can answer, while a mention still reaches anybody.
-    */
+     */
     const live = [...conversation.participants.keys()]
     const liveInRoutingOrder: AgentId[] =
       conversation.lastAddressed === undefined && live.includes('claude')
@@ -2728,7 +2742,8 @@ export class ChorusRuntime {
       cwd: parent.cwd,
       title: aside.excerpt.slice(0, 80),
       lastAddressed: agentId,
-      handoffEpoch: 0,      lastSeenSeq: 0,
+      handoffEpoch: 0,
+      lastSeenSeq: 0,
       draft: '',
       planning: false,
       /*
@@ -3383,7 +3398,8 @@ export class ChorusRuntime {
       title: entry.title,
       lastAddressed: undefined,
       lastSeenSeq: entry.lastSeenSeq,
-      handoffEpoch: 0,      draft: entry.draft,
+      handoffEpoch: 0,
+      draft: entry.draft,
       planning: false,
       styleOn: this.defaultStyleOn(),
     }
@@ -4291,29 +4307,61 @@ export class ChorusRuntime {
 
     let namer = this.namers.get(conversationId)
     if (namer === undefined) {
-      namer = { queue: Promise.resolve() }
+      namer = { sessions: new Map(), demoted: new Set(), queue: Promise.resolve() }
       this.namers.set(conversationId, namer)
     }
     const held = namer
 
     held.queue = held.queue
       .then(async () => {
-        if (held.session === undefined) {
-          const started = await this.startNamer(conversation, held)
-          // No agent to ask. The next message tries again rather than marking
-          // the conversation permanently unnameable — an adapter can be absent
-          // for a moment and present later.
-          if (started === null) return
-          held.session = started
-        }
+        const text =
+          conversation.title === folderName(conversation.cwd)
+            ? message
+            : `Current title: ${conversation.title}\n\n${message}`
 
-        const title = cleanTitle(await this.askNamer(held, message))
-        if (title === null) return
-        // Closed while the namer was thinking. `renameConversation` would throw
-        // on a conversation `require` can no longer find.
-        if (!this.active.has(conversationId)) return
-        if (title === conversation.title) return
-        this.renameConversation(conversationId, title)
+        for (const agentId of NAMER_ORDER) {
+          if (this.namers.get(conversationId) !== held) return
+          if (held.demoted.has(agentId) || !this.adapters.has(agentId)) continue
+
+          let session = held.sessions.get(agentId)
+          if (session === undefined) {
+            try {
+              session = await this.startNamer(conversation, held, agentId)
+            } catch (error: unknown) {
+              // No agent to ask. The next message tries again rather than marking
+              // the conversation permanently unnameable — an adapter can be absent
+              // for a moment and present later.
+              this.log.error('the topic namer failed', error instanceof Error ? error : undefined, {
+                conversationId,
+                agentId,
+              })
+              held.demoted.add(agentId)
+              continue
+            }
+          }
+
+          if (this.namers.get(conversationId) !== held) {
+            void session.close().catch(() => undefined)
+            return
+          }
+
+          const outcome = await this.askNamer(held, session, text)
+          if (outcome.kind !== 'title') {
+            held.sessions.delete(agentId)
+            void session.close().catch(() => undefined)
+            if (outcome.kind === 'failed') held.demoted.add(agentId)
+            continue
+          }
+
+          const title = cleanTitle(outcome.text)
+          if (title === null) return
+          // Closed while the namer was thinking. `renameConversation` would throw
+          // on a conversation `require` can no longer find.
+          if (!this.active.has(conversationId)) return
+          if (title === conversation.title) return
+          this.renameConversation(conversationId, title)
+          return
+        }
       })
       .catch((error: unknown) => {
         this.log.error('the topic namer failed', error instanceof Error ? error : undefined, {
@@ -4331,12 +4379,12 @@ export class ChorusRuntime {
    */
   private async startNamer(
     conversation: ActiveConversation,
-    namer: Namer
-  ): Promise<AgentSession | null> {
-    const agentId = [...conversation.participants.keys()][0]
-    if (agentId === undefined) return null
+    namer: Namer,
+    agentId: AgentId
+  ): Promise<AgentSession> {
     const adapter = this.adapters.get(agentId)
-    if (adapter === undefined) return null
+    if (adapter === undefined) throw new Error(`${agentId} is not available`)
+    const model = this.preferredModelFor(agentId)
 
     /*
      * Read-only, and it never asks. The namer is handed the user's words and
@@ -4347,22 +4395,33 @@ export class ChorusRuntime {
       cwd: conversation.cwd,
       sandbox: { mode: 'readOnly', writableRoots: [], networkAccess: false },
       instructions: NAMER_INSTRUCTIONS,
+      ...(model === '' ? {} : { model }),
     })
+    namer.sessions.set(agentId, session)
+
+    const settle = (outcome: NamerOutcome): void => {
+      const waiting = namer.pending
+      if (waiting?.session !== session) return
+      // Cleared before the hand-off, so a second completed message in one
+      // turn cannot resolve the same request twice.
+      delete namer.pending
+      waiting.settle(outcome)
+    }
 
     void (async () => {
       try {
         for await (const event of session.events) {
-          if (event.type !== 'message.completed') continue
-          const waiting = namer.resolve
-          // Cleared before the hand-off, so a second completed message in one
-          // turn cannot resolve the same request twice.
-          delete namer.resolve
-          waiting?.(event.text)
+          if (event.type === 'message.completed') {
+            settle({ kind: 'title', text: event.text })
+          } else if (event.type === 'turn.completed' && event.status !== 'completed') {
+            settle({ kind: 'failed' })
+          }
         }
       } catch {
         // The session ended or the provider went away. Anything waiting on it
         // times out on its own, which is the same outcome by a slower route.
       }
+      settle({ kind: 'failed' })
     })()
 
     return session
@@ -4376,25 +4435,26 @@ export class ChorusRuntime {
    * queue behind it never moves again — so one silent turn would stop the
    * conversation being renamed for the rest of the session.
    */
-  private async askNamer(namer: Namer, text: string): Promise<string | null> {
-    const session = namer.session
-    if (session === undefined) return null
-
-    return new Promise<string | null>((resolve) => {
+  private async askNamer(namer: Namer, session: AgentSession, text: string): Promise<NamerOutcome> {
+    return new Promise<NamerOutcome>((resolve) => {
       const timer = setTimeout(() => {
-        delete namer.resolve
-        resolve(null)
+        if (namer.pending?.session === session) delete namer.pending
+        resolve({ kind: 'timeout' })
       }, NAMER_TIMEOUT_MS)
 
-      namer.resolve = (reply) => {
-        clearTimeout(timer)
-        resolve(reply)
+      namer.pending = {
+        session,
+        settle: (outcome) => {
+          clearTimeout(timer)
+          resolve(outcome)
+        },
       }
 
       void session.send({ text }).catch(() => {
-        clearTimeout(timer)
-        delete namer.resolve
-        resolve(null)
+        const waiting = namer.pending
+        if (waiting?.session !== session) return
+        delete namer.pending
+        waiting.settle({ kind: 'failed' })
       })
     })
   }
@@ -4404,9 +4464,11 @@ export class ChorusRuntime {
     const namer = this.namers.get(conversationId)
     if (namer === undefined) return
     this.namers.delete(conversationId)
-    void namer.session?.close().catch(() => {
-      // Closing something already gone is not a failure worth raising.
-    })
+    for (const session of namer.sessions.values()) {
+      void session.close().catch(() => {
+        // Closing something already gone is not a failure worth raising.
+      })
+    }
   }
 
   renameConversation(conversationId: string, title: string): { title: string } {
@@ -5333,8 +5395,9 @@ export class ChorusRuntime {
       grants,
       // Account state, not conversation history: it goes to the window, not the log.
       onLimits: (windows) => {
-        this.limits.set(agentId, windows)
-        this.onLimits?.({ agentId, windows: [...windows] })
+        const merged = mergeUsageWindows(this.limits.get(agentId) ?? [], windows)
+        this.limits.set(agentId, merged)
+        this.onLimits?.({ agentId, windows: merged })
       },
       // Conversation state, not account state: it goes to the pane that asked.
       onContextUsage: (usage) => {

@@ -1192,6 +1192,20 @@ export function answersThinking(
   return previous?.kind === 'reasoning' && previous.actor === current.actor
 }
 
+export function finalAnswerKey(view: TranscriptView): string | null {
+  const trigger = view.busy
+    ? view.messages.findLastIndex(
+        (m) => (m.actor === 'user' && m.kind === 'message') || m.kind === 'handoff'
+      )
+    : view.messages.length
+  if (trigger === -1) return null
+  const answer = view.messages.findLast(
+    (m, index) =>
+      index < trigger && isAgentId(m.actor) && m.kind === 'message' && m.status === 'complete'
+  )
+  return answer?.key ?? null
+}
+
 /**
  * Reads the files off a `file.change.completed` payload.
  *

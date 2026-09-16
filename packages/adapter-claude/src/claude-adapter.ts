@@ -43,6 +43,7 @@ import {
   mapSdkMessage,
   mapToolPermission,
   mapUserInputRequest,
+  opensTurn,
   proposedText,
   toClaudeUserInputResult,
   trackBashTools,
@@ -269,6 +270,9 @@ export class ClaudeSession implements AgentSession {
   private bashToolIds: ReadonlySet<string> = new Set()
   /** Running totals, so usage means the same thing here as it does for Codex. */
   private readonly usageSoFar = { inputTokens: 0, outputTokens: 0 }
+  private planRead: Promise<boolean> | null = null
+  private planReadAgain = false
+  private planAnswered = false
   /**
    * Whether a turn is open, so exactly one `turn.started` is raised per turn.
    *
@@ -308,6 +312,13 @@ export class ClaudeSession implements AgentSession {
     private readonly knownModels: readonly ModelChoice[] | undefined
   ) {
     this.resolvedSessionRef = sessionRef
+    this.emit({
+      agentId: this.agentId,
+      seq: ++this.seq,
+      at: this.now(),
+      type: 'tasks.changed',
+      tasks: [],
+    })
     void this.pump()
   }
 
@@ -331,16 +342,7 @@ export class ClaudeSession implements AgentSession {
      * one is honest, where reusing the session id would claim a correspondence
      * with `result`'s uuid that does not exist.
      */
-    if (!this.turnOpen) {
-      this.turnOpen = true
-      this.emit({
-        agentId: this.agentId,
-        seq: ++this.seq,
-        at: this.now(),
-        type: 'turn.started',
-        turnRef: `${this.resolvedSessionRef}:${String(this.seq)}`,
-      })
-    }
+    this.openTurn()
     // Streaming-input mode: messages are pushed onto the prompt iterable rather
     // than passed at construction. It is also what makes interrupt() and
     // setModel() available at all.
@@ -351,6 +353,18 @@ export class ClaudeSession implements AgentSession {
       session_id: this.resolvedSessionRef,
     })
     return Promise.resolve()
+  }
+
+  private openTurn(): void {
+    if (this.turnOpen) return
+    this.turnOpen = true
+    this.emit({
+      agentId: this.agentId,
+      seq: ++this.seq,
+      at: this.now(),
+      type: 'turn.started',
+      turnRef: `${this.resolvedSessionRef}:${String(this.seq)}`,
+    })
   }
 
   async interrupt(): Promise<void> {
@@ -744,10 +758,11 @@ export class ClaudeSession implements AgentSession {
         // message that has to be mapped with the id already known.
         this.bashToolIds = trackBashTools(message as never, this.bashToolIds)
 
-        const kind = (message as { type?: string; subtype?: string }).type
+        const { type: kind, subtype } = message as { type?: string; subtype?: string }
         // Both moments the plan windows are worth re-reading: when a session
         // opens, and when a turn has just spent something.
-        if (kind === 'system' || kind === 'result') void this.readPlanUsage()
+        if ((kind === 'system' && subtype === 'init') || kind === 'result')
+          void this.readPlanUsage()
         // Only at the end of a turn: the window cannot have moved until the
         // agent has actually said something.
         if (kind === 'result') void this.readContextUsage()
@@ -755,8 +770,12 @@ export class ClaudeSession implements AgentSession {
         // `turn.completed`, so this is the same moment, read from the same
         // message rather than inferred from the event it becomes.
         if (kind === 'result') this.turnOpen = false
+        if (kind === 'rate_limit_event' && this.planAnswered) {
+          void this.readPlanUsage()
+          continue
+        }
 
-        for (const event of mapSdkMessage(message as never, {
+        const events = mapSdkMessage(message as never, {
           seq: this.seq + 1,
           now: this.now(),
           agentId: this.agentId,
@@ -764,7 +783,9 @@ export class ClaudeSession implements AgentSession {
           usageSoFar: this.usageSoFar,
           streamMessageRef: this.streamMessageRef,
           bashToolIds: this.bashToolIds,
-        })) {
+        })
+        if (events.length > 0 && opensTurn(message as never)) this.openTurn()
+        for (const event of events) {
           this.emit(this.correctInterrupt(event))
         }
       }
@@ -838,7 +859,22 @@ export class ClaudeSession implements AgentSession {
     }
   }
 
-  private async readPlanUsage(): Promise<boolean> {
+  private readPlanUsage(): Promise<boolean> {
+    if (this.planRead !== null) {
+      this.planReadAgain = true
+      return this.planRead
+    }
+    const read = this.askPlanUsage().finally(() => {
+      this.planRead = null
+      if (!this.planReadAgain) return
+      this.planReadAgain = false
+      void this.readPlanUsage()
+    })
+    this.planRead = read
+    return read
+  }
+
+  private async askPlanUsage(): Promise<boolean> {
     const ask = (
       this.q as unknown as {
         usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET?: () => Promise<unknown>
@@ -854,6 +890,7 @@ export class ClaudeSession implements AgentSession {
         at: this.now(),
       })
       for (const event of events) this.emit(event)
+      if (events.length > 0) this.planAnswered = true
       // Whether it actually said anything, which is what the priming loop
       // needs to know — a call that succeeds and reports no windows has not
       // answered the question.

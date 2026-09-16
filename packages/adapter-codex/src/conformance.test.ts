@@ -227,3 +227,60 @@ describe('conformance: CodexAdapter', () => {
     expect(reply?.['result']).toEqual({ decision: 'acceptForSession' })
   })
 })
+
+describe('turn boundaries: CodexAdapter', () => {
+  const delta = (turnId: string) => ({
+    threadId: 'thr_conformance',
+    turnId,
+    itemId: 'm1',
+    delta: 'hi',
+  })
+
+  it('opens the turn its server never announced', async () => {
+    const target = codexTarget()
+    const session = await target.adapter.start(OPTS)
+
+    target.wire().notify('item/agentMessage/delta', delta('t1'))
+    target.wire().notify('turn/completed', { turn: { id: 't1', status: 'completed' } })
+
+    const events = await collectEvents(session, 3)
+    expect(events.map((event) => event.type)).toEqual([
+      'turn.started',
+      'message.delta',
+      'turn.completed',
+    ])
+    expect(events[0]).toMatchObject({ type: 'turn.started', turnRef: 't1' })
+  })
+
+  it('does not reopen a turn for a straggler from the turn that just completed', async () => {
+    const target = codexTarget()
+    const session = await target.adapter.start(OPTS)
+
+    target.wire().notify('turn/started', { turn: { id: 't1' } })
+    target.wire().notify('turn/completed', { turn: { id: 't1', status: 'completed' } })
+    target.wire().notify('item/agentMessage/delta', delta('t1'))
+
+    const events = await collectEvents(session, 3)
+    expect(events.map((event) => event.type)).toEqual([
+      'turn.started',
+      'turn.completed',
+      'message.delta',
+    ])
+  })
+
+  it('absorbs the real start of a turn it already opened', async () => {
+    const target = codexTarget()
+    const session = await target.adapter.start(OPTS)
+
+    target.wire().notify('item/agentMessage/delta', delta('t2'))
+    target.wire().notify('turn/started', { turn: { id: 't2' } })
+    target.wire().notify('turn/completed', { turn: { id: 't2', status: 'completed' } })
+
+    const events = await collectEvents(session, 3)
+    expect(events.map((event) => event.type)).toEqual([
+      'turn.started',
+      'message.delta',
+      'turn.completed',
+    ])
+  })
+})

@@ -7,6 +7,7 @@ import {
   reorderSessions,
   stateOf,
   stepSlot,
+  withBackgroundWork,
   type SessionRowState,
 } from './session-row.js'
 
@@ -58,6 +59,35 @@ describe('stateOf', () => {
 
   it('is idle otherwise', () => {
     expect(stateOf(IDLE)).toBe('idle')
+  })
+})
+
+describe('withBackgroundWork', () => {
+  const task = { id: 't1', kind: 'subagent', description: 'read the backend' }
+
+  it('counts an agent with a live task as working', () => {
+    expect(withBackgroundWork([], { claude: [task] })).toEqual(['claude'])
+  })
+
+  it('adds nothing for an empty list, which is what a new session pushes', () => {
+    expect(withBackgroundWork([], { claude: [] })).toEqual([])
+  })
+
+  it('keeps working agents first and names each agent once', () => {
+    expect(withBackgroundWork(['codex', 'claude'], { claude: [task], deepseek: [task] })).toEqual([
+      'codex',
+      'claude',
+      'deepseek',
+    ])
+  })
+
+  it('ignores a key that is not an agent', () => {
+    expect(withBackgroundWork([], { system: [task] })).toEqual([])
+  })
+
+  it('turns an idle row into a working one while background work runs', () => {
+    const working = withBackgroundWork(IDLE.working, { deepseek: [task] })
+    expect(stateOf({ ...IDLE, working })).toBe('working')
   })
 })
 

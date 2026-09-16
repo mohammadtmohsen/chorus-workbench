@@ -19,6 +19,8 @@ import {
   mapApprovalRequest,
   mapNotification,
   mapUserInputRequest,
+  mergeRateLimits,
+  opensTurn,
   toCodexDecision,
   toCodexUserInputResponse,
   type ThreadItem,
@@ -128,6 +130,9 @@ export class CodexSession implements AgentSession {
   private ended = false
   private seq = 0
   private currentTurnId: string | null = null
+  private turnOpen = false
+  private lastCompletedTurnId: string | null = null
+  private rateLimits: Record<string, unknown> | null = null
   /** Approval id → the resolver that answers the server's pending request. */
   private readonly openApprovals = new Map<string, (decision: string) => void>()
   /**
@@ -343,12 +348,38 @@ export class CodexSession implements AgentSession {
 
   private ingest(method: string, params: unknown): void {
     this.rememberItem(params)
+    let payload = params
+    const update = (params as { rateLimits?: unknown } | null | undefined)?.rateLimits
+    if (method === 'account/rateLimits/updated' && typeof update === 'object' && update !== null) {
+      this.rateLimits = mergeRateLimits(this.rateLimits, update as Record<string, unknown>)
+      payload = { rateLimits: this.rateLimits }
+    }
     const event = mapNotification(
-      { method, params },
+      { method, params: payload },
       { seq: this.seq + 1, now: this.now(), approvalTtlMs: this.approvalTtlMs }
     )
     if (event === null) return
-    if (event.type === 'turn.started') this.currentTurnId = event.turnRef
+    if (event.type === 'turn.started') {
+      this.currentTurnId = event.turnRef
+      if (this.turnOpen) return
+      this.turnOpen = true
+    } else if (event.type === 'turn.completed') {
+      this.turnOpen = false
+      this.lastCompletedTurnId = event.turnRef
+    } else if (!this.turnOpen && opensTurn(method)) {
+      const turnId = (params as { turnId?: unknown } | null | undefined)?.turnId
+      if (typeof turnId === 'string' && turnId !== '' && turnId !== this.lastCompletedTurnId) {
+        this.turnOpen = true
+        this.currentTurnId = turnId
+        this.emit({
+          agentId: 'codex' satisfies AgentId,
+          seq: this.seq + 1,
+          at: this.now(),
+          type: 'turn.started',
+          turnRef: turnId,
+        })
+      }
+    }
     this.emit(event)
   }
 
@@ -437,6 +468,10 @@ export class CodexSession implements AgentSession {
        * silently, which is why it took a probe to see.
        */
       const response = await this.rpc.request('account/rateLimits/read')
+      const snapshot = (response as { rateLimits?: unknown } | null | undefined)?.rateLimits
+      if (typeof snapshot === 'object' && snapshot !== null) {
+        this.rateLimits = snapshot as Record<string, unknown>
+      }
       const event = mapNotification(
         { method: 'account/rateLimits/updated', params: response },
         { seq: this.seq + 1, now: this.now(), approvalTtlMs: this.approvalTtlMs }

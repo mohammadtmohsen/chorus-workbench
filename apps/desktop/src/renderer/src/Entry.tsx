@@ -545,6 +545,7 @@ export const Entry = memo(function Entry({
   onCollaborate,
   answersThinking = false,
   final = false,
+  held = false,
   grouped = false,
   live = false,
 }: {
@@ -645,6 +646,7 @@ export const Entry = memo(function Entry({
   answersThinking?: boolean
   /** The answer the finished turn arrived at, as opposed to the work it did. */
   final?: boolean
+  held?: boolean
   /** This row carries on from the one above it: same speaker, no second header. */
   grouped?: boolean
 }): React.JSX.Element {
@@ -1142,6 +1144,7 @@ export const Entry = memo(function Entry({
                 type="button"
                 className="entry-action"
                 data-entry-action="recap"
+                inert={held}
                 onClick={(e) => {
                   onRecap(message, e.currentTarget.getBoundingClientRect())
                 }}
@@ -1192,7 +1195,7 @@ export const Entry = memo(function Entry({
                   why that pair of restrictions travels together, and why the
                   name is in the label rather than left to be inferred.
                 */}
-                <span className="entry-actions-intents">
+                <span className="entry-actions-intents" inert={held}>
                   {final &&
                     onQuickHandOff !== undefined &&
                     (
@@ -1281,7 +1284,7 @@ export const Entry = memo(function Entry({
               room, and the first line collapses into a column.
             */}
             {final && onGo !== undefined && offersToAct(message.text) && (
-              <span className="entry-actions-go">
+              <span className="entry-actions-go" inert={held}>
                 <button
                   type="button"
                   className="entry-action entry-action--go"

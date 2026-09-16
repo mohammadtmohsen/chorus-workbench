@@ -222,6 +222,18 @@ export function mapNotification(n: Notification, ctx: MapContext): AgentEvent | 
   }
 }
 
+const TURN_WORK = new Set([
+  'item/agentMessage/delta',
+  'item/reasoning/summaryTextDelta',
+  'item/reasoning/textDelta',
+  'item/commandExecution/outputDelta',
+  'item/started',
+])
+
+export function opensTurn(method: string): boolean {
+  return TURN_WORK.has(method)
+}
+
 function mapItem(
   p: Record<string, unknown>,
   base: { agentId: AgentId; seq: number; at: number; raw: unknown },
@@ -461,6 +473,31 @@ function mapTurnStatus(status: string | undefined): 'completed' | 'interrupted' 
 function turnIdOf(p: Record<string, unknown>): string {
   const turn = p['turn'] as { id?: string } | undefined
   return turn?.id ?? str(p['turnId'], '')
+}
+
+export function mergeRateLimits(
+  held: Record<string, unknown> | null,
+  update: Record<string, unknown>
+): Record<string, unknown> {
+  if (held === null) return update
+  const bucket = held['limitId']
+  const incoming = update['limitId']
+  if (typeof bucket === 'string' && typeof incoming === 'string' && bucket !== incoming) {
+    return held
+  }
+  const merged: Record<string, unknown> = { ...held }
+  for (const slot of ['primary', 'secondary'] as const) {
+    const next = record(update[slot])
+    if (Object.keys(next).length === 0) continue
+    const previous = record(held[slot])
+    merged[slot] = {
+      ...previous,
+      ...next,
+      windowDurationMins: next['windowDurationMins'] ?? previous['windowDurationMins'] ?? null,
+      resetsAt: next['resetsAt'] ?? previous['resetsAt'] ?? null,
+    }
+  }
+  return merged
 }
 
 /**

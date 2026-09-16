@@ -1,8 +1,8 @@
 import type { IdeContextPush } from '../../../shared/ipc.js'
 import { useMemo } from 'react'
 import { useShallow } from 'zustand/react/shallow'
-import type { AgentId } from '@chorus/shared'
-import type { SessionRowState } from './session-row.js'
+import { isAgentId, type AgentId } from '@chorus/shared'
+import { withBackgroundWork, type SessionRowState } from './session-row.js'
 import {
   CHORUS_WIDTH,
   CLOSED_TERMINAL_PANEL,
@@ -319,6 +319,12 @@ export function useSessionActivity(conversationId: string): string {
   )
 }
 
+export function useBackgroundAgents(conversationId: string): string {
+  return useWorkspaceStore((state) =>
+    withBackgroundWork([], state.pulses[conversationId]?.tasksByActor ?? {}).join(',')
+  )
+}
+
 /**
  * How many sessions have an agent working in them, and nothing else.
  *
@@ -355,7 +361,10 @@ export function useSessionRowState(conversationId: string): SessionRowState {
       return {
         approvals: pulse?.approvalIds.length ?? 0,
         questions: pulse?.questionIds.length ?? 0,
-        working: (pulse?.working ?? []).join(','),
+        working: withBackgroundWork(
+          (pulse?.working ?? []).filter(isAgentId),
+          pulse?.tasksByActor ?? {}
+        ).join(','),
         unread: pulse?.unread ?? 0,
         failed: pulse?.failed ?? false,
       }
@@ -406,7 +415,8 @@ export function useProjectRowState(conversationIds: readonly string[]): SessionR
         questions += pulse.questionIds.length
         unread += pulse.unread
         failed = failed || pulse.failed
-        for (const agentId of pulse.working) working.add(agentId)
+        const agents = withBackgroundWork(pulse.working.filter(isAgentId), pulse.tasksByActor)
+        for (const agentId of agents) working.add(agentId)
       }
       return { approvals, questions, unread, failed, working: [...working].sort().join(',') }
     })

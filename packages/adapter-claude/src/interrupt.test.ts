@@ -47,6 +47,16 @@ async function emitted(events: AsyncIterable<AgentEvent>, count: number): Promis
   return seen
 }
 
+async function firstOfType(
+  events: AsyncIterable<AgentEvent>,
+  type: AgentEvent['type']
+): Promise<AgentEvent | undefined> {
+  for await (const event of events) {
+    if (event.type === type) return event
+  }
+  return undefined
+}
+
 describe('interrupt', () => {
   it('says how many messages the stop did not stop', async () => {
     const session = await adapterWith(() =>
@@ -54,7 +64,7 @@ describe('interrupt', () => {
     ).start(OPTS)
 
     await session.interrupt()
-    const [notice] = await emitted(session.events, 1)
+    const notice = await firstOfType(session.events, 'notice')
     expect(notice).toMatchObject({ type: 'notice', level: 'warn', text: '2 queued' })
   })
 

@@ -120,6 +120,15 @@ describe('usageReadings', () => {
     expect(readings[0]?.percent).toBeNull()
   })
 
+  it('does not let a window with no length take a slot', () => {
+    const readings = usageReadings(
+      [push('codex', [{ id: 'lengthless', usedPercent: 0, windowMinutes: null, resetsAt: null }])],
+      NOW
+    )
+    expect(readings[0]?.reported).toBe(false)
+    expect(readings[1]?.reported).toBe(false)
+  })
+
   it('clamps a percentage over the top rather than drawing past it', () => {
     const readings = usageReadings(
       [push('codex', [{ id: 'over', usedPercent: 140, windowMinutes: 300, resetsAt: null }])],
@@ -186,13 +195,9 @@ describe('usageReadings pace', () => {
    * the slot's assumed duration would be Chorus claiming a window the provider
    * never reported.
    */
-  it('has no pace to report when the provider gave no window length', () => {
+  it('has no pace to report when the window has no usable length', () => {
     const readings = usageReadings(
-      [
-        push('codex', [
-          { id: 'w', usedPercent: 50, windowMinutes: null, resetsAt: NOW + 3_600_000 },
-        ]),
-      ],
+      [push('codex', [{ id: 'w', usedPercent: 50, windowMinutes: 0, resetsAt: NOW + 3_600_000 }])],
       NOW
     )
     expect(readings[0]?.elapsedPercent).toBeNull()

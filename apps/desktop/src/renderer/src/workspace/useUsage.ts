@@ -174,7 +174,7 @@ export function usageReadings(pushes: readonly LimitsPush[], now: number): reado
      * reading that *did* arrive with nowhere to go.
      */
     const windows = (push?.windows ?? [])
-      .filter((window) => window.usedPercent !== null)
+      .filter((window) => window.usedPercent !== null && window.windowMinutes !== null)
       .toSorted((a, b) => (a.windowMinutes ?? 0) - (b.windowMinutes ?? 0))
 
     return SLOTS.map((slot): UsageReading => {

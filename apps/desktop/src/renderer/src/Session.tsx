@@ -25,6 +25,7 @@ import type { ActivityPush, CollaborationPush, TranscriptEvent } from '../../sha
 
 import { askableQuestion, questionText } from '../../shared/question-text.js'
 import {
+  useBackgroundAgents,
   useSessionActivity,
   useWorkbenchShown,
   useWorkspaceActions,
@@ -34,6 +35,7 @@ import {
   answersThinking,
   groupedWith,
   EMPTY_VIEW,
+  finalAnswerKey,
   applyTranscriptState,
   prependEvents,
   reduceEvents,
@@ -201,6 +203,9 @@ export interface SessionInfo {
  * is a few hundred rows, not four thousand.
  */
 const PAGE_EVENTS = 400
+
+const FLOOR_HOLD_MS = 1_000
+const FLOOR_EASE_MS = 240
 
 /** Renderer state that survives closing or backgrounding a tab. */
 export interface SessionCarry {
@@ -373,6 +378,7 @@ export function Session(props: {
    * push, and this arrives several times a turn.
    */
   const activityByAgent = useSessionActivity(conversationId)
+  const backgroundAgents = useBackgroundAgents(conversationId)
   const { toggleWorkbench } = useWorkspaceActions()
   const workbenchShown = useWorkbenchShown(props.session.projectId)
   const [handoff, setHandoff] = useState<HandoffDraft | null>(null)
@@ -654,6 +660,20 @@ export function Session(props: {
    */
   const following = useRef(props.carry?.following ?? true)
 
+  const floor = useRef<HTMLDivElement | null>(null)
+  const settleFloor = useRef<(immediately: boolean) => void>(() => undefined)
+  const lastTop = useRef(0)
+
+  const stopFollowing = useCallback((): void => {
+    following.current = false
+  }, [])
+
+  const resumeFollowing = useCallback((): void => {
+    if (following.current) return
+    following.current = true
+    settleFloor.current(false)
+  }, [])
+
   /*
    * There used to be a `makeRoom` here, and its removal is the point.
    *
@@ -684,6 +704,7 @@ export function Session(props: {
     const el = score.current
     const content = transcript.current
     if (el === null || content === null) return
+    lastTop.current = el.scrollTop
 
     /*
      * Watching the content grow, not the message count.
@@ -714,23 +735,68 @@ export function Session(props: {
      * notifications coalesces into one layout, where the old shape paid for
      * each. Removing it would be a performance change, not a simplification.
      */
-    let frame = 0
-    const settle = (): void => {
-      if (frame !== 0) return
-      frame = requestAnimationFrame(() => {
-        frame = 0
-        if (following.current) el.scrollTop = el.scrollHeight
-      })
+    const spacer = floor.current
+    let seen = content.offsetHeight
+    let slack = 0
+    let hold = 0
+    let ease = 0
+
+    const setSlack = (px: number): void => {
+      slack = Math.max(0, px)
+      if (spacer !== null) spacer.style.height = `${String(slack)}px`
     }
 
-    const follow = new ResizeObserver(settle)
+    const stopTimers = (): void => {
+      clearTimeout(hold)
+      cancelAnimationFrame(ease)
+      hold = 0
+      ease = 0
+    }
+
+    const glide = (): void => {
+      hold = 0
+      const from = slack
+      const start = performance.now()
+      const step = (now: number): void => {
+        if (!following.current) {
+          ease = 0
+          return
+        }
+        const t = Math.min(1, (now - start) / FLOOR_EASE_MS)
+        setSlack(from * (1 - t) ** 3)
+        el.scrollTop = el.scrollHeight
+        ease = t < 1 ? requestAnimationFrame(step) : 0
+      }
+      ease = requestAnimationFrame(step)
+    }
+
+    const holdSlack = (px: number): void => {
+      stopTimers()
+      setSlack(px)
+      if (slack > 0) hold = window.setTimeout(glide, FLOOR_HOLD_MS)
+    }
+
+    settleFloor.current = (immediately) => {
+      holdSlack(immediately ? 0 : slack)
+    }
+
+    const follow = new ResizeObserver(() => {
+      const height = content.offsetHeight
+      const change = height - seen
+      seen = height
+      if (!following.current) return
+      if (change < 0) holdSlack(-change > el.clientHeight ? 0 : slack - change)
+      else if (change > 0 && slack > 0) holdSlack(slack - change)
+      el.scrollTop = el.scrollHeight
+    })
     follow.observe(content)
     // The pane too: a window resize changes where the bottom is without
     // changing a word, and a following transcript has to stay pinned to it.
     follow.observe(el)
     return () => {
       follow.disconnect()
-      cancelAnimationFrame(frame)
+      stopTimers()
+      settleFloor.current = () => undefined
     }
   }, [])
 
@@ -878,10 +944,11 @@ export function Session(props: {
   const lastCount = useRef(view.messages.length)
   useLayoutEffect(() => {
     const el = score.current
-    if (el === null) return
-    const grew = el.scrollHeight - lastHeight.current
+    const content = transcript.current
+    if (el === null || content === null) return
+    const grew = content.offsetHeight - lastHeight.current
     const prepended = view.messages.length > lastCount.current && !following.current
-    lastHeight.current = el.scrollHeight
+    lastHeight.current = content.offsetHeight
     lastCount.current = view.messages.length
     if (prepended && grew > 0) el.scrollTop += grew
   }, [view.messages.length])
@@ -900,6 +967,7 @@ export function Session(props: {
      */
     const el = score.current
     if (el === null || turnKey === null) return
+    settleFloor.current(true)
     if (following.current) el.scrollTop = el.scrollHeight
   }, [turnKey])
 
@@ -1646,7 +1714,7 @@ export function Session(props: {
          * the view ends up, and this write is a restoration rather than the
          * reader arriving anywhere.
          */
-        following.current = false
+        stopFollowing()
         return
       }
       if (Date.now() < until) frame = requestAnimationFrame(restore)
@@ -1760,10 +1828,7 @@ export function Session(props: {
    * every time the agent spoke again. Only the newest, too — every agent
    * message is some turn's conclusion, so marking them all marks nothing.
    */
-  const finalKey =
-    view.busy || view.messages.length === 0
-      ? null
-      : (view.messages.findLast((m) => isAgentId(m.actor) && m.kind === 'message')?.key ?? null)
+  const finalKey = finalAnswerKey(view)
 
   /**
    * The newest message of each speaker still working, so its dot can say so.
@@ -1798,6 +1863,7 @@ export function Session(props: {
          memoisation nothing. */
       cwd={props.session.cwd}
       final={message.key === finalKey}
+      held={view.busy && message.key === finalKey}
       answersThinking={answersThinking(view.messages[index - 1], message)}
       /*
        * A run of steps by one agent is one speaker, not eleven.
@@ -1932,6 +1998,35 @@ export function Session(props: {
       </article>
     ))
 
+  const waitingOnBackground =
+    view.working.length === 0 && !awaiting
+      ? backgroundAgents
+          .split(',')
+          .filter(isAgentId)
+          .sort()
+          .map((agent) => (
+            <article
+              key={`background:${agent}`}
+              className={`entry entry--${agent} entry--thinking`}
+            >
+              <span className="entry-mark" aria-hidden="true">
+                <span className="tick" />
+              </span>
+              <div className="entry-head">
+                <span className="speaker">{t(`actor.${agent}`)}</span>
+              </div>
+              <p className="said thinking" role="status">
+                {t('conversation.backgroundWork')}
+                <span className="thinking-dots" aria-hidden="true">
+                  <i />
+                  <i />
+                  <i />
+                </span>
+              </p>
+            </article>
+          ))
+      : null
+
   return (
     <section
       ref={pane}
@@ -2064,15 +2159,22 @@ export function Session(props: {
            * unambiguous however you got there.
            */
           onWheel={(e) => {
-            if (e.deltaY < 0) following.current = false
+            const el = e.currentTarget
+            const gap = el.scrollHeight - el.scrollTop - el.clientHeight
+            if (e.deltaY < 0) stopFollowing()
+            else if (e.deltaY > 0 && gap <= 1) resumeFollowing()
           }}
           onTouchMove={() => {
             const el = score.current
             if (el === null) return
-            if (el.scrollHeight - el.scrollTop - el.clientHeight > 32) following.current = false
+            if (el.scrollHeight - el.scrollTop - el.clientHeight <= 1) resumeFollowing()
           }}
           onKeyDown={(e) => {
-            if (['PageUp', 'ArrowUp', 'Home'].includes(e.key)) following.current = false
+            const el = e.currentTarget
+            const gap = el.scrollHeight - el.scrollTop - el.clientHeight
+            const down = ['PageDown', 'ArrowDown', 'End'].includes(e.key)
+            if (['PageUp', 'ArrowUp', 'Home'].includes(e.key)) stopFollowing()
+            else if (down && gap <= 1) resumeFollowing()
           }}
           onScroll={(e) => {
             const el = e.currentTarget
@@ -2104,7 +2206,11 @@ export function Session(props: {
              * unambiguous however you got there. Stopping it is a gesture, which
              * the handlers above own.
              */
-            if (el.scrollHeight - el.scrollTop - el.clientHeight <= 32) following.current = true
+            const top = el.scrollTop
+            const gap = el.scrollHeight - top - el.clientHeight
+            if (top < lastTop.current && gap > 1) stopFollowing()
+            else if (top > lastTop.current && gap <= 1) resumeFollowing()
+            lastTop.current = top
           }}
         >
           <div className="score-content" ref={transcript}>
@@ -2119,6 +2225,7 @@ export function Session(props: {
               <>
                 {thinking}
                 {waitingRow}
+                {waitingOnBackground}
               </>
             ) : (
               /*
@@ -2151,6 +2258,7 @@ export function Session(props: {
                 */}
                 {thinking}
                 {waitingRow}
+                {waitingOnBackground}
               </div>
             )}
             {/*
@@ -2252,6 +2360,7 @@ export function Session(props: {
               </div>
             )}
           </div>
+          <div className="score-floor" ref={floor} aria-hidden="true" />
         </div>
 
         {/*
@@ -2455,6 +2564,7 @@ export function Session(props: {
           participants={ALL_AGENTS}
           busy={view.busy}
           working={view.working}
+          backgroundAgents={backgroundAgents}
           ide={ide}
           onRestart={props.onRestart}
           onContinue={props.onContinue}

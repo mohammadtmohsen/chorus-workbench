@@ -92,6 +92,7 @@ export interface ComposerProps {
   /** Drives whether the one button offers Send or Stop. */
   readonly busy: boolean
   readonly working: readonly string[]
+  readonly backgroundAgents: string
   /** What VS Code is showing for this pane's project. Metadata only. */
   readonly ide: IdeContextPush | null
   /**
@@ -1135,7 +1136,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(
            * handling has a lifecycle to hang on.
            */
           <ConfirmRestart
-            working={props.working.join(', ')}
+            working={(props.busy ? props.working : props.backgroundAgents.split(',')).join(', ')}
             onCancel={() => {
               setConfirmingRestart(false)
             }}
@@ -1501,7 +1502,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(
               aria-label={t('conversation.restart')}
               title={t('conversation.restart')}
               onClick={() => {
-                if (props.busy) setConfirmingRestart(true)
+                if (props.busy || props.backgroundAgents !== '') setConfirmingRestart(true)
                 else props.onRestart()
               }}
             >

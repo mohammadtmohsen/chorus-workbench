@@ -3,9 +3,11 @@ import type { TranscriptEvent } from '../../shared/ipc.js'
 import {
   answersThinking,
   EMPTY_VIEW,
+  finalAnswerKey,
   groupedWith,
   reduceEvents,
   type TranscriptMessage,
+  type TranscriptView,
 } from './transcript.js'
 
 let seq = 0
@@ -1204,5 +1206,58 @@ describe('groupedWith', () => {
 
   it('leaves the first row of a transcript alone', () => {
     expect(groupedWith(undefined, row({}))).toBe(false)
+  })
+})
+
+describe('finalAnswerKey', () => {
+  const row = (key: string, over: Partial<TranscriptMessage>): TranscriptMessage => ({
+    key,
+    eventId: key,
+    at: 0,
+    actor: 'claude',
+    kind: 'message',
+    text: '',
+    status: 'complete',
+    ...over,
+  })
+  const view = (busy: boolean, messages: TranscriptMessage[]): TranscriptView => ({
+    ...EMPTY_VIEW,
+    busy,
+    messages,
+  })
+
+  it('is the newest complete agent reply while idle', () => {
+    expect(finalAnswerKey(view(false, [row('q', { actor: 'user' }), row('a', {})]))).toBe('a')
+  })
+
+  it('never picks a user message, even the newest row', () => {
+    expect(finalAnswerKey(view(false, [row('a', {}), row('q', { actor: 'user' })]))).toBe('a')
+  })
+
+  it('stays on the sender on both sides of a handoff', () => {
+    const seam = [
+      row('q', { actor: 'user' }),
+      row('a', { actor: 'codex' }),
+      row('h', { actor: 'codex', kind: 'handoff' }),
+    ]
+    expect(finalAnswerKey(view(false, seam))).toBe('a')
+    expect(finalAnswerKey(view(true, [...seam, row('b', { status: 'streaming' })]))).toBe('a')
+  })
+
+  it('holds the previous answer through a new turn, intermediate replies included', () => {
+    const turn = [row('a', {}), row('q', { actor: 'user' }), row('m', {})]
+    expect(finalAnswerKey(view(true, turn))).toBe('a')
+  })
+
+  it('skips a reply that is still streaming', () => {
+    expect(finalAnswerKey(view(false, [row('a', {}), row('b', { status: 'streaming' })]))).toBe('a')
+  })
+
+  it('is null while busy with no trigger loaded', () => {
+    expect(finalAnswerKey(view(true, [row('a', {})]))).toBeNull()
+  })
+
+  it('is null for an empty transcript', () => {
+    expect(finalAnswerKey(view(false, []))).toBeNull()
   })
 })

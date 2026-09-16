@@ -317,6 +317,17 @@ export function toEpochMs(value: number | null | undefined): number | null {
   return value < 1e12 ? Math.round(value * 1000) : Math.round(value)
 }
 
+export function mergeUsageWindows(
+  held: readonly UsageWindow[],
+  incoming: readonly UsageWindow[]
+): UsageWindow[] {
+  const byId = new Map(held.map((window) => [window.id, window]))
+  for (const window of incoming) {
+    if (window.usedPercent !== null) byId.set(window.id, window)
+  }
+  return [...byId.values()].sort((a, b) => (a.windowMinutes ?? 0) - (b.windowMinutes ?? 0))
+}
+
 export interface LimitsUpdated extends AgentEventBase {
   readonly type: 'limits'
   readonly windows: readonly UsageWindow[]

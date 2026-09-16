@@ -1,4 +1,4 @@
-import type { AgentId } from '@chorus/shared'
+import { isAgentId, type AgentId } from '@chorus/shared'
 import type { SessionInfo } from '../Session.js'
 
 /**
@@ -77,6 +77,17 @@ export function stateOf(row: SessionRowState): SessionState {
   if (row.working.length > 0) return 'working'
   if (row.failed) return 'failed'
   return 'idle'
+}
+
+export function withBackgroundWork(
+  working: readonly AgentId[],
+  tasksByActor: Readonly<Record<string, readonly unknown[]>>
+): AgentId[] {
+  const waiting = Object.entries(tasksByActor)
+    .filter(([, tasks]) => tasks.length > 0)
+    .map(([agentId]) => agentId)
+    .filter(isAgentId)
+  return [...new Set([...working, ...waiting])]
 }
 
 export function projectRow(

@@ -6,6 +6,7 @@ import {
   mapSdkMessage,
   mapToolPermission,
   mapUserInputRequest,
+  opensTurn,
   toClaudeUserInputResult,
   trackBashTools,
   trackStreamMessage,
@@ -1189,6 +1190,16 @@ describe('rate limits', () => {
   it('says nothing when there is nothing to say', () => {
     expect(mapSdkMessage({ type: 'rate_limit_event' }, CTX)).toEqual([])
   })
+
+  it('drops a window the rail has no slot for', () => {
+    for (const rateLimitType of ['overage', 'seven_day_overage_included', 'seven_day_sonnet']) {
+      const event = {
+        ...LIVE,
+        rate_limit_info: { ...LIVE.rate_limit_info, rateLimitType, utilization: 0 },
+      }
+      expect(mapSdkMessage(event, CTX)).toEqual([])
+    }
+  })
 })
 
 describe('plan usage', () => {
@@ -1229,6 +1240,26 @@ describe('plan usage', () => {
     // Most of the named ones are null, and a couple are not windows we know.
     const [event] = mapPlanUsage(LIVE, BASE)
     expect(event?.type === 'limits' && event.windows.map((w) => w.id)).not.toContain('tangelo')
+  })
+
+  it('keeps only the five-hour and weekly windows', () => {
+    const resets_at = '2026-08-06T17:59:59.163318+00:00'
+    const [event] = mapPlanUsage(
+      {
+        ...LIVE,
+        rate_limits: {
+          ...LIVE.rate_limits,
+          seven_day_opus: { utilization: 40, resets_at },
+          seven_day_sonnet: { utilization: 12, resets_at },
+          seven_day_oauth_apps: { utilization: 5, resets_at },
+        },
+      },
+      BASE
+    )
+    expect(event?.type === 'limits' && event.windows.map((w) => w.id)).toEqual([
+      'five_hour',
+      'seven_day',
+    ])
   })
 
   it('says nothing for an account with no plan windows', () => {
@@ -1618,5 +1649,48 @@ describe('mapping: edit patches', () => {
 
     expect(events).toHaveLength(2)
     expect(events.every((e) => e.patch === undefined)).toBe(true)
+  })
+})
+
+describe('opensTurn', () => {
+  const toolResult = { content: [{ type: 'tool_result', tool_use_id: 't1', content: 'ok' }] }
+
+  it('opens on the model working', () => {
+    expect(opensTurn({ type: 'assistant' })).toBe(true)
+    expect(opensTurn({ type: 'stream_event' })).toBe(true)
+  })
+
+  it('opens on a live tool result', () => {
+    expect(opensTurn({ type: 'user', message: toolResult })).toBe(true)
+  })
+
+  it('never opens on a replay', () => {
+    expect(opensTurn({ type: 'assistant', isReplay: true })).toBe(false)
+    expect(opensTurn({ type: 'user', isReplay: true, message: toolResult })).toBe(false)
+  })
+
+  it('never opens on a user message that does not query', () => {
+    expect(opensTurn({ type: 'user', shouldQuery: false, message: toolResult })).toBe(false)
+  })
+
+  it('never opens on a user message without a tool result', () => {
+    const text = { content: [{ type: 'text', text: 'the background task finished' }] }
+    expect(opensTurn({ type: 'user', message: text })).toBe(false)
+  })
+
+  it('never opens on a background notification, although it maps to a tool event', () => {
+    const notification = {
+      type: 'system',
+      subtype: 'task_notification',
+      task_id: 't1',
+      status: 'completed',
+    }
+    expect(mapSdkMessage(notification, CTX).map((event) => event.type)).toContain('tool.completed')
+    expect(opensTurn(notification)).toBe(false)
+  })
+
+  it('never opens on a result or a rate limit', () => {
+    expect(opensTurn({ type: 'result', subtype: 'success' })).toBe(false)
+    expect(opensTurn({ type: 'rate_limit_event' })).toBe(false)
   })
 })

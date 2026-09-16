@@ -144,8 +144,8 @@ function show(): void {
   // `window.chorus` is not injected. It short-circuits the whole chain, so the
   // clear below does not run there either — and there are no surfaces in either
   // of those documents, so there is nothing left painted.
-  // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition
   void window.chorus
+    // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition
     ?.setWorkbenchVisible({ visible: true })
     .catch(() => {
       /* nothing to undo; the views are already being asked to come back */

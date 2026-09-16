@@ -102,6 +102,7 @@
     "cancel": "Cancel",
     "waiting": "waiting",
     "noAnswer": "No answer yet — the message may not have reached the agent. Try sending it again.",
+    "backgroundWork": "waiting on background tasks",
     "askAboutThis": "Ask about this",
     "explainSimply": "Explain simply",
     "styleOn": "Answer this room in English and Arabic",

@@ -1884,7 +1884,9 @@ body {
   overflow-anchor: none;
   /* Named because the pinned turn has to cancel it exactly; see `.turn-head`. */
   --score-top: calc(var(--step) * 5);
-  padding: var(--score-top) calc(var(--step) * 5) calc(var(--step) * 7);
+  --score-scrollbar: 15px;
+  padding: var(--score-top) calc(var(--step) * 5 + var(--score-scrollbar)) calc(var(--step) * 7)
+    calc(var(--step) * 5);
 }
 
 /* The origin the rail and every dot now share. */
@@ -5009,6 +5011,16 @@ input::placeholder {
   color: var(--voice);
 }
 
+.entry-action[inert],
+[inert] .entry-action {
+  color: var(--text-disabled);
+}
+
+[inert] .entry-action--go {
+  border-color: var(--line);
+  background: none;
+}
+
 /* A handoff is the moment context crosses between agents that otherwise cannot
    see each other, so it reads as a seam rather than as another message. */
 .entry--handoff .tick {
@@ -5801,7 +5813,8 @@ input::placeholder {
   }
 
   .score {
-    padding: calc(var(--step) * 5) calc(var(--step) * 3) calc(var(--step) * 6);
+    padding: calc(var(--step) * 5) calc(var(--step) * 3 + var(--score-scrollbar))
+      calc(var(--step) * 6) calc(var(--step) * 3);
   }
 
   .entry {
@@ -7645,7 +7658,7 @@ input::placeholder {
    * wider than this rule's `gap` above. Only projects are dragged, so this is
    * measured on them rather than on the 44px buttons at the head and foot.
    */
-  --rail-step: calc(var(--rail) - var(--step) * 2 + var(--step) * 5);
+  --rail-step: calc(var(--rail) - var(--step) * 2 + var(--step) * 2.5);
 }
 
 /*
@@ -7682,7 +7695,7 @@ input::placeholder {
  * the account block, and the two buttons at the top are a pair.
  */
 .quick-rail-sessions .quick-rail-group {
-  gap: calc(var(--step) * 5);
+  gap: calc(var(--step) * 2.5);
 }
 
 /*
@@ -7698,7 +7711,7 @@ input::placeholder {
 }
 
 .quick-rail-group--foot {
-  gap: calc(var(--step) * 5);
+  gap: calc(var(--step) * 2.5);
   /*
    * Clear of the session list above it.
    *
@@ -7707,6 +7720,10 @@ input::placeholder {
    * ran together exactly when there were most sessions to tell apart.
    */
   margin-top: calc(var(--step) * 5);
+}
+
+.rail-usage-slot + li {
+  margin-top: calc(var(--step) * 2.5);
 }
 
 /*
@@ -7745,8 +7762,8 @@ input::placeholder {
   content: '';
   position: absolute;
   top: 0;
-  right: calc(var(--step) * 3);
-  left: calc(var(--step) * 3);
+  right: 0;
+  left: 0;
   border-top: 1px solid var(--border-default);
 }
 
@@ -7786,7 +7803,7 @@ input::placeholder {
   display: grid;
   place-items: center;
   /* 44 x 44, comfortably past WCAG's 24px pointer-target floor. */
-  width: 44px;
+  width: 100%;
   height: 44px;
   /* Centred in the rail's content box, which `.quick-rail` has already shifted
      to account for its neighbour — see the padding comment there. */
@@ -8249,6 +8266,10 @@ input::placeholder {
   color: var(--voice-claude);
 }
 
+.state-mark[data-state='working'][data-voice='deepseek'] {
+  color: var(--voice-deepseek);
+}
+
 /*
  * Blocked: a triangle, in the danger colour, because something is held up.
  *
@@ -8370,7 +8391,7 @@ input::placeholder {
   gap: calc(var(--step) * 5);
   width: 100%;
   height: auto;
-  padding: 0 calc(var(--step) * 3);
+  padding: 0;
   border: 0;
   border-radius: var(--radius);
   background: none;
@@ -9538,6 +9559,10 @@ input::placeholder {
 
 .rail-session[data-state='working'][data-voice='claude'] {
   --orbit: var(--voice-claude);
+}
+
+.rail-session[data-state='working'][data-voice='deepseek'] {
+  --orbit: var(--voice-deepseek);
 }
 
 .rail-session[data-state='working']::before {
@@ -11469,7 +11494,7 @@ input::placeholder {
 .workspace-pane-workbench {
   position: relative;
   flex: 1 1 auto;
-  min-width: 0;
+  min-width: 59px;
   min-height: 0;
   /*
    * Inset from the pane's own edges as well as from the divider, and this half
