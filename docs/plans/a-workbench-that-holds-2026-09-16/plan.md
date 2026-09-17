@@ -9,7 +9,7 @@
 | 2 — A workbench that is not throttled | ✅ verified 2026-09-16             | `1de72c0`                                                                              | Measured before and after. `detached` went from `hidden` to `visible`, and no `visibilitychange` fires at all.                    |
 | 3 — Focus, honestly                   | ✅ verified 2026-09-16             | `1867518`, `2f07d03`                                                                   | Measured with the workaround disabled: SCM refreshed with focus in the chat. `scm-refresh.ts` removed.                            |
 | 4 — Extensions per workspace          | ⬜ not started                     | —                                                                                      | Closes C-063 with upstream machinery.                                                                                             |
-| 5 — Remote over SSH                   | ✅ verified 2026-09-17 on `tpa-be` | `a47c9f4`, `f12fa2e`, `148fce1`, `62b3d75`, `e2d4018`, `e58c580`, `f165396`, `26e8c54` | The backend opened from Chorus on `tpa-be`, and an agent answered about the selected lines. Dev build only so far.                |
+| 5 — Remote over SSH                   | ✅ verified 2026-09-17 on `tpa-be` | `a47c9f4`, `f12fa2e`, `148fce1`, `62b3d75`, `e2d4018`, `e58c580`, `f165396`, `26e8c54`, `7a05e73` | The backend opened from Chorus on `tpa-be`, in the dev build and then in the installed app. An agent answered about the selected lines, and its edits reach the remote file. |
 | 6 — `33.0.9` → `36.2.7`               | ⬜ not started                     | —                                                                                      | Table stakes, not a fix. Its own migration.                                                                                       |
 
 Meta: written 2026-09-16, after a research round by `claude`, `codex` and `deepseek`.
@@ -801,10 +801,31 @@ under the supervising task, and opened `C:/TPA-MEDEXA/MasterTPABackend` as the r
 project `MasterTPABackend`, with the agents' folder `~/code/tpa/tpa-be`. The status bar
 showed branch `procedure-axes-info` and Source Control his four changes. An agent then
 answered about `CreateRecordNoteCommand.kt` lines 4–11, quoting the selection
-correctly. **What this does not yet cover:** only the dev build has run it, not an
-installed app; `editor_edit` still refuses in a remote project; and file links in the
-conversation do not open remote files. Ahmad's machine now holds that server tree and
-the `Chorus Workbench Server` task, and he should be told.
+correctly. **The installed app ran it too**, the same day, from its own data
+directory and therefore its own registry, token and server tree — so the packaged
+build is no longer the untested half of this. Ahmad's machine now holds that server
+tree and the `Chorus Workbench Server` task, and he should be told.
+
+**The agent's edits reach a remote file, from `7a05e73`.** A session carries the
+place its project is in — host and canonical root, read from the registry where the
+session options are built — and `requestWorkbenchEdit` matches both, so an edit goes
+to the surface on that host rather than to whichever pane held a matching path. A
+local project is unchanged: with no place, the adapter falls back to the working
+directory, which for a local project _is_ the root.
+
+Three things it deliberately leaves standing. **Editor edits are Claude's only**,
+because `editor_edit` is an in-process MCP tool of the Claude SDK and the Codex
+app-server has no editor tool to mount — a Codex agent in a remote project writes
+through its own sandbox, into the agents' folder on this Mac. **`requestWorkbenchAskDiff`
+stays root-only**, so a diff card in a remote project finds no surface and shows
+nothing; that is the designed degradation its own comment allows, not a defect, and
+it is written down here because nothing else said it. **The local sentinel is spelled
+twice** — `''` in `packages/adapter-claude/src/claude-adapter.ts` and `LOCAL_HOST` in
+the store — and the two must stay equal; the adapter cannot import from the store
+without inverting the layering, so a note is the whole fix.
+
+**What this still does not cover:** file links in the conversation do not open remote
+files.
 
 **Still unproven, and carried as such.** The source-level Win32-OpenSSH behaviour.
 How auto-shutdown's orphaned extension hosts behave on Windows specifically. Whether
