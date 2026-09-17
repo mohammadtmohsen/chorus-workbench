@@ -1765,10 +1765,12 @@ export async function requestWorkbenchSnapshot(
  * what it wants.
  */
 export async function requestWorkbenchEdit(
-  projectRoot: string,
+  place: WorkbenchPlace,
   edit: Omit<WorkbenchEditRequest, 'requestId'>
 ): Promise<WorkbenchEditResult> {
-  const surface = [...byId.values()].find((s) => s.projectRoot === projectRoot)
+  const surface = [...byId.values()].find(
+    (s) => s.host === place.host && s.projectRoot === place.root
+  )
   const requestId = randomUUID()
   if (surface === undefined || surface.view.webContents.isDestroyed()) {
     return {

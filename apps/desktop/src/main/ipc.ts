@@ -407,7 +407,7 @@ export function buildHandlers(runtime: ChorusRuntime): Handlers {
       }),
 
     'files:complete': (request: { conversationId: string; query: string }) =>
-      completeFiles(runtime.projectDirectory(request.conversationId), request.query),
+      completeFiles(runtime.agentDirectory(request.conversationId), request.query),
 
     'conversation:commands': async (request: { conversationId: string }) => ({
       commands: await runtime.listCommands(request.conversationId),
@@ -784,7 +784,7 @@ export function buildHandlers(runtime: ChorusRuntime): Handlers {
     'ide:installExtension': () => installBundledExtension(extensionDeps()),
 
     'ide:openProject': (request: { conversationId: string }) =>
-      openProjectInEditor(runtime.projectDirectory(request.conversationId), extensionDeps()),
+      openProjectInEditor(runtime.agentDirectory(request.conversationId), extensionDeps()),
 
     /*
      * Resolved and contained here, never trusted from the renderer.
@@ -796,14 +796,14 @@ export function buildHandlers(runtime: ChorusRuntime): Handlers {
      * `isWithin` is the check, and it is segment-wise because `/a/project-old`
      * must not count as inside `/a/project`.
      *
-     * A conversation that is no longer open throws from `projectDirectory` —
+     * A conversation that is no longer open throws from `agentDirectory` —
      * caught, because a pane closing mid-click is a normal race and not
      * something to surface as an unhandled rejection.
      */
     'ide:openFile': async (request: { conversationId: string; path: string }) => {
       let cwd: string
       try {
-        cwd = runtime.projectDirectory(request.conversationId)
+        cwd = runtime.agentDirectory(request.conversationId)
       } catch {
         return { ok: false, reason: 'outside-project' as const, path: request.path, project: '' }
       }
@@ -873,7 +873,7 @@ export function buildHandlers(runtime: ChorusRuntime): Handlers {
     },
 
     'ide:snapshot': async (request: { conversationId: string }) => {
-      const cwd = runtime.projectDirectory(request.conversationId)
+      const cwd = runtime.agentDirectory(request.conversationId)
 
       /*
        * The embedded editor first, and the external bridge only if there is none.

@@ -37,7 +37,7 @@ const { buildHandlers } = await import('./ipc.js')
  */
 describe('ide:openFile', () => {
   const open = async (cwd: string, path: string) => {
-    const runtime = { projectDirectory: () => cwd } as unknown as ChorusRuntime
+    const runtime = { agentDirectory: () => cwd } as unknown as ChorusRuntime
     return (await (buildHandlers(runtime)['ide:openFile'] as (r: unknown) => Promise<unknown>)({
       conversationId: 'c1',
       path,
@@ -76,7 +76,7 @@ describe('ide:openFile', () => {
 
   it('refuses when the conversation is no longer open', async () => {
     const runtime = {
-      projectDirectory: () => {
+      agentDirectory: () => {
         throw new Error('Conversation "c1" is not active')
       },
     } as unknown as ChorusRuntime

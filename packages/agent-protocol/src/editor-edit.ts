@@ -97,6 +97,11 @@ export type EditorEditOutcome =
       readonly version: number | null
     }
 
+export interface EditorPlace {
+  readonly host: string
+  readonly root: string
+}
+
 /**
  * What a host provides and an adapter offers to its agent.
  *
@@ -112,6 +117,6 @@ export type EditorEditCapability = (
    * one object serving every conversation, while a surface belongs to one
    * project — so the root is a property of the *call*, not of the host.
    */
-  projectRoot: string,
+  place: EditorPlace,
   request: EditorEditRequest
 ) => Promise<EditorEditOutcome>

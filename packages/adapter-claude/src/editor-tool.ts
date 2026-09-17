@@ -1,5 +1,5 @@
 import { createSdkMcpServer, tool } from '@anthropic-ai/claude-agent-sdk'
-import type { EditorEditCapability } from '@chorus/agent-protocol'
+import type { EditorEditCapability, EditorPlace } from '@chorus/agent-protocol'
 import { z } from 'zod'
 
 /**
@@ -88,7 +88,7 @@ const DESCRIPTION = [
  */
 export function editorMcpServer(
   edit: EditorEditCapability | undefined,
-  projectRoot: string
+  place: EditorPlace
 ): Record<string, ReturnType<typeof createSdkMcpServer>> | undefined {
   if (edit === undefined) return undefined
   return {
@@ -99,7 +99,7 @@ export function editorMcpServer(
         "Tools for changing files in the user's open editor. Use these in preference to writing files directly while an editor is open.",
       tools: [
         tool('editor_edit', DESCRIPTION, EDIT_SCHEMA, async (args) => {
-          const outcome = await edit(projectRoot, {
+          const outcome = await edit(place, {
             path: args.path,
             baseVersion: args.base_version,
             range: {

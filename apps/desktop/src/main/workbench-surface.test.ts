@@ -3,7 +3,11 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { LOCAL_HOST } from '@chorus/event-store'
 import { afterAll, beforeEach, describe, expect, it, vi } from 'vitest'
-import { WORKBENCH_FOCUS_CHANNEL, WorkbenchConnection } from '../shared/workbench-ipc.js'
+import {
+  WORKBENCH_EDIT_RESULT_CHANNEL,
+  WORKBENCH_FOCUS_CHANNEL,
+  WorkbenchConnection,
+} from '../shared/workbench-ipc.js'
 
 /**
  * The whole class of defect here is a control that appears to exist because it
@@ -1112,6 +1116,39 @@ describe('the shared server lease', () => {
       surface.closeSurface(shell as never, viewId)
       expect(releaseRemoteWorkbenchRuntime).toHaveBeenCalledWith('officepc', 'C:/api')
       expect(releaseWorkbenchRuntime).not.toHaveBeenCalled()
+    } finally {
+      surface.registerWorkbenchHandlers(undefined)
+    }
+  })
+
+  it('sends an agent edit to the editor on its host, and never to a local project at that root', async () => {
+    surface.registerWorkbenchHandlers(undefined, () => ({ host: 'officepc', root: 'C:/api' }))
+    try {
+      const viewId = await surface.openSurface(shell as never, { projectId: 'remote' }, undefined)
+      const view = lastView()
+      const edit = {
+        path: 'C:/api/src/Main.kt',
+        baseVersion: 3,
+        range: { startLine: 1, startColumn: 1, endLine: 1, endColumn: 4 },
+        oldText: 'val',
+        newText: 'var',
+      }
+
+      await expect(
+        surface.requestWorkbenchEdit({ host: LOCAL_HOST, root: 'C:/api' }, edit)
+      ).resolves.toMatchObject({ ok: false, refusal: 'no-editor' })
+      expect(view.webContents.sent).toEqual([])
+
+      const pending = surface.requestWorkbenchEdit({ host: 'officepc', root: 'C:/api' }, edit)
+      expect(view.webContents.sent).toEqual([{ ...edit, requestId: expect.any(String) }])
+      const [sent] = view.webContents.sent as { requestId: string }[]
+      pushes.get(WORKBENCH_EDIT_RESULT_CHANNEL)?.(
+        { sender: view.webContents },
+        { requestId: sent?.requestId, ok: true, version: 4 }
+      )
+      await expect(pending).resolves.toEqual({ requestId: sent?.requestId, ok: true, version: 4 })
+
+      surface.closeSurface(shell as never, viewId)
     } finally {
       surface.registerWorkbenchHandlers(undefined)
     }

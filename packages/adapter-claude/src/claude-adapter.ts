@@ -1338,7 +1338,10 @@ export class ClaudeAdapter implements AgentAdapter {
      * plugins, so adding one tool of ours would silently disconnect all of
      * theirs. Same reasoning as `settingSources` being omitted below.
      */
-    const editorServer = editorMcpServer(this.editorEdit, opts.cwd)
+    const editorServer = editorMcpServer(
+      this.editorEdit,
+      opts.editorPlace ?? { host: '', root: opts.cwd }
+    )
     const transcriptServer = transcriptMcpServer(opts.transcript)
 
     const options: Options = {

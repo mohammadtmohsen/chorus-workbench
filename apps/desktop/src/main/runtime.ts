@@ -1872,7 +1872,11 @@ export class ChorusRuntime {
           agentId,
           conversationId,
           (resuming) =>
-            this.sessionOptsFor({ conversationId, cwd, profile, styleOn }, agentId, resuming),
+            this.sessionOptsFor(
+              { conversationId, cwd, profile, styleOn, projectId: options.projectId },
+              agentId,
+              resuming
+            ),
           profile,
           grants
         )
@@ -2686,7 +2690,7 @@ export class ChorusRuntime {
     await aside.service.close('closed')
 
     const grants = this.newGrants()
-    const where = { cwd: parent.cwd, profile }
+    const where = { cwd: parent.cwd, profile, projectId: parent.projectId }
     let participant
     try {
       participant = await this.startParticipant(
@@ -4242,10 +4246,14 @@ export class ChorusRuntime {
        */
       readonly styleOn?: boolean
       readonly conversationId?: string
+      readonly projectId?: string
     },
     agentId: AgentId,
     resuming = false
   ): SessionOpts {
+    const project = where.projectId === undefined ? null : this.projects.get(where.projectId)
+    const editorPlace =
+      project === null ? undefined : { host: project.host, root: project.canonicalRoot }
     // Read at call time rather than held: changing the sheet should affect the
     // next session without the app having to be restarted.
     const preferred = resuming ? '' : this.preferredModelFor(agentId)
@@ -4274,6 +4282,7 @@ export class ChorusRuntime {
       ...(preferred === '' ? {} : { model: preferred }),
       ...(instructions === '' ? {} : { instructions }),
       ...(transcript === undefined ? {} : { transcript }),
+      ...(editorPlace === undefined ? {} : { editorPlace }),
       sandbox:
         where.profile.id === 'read-only'
           ? { mode: 'readOnly', writableRoots: [], networkAccess: false }
@@ -4511,7 +4520,7 @@ export class ChorusRuntime {
   }
 
   /** Where a conversation is, for anything that needs the path rather than the id. */
-  projectDirectory(conversationId: string): string {
+  agentDirectory(conversationId: string): string {
     return this.require(conversationId).cwd
   }
 
@@ -5455,7 +5464,7 @@ export class ChorusRuntime {
        */
       onApprovalQueued: (request) => {
         if (request.kind !== 'fileChange') return
-        const projectRoot = this.projectDirectory(conversationId)
+        const projectRoot = this.agentDirectory(conversationId)
         void this.previews
           .capture({
             request,
@@ -5837,8 +5846,8 @@ function claudeOptions(): {
      * not a translation. If they ever diverge the compiler says so here, which is
      * the point of not widening either to a string.
      */
-    editorEdit: async (projectRoot, request) => {
-      const result = await requestWorkbenchEdit(projectRoot, request)
+    editorEdit: async (place, request) => {
+      const result = await requestWorkbenchEdit(place, request)
       return result.ok
         ? { ok: true, version: result.version }
         : { ok: false, refusal: result.refusal, message: result.message, version: result.version }
