@@ -10,7 +10,7 @@ import {
   type ProjectStore,
 } from '@chorus/event-store'
 import { remoteProjectRoot } from '@chorus/workspace'
-import { approveProjectRoot } from './workbench-surface.js'
+import { approveProjectRoot, type WorkbenchPlace } from './workbench-surface.js'
 
 /**
  * The durable set of projects the person has adopted — Phase 2's domain service,
@@ -254,6 +254,11 @@ export class ProjectService {
       throw new ProjectRootMissingError(projectId, project.canonicalRoot)
     }
     return project.canonicalRoot
+  }
+
+  workbenchTarget(projectId: string): WorkbenchPlace {
+    const root = this.resolveRoot(projectId)
+    return { host: this.projects.get(projectId)?.host ?? LOCAL_HOST, root }
   }
 
   resolveAgentCwd(projectId: string): string {

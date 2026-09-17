@@ -1,6 +1,7 @@
 import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { LOCAL_HOST } from '@chorus/event-store'
 import { afterAll, beforeEach, describe, expect, it, vi } from 'vitest'
 import { WORKBENCH_FOCUS_CHANNEL, WorkbenchConnection } from '../shared/workbench-ipc.js'
 
@@ -190,8 +191,19 @@ const acquireWorkbenchRuntime = vi.fn((_root: string) => {
 })
 const releaseWorkbenchRuntime = vi.fn((_root: string) => undefined)
 
+const acquireRemoteWorkbenchRuntime = vi.fn((_host: string, _root: string) =>
+  Promise.resolve({ ...RUNTIME, remoteAuthority: '127.0.0.1:48000' })
+)
+const releaseRemoteWorkbenchRuntime = vi.fn((_host: string, _root: string) => Promise.resolve())
+
+vi.mock('./remote-workbench.js', () => ({
+  acquireRemoteWorkbenchRuntime: (host: string, root: string) =>
+    acquireRemoteWorkbenchRuntime(host, root),
+  releaseRemoteWorkbenchRuntime: (host: string, root: string) =>
+    releaseRemoteWorkbenchRuntime(host, root),
+}))
+
 vi.mock('./workbench-host.js', () => ({
-  remoteWorkbenchOverride: () => null,
   acquireWorkbenchRuntime: (root: string) => acquireWorkbenchRuntime(root),
   // Braces, because the mock returns void and a shorthand arrow returning a void
   // expression is forbidden — the forwarding is the point, not the value.
@@ -501,7 +513,7 @@ describe('what main will open, and what it refuses', () => {
     surface.registerWorkbenchHandlers(undefined, (projectId) => {
       const root = adopted.get(projectId)
       if (root === undefined) throw new Error(`No project with id ${projectId}`)
-      return root
+      return { host: LOCAL_HOST, root }
     })
 
     try {
@@ -701,7 +713,7 @@ describe('a surface changing hands', () => {
 
   async function withRegistry(run: () => Promise<void>): Promise<void> {
     surface.registerWorkbenchHandlers(undefined, (projectId) => {
-      if (projectId === 'a') return ROOT_A
+      if (projectId === 'a') return { host: LOCAL_HOST, root: ROOT_A }
       throw new Error(`No project with id ${projectId}`)
     })
     try {
@@ -1035,6 +1047,26 @@ describe('the shared server lease', () => {
     // recently opened" would get wrong.
     expect(a.webContents.sent).toEqual([{ ...RUNTIME, projectRoot: ROOT_A }])
     expect(b.webContents.sent).toEqual([{ ...RUNTIME, projectRoot: ROOT_B }])
+  })
+
+  it('opens a remote project through its tunnel, as a folder path the URI accepts', async () => {
+    surface.registerWorkbenchHandlers(undefined, () => ({ host: 'officepc', root: 'C:/api' }))
+    try {
+      const viewId = await surface.openSurface(shell as never, { projectId: 'remote' }, undefined)
+      const view = lastView()
+      view.webContents.emit('did-finish-load')
+      expect(acquireRemoteWorkbenchRuntime).toHaveBeenCalledWith('officepc', 'C:/api')
+      expect(acquireWorkbenchRuntime).not.toHaveBeenCalled()
+      expect(view.webContents.sent).toEqual([
+        { ...RUNTIME, remoteAuthority: '127.0.0.1:48000', projectRoot: '/C:/api' },
+      ])
+
+      surface.closeSurface(shell as never, viewId)
+      expect(releaseRemoteWorkbenchRuntime).toHaveBeenCalledWith('officepc', 'C:/api')
+      expect(releaseWorkbenchRuntime).not.toHaveBeenCalled()
+    } finally {
+      surface.registerWorkbenchHandlers(undefined)
+    }
   })
 
   it('releases only when the last surface on that root goes', async () => {

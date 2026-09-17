@@ -2,15 +2,15 @@
 
 ## Status
 
-| Phase                                 | Status                 | Commit               | Notes                                                                                                                             |
-| ------------------------------------- | ---------------------- | -------------------- | --------------------------------------------------------------------------------------------------------------------------------- |
-| 0 — Research                          | ✅ done                | —                    | Three agents, read-only. Findings below.                                                                                          |
-| 1 — The port in the name              | ✅ verified 2026-09-16 | `2cb9885`            | The branch appears on the second launch with no click. Revived the same day, once the SCM symptom proved the residual observable. |
-| 2 — A workbench that is not throttled | ✅ verified 2026-09-16 | `1de72c0`            | Measured before and after. `detached` went from `hidden` to `visible`, and no `visibilitychange` fires at all.                    |
-| 3 — Focus, honestly                   | ✅ verified 2026-09-16 | `1867518`, `2f07d03` | Measured with the workaround disabled: SCM refreshed with focus in the chat. `scm-refresh.ts` removed.                            |
-| 4 — Extensions per workspace          | ⬜ not started         | —                    | Closes C-063 with upstream machinery.                                                                                             |
-| 5 — Remote over SSH                   | 🚧 5a–5b landed        | `a47c9f4`, `f12fa2e` | Dev-only seam through an SSH tunnel. An agent named a remote file's lines and quoted the selection. 5c–5e remain.                 |
-| 6 — `33.0.9` → `36.2.7`               | ⬜ not started         | —                    | Table stakes, not a fix. Its own migration.                                                                                       |
+| Phase                                 | Status                 | Commit                                     | Notes                                                                                                                             |
+| ------------------------------------- | ---------------------- | ------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------- |
+| 0 — Research                          | ✅ done                | —                                          | Three agents, read-only. Findings below.                                                                                          |
+| 1 — The port in the name              | ✅ verified 2026-09-16 | `2cb9885`                                  | The branch appears on the second launch with no click. Revived the same day, once the SCM symptom proved the residual observable. |
+| 2 — A workbench that is not throttled | ✅ verified 2026-09-16 | `1de72c0`                                  | Measured before and after. `detached` went from `hidden` to `visible`, and no `visibilitychange` fires at all.                    |
+| 3 — Focus, honestly                   | ✅ verified 2026-09-16 | `1867518`, `2f07d03`                       | Measured with the workaround disabled: SCM refreshed with focus in the chat. `scm-refresh.ts` removed.                            |
+| 4 — Extensions per workspace          | ⬜ not started         | —                                          | Closes C-063 with upstream machinery.                                                                                             |
+| 5 — Remote over SSH                   | 🚧 5a–5d written       | `a47c9f4`, `f12fa2e`, `148fce1`, `62b3d75` | 5a–5c committed. 5d written and reviewed, uncommitted, never run on a host. Nothing can add a remote project yet. 5e remains.     |
+| 6 — `33.0.9` → `36.2.7`               | ⬜ not started         | —                                          | Table stakes, not a fix. Its own migration.                                                                                       |
 
 Meta: written 2026-09-16, after a research round by `claude`, `codex` and `deepseek`.
 Nothing was run and nothing was changed. Every claim below is either a citation or
@@ -635,12 +635,55 @@ approval; no code yet.**
 - **5d — Chorus runs it.** Upload once per commit, extract with `tar.exe`, patch
   `product.json`, start with a persisted `--port <n>-<n>`, a fresh token and
   `--enable-remote-auto-shutdown`, and supervise the tunnel on a stable local port.
+  **Correction, 2026-09-17:** the token is not fresh per start. It is persisted per
+  host on this machine, mode 0600, and reused while the server it started lives, so
+  a restarted Chorus reattaches instead of minting a second one. **The layout on the
+  host is fixed here, because 5e matches on it:** everything lives under
+  `%LOCALAPPDATA%\chorus-reh`. The tree is `<release>-<platform>`, with
+  `chorus-receipt.txt` holding the installed archive's sha256. The token is
+  `connection-token`, beside the trees and never inside one. The server's
+  `--server-data-dir` is **`%LOCALAPPDATA%\chorus-reh\data\server`**, with
+  `data\extensions` and `data\data` beside it, and its logs are `server.out.log` and
+  `server.err.log`. The scheduled task is `Chorus Workbench Server`. **The remote
+  server's arguments are the local set with exactly two deliberate differences:**
+  `--enable-remote-auto-shutdown` is added, and `--reconnection-grace-time` is
+  **120**, not 30. The local 30 is sized for a loopback `WebContentsView`, where
+  only a renderer crash-reload reconnects. Over a tunnel a network drop is a real
+  reconnect, and 120 covers every client retry (0, 5, 5, 10, 10, 10, 10, 10, 30 s)
+  with margin while staying under auto-shutdown's five idle minutes, above which a
+  longer grace buys nothing. Chosen by the user on 2026-09-17. **The tunnel's local
+  port** is persisted per host on this machine, in its own range, 48000–48499, so a
+  tunnel can never take the port the local server keeps in 47500–47999. Its
+  stability is now a convenience, not the hard limit it was in 5a: the workbench
+  session is keyed by authority since `148fce1`, so a changed port costs a fresh
+  session, not a refused connection. The tunnel forwards loopback to loopback with
+  `ExitOnForwardFailure` and 10 s keepalives, restarts with a backoff of 1, 2, 4, 8,
+  then 15 s, which is eleven attempts inside the 120 s grace, and resets the backoff
+  once it is up. It is leased per host, stops when the last remote project on that
+  host closes, and `stopWorkbenchHost` stops every tunnel on quit. `rootPresent`
+  answers true for a remote host by assumption, not by observation, until this slice
+  replaces the assumption with the server's own answer.
 - **5e — Clean up on the host.** A PowerShell reaper that kills the server's
   process tree by its `--server-data-dir` marker. **Before this is ever left
   running unattended on a colleague's machine**, not after.
 
+**Where 5d left it, 2026-09-17.** 5d is code-complete and reviewed with a green
+gate, and **not yet usable by a person.** `adoptRemote` has no caller, so no remote
+project can enter the registry, and the "done" this phase states — open the project
+from Chorus and have an agent answer about the open file — cannot be reached. The
+5a dev seam that made a hand run possible was deleted in 5d-5, as planned, so there
+is no hand path either. Closing that needs a slice not listed above: an IPC channel
+for `adoptRemote`, a form for the host and the remote root, a folder chooser for the
+agents' local folder, and a "check the host" step that runs the probe and shows the
+platform it found. `REMOTE_SERVER_PORT` is a fixed 47500 on every host, and
+officepc's 5a `ChorusREH-Proof` task may still hold it.
+
 **Still unproven, and carried as such.** The source-level Win32-OpenSSH behaviour.
-How auto-shutdown's orphaned extension hosts behave on Windows specifically.
+How auto-shutdown's orphaned extension hosts behave on Windows specifically. Whether
+`Register-ScheduledTask` works unelevated: it ran elevated on `officepc`, and
+`tpa-be` may not grant that. Whether `-LogonType Interactive` can start at all on
+`tpa-be`: it needs a logged-on session, `officepc` has auto-login and `tpa-be` may
+be logged out, and that failure reads as a start timeout, not as a refusal.
 
 ---
 

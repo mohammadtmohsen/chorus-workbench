@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto'
 import { realpathSync, statSync } from 'node:fs'
 import { delimiter, isAbsolute, join } from 'node:path'
 import { pathToFileURL } from 'node:url'
+import { LOCAL_HOST } from '@chorus/event-store'
 import {
   BrowserWindow,
   WebContentsView,
@@ -53,11 +54,11 @@ import {
   type WorkbenchShellResponse,
   type WorkbenchTarget,
 } from '../shared/workbench-ipc.js'
+import { acquireRemoteWorkbenchRuntime, releaseRemoteWorkbenchRuntime } from './remote-workbench.js'
 import { applyWorkbenchContentSecurityPolicy, lockDownNavigation } from './security.js'
 import {
   acquireWorkbenchRuntime,
   releaseWorkbenchRuntime,
-  remoteWorkbenchOverride,
   type WorkbenchRuntime,
 } from './workbench-host.js'
 import {
@@ -109,8 +110,14 @@ import {
  */
 export const WORKBENCH_PARTITION = 'chorus-workbench'
 
+export interface WorkbenchPlace {
+  readonly host: string
+  readonly root: string
+}
+
 interface Surface {
   readonly id: string
+  readonly host: string
   /** Canonical, and never the string the renderer proposed. See `approveProjectRoot`. */
   readonly projectRoot: string
   /**
@@ -638,7 +645,7 @@ async function setSurfacesVisible(
  * for the same reason, since a grant reaches the shell's React state and would
  * reach the first log line anyone adds while debugging this.
  */
-function redeem(caller: WebContents, target: WorkbenchTarget): string {
+function redeem(caller: WebContents, target: WorkbenchTarget): WorkbenchPlace {
   if ('projectId' in target) {
     /*
      * **Authorised by adoption rather than by this document**, and that is a
@@ -648,7 +655,7 @@ function redeem(caller: WebContents, target: WorkbenchTarget): string {
      * answers "is this one of the projects the person has adopted", which is a set
      * bounded by every dialog they ever accepted and is exactly what Phase 1's E2
      * asked for. The renderer still cannot name a *path*: an id it invents
-     * resolves to nothing, which is what `resolveProjectRoot` refuses. Requiring
+     * resolves to nothing, which is what `resolveProjectPlace` refuses. Requiring
      * a per-window grant on top would mean re-choosing every project on every
      * launch, which is the product failure E2 was filed about.
      *
@@ -656,27 +663,44 @@ function redeem(caller: WebContents, target: WorkbenchTarget): string {
      * registry must refuse rather than fall through to the grant branch, where
      * `target.grant` is not even present.
      */
-    if (resolveProjectRoot === null) {
+    if (resolveProjectPlace === null) {
       throw new Error(`No project registry is wired, so "${target.projectId}" cannot be opened`)
     }
-    const root = resolveProjectRoot(target.projectId)
-    if (detachedAccess?.(caller, root) === false) {
+    const place = resolveProjectPlace(target.projectId)
+    if (detachedAccess?.(caller, place.root) === false) {
       throw new Error(`No workbench project "${target.projectId}" is open in this window`)
     }
-    return root
+    return place
   }
   const held = grants.get(target.grant)
   if (held?.owner !== caller) {
     throw new Error(`No workbench project grant "${target.grant}" belongs to this window`)
   }
-  return held.projectRoot
+  return { host: LOCAL_HOST, root: held.projectRoot }
 }
 
 /** Everything a surface is told about itself. One project, one view, one server. */
+function folderPath(host: string, root: string): string {
+  return host !== LOCAL_HOST && /^[A-Za-z]:\//.test(root) ? `/${root}` : root
+}
+
+function acquireRuntime(place: WorkbenchPlace): Promise<WorkbenchRuntime> {
+  return place.host === LOCAL_HOST
+    ? acquireWorkbenchRuntime(place.root)
+    : acquireRemoteWorkbenchRuntime(place.host, place.root)
+}
+
+function releaseRuntime(place: WorkbenchPlace): void {
+  if (place.host === LOCAL_HOST) {
+    releaseWorkbenchRuntime(place.root)
+    return
+  }
+  void releaseRemoteWorkbenchRuntime(place.host, place.root)
+}
+
 function describe(surface: Surface): WorkbenchConnection {
-  const remote = remoteWorkbenchOverride()
   return {
-    projectRoot: remote?.root ?? surface.projectRoot,
+    projectRoot: folderPath(surface.host, surface.projectRoot),
     remoteAuthority: surface.runtime.remoteAuthority,
     connectionToken: surface.runtime.connectionToken,
     commit: surface.runtime.commit,
@@ -878,7 +902,8 @@ export async function openSurface(
   target: WorkbenchTarget,
   devServerUrl: string | undefined
 ): Promise<string> {
-  const projectRoot = redeem(owner, target)
+  const place = redeem(owner, target)
+  const projectRoot = place.root
   const claimed = claimHandoff(owner, projectRoot)
   if (claimed !== null) return claimed
 
@@ -894,7 +919,7 @@ export async function openSurface(
    * connect to, which is the state its own error path cannot distinguish from a
    * server that died.
    */
-  const runtime = await acquireWorkbenchRuntime(projectRoot)
+  const runtime = await acquireRuntime(place)
 
   /*
    * The parent window is *derived from* the owner rather than passed beside it,
@@ -907,7 +932,7 @@ export async function openSurface(
    */
   const parent = BrowserWindow.fromWebContents(owner)
   if (parent === null || owner.isDestroyed()) {
-    releaseWorkbenchRuntime(projectRoot)
+    releaseRuntime(place)
     throw new Error('A workbench surface needs a window to attach to')
   }
 
@@ -940,7 +965,15 @@ export async function openSurface(
     },
   })
 
-  const surface: Surface = { id, projectRoot, runtime, view, owner, state: 'active' }
+  const surface: Surface = {
+    id,
+    host: place.host,
+    projectRoot,
+    runtime,
+    view,
+    owner,
+    state: 'active',
+  }
   byId.set(id, surface)
   byContents.set(view.webContents, surface)
   watchOwner(owner).add(id)
@@ -1133,8 +1166,10 @@ function destroySurface(viewId: string): void {
    * any case — `stopWorkbenchHost` on quit is the only unconditional kill — so
    * the shape is right before it is load-bearing rather than after.
    */
-  const stillOpen = [...byId.values()].some((other) => other.projectRoot === surface.projectRoot)
-  if (!stillOpen) releaseWorkbenchRuntime(surface.projectRoot)
+  const stillOpen = [...byId.values()].some(
+    (other) => other.host === surface.host && other.projectRoot === surface.projectRoot
+  )
+  if (!stillOpen) releaseRuntime({ host: surface.host, root: surface.projectRoot })
 }
 
 /**
@@ -1184,7 +1219,7 @@ export function closeAllSurfaces(): void {
  * a cycle — and a function is the whole of what this file needs, so taking the
  * service would be taking a registry in order to call one method on it.
  */
-let resolveProjectRoot: ((projectId: string) => string) | null = null
+let resolveProjectPlace: ((projectId: string) => WorkbenchPlace) | null = null
 
 let detachedAccess: ((caller: WebContents, projectRoot: string) => boolean) | null = null
 
@@ -1196,9 +1231,9 @@ export function setDetachedAccessPredicate(
 
 export function registerWorkbenchHandlers(
   devServerUrl: string | undefined,
-  resolveRoot?: (projectId: string) => string
+  resolvePlace?: (projectId: string) => WorkbenchPlace
 ): void {
-  resolveProjectRoot = resolveRoot ?? null
+  resolveProjectPlace = resolvePlace ?? null
   for (const channel of WORKBENCH_SHELL_CHANNELS) {
     ipcMain.handle(channel, async (event, rawRequest: unknown) => {
       /*
@@ -1540,7 +1575,7 @@ export function registerWorkbenchHandlers(
 /**
  * Where a surface's editor state goes, injected rather than imported.
  *
- * The same shape as `resolveProjectRoot`: this file already sits below
+ * The same shape as `resolveProjectPlace`: this file already sits below
  * `project-service.ts`, and reaching up to a consumer from here would close a
  * cycle. It also keeps this module's job unchanged — it owns surfaces, not what
  * anybody does with what they report.

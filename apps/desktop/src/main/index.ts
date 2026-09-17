@@ -321,7 +321,7 @@ void app.whenReady().then(async () => {
    * request, and a channel that is not registered fails at `invoke` with a
    * message about the channel rather than about the workbench.
    */
-  registerWorkbenchHandlers(devServerUrl, (projectId) => opened.projects.resolveRoot(projectId))
+  registerWorkbenchHandlers(devServerUrl, (projectId) => opened.projects.workbenchTarget(projectId))
   const detachedDeps: DetachedWindowDeps = {
     mainWindow: () => mainWindow,
     createDetachedWindow: (projectId, title, x, y) => {

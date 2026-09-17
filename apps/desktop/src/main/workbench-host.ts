@@ -13,11 +13,12 @@ import {
   writeFileSync,
 } from 'node:fs'
 import { createServer } from 'node:net'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { promisify } from 'node:util'
 import { app, dialog } from 'electron'
 import { z } from 'zod'
-import { hashBytes, publishServer, sweepQuarantine } from './workbench-extract.js'
+import { stopAllTunnels } from './remote-tunnel.js'
+import { hashBytes, hashFile, publishServer, sweepQuarantine } from './workbench-extract.js'
 
 /** `reap.ts`'s shape: the process table is read off the main thread. */
 const runCommand = promisify(execFile)
@@ -222,6 +223,20 @@ function serverDataDir(): string {
 const PORT_RANGE_FIRST = 47_500
 const PORT_RANGE_LAST = 47_999
 
+export interface PortRange {
+  readonly first: number
+  readonly last: number
+  readonly purpose: string
+}
+
+const WORKBENCH_PORTS: PortRange = {
+  first: PORT_RANGE_FIRST,
+  last: PORT_RANGE_LAST,
+  purpose: 'the workbench server',
+}
+
+export const TUNNEL_PORTS: PortRange = { first: 48_000, last: 48_499, purpose: 'a remote tunnel' }
+
 function chosenPortFile(): string {
   return join(serverDataDir(), 'chosen-port')
 }
@@ -261,7 +276,8 @@ function canBind(port: number): Promise<boolean> {
  */
 export async function chooseWorkbenchPort(
   file: string = chosenPortFile(),
-  probe: (port: number) => Promise<boolean> = canBind
+  probe: (port: number) => Promise<boolean> = canBind,
+  ports: PortRange = WORKBENCH_PORTS
 ): Promise<number> {
   /*
    * Absent is the ordinary first run, not an error — so it is read through the
@@ -287,17 +303,25 @@ export async function chooseWorkbenchPort(
    * rather than a refusal to start.
    */
   const held = /^\d+$/.test(recorded) ? Number.parseInt(recorded, 10) : Number.NaN
-  if (Number.isInteger(held) && held >= PORT_RANGE_FIRST && held <= PORT_RANGE_LAST) {
+  if (Number.isInteger(held) && held >= ports.first && held <= ports.last) {
     return held
   }
-  for (let port = PORT_RANGE_FIRST; port <= PORT_RANGE_LAST; port += 1) {
+  for (let port = ports.first; port <= ports.last; port += 1) {
     if (!(await probe(port))) continue
     writeFileSync(file, String(port), { mode: 0o600 })
     return port
   }
   throw new Error(
-    `Chorus could not find a free port between ${String(PORT_RANGE_FIRST)} and ${String(PORT_RANGE_LAST)} for the workbench server. Something is holding all of them.`
+    `Chorus could not find a free port between ${String(ports.first)} and ${String(ports.last)} for ${ports.purpose}. Something is holding all of them.`
   )
+}
+
+export function chooseTunnelPort(
+  file: string,
+  probe: (port: number) => Promise<boolean> = canBind
+): Promise<number> {
+  mkdirSync(dirname(file), { recursive: true, mode: 0o700 })
+  return chooseWorkbenchPort(file, probe, TUNNEL_PORTS)
 }
 
 async function download(
@@ -334,6 +358,29 @@ async function download(
   renameSync(partial, into)
 }
 
+function serverArchiveUrl(manifest: WorkbenchManifest, artifactName: string): string {
+  return `https://github.com/VSCodium/vscodium/releases/download/${manifest.server.release}/${artifactName}`
+}
+
+export async function cachedServerArchive(key: string, signal: AbortSignal): Promise<string> {
+  const { manifest } = loadManifest(manifestPath())
+  const artifact = manifest.server.artifacts[key]
+  if (artifact === undefined) {
+    throw new Error(`No ${manifest.server.vendor} server is published for ${key}`)
+  }
+  const archive = join(cacheDir(), artifact.name)
+  const url = serverArchiveUrl(manifest, artifact.name)
+  if (!existsSync(archive) || statSync(archive).size !== artifact.size) {
+    await download(url, archive, artifact.size, signal)
+  }
+  if ((await hashFile(archive)) === artifact.sha256) return archive
+  rmSync(archive, { force: true })
+  await download(url, archive, artifact.size, signal)
+  if ((await hashFile(archive)) === artifact.sha256) return archive
+  rmSync(archive, { force: true })
+  throw new Error(`The downloaded ${artifact.name} does not match the manifest checksum`)
+}
+
 export interface WorkbenchRuntime {
   readonly remoteAuthority: string
   readonly connectionToken: string
@@ -341,36 +388,8 @@ export interface WorkbenchRuntime {
   readonly quality: string
 }
 
-export interface RemoteWorkbenchOverride {
-  readonly runtime: WorkbenchRuntime
-  readonly root: string
-}
-
-export function remoteWorkbenchOverride(): RemoteWorkbenchOverride | null {
-  if (app.isPackaged) return null
-  const remoteAuthority = process.env['CHORUS_REMOTE_AUTHORITY']
-  const tokenFile = process.env['CHORUS_REMOTE_TOKEN_FILE']
-  const root = process.env['CHORUS_REMOTE_ROOT']
-  if (
-    remoteAuthority === undefined ||
-    remoteAuthority === '' ||
-    tokenFile === undefined ||
-    tokenFile === '' ||
-    root === undefined ||
-    root === ''
-  ) {
-    return null
-  }
-  const { manifest } = loadManifest(manifestPath())
-  return {
-    runtime: {
-      remoteAuthority,
-      connectionToken: readFileSync(tokenFile, 'utf8').trim(),
-      commit: manifest.client.vscodeCommit,
-      quality: manifest.client.quality,
-    },
-    root,
-  }
+export function loadWorkbenchManifest(): LoadedManifest {
+  return loadManifest(manifestPath())
 }
 
 interface RunningHost {
@@ -539,6 +558,71 @@ export function redactToken(line: string): string {
  * are checked before spawning, so an artifact that disagrees fails with the name
  * of the missing file rather than as a spawn error nobody can read.
  */
+export interface ServerPaths {
+  readonly script: string
+  readonly port: number
+  readonly tokenFile: string
+  readonly serverDataDir: string
+  readonly extensionsDir: string
+  readonly userDataDir: string
+}
+
+export function serverArguments(paths: ServerPaths): readonly string[] {
+  return [
+    paths.script,
+    '--host',
+    '127.0.0.1',
+    '--port',
+    `${String(paths.port)}-${String(paths.port)}`,
+    '--connection-token-file',
+    paths.tokenFile,
+    '--server-data-dir',
+    paths.serverDataDir,
+    '--extensions-dir',
+    paths.extensionsDir,
+    '--user-data-dir',
+    paths.userDataDir,
+    '--accept-server-license-terms',
+    /*
+     * C-065. The server forks an extension host per connection and hands it the
+     * socket; from then on that process decides when to die. It has two paths,
+     * and they are three hours apart. A graceful protocol `Disconnect` disposes
+     * it at once — "the client has disconnected gracefully". A socket that
+     * merely closes arms a timer instead, because a dropped connection is
+     * supposed to mean a flaky network and a client that will come back.
+     *
+     * The default for that timer is `ReconnectionGraceTime`, 3 hours. Ten
+     * open/close cycles left two extension hosts alive, which read like a
+     * missing teardown and is not one: it is the graceful frame losing a race
+     * with the view being destroyed. When it wins the host goes immediately,
+     * when it loses the host waits three hours, and R11's 60 s settle window
+     * can never see the difference.
+     *
+     * Three hours is the wrong default *here* specifically. It is sized for a
+     * laptop that slept on a train; our client is a `WebContentsView` on the
+     * other end of a loopback socket that main itself owns, and the only
+     * reconnect that can genuinely happen is a renderer crash-reload. Thirty
+     * seconds covers that with room to spare, and bounds a leaked host to
+     * thirty seconds instead of a working day.
+     *
+     * Seconds, not milliseconds — the server multiplies by 1000. It also
+     * exports the result as `VSCODE_RECONNECTION_GRACE_TIME` into the forked
+     * host's environment, which is the only reason setting it on the server
+     * reaches the process that actually leaks.
+     *
+     * This bounds the damage; it does not remove the race. Closing a project
+     * still usually reaps at once and sometimes takes thirty seconds.
+     */
+    '--reconnection-grace-time',
+    '30',
+    '--telemetry-level',
+    'off',
+    // Never `trace`: full request URLs, token included, are logged at that level.
+    '--log',
+    'info',
+  ]
+}
+
 export function serverLauncher(dir: string): { readonly node: string; readonly script: string } {
   return {
     node: join(dir, process.platform === 'win32' ? 'node.exe' : 'node'),
@@ -979,12 +1063,7 @@ async function start(): Promise<WorkbenchRuntime> {
   })
   const startedAt = Date.now()
   if (!cached) {
-    await download(
-      `https://github.com/VSCodium/vscodium/releases/download/${manifest.server.release}/${artifact.name}`,
-      archive,
-      artifact.size,
-      abort.signal
-    )
+    await download(serverArchiveUrl(manifest, artifact.name), archive, artifact.size, abort.signal)
     log.info('workbench server downloaded', {
       bytes: artifact.size,
       ms: Date.now() - startedAt,
@@ -1173,59 +1252,14 @@ async function start(): Promise<WorkbenchRuntime> {
   writeFileSync(tokenFile, connectionToken, { mode: 0o600 })
   const child = spawn(
     node,
-    [
+    serverArguments({
       script,
-      '--host',
-      '127.0.0.1',
-      '--port',
-      `${String(requestedPort)}-${String(requestedPort)}`,
-      '--connection-token-file',
+      port: requestedPort,
       tokenFile,
-      '--server-data-dir',
-      join(data, 'server'),
-      '--extensions-dir',
-      join(data, 'extensions'),
-      '--user-data-dir',
-      join(data, 'data'),
-      '--accept-server-license-terms',
-      /*
-       * C-065. The server forks an extension host per connection and hands it the
-       * socket; from then on that process decides when to die. It has two paths,
-       * and they are three hours apart. A graceful protocol `Disconnect` disposes
-       * it at once — "the client has disconnected gracefully". A socket that
-       * merely closes arms a timer instead, because a dropped connection is
-       * supposed to mean a flaky network and a client that will come back.
-       *
-       * The default for that timer is `ReconnectionGraceTime`, 3 hours. Ten
-       * open/close cycles left two extension hosts alive, which read like a
-       * missing teardown and is not one: it is the graceful frame losing a race
-       * with the view being destroyed. When it wins the host goes immediately,
-       * when it loses the host waits three hours, and R11's 60 s settle window
-       * can never see the difference.
-       *
-       * Three hours is the wrong default *here* specifically. It is sized for a
-       * laptop that slept on a train; our client is a `WebContentsView` on the
-       * other end of a loopback socket that main itself owns, and the only
-       * reconnect that can genuinely happen is a renderer crash-reload. Thirty
-       * seconds covers that with room to spare, and bounds a leaked host to
-       * thirty seconds instead of a working day.
-       *
-       * Seconds, not milliseconds — the server multiplies by 1000. It also
-       * exports the result as `VSCODE_RECONNECTION_GRACE_TIME` into the forked
-       * host's environment, which is the only reason setting it on the server
-       * reaches the process that actually leaks.
-       *
-       * This bounds the damage; it does not remove the race. Closing a project
-       * still usually reaps at once and sometimes takes thirty seconds.
-       */
-      '--reconnection-grace-time',
-      '30',
-      '--telemetry-level',
-      'off',
-      // Never `trace`: full request URLs, token included, are logged at that level.
-      '--log',
-      'info',
-    ],
+      serverDataDir: join(data, 'server'),
+      extensionsDir: join(data, 'extensions'),
+      userDataDir: join(data, 'data'),
+    }),
     {
       stdio: ['ignore', 'pipe', 'pipe'],
       env: { ...process.env, ELECTRON_RUN_AS_NODE: undefined },
@@ -1548,8 +1582,6 @@ export async function acquireWorkbenchRuntime(projectRoot: string): Promise<Work
    * to nothing — a legible refusal now beats an empty tree with no cause on screen.
    */
   if (shuttingDown) throw new Error('Chorus is shutting down; no workbench project can open.')
-  const remote = remoteWorkbenchOverride()
-  if (remote !== null) return remote.runtime
   if (hostFailure !== null) throw new Error(hostFailure)
 
   leases.add(projectRoot)
@@ -1630,6 +1662,8 @@ async function shutdown(): Promise<ShutdownResult> {
     ])
   }
 
+  await stopAllTunnels()
+
   const running = host
   host = null
 
@@ -1675,6 +1709,10 @@ async function shutdown(): Promise<ShutdownResult> {
 }
 
 /** For the tests and for a future `describe`: the observed state, not the intended one. */
+export function workbenchShuttingDown(): boolean {
+  return shuttingDown
+}
+
 export function workbenchHostState(): {
   readonly running: boolean
   readonly leases: number

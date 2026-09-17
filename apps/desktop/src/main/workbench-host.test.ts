@@ -806,4 +806,17 @@ describe('the port this profile keeps', () => {
     expect(await host.chooseWorkbenchPort(file, () => Promise.resolve(true))).toBe(47_500)
     expect(readFileSync(file, 'utf8')).toBe('47500')
   })
+
+  it('keeps a remote tunnel in its own range, so it cannot take the server port', async () => {
+    const file = join(USER_DATA, 'remote-hosts', 'officepc', 'tunnel-port')
+    const probed: number[] = []
+    const probe = (port: number): Promise<boolean> => {
+      probed.push(port)
+      return Promise.resolve(true)
+    }
+
+    expect(await host.chooseTunnelPort(file, probe)).toBe(48_000)
+    expect(probed).toEqual([48_000])
+    expect(readFileSync(file, 'utf8')).toBe('48000')
+  })
 })

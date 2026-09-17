@@ -291,6 +291,13 @@ describe('adoptRemote', () => {
     expect(() => service.adoptRemote({ host: option, root: 'C:/api', agentCwd })).toThrow()
   })
 
+  it('tells the workbench which host each project lives on', () => {
+    const { project } = api(dir('target-agents'))
+    expect(service.workbenchTarget(project.id)).toEqual({ host: 'tpa-be', root: 'C:/api' })
+    const local = service.adopt(dir('target-local')).project
+    expect(service.workbenchTarget(local.id)).toEqual({ host: '', root: local.canonicalRoot })
+  })
+
   it('is present and resolvable, though its root is not on this machine', () => {
     const { project } = api(dir('present-agents'))
     expect(service.rootPresent(project.id)).toBe(true)
