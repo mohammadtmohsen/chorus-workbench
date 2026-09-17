@@ -181,6 +181,7 @@ export interface RemoteServerLayout {
   readonly userDataDir: string
   readonly stdoutLog: string
   readonly stderrLog: string
+  readonly reapLog: string
 }
 
 export function remoteServerLayout(serverDir: string): RemoteServerLayout {
@@ -194,6 +195,7 @@ export function remoteServerLayout(serverDir: string): RemoteServerLayout {
     userDataDir: win32.join(data, 'data'),
     stdoutLog: win32.join(base, 'server.out.log'),
     stderrLog: win32.join(base, 'server.err.log'),
+    reapLog: win32.join(base, 'server.reap.log'),
   }
 }
 
@@ -246,13 +248,123 @@ export interface StartedServer {
   readonly reattached: boolean
 }
 
+export type ReapKind = 'server' | 'descendant' | 'tree'
+
+export interface ReapCandidate {
+  readonly pid: number
+  readonly parentPid: number
+  readonly kind: ReapKind
+}
+
+const REAP_PRECEDENCE: readonly ReapKind[] = ['server', 'descendant', 'tree']
+
+const DESCENDANTS_OF = [
+  'function descendantsOf($roots, $children) {',
+  '  $found = @()',
+  '  $seen = @{}',
+  '  $pending = @($roots)',
+  '  while ($pending.Count -gt 0) {',
+  '    $next = @()',
+  '    foreach ($parent in $pending) {',
+  '      if ($null -eq $children -or -not $children.ContainsKey($parent)) { continue }',
+  '      foreach ($child in @($children[$parent])) {',
+  '        $id = [string]$child.ProcessId',
+  '        if ($seen.ContainsKey($id)) { continue }',
+  '        $seen[$id] = $true',
+  '        $found += $child',
+  '        $next += $id',
+  '      }',
+  '    }',
+  '    $pending = $next',
+  '  }',
+  '  return $found',
+  '}',
+].join('\n')
+
+function processTableScript(layout: RemoteServerLayout): string {
+  return [
+    DESCENDANTS_OF,
+    `$dataDir = ${powerShellLiteral(layout.serverDataDir)}`,
+    `$tree = ${powerShellLiteral(layout.serverDir)}`,
+    '$all = @(Get-CimInstance -ClassName Win32_Process)',
+    '$children = $all | Group-Object -Property ParentProcessId -AsHashTable -AsString',
+    '$servers = @($all | Where-Object {',
+    "  $_.Name -eq 'node.exe' -and $_.CommandLine -and $_.CommandLine.Contains($dataDir)",
+    '})',
+    '$serverIds = @($servers | ForEach-Object { [string]$_.ProcessId })',
+    '$inTree = @($all | Where-Object { $_.CommandLine -and $_.CommandLine.Contains($tree) })',
+  ].join('\n')
+}
+
+export function reapCandidatesScript(layout: RemoteServerLayout): string {
+  return [
+    processTableScript(layout),
+    "foreach ($s in $servers) { Write-Output ('server ' + $s.ProcessId + ' ' + $s.ParentProcessId) }",
+    'foreach ($child in @(descendantsOf $serverIds $children)) {',
+    "  Write-Output ('descendant ' + $child.ProcessId + ' ' + $child.ParentProcessId)",
+    '}',
+    "foreach ($p in $inTree) { Write-Output ('tree ' + $p.ProcessId + ' ' + $p.ParentProcessId) }",
+  ].join('\n')
+}
+
+export function clearHostScript(layout: RemoteServerLayout, killServers: boolean): string {
+  return [
+    processTableScript(layout),
+    `$killServers = ${killServers ? '$true' : '$false'}`,
+    "if (-not $killServers -and $servers.Count -gt 0) { Write-Output 'live'; exit 0 }",
+    '$doomed = @($servers) + @(descendantsOf $serverIds $children) + $inTree',
+    '$reaped = @()',
+    'foreach ($process in $doomed) {',
+    '  $id = [string]$process.ProcessId',
+    '  if ($reaped -contains $id) { continue }',
+    '  Stop-Process -Id ([int]$id) -Force -ErrorAction SilentlyContinue',
+    '  $reaped += $id',
+    '}',
+    "Write-Output ('cleared ' + ($reaped -join ','))",
+  ].join('\n')
+}
+
+export function parseReapCandidates(stdout: string): readonly ReapCandidate[] {
+  const byPid = new Map<number, ReapCandidate>()
+  for (const line of stdout.split(/\r?\n/)) {
+    const match = /^(server|descendant|tree) (\d+) (\d+)$/.exec(line.trim())
+    const [, kindText, pidText, parentText] = match ?? []
+    if (kindText === undefined || pidText === undefined || parentText === undefined) continue
+    const kind = kindText as ReapKind
+    const candidate = { pid: Number(pidText), parentPid: Number(parentText), kind }
+    const held = byPid.get(candidate.pid)
+    if (
+      held === undefined ||
+      REAP_PRECEDENCE.indexOf(kind) < REAP_PRECEDENCE.indexOf(held.kind)
+    ) {
+      byPid.set(candidate.pid, candidate)
+    }
+  }
+  return [...byPid.values()]
+}
+
+export async function remoteReapCandidates(
+  host: RemoteHost,
+  layout: RemoteServerLayout,
+  deadlineMs: number
+): Promise<readonly ReapCandidate[]> {
+  const found = succeeded(
+    await host.runPowerShell(reapCandidatesScript(layout), deadlineMs),
+    'Finding the server processes'
+  )
+  return parseReapCandidates(found)
+}
+
 function statusScript(layout: RemoteServerLayout, port: number): string {
   return [
     `$dataDir = ${powerShellLiteral(layout.serverDataDir)}`,
+    `$tree = ${powerShellLiteral(layout.serverDir)}`,
     `$tokenFile = ${powerShellLiteral(layout.tokenFile)}`,
-    '$running = @(Get-CimInstance -ClassName Win32_Process | Where-Object {',
+    '$servers = @(Get-CimInstance -ClassName Win32_Process | Where-Object {',
     "  $_.Name -eq 'node.exe' -and $_.CommandLine -and $_.CommandLine.Contains($dataDir)",
-    '}).Count',
+    '})',
+    '$running = $servers.Count',
+    '$onTree = @($servers | Where-Object { $_.CommandLine.Contains($tree) }).Count',
     "$tokenHash = ''",
     'if (Test-Path -LiteralPath $tokenFile) {',
     '  $tokenHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $tokenFile).Hash.ToLowerInvariant()',
@@ -265,6 +377,7 @@ function statusScript(layout: RemoteServerLayout, port: number): string {
     'Write-Output $running',
     'Write-Output $tokenHash',
     'Write-Output $listening',
+    'Write-Output $onTree',
   ].join('\n')
 }
 
@@ -274,9 +387,31 @@ function launcherScript(layout: RemoteServerLayout, port: number): string {
   return [
     `$out = ${powerShellLiteral(layout.stdoutLog)}`,
     `$err = ${powerShellLiteral(layout.stderrLog)}`,
-    `Start-Process -WindowStyle Hidden -WorkingDirectory ${powerShellLiteral(layout.serverDir)} \``,
+    `$server = Start-Process -WindowStyle Hidden -WorkingDirectory ${powerShellLiteral(layout.serverDir)} \``,
     `  -FilePath ${powerShellLiteral(node)} -ArgumentList ${powerShellLiteral(commandLine)} \``,
-    '  -RedirectStandardOutput $out -RedirectStandardError $err',
+    '  -RedirectStandardOutput $out -RedirectStandardError $err -PassThru',
+    '$server.WaitForExit()',
+    '$reaped = @()',
+    "$outcome = ''",
+    'try {',
+    processTableScript(layout),
+    '$keep = @{}',
+    'foreach ($id in $serverIds) { $keep[$id] = $true }',
+    'foreach ($child in @(descendantsOf $serverIds $children)) { $keep[[string]$child.ProcessId] = $true }',
+    '$doomed = @(descendantsOf @([string]$server.Id) $children) + $inTree',
+    'foreach ($process in $doomed) {',
+    '  $id = [string]$process.ProcessId',
+    '  if ($keep.ContainsKey($id) -or $reaped -contains $id) { continue }',
+    '  Stop-Process -Id ([int]$id) -Force -ErrorAction SilentlyContinue',
+    '  $reaped += $id',
+    '}',
+    "$outcome = 'reaped ' + ($reaped -join ',')",
+    '} catch {',
+    "  $outcome = 'reap failed: ' + $_.Exception.Message + '; reaped ' + ($reaped -join ',')",
+    '}',
+    "$stamp = (Get-Date).ToString('o')",
+    "$line = $stamp + ' server ' + $server.Id + ' exited; ' + $outcome",
+    `Add-Content -LiteralPath ${powerShellLiteral(layout.reapLog)} -Value $line`,
   ].join('\n')
 }
 
@@ -292,7 +427,7 @@ function registerScript(layout: RemoteServerLayout, launcher: string): string {
     '$me = (whoami).Trim()',
     '$principal = New-ScheduledTaskPrincipal -UserId $me -LogonType Interactive',
     '$settings = New-ScheduledTaskSettingsSet -ExecutionTimeLimit ([TimeSpan]::Zero) `',
-    '  -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries',
+    '  -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -MultipleInstances Parallel',
     `Register-ScheduledTask -TaskName ${task} -Action $action -Principal $principal \``,
     '  -Settings $settings -Force | Out-Null',
     `Start-ScheduledTask -TaskName ${task}`,
@@ -331,22 +466,49 @@ export async function startRemoteServer(options: StartOptions): Promise<StartedS
     await host.runPowerShell(statusScript(layout, port), deadlines.command),
     'Checking the server'
   )
-  const [running, tokenHash, listening] = status.trim().split(/\r?\n/).map((line) => line.trim())
+  const [running, tokenHash, listening, onTree] = status
+    .trim()
+    .split(/\r?\n/)
+    .map((line) => line.trim())
   const count = Number(running)
   if (running === '' || !Number.isInteger(count)) {
     throw new Error(`The server check on the host was not understood: ${status}`)
   }
   const tokenMatches = tokenHash === localHash
-  options.log?.info('remote server status', { running: count, tokenMatches, listening })
-  if (count > 0) {
-    if (tokenMatches && listening === 'True') {
-      options.log?.info('remote server reattached', { port })
-      return { port, reattached: true }
-    }
+  const thisRelease = Number(onTree) > 0
+  options.log?.info('remote server status', {
+    running: count,
+    tokenMatches,
+    listening,
+    thisRelease,
+  })
+  if (count > 0 && tokenMatches && listening === 'True' && thisRelease) {
+    options.log?.info('remote server reattached', { port })
+    return { port, reattached: true }
+  }
+  if (count > 0 && !tokenMatches) {
     throw new Error(
-      'A Chorus workbench server is already running on the host with another token or port'
+      'A Chorus workbench server is already running on the host under another token or port, ' +
+        'from another machine or another Chorus profile on this one. It stops itself five ' +
+        'minutes after its last editor closes.'
     )
   }
+
+  const replacing = count > 0
+  const cleared = succeeded(
+    await host.runPowerShell(clearHostScript(layout, replacing), deadlines.command),
+    'Clearing the host'
+  ).trim()
+  if (cleared === 'live') {
+    throw new Error(
+      'A Chorus workbench server started on the host while this one was preparing. ' +
+        'Open the project again.'
+    )
+  }
+  options.log?.info('remote host cleared', {
+    replacing,
+    reaped: cleared.replace(/^cleared ?/, ''),
+  })
 
   await host.upload(options.localTokenFile, layout.tokenFile, deadlines.upload)
   const register = registerScript(layout, launcherScript(layout, port))

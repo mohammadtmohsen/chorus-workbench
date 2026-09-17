@@ -2,15 +2,15 @@
 
 ## Status
 
-| Phase                                 | Status                 | Commit                                                | Notes                                                                                                                             |
-| ------------------------------------- | ---------------------- | ----------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------- |
-| 0 — Research                          | ✅ done                | —                                                     | Three agents, read-only. Findings below.                                                                                          |
-| 1 — The port in the name              | ✅ verified 2026-09-16 | `2cb9885`                                             | The branch appears on the second launch with no click. Revived the same day, once the SCM symptom proved the residual observable. |
-| 2 — A workbench that is not throttled | ✅ verified 2026-09-16 | `1de72c0`                                             | Measured before and after. `detached` went from `hidden` to `visible`, and no `visibilitychange` fires at all.                    |
-| 3 — Focus, honestly                   | ✅ verified 2026-09-16 | `1867518`, `2f07d03`                                  | Measured with the workaround disabled: SCM refreshed with focus in the chat. `scm-refresh.ts` removed.                            |
-| 4 — Extensions per workspace          | ⬜ not started         | —                                                     | Closes C-063 with upstream machinery.                                                                                             |
-| 5 — Remote over SSH                   | 🚧 5a–5d committed     | `a47c9f4`, `f12fa2e`, `148fce1`, `62b3d75`, `e2d4018` | 5d never run on a host. Nothing can add a remote project yet. Next: that UI, then 5e before any server runs on `tpa-be`.          |
-| 6 — `33.0.9` → `36.2.7`               | ⬜ not started         | —                                                     | Table stakes, not a fix. Its own migration.                                                                                       |
+| Phase                                 | Status                  | Commit                                                                      | Notes                                                                                                                             |
+| ------------------------------------- | ----------------------- | --------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------- |
+| 0 — Research                          | ✅ done                 | —                                                                           | Three agents, read-only. Findings below.                                                                                          |
+| 1 — The port in the name              | ✅ verified 2026-09-16  | `2cb9885`                                                                   | The branch appears on the second launch with no click. Revived the same day, once the SCM symptom proved the residual observable. |
+| 2 — A workbench that is not throttled | ✅ verified 2026-09-16  | `1de72c0`                                                                   | Measured before and after. `detached` went from `hidden` to `visible`, and no `visibilitychange` fires at all.                    |
+| 3 — Focus, honestly                   | ✅ verified 2026-09-16  | `1867518`, `2f07d03`                                                        | Measured with the workaround disabled: SCM refreshed with focus in the chat. `scm-refresh.ts` removed.                            |
+| 4 — Extensions per workspace          | ⬜ not started          | —                                                                           | Closes C-063 with upstream machinery.                                                                                             |
+| 5 — Remote over SSH                   | 🚧 verified on officepc | `a47c9f4`, `f12fa2e`, `148fce1`, `62b3d75`, `e2d4018`, `e58c580`, `f165396` | Opened from Chorus on officepc, and an agent saw the selected lines. Next: 5e, then `tpa-be`.                                     |
+| 6 — `33.0.9` → `36.2.7`               | ⬜ not started          | —                                                                           | Table stakes, not a fix. Its own migration.                                                                                       |
 
 Meta: written 2026-09-16, after a research round by `claude`, `codex` and `deepseek`.
 Nothing was run and nothing was changed. Every claim below is either a citation or
@@ -689,14 +689,98 @@ chose the UI, keeping 5e as the gate for `tpa-be` rather than for `officepc`.
 `project:adoptRemote` channel, which checks the host and root before main opens the
 agents'-folder dialog; `project:checkRemoteHost`, read-only on the far machine; the
 form beside Add Project, two fields and a Check button; and host-aware handoffs and
-grant cleanup, with `host` on the listed project. Not yet committed, never run
-against a host, and the rail carries each project's host without displaying it.
+grant cleanup, with `host` on the listed project. Committed as `e58c580`. The rail
+carries each project's host without displaying it.
+
+**The first real run, on `officepc`, 2026-09-17, fixed in `f165396`.** Download,
+upload, `Get-FileHash` and `tar.exe` worked first time. Four faults then surfaced
+and were fixed. The commit patch had to be `.cjs`, because the server tree's
+`package.json` declares `"type": "module"`. Two opens of one project at once, which
+React's `StrictMode` produces in dev, raced for the tunnel port, so the port is now
+chosen once per host inside the shared preparation. The editor's selection never
+reached a remote project's conversations, because both the context push
+(`conversationsForRoot`) and the snapshot pull (`requestWorkbenchSnapshot`) looked
+the project up as local, so both now go by host and root. And nothing on the remote
+path was logged, so every step now logs with its host. **Verified by the user on
+freshly started code:** the editor opened `C:/Users/user/chorus-reh` on officepc,
+Chorus reattached to the running server, the tunnel came up in 275 ms, and an agent
+saw the selected lines. One lesson from the run: `pnpm dev` did not restart main
+after source edits, so a retry must be preceded by a manual restart and a start time
+later than the last edit, or a stale run reads as a failed fix.
+
+**Two folders, and what that means for writes.** An agent in a remote project runs
+in its local folder on this machine. Its own `Write`, `Edit` and `Bash` act there,
+never on the remote tree. What reaches the remote file is `editor_edit`, which
+changes the editor's model. That tool still refuses in a remote project, because its
+capability is looked up by the agent's folder; carrying `editorPlace` on the session
+options is the next editor slice. Opening a file link from the conversation in a
+remote project is also unsolved, because it resolves the path against the local
+folder.
+
 **Still keyed on the root alone:** `handOffExpired(deps, projectRoot)` and the
 detached-access predicate `(caller, projectRoot)`. On macOS a Windows remote root
 (`C:/…`) can never equal a local one (`/…`), so nothing collides today. On a
 Windows build of Chorus, or once a POSIX host is allowed, a local and a remote
 project with the same root string could be confused by those two, and they need the
 same host-and-root treatment the handoff maps got.
+
+**5e, reshaped in review, 2026-09-17.** Three rules decide it. **A healthy server is
+never killed because a tab closed:** `releaseWorkbenchRuntime` deliberately keeps
+the local server at zero leases, and remote has more reason to, since
+`--enable-remote-auto-shutdown` already stops an idle server five minutes after its
+last client and a remote terminal is a shell on someone else's machine. **The
+unattended risk is cleaned up on the host, not from this Mac:** auto-shutdown's
+`process.exit(0)` orphans extension hosts exactly when this Mac is asleep, off the
+tailnet or gone, so the hidden launcher now starts the server with `-PassThru`,
+waits for it to exit, then kills what descended from it and whatever still names
+the server tree, sparing any server still live on our `--server-data-dir` and its
+descendants, and appends one line to `server.reap.log`. The task is registered with
+`-MultipleInstances Parallel`, so a new start is not ignored while an old supervisor
+finishes. **Only our own is ours to kill:** a server holding a different token is
+another machine, or another Chorus profile on this one, since the dev build and the
+installed app keep separate `userData` and so separate tokens; the refusal says so,
+and says that server stops itself five minutes after its last editor closes. The
+slices: 5e-1 finds the tree read-only; 5e-2 is the supervising launcher; 5e-3 clears
+the host before a start, as the local `start()` does with
+`reapOrphanedWorkbenchServers()`. **Unproven, and the risk
+worth naming:** only the transient launcher is proven on `officepc`. A task action
+kept alive for hours is the shape the `0xC000013A` note records failing when Task
+Scheduler closes its console. If it does not survive, the fallback is a host-side
+task that runs the same reap every few minutes whenever no marked server is live,
+at the cost of one more artefact on the host. The supervisor's read and reap run
+inside a `try`, so the log always gets a line naming its outcome, `reaped …` or
+`reap failed: …`. A launcher that fails outright exits non-zero, and Task Scheduler
+keeps that in `LastTaskResult`, which the start's wait script already prints, so a
+failure stays visible from this Mac even when no log line was written. 5e-3, as
+written: before any start, when no server of ours is live, Chorus kills whatever
+still names the server tree. A server of ours that is running but not listening is
+treated as wedged and killed with its descendants first, instead of refusing the open.
+A server under another token is still refused. If a server appears between the
+status check and the clear, the start stops and asks for the project to be opened
+again. A live server of ours is reattached only if it runs from this release's tree,
+so a server left from before a Chorus update is replaced rather than adopted, which
+would pair the new client's commit with an old server.
+
+**5e has three slices, and quit deliberately stops tunnels only.** A fourth slice,
+killing the remote server on quit, was planned and dropped in review. After a quit
+the tunnel is gone, so the extension hosts end at the 120 s grace, auto-shutdown
+stops the server five minutes after its last client, and the supervisor reaps what
+is left. A kill on quit would only shorten that, and it would cost quit latency on
+every slow or unreachable host and throw away the reattach that makes reopening
+within five minutes take a fraction of a second. **Do not re-add it without a case
+where a live server after quit does real harm.** The one harm found in that review,
+reattaching to a previous release's server after an update, is closed by the tree
+check above, which also covers a crash or an install that kills the app, where a
+kill on quit never runs.
+
+**Known gap: old server trees stay on the host.** The reaper kills processes, and
+the install only ever touches its own `<release>-<platform>` directory, so each new
+release leaves the previous tree behind, about 257 MB under
+`%LOCALAPPDATA%\chorus-reh`. That is harmless on the hosts we know, with 847 GB free
+on `officepc` and 385 GB on `tpa-be`, so this phase does not remove them. Whoever
+does must hold one condition: a tree may only be removed when no server of any
+Chorus profile is running from it, which is the same ownership question the token
+answers for processes.
 
 **Still unproven, and carried as such.** The source-level Win32-OpenSSH behaviour.
 How auto-shutdown's orphaned extension hosts behave on Windows specifically. Whether

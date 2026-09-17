@@ -8,6 +8,10 @@ import {
   checkRemoteHost,
   ensureLocalToken,
   hostPlatformKey,
+  parseReapCandidates,
+  reapCandidatesScript,
+  remoteReapCandidates,
+  remoteServerLayout,
   powerShellQuotingHolds,
   provisionRemoteServer,
   QUOTE_PROBE,
@@ -164,6 +168,8 @@ describe('startRemoteServer', () => {
   const START = { command: 1_000, upload: 2_000, serverStart: 30_000 }
   const tokenFile = join(scratch, 'officepc', 'connection-token')
   const notRunning = ok('0\n\nFalse')
+  const cleared = ok('cleared ')
+  const listening = ok('started\nExtension host agent listening on 47500\n')
 
   beforeAll(() => {
     ensureLocalToken(tokenFile)
@@ -186,7 +192,7 @@ describe('startRemoteServer', () => {
   }
 
   it('reattaches to a live server holding this token, without uploading or starting', async () => {
-    const { host, scripts, uploads } = recordingHost([ok(`1\n${localHash()}\nTrue`)])
+    const { host, scripts, uploads } = recordingHost([ok(`1\n${localHash()}\nTrue\n1`)])
     await expect(start(host)).resolves.toEqual({ port: 47500, reattached: true })
     expect(scripts).toHaveLength(1)
     expect(uploads).toEqual([])
@@ -198,15 +204,44 @@ describe('startRemoteServer', () => {
     expect(uploads).toEqual([])
   })
 
+  it('clears leftovers on the host before starting, and never touches a live server', async () => {
+    const { host, scripts } = recordingHost([notRunning, ok('cleared 51,52'), ok(''), listening])
+    await expect(start(host)).resolves.toEqual({ port: 47500, reattached: false })
+    const clear = scripts[1] ?? ''
+    expect(clear).toContain('$killServers = $false')
+    expect(clear).toContain(
+      "if (-not $killServers -and $servers.Count -gt 0) { Write-Output 'live'"
+    )
+    expect(clear.indexOf("Write-Output 'live'")).toBeLessThan(clear.indexOf('Stop-Process'))
+  })
+
+  it('kills a server of ours that is running but not answering, then starts', async () => {
+    const wedged = ok(`1\n${localHash()}\nFalse`)
+    const { host, scripts } = recordingHost([wedged, cleared, ok(''), listening])
+    await expect(start(host)).resolves.toEqual({ port: 47500, reattached: false })
+    expect(scripts[1]).toContain('$killServers = $true')
+    expect(scripts[1]).toContain('$doomed = @($servers) + @(descendantsOf $serverIds $children)')
+  })
+
+  it('replaces a live server of ours from another release instead of adopting it', async () => {
+    const olderRelease = ok(`1\n${localHash()}\nTrue\n0`)
+    const { host, scripts } = recordingHost([olderRelease, cleared, ok(''), listening])
+    await expect(start(host)).resolves.toEqual({ port: 47500, reattached: false })
+    expect(scripts[0]).toContain(`$tree = '${SERVER_DIR}'`)
+    expect(scripts[1]).toContain('$killServers = $true')
+  })
+
+  it('stops when a server appears on the host while this start is clearing it', async () => {
+    const { host, uploads } = recordingHost([notRunning, ok('live')])
+    await expect(start(host)).rejects.toThrow('started on the host while this one was preparing')
+    expect(uploads).toEqual([])
+  })
+
   it('uploads the token beside the server and starts it through an interactive task', async () => {
-    const { host, scripts, uploads } = recordingHost([
-      notRunning,
-      ok(''),
-      ok('started\nExtension host agent listening on 47500\n'),
-    ])
+    const { host, scripts, uploads } = recordingHost([notRunning, cleared, ok(''), listening])
     await expect(start(host)).resolves.toEqual({ port: 47500, reattached: false })
     expect(uploads).toEqual([[tokenFile, `${REMOTE_BASE}\\connection-token`, 2_000]])
-    const register = scripts[1] ?? ''
+    const register = scripts[2] ?? ''
     expect(register).toContain('New-ScheduledTaskPrincipal -UserId $me -LogonType Interactive')
     expect(register).toContain("Register-ScheduledTask -TaskName 'Chorus Workbench Server'")
     expect(register).toContain('-EncodedCommand $launcher')
@@ -214,13 +249,9 @@ describe('startRemoteServer', () => {
   })
 
   it('launches the local server arguments plus auto-shutdown, quoted for Windows', async () => {
-    const { host, scripts } = recordingHost([
-      notRunning,
-      ok(''),
-      ok('started\nExtension host agent listening on 47500\n'),
-    ])
+    const { host, scripts } = recordingHost([notRunning, cleared, ok(''), listening])
     await start(host)
-    const launcher = launcherOf(scripts[1] ?? '')
+    const launcher = launcherOf(scripts[2] ?? '')
     expect(launcher).toContain('Start-Process -WindowStyle Hidden')
     expect(launcher).toContain(`"${REMOTE_BASE}\\data\\server"`)
     expect(launcher).toContain('--port 47500-47500')
@@ -228,22 +259,84 @@ describe('startRemoteServer', () => {
     expect(launcher).toContain('--log info --enable-remote-auto-shutdown')
   })
 
+  it('stays to clean up after the server, sparing any server that is live by then', async () => {
+    const { host, scripts } = recordingHost([notRunning, cleared, ok(''), listening])
+    await start(host)
+    const launcher = launcherOf(scripts[2] ?? '')
+    const waits = launcher.indexOf('$server.WaitForExit()')
+    expect(launcher).toContain('-RedirectStandardError $err -PassThru')
+    expect(waits).toBeGreaterThan(launcher.indexOf('-PassThru'))
+    expect(launcher.indexOf('Stop-Process')).toBeGreaterThan(waits)
+    expect(launcher).toContain(
+      '$doomed = @(descendantsOf @([string]$server.Id) $children) + $inTree'
+    )
+    expect(launcher).toContain('if ($keep.ContainsKey($id) -or $reaped -contains $id) { continue }')
+    expect(launcher).toContain(`'${REMOTE_BASE}\\server.reap.log'`)
+    expect(launcher.indexOf('$reaped = @()')).toBeLessThan(launcher.indexOf('try {'))
+    expect(launcher.indexOf('try {')).toBeLessThan(launcher.indexOf('Get-CimInstance'))
+    expect(launcher).toContain("$outcome = 'reap failed: ' + $_.Exception.Message")
+    expect(scripts[2]).toContain('-MultipleInstances Parallel')
+  })
+
   it('fails with what the server said, token redacted, when it never reports a port', async () => {
     const said = 'timed-out\nError: listen EADDRINUSE 127.0.0.1:47500 ?tkn=secret-token\n'
-    const { host, scripts } = recordingHost([notRunning, ok(''), ok(said)])
+    const { host, scripts } = recordingHost([notRunning, cleared, ok(''), ok(said)])
     await expect(start(host)).rejects.toThrow(
       'did not start: Error: listen EADDRINUSE 127.0.0.1:47500 ?tkn=REDACTED'
     )
-    expect(scripts[2]).toContain("Get-ScheduledTaskInfo -TaskName 'Chorus Workbench Server'")
+    expect(scripts[3]).toContain("Get-ScheduledTaskInfo -TaskName 'Chorus Workbench Server'")
   })
 
   it('refuses a server that bound some other port', async () => {
     const { host } = recordingHost([
       notRunning,
+      cleared,
       ok(''),
       ok('started\nExtension host agent listening on 47501\n'),
     ])
     await expect(start(host)).rejects.toThrow('bound 47501, not 47500')
+  })
+})
+
+describe('remoteReapCandidates', () => {
+  const layout = remoteServerLayout(`${BASE}\\1.121.03429-win32-x64`)
+  const READ_ONLY_CMDLETS = new Set([
+    'Get-CimInstance',
+    'Where-Object',
+    'Write-Output',
+    'Group-Object',
+    'ForEach-Object',
+  ])
+
+  it('sends one script that only reads the process table, and uploads nothing', async () => {
+    const { host, scripts, uploads } = recordingHost([ok('')])
+    await expect(remoteReapCandidates(host, layout, 1_000)).resolves.toEqual([])
+    expect(uploads).toEqual([])
+    expect(scripts).toEqual([reapCandidatesScript(layout)])
+    const cmdlets = (scripts[0] ?? '').match(/\b[A-Z][a-z]+-[A-Z][A-Za-z]+\b/g) ?? []
+    expect(cmdlets.filter((cmdlet) => !READ_ONLY_CMDLETS.has(cmdlet))).toEqual([])
+    expect(scripts[0]).toContain(`$dataDir = '${BASE}\\data\\server'`)
+  })
+
+  it('keeps one entry per process, as the strongest thing it was found as', () => {
+    const stdout = [
+      '** WARNING: connection is not using a post-quantum key exchange algorithm.',
+      'server 4100 900',
+      'descendant 4200 4100',
+      'tree 4100 900',
+      'tree 4200 4100',
+      'tree 4300 1',
+      '',
+    ].join('\r\n')
+    expect(parseReapCandidates(stdout)).toEqual([
+      { pid: 4100, parentPid: 900, kind: 'server' },
+      { pid: 4200, parentPid: 4100, kind: 'descendant' },
+      { pid: 4300, parentPid: 1, kind: 'tree' },
+    ])
+  })
+
+  it('finds nothing in output that is not a candidate line', () => {
+    expect(parseReapCandidates('server abc 1\nfork 12 3\nserver 12\n')).toEqual([])
   })
 })
 
