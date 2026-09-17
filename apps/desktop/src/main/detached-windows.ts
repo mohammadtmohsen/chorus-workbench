@@ -23,13 +23,14 @@ import {
 } from '../shared/detached-window-ipc.js'
 import type { ProjectLayoutSlice, ReturnSlot } from '../shared/workspace-layout.js'
 import type { ChorusRuntime } from './runtime.js'
-import { beginHandoff } from './workbench-surface.js'
+import { beginHandoff, type WorkbenchPlace } from './workbench-surface.js'
 
 export type DetachedState =
   'detaching' | 'detached' | 'redocking' | 'returning' | 'closing-empty' | 'shutting-down'
 
 interface DetachedEntry {
   readonly window: BrowserWindow
+  readonly host: string
   readonly projectRoot: string
   state: DetachedState
   returnSlot: ReturnSlot
@@ -60,7 +61,7 @@ export interface DetachedWindowDeps {
     x: number,
     y: number
   ) => BrowserWindow
-  readonly resolveRoot: (projectId: string) => string
+  readonly resolvePlace: (projectId: string) => WorkbenchPlace
   readonly runtime: ChorusRuntime
 }
 
@@ -111,12 +112,12 @@ function sendToMain(deps: DetachedWindowDeps, channel: string, payload: unknown)
 
 function tryHandOff(
   from: WebContents,
-  projectRoot: string,
+  place: WorkbenchPlace,
   to: WebContents,
   kind: 'detach' | 'return'
 ): boolean {
   try {
-    beginHandoff(from, projectRoot, to, kind)
+    beginHandoff(from, place.root, to, kind, place.host)
     return true
   } catch {
     return false
@@ -145,7 +146,8 @@ function returnProject(deps: DetachedWindowDeps, projectId: string): void {
   if (entry?.state !== 'detached') return
   const main = deps.mainWindow()
   if (main !== null && !main.isDestroyed()) {
-    tryHandOff(entry.window.webContents, entry.projectRoot, main.webContents, 'return')
+    const place = { host: entry.host, root: entry.projectRoot }
+    tryHandOff(entry.window.webContents, place, main.webContents, 'return')
   }
   sendToMain(deps, PROJECT_RETURNED_PUSH_CHANNEL, {
     projectId,
@@ -279,7 +281,7 @@ export function registerDetachedWindowHandlers(deps: DetachedWindowDeps): void {
     },
     'project:commitDetach': (event, request) => {
       const held = takeTicket(request.ticket, event.sender, 'detach')
-      const projectRoot = deps.resolveRoot(held.projectId)
+      const place = deps.resolvePlace(held.projectId)
       const window = deps.createDetachedWindow(
         held.projectId,
         held.title,
@@ -288,13 +290,14 @@ export function registerDetachedWindowHandlers(deps: DetachedWindowDeps): void {
       )
       const entry: DetachedEntry = {
         window,
-        projectRoot,
+        host: place.host,
+        projectRoot: place.root,
         state: 'detaching',
         returnSlot: request.returnSlot,
         slice: request.slice,
       }
       entries.set(held.projectId, entry)
-      if (!tryHandOff(event.sender, projectRoot, window.webContents, 'detach')) {
+      if (!tryHandOff(event.sender, place, window.webContents, 'detach')) {
         entries.delete(held.projectId)
         window.destroy()
         throw new Error('That project has no single workbench surface to move')
@@ -352,7 +355,12 @@ export function registerDetachedWindowHandlers(deps: DetachedWindowDeps): void {
       entry.slice = request.slice
       entry.returnSlot = { paneId: held.paneId, index: held.slot }
       entry.state = 'redocking'
-      tryHandOff(event.sender, entry.projectRoot, main.webContents, 'return')
+      tryHandOff(
+        event.sender,
+        { host: entry.host, root: entry.projectRoot },
+        main.webContents,
+        'return'
+      )
       sendToMain(deps, PROJECT_RETURNED_PUSH_CHANNEL, {
         projectId: held.projectId,
         returnSlot: entry.returnSlot,

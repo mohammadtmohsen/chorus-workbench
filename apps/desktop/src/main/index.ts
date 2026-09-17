@@ -329,7 +329,7 @@ void app.whenReady().then(async () => {
       attachDetachedWindowListeners(detachedDeps, projectId, window)
       return window
     },
-    resolveRoot: (projectId) => opened.projects.resolveRoot(projectId),
+    resolvePlace: (projectId) => opened.projects.workbenchTarget(projectId),
     runtime: opened,
   }
   registerDetachedWindowHandlers(detachedDeps)

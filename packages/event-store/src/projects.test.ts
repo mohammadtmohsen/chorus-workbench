@@ -6,6 +6,7 @@ import {
   LOCAL_HOST,
   platformCaseSensitivity,
   ProjectStore,
+  remoteProjectHost,
   UnknownProjectError,
 } from './projects.js'
 import { openSqlite, type SqliteHandle } from './sqlite.js'
@@ -270,6 +271,13 @@ describe('a project on another host', () => {
     root: string
   ): ReturnType<ProjectStore['create']> =>
     store.create({ name: 'Api', host, root, canonicalRoot: root, workspaceFile: null, now: 2 })
+
+  it('accepts a remote host only when it names one', () => {
+    expect(remoteProjectHost('  TPA-BE ')).toBe('tpa-be')
+    expect(() => remoteProjectHost('')).toThrow('Not a usable remote host')
+    expect(() => remoteProjectHost('   ')).toThrow('Not a usable remote host')
+    expect(() => remoteProjectHost('-oProxyCommand=x')).toThrow('Not a usable remote host')
+  })
 
   it('lets two hosts hold the same path', () => {
     const store = sensitive()

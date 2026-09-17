@@ -2,15 +2,15 @@
 
 ## Status
 
-| Phase                                 | Status                 | Commit                                     | Notes                                                                                                                             |
-| ------------------------------------- | ---------------------- | ------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------- |
-| 0 — Research                          | ✅ done                | —                                          | Three agents, read-only. Findings below.                                                                                          |
-| 1 — The port in the name              | ✅ verified 2026-09-16 | `2cb9885`                                  | The branch appears on the second launch with no click. Revived the same day, once the SCM symptom proved the residual observable. |
-| 2 — A workbench that is not throttled | ✅ verified 2026-09-16 | `1de72c0`                                  | Measured before and after. `detached` went from `hidden` to `visible`, and no `visibilitychange` fires at all.                    |
-| 3 — Focus, honestly                   | ✅ verified 2026-09-16 | `1867518`, `2f07d03`                       | Measured with the workaround disabled: SCM refreshed with focus in the chat. `scm-refresh.ts` removed.                            |
-| 4 — Extensions per workspace          | ⬜ not started         | —                                          | Closes C-063 with upstream machinery.                                                                                             |
-| 5 — Remote over SSH                   | 🚧 5a–5d written       | `a47c9f4`, `f12fa2e`, `148fce1`, `62b3d75` | 5a–5c committed. 5d written and reviewed, uncommitted, never run on a host. Nothing can add a remote project yet. 5e remains.     |
-| 6 — `33.0.9` → `36.2.7`               | ⬜ not started         | —                                          | Table stakes, not a fix. Its own migration.                                                                                       |
+| Phase                                 | Status                 | Commit                                                | Notes                                                                                                                             |
+| ------------------------------------- | ---------------------- | ----------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------- |
+| 0 — Research                          | ✅ done                | —                                                     | Three agents, read-only. Findings below.                                                                                          |
+| 1 — The port in the name              | ✅ verified 2026-09-16 | `2cb9885`                                             | The branch appears on the second launch with no click. Revived the same day, once the SCM symptom proved the residual observable. |
+| 2 — A workbench that is not throttled | ✅ verified 2026-09-16 | `1de72c0`                                             | Measured before and after. `detached` went from `hidden` to `visible`, and no `visibilitychange` fires at all.                    |
+| 3 — Focus, honestly                   | ✅ verified 2026-09-16 | `1867518`, `2f07d03`                                  | Measured with the workaround disabled: SCM refreshed with focus in the chat. `scm-refresh.ts` removed.                            |
+| 4 — Extensions per workspace          | ⬜ not started         | —                                                     | Closes C-063 with upstream machinery.                                                                                             |
+| 5 — Remote over SSH                   | 🚧 5a–5d committed     | `a47c9f4`, `f12fa2e`, `148fce1`, `62b3d75`, `e2d4018` | 5d never run on a host. Nothing can add a remote project yet. Next: that UI, then 5e before any server runs on `tpa-be`.          |
+| 6 — `33.0.9` → `36.2.7`               | ⬜ not started         | —                                                     | Table stakes, not a fix. Its own migration.                                                                                       |
 
 Meta: written 2026-09-16, after a research round by `claude`, `codex` and `deepseek`.
 Nothing was run and nothing was changed. Every claim below is either a citation or
@@ -677,6 +677,26 @@ for `adoptRemote`, a form for the host and the remote root, a folder chooser for
 agents' local folder, and a "check the host" step that runs the probe and shows the
 platform it found. `REMOTE_SERVER_PORT` is a fixed 47500 on every host, and
 officepc's 5a `ChorusREH-Proof` task may still hold it.
+
+**The order from here, chosen by the user on 2026-09-17.** The add-remote-project
+UI comes next, so the phase can be tried end to end on `officepc`, the user's own
+machine. 5e comes after it and **before any server runs on `tpa-be`**, which is a
+colleague's machine. `deepseek` recommended 5e first, on the grounds that the first
+real use should have something to clean up after it; the user weighed that and
+chose the UI, keeping 5e as the gate for `tpa-be` rather than for `officepc`.
+
+**The add-remote-project UI, written and reviewed, 2026-09-17.** Four slices: the
+`project:adoptRemote` channel, which checks the host and root before main opens the
+agents'-folder dialog; `project:checkRemoteHost`, read-only on the far machine; the
+form beside Add Project, two fields and a Check button; and host-aware handoffs and
+grant cleanup, with `host` on the listed project. Not yet committed, never run
+against a host, and the rail carries each project's host without displaying it.
+**Still keyed on the root alone:** `handOffExpired(deps, projectRoot)` and the
+detached-access predicate `(caller, projectRoot)`. On macOS a Windows remote root
+(`C:/…`) can never equal a local one (`/…`), so nothing collides today. On a
+Windows build of Chorus, or once a POSIX host is allowed, a local and a remote
+project with the same root string could be confused by those two, and they need the
+same host-and-root treatment the handoff maps got.
 
 **Still unproven, and carried as such.** The source-level Win32-OpenSSH behaviour.
 How auto-shutdown's orphaned extension hosts behave on Windows specifically. Whether

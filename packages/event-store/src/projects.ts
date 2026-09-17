@@ -155,6 +155,14 @@ const ProjectHost = z
   })
   .transform((host) => host.trim().toLowerCase())
 
+export function remoteProjectHost(host: string): string {
+  const parsed = ProjectHost.safeParse(host)
+  if (!parsed.success || parsed.data === LOCAL_HOST) {
+    throw new Error(`Not a usable remote host: ${host}`)
+  }
+  return parsed.data
+}
+
 /*
  * Validated because two of these fields are typed by a person and one comes from
  * a file dialog. `trim` on the name so a project called " " cannot exist and then

@@ -158,6 +158,8 @@ const api: ChorusApi = {
   copyText: invoke('app:copyText'),
   renameConversation: invoke('conversation:rename'),
   adoptProject: invoke('project:adopt'),
+  adoptRemoteProject: invoke('project:adoptRemote'),
+  checkRemoteHost: invoke('project:checkRemoteHost'),
   listProjects: invoke('project:list'),
   renameProject: invoke('project:rename'),
   reorderProjects: invoke('project:reorder'),

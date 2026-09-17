@@ -3,8 +3,9 @@ import { mkdtempSync, readFileSync, statSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { beforeAll, describe, expect, it, vi } from 'vitest'
-import type { RemoteHost, RemoteResult } from './remote-host.js'
+import { powerShellLiteral, type RemoteHost, type RemoteResult } from './remote-host.js'
 import {
+  checkRemoteHost,
   ensureLocalToken,
   hostPlatformKey,
   powerShellQuotingHolds,
@@ -243,6 +244,71 @@ describe('startRemoteServer', () => {
       ok('started\nExtension host agent listening on 47501\n'),
     ])
     await expect(start(host)).rejects.toThrow('bound 47501, not 47500')
+  })
+})
+
+describe('checkRemoteHost', () => {
+  it('reports a reachable Windows host, its platform and quoting, changing nothing', async () => {
+    const { host, scripts, uploads } = recordingHost([ok('AMD64\r\n'), ok(QUOTE_PROBE)])
+    await expect(checkRemoteHost(host, 1_000)).resolves.toEqual({
+      reachable: true,
+      platform: 'win32-x64',
+      quotingHolds: true,
+      detail: '',
+    })
+    expect(uploads).toEqual([])
+    expect(scripts).toEqual([
+      'Write-Output $env:PROCESSOR_ARCHITECTURE',
+      `[Console]::Out.Write(${powerShellLiteral(QUOTE_PROBE)})`,
+    ])
+  })
+
+  it('answers unreachable in the words ssh used, rather than throwing', async () => {
+    const stderr = [
+      '** WARNING: connection is not using a post-quantum key exchange algorithm.',
+      'ssh: Could not resolve hostname nope: nodename nor servname provided, or not known',
+    ].join('\n')
+    const { host, scripts } = recordingHost([{ exitCode: 255, stdout: '', stderr }])
+    await expect(checkRemoteHost(host, 1_000)).resolves.toEqual({
+      reachable: false,
+      platform: null,
+      quotingHolds: false,
+      detail: 'ssh: Could not resolve hostname nope: nodename nor servname provided, or not known',
+    })
+    expect(scripts).toHaveLength(1)
+  })
+
+  it('answers unreachable when the connection never finishes', async () => {
+    const stalled: RemoteHost = {
+      runPowerShell: () => Promise.reject(new Error('ssh did not finish within 1000 ms')),
+      upload: () => Promise.resolve(),
+    }
+    await expect(checkRemoteHost(stalled, 1_000)).resolves.toEqual({
+      reachable: false,
+      platform: null,
+      quotingHolds: false,
+      detail: 'ssh did not finish within 1000 ms',
+    })
+  })
+
+  it('tells a host without Windows PowerShell apart from one it could not reach', async () => {
+    const stderr = 'bash: powershell.exe: command not found\n'
+    const { host } = recordingHost([{ exitCode: 127, stdout: '', stderr }])
+    await expect(checkRemoteHost(host, 1_000)).resolves.toEqual({
+      reachable: true,
+      platform: null,
+      quotingHolds: false,
+      detail: 'bash: powershell.exe: command not found',
+    })
+  })
+
+  it('reports quoting that does not survive the trip', async () => {
+    const { host } = recordingHost([ok('ARM64'), ok('mangled')])
+    await expect(checkRemoteHost(host, 1_000)).resolves.toMatchObject({
+      reachable: true,
+      platform: 'win32-arm64',
+      quotingHolds: false,
+    })
   })
 })
 

@@ -46,6 +46,7 @@ export interface QuickRailProps {
     event: ReactPointerEvent<HTMLElement>
   ) => void
   readonly onAddProject: () => Promise<void>
+  readonly onAddRemoteProject: () => void
   /** Switches to the project. Deliberately does not start a conversation. */
   readonly onOpenProject: (projectId: string) => void
   readonly onOpenSettings: () => void
@@ -212,6 +213,20 @@ export function QuickRail(props: QuickRailProps): React.JSX.Element {
             }}
           >
             <FolderIcon />
+          </button>
+        </li>
+        <li>
+          <button
+            type="button"
+            className="rail-item"
+            data-rail-add-remote-project
+            aria-label={t('rail.addRemoteProject')}
+            title={t('rail.addRemoteProject')}
+            onClick={props.onAddRemoteProject}
+          >
+            <svg className="rail-icon" viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M4 5h16v10H4zM9 19h6M12 15v4" />
+            </svg>
           </button>
         </li>
       </ul>

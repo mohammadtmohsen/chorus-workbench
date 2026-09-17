@@ -11,6 +11,7 @@ import { trimCarry } from './carry.js'
 import { EMPTY_VIEW } from './transcript.js'
 import { noticesFrom, roomsWaiting, shouldRaise, trackPending, type Notice } from './notify.js'
 import { HistoryPanel } from './HistoryPanel.js'
+import { RemoteProjectDialog } from './workspace/RemoteProjectDialog.js'
 import { INSTALL, Settings, type Defaults } from './Settings.js'
 import { Workspace } from './workspace/Workspace.js'
 import { DetachedStage } from './workspace/DetachedStage.js'
@@ -173,6 +174,7 @@ export function App({ role }: { readonly role: WindowRole }): React.JSX.Element 
   const [showingLogs, setShowingLogs] = useState(false)
   const [showingSettings, setShowingSettings] = useState(false)
   const [showingHistory, setShowingHistory] = useState(false)
+  const [addingRemoteProject, setAddingRemoteProject] = useState(false)
   const [restoring, setRestoring] = useState(true)
   const [restored, setRestored] = useState(false)
   const [zoom, setZoom] = useState<number | null>(null)
@@ -1160,11 +1162,8 @@ export function App({ role }: { readonly role: WindowRole }): React.JSX.Element 
       .catch(fail(setError))
   }, [])
 
-  const addProject = useCallback(async () => {
-    setError(null)
-    try {
-      const { project } = await window.chorus.adoptProject({})
-      if (project === null) return
+  const openAdopted = useCallback(
+    async (project: { readonly id: string; readonly created: boolean }) => {
       const listed = await refreshProjects()
       // A folder that was already a project opens rather than announcing itself;
       // a new one starts its first conversation, because an empty project has
@@ -1172,10 +1171,30 @@ export function App({ role }: { readonly role: WindowRole }): React.JSX.Element 
       if (project.created || listed.every((p) => p.openConversations === 0)) {
         startIn(project.id)
       }
+    },
+    [refreshProjects, startIn]
+  )
+
+  const addProject = useCallback(async () => {
+    setError(null)
+    try {
+      const { project } = await window.chorus.adoptProject({})
+      if (project === null) return
+      await openAdopted(project)
     } catch (error) {
       fail(setError)(error)
     }
-  }, [refreshProjects, startIn])
+  }, [openAdopted])
+
+  const addRemoteProject = useCallback(
+    async (host: string, root: string) => {
+      const { project } = await window.chorus.adoptRemoteProject({ host, root })
+      if (project === null) return
+      setAddingRemoteProject(false)
+      await openAdopted(project)
+    },
+    [openAdopted]
+  )
 
   /*
    * The first session waits for the settings, not just for the restore.
@@ -1650,6 +1669,14 @@ export function App({ role }: { readonly role: WindowRole }): React.JSX.Element 
           }}
         />
       )}
+      {addingRemoteProject && (
+        <RemoteProjectDialog
+          onClose={() => {
+            setAddingRemoteProject(false)
+          }}
+          onAdd={addRemoteProject}
+        />
+      )}
       {showingHistory && (
         <HistoryPanel
           onClose={() => {
@@ -1927,6 +1954,9 @@ export function App({ role }: { readonly role: WindowRole }): React.JSX.Element 
         onForgetProject={forgetProject}
         projects={projects}
         onAddProject={addProject}
+        onAddRemoteProject={() => {
+          setAddingRemoteProject(true)
+        }}
         onOpenProject={showProject}
         home={home}
         onChooseProfile={applyProfile}

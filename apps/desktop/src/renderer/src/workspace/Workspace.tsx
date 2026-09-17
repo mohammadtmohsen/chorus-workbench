@@ -70,6 +70,7 @@ interface WorkspaceProps {
   readonly onRelocateProject: (projectId: string) => Promise<void>
   readonly onForgetProject: (projectId: string) => Promise<void>
   readonly onAddProject: () => Promise<void>
+  readonly onAddRemoteProject: () => void
   /**
    * Switches to a project — the rail's tiles.
    *
@@ -434,6 +435,7 @@ export function Workspace(props: WorkspaceProps): React.JSX.Element {
         onNewSession={props.onNewSession}
         projects={props.projects}
         onAddProject={props.onAddProject}
+        onAddRemoteProject={props.onAddRemoteProject}
         onOpenProject={props.onOpenProject}
         onOpenSettings={props.onOpenSettings}
         onOpenHistory={props.onOpenHistory}

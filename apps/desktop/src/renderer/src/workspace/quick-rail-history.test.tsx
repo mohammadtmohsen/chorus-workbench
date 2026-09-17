@@ -49,6 +49,7 @@ function railWith(onOpenHistory: () => void): HTMLElement {
       /* No drag in flight: this test is about the history button. */
       pendingMove={null}
       onAddProject={() => Promise.resolve()}
+      onAddRemoteProject={() => undefined}
       onOpenProject={() => undefined}
       preview={{ open: null, show: () => undefined, hide: () => undefined } as never}
       onNewSession={() => undefined}

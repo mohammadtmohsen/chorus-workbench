@@ -1,4 +1,4 @@
-import type { TranscriptState } from '@chorus/event-store'
+import { remoteProjectHost, type TranscriptState } from '@chorus/event-store'
 import { writeFileSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import { buildDiagnostics, type AgentId } from '@chorus/shared'
@@ -39,8 +39,15 @@ import { MAX_SELECTED_BYTES, toDisplayRange, type EditorMetadata } from '@chorus
  * is main's one place for that assumption. Importing the raw rule here would be
  * a second.
  */
-import { isWithin, projectRelativePath, type CanonicalRoot } from '@chorus/workspace'
+import {
+  isWithin,
+  projectRelativePath,
+  remoteProjectRoot,
+  type CanonicalRoot,
+} from '@chorus/workspace'
 import type { IdeBridge } from './ide-bridge.js'
+import { SshRemoteHost } from './remote-host.js'
+import { checkRemoteHost, REMOTE_CHECK_DEADLINE_MS } from './remote-workbench.js'
 import {
   defaultDeps,
   extensionStatus,
@@ -289,6 +296,35 @@ export function buildHandlers(runtime: ChorusRuntime): Handlers {
 
       const { project, created } = runtime.projects.adopt(chosen)
       return { project: { id: project.id, name: project.name, root: project.root, created } }
+    },
+
+    'project:adoptRemote': async (request: IpcRequest<'project:adoptRemote'>) => {
+      const host = remoteProjectHost(request.host)
+      remoteProjectRoot(request.root)
+      const window = BrowserWindow.getFocusedWindow() ?? BrowserWindow.getAllWindows()[0]
+      const options: OpenDialogOptions = {
+        properties: ['openDirectory', 'createDirectory'],
+        buttonLabel: 'Run agents here',
+      }
+      const result = await (window === undefined
+        ? dialog.showOpenDialog(options)
+        : dialog.showOpenDialog(window, options))
+
+      const chosen = result.canceled ? undefined : result.filePaths[0]
+      if (chosen === undefined) return { project: null }
+
+      const { project, created } = runtime.projects.adoptRemote({
+        host,
+        root: request.root,
+        agentCwd: chosen,
+      })
+      return { project: { id: project.id, name: project.name, root: project.root, created } }
+    },
+
+    'project:checkRemoteHost': async (request: IpcRequest<'project:checkRemoteHost'>) => {
+      const remote = new SshRemoteHost(remoteProjectHost(request.host))
+      const check = await checkRemoteHost(remote, REMOTE_CHECK_DEADLINE_MS)
+      return check
     },
 
     'conversation:start': (request: {

@@ -833,6 +833,54 @@ describe('a surface changing hands', () => {
     ).resolves.toEqual(expect.any(String))
   })
 
+  it('lets only the host a surface left claim its handoff, when roots match', async () => {
+    surface.registerWorkbenchHandlers(undefined, (projectId) => ({
+      host: projectId === 'remote' ? 'officepc' : LOCAL_HOST,
+      root: ROOT_A,
+    }))
+    try {
+      const destination = new FakeWebContents()
+      const remote = await surface.openSurface(shell as never, { projectId: 'remote' }, undefined)
+      surface.beginHandoff(shell as never, ROOT_A, destination as never, 'detach', 'officepc')
+
+      const local = await surface.openSurface(
+        destination as never,
+        { projectId: 'local' },
+        undefined
+      )
+      expect(local).not.toBe(remote)
+
+      const claimed = await surface.openSurface(
+        destination as never,
+        { projectId: 'remote' },
+        undefined
+      )
+      expect(claimed).toBe(remote)
+    } finally {
+      surface.registerWorkbenchHandlers(undefined)
+    }
+  })
+
+  it('keeps a local grant when a remote surface at the same root is handed off', async () => {
+    surface.registerWorkbenchHandlers(undefined, () => ({ host: 'officepc', root: ROOT_A }))
+    try {
+      const grant = await grantFor(shell, ROOT_A)
+      await surface.openSurface(shell as never, { projectId: 'remote' }, undefined)
+      surface.beginHandoff(
+        shell as never,
+        ROOT_A,
+        new FakeWebContents() as never,
+        'detach',
+        'officepc'
+      )
+      await expect(
+        surface.openSurface(shell as never, { grant }, undefined)
+      ).resolves.toEqual(expect.any(String))
+    } finally {
+      surface.registerWorkbenchHandlers(undefined)
+    }
+  })
+
   it('refuses a project id the detached-window check turns away', async () => {
     await withRegistry(async () => {
       surface.setDetachedAccessPredicate(() => false)

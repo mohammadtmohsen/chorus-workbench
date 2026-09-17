@@ -435,6 +435,7 @@ export type TranscriptStatePayload = z.infer<typeof TranscriptStateShape>
 export const ListedProject = z.object({
   id: z.string(),
   name: z.string(),
+  host: z.string(),
   root: z.string(),
   lastOpenedAt: z.number(),
   /** How many of this project's conversations are open right now. */
@@ -1105,6 +1106,25 @@ export const IPC_CONTRACT = {
       project: z
         .object({ id: z.string(), name: z.string(), root: z.string(), created: z.boolean() })
         .nullable(),
+    }),
+  },
+
+  'project:adoptRemote': {
+    request: z.object({ host: z.string(), root: z.string() }).strict(),
+    response: z.object({
+      project: z
+        .object({ id: z.string(), name: z.string(), root: z.string(), created: z.boolean() })
+        .nullable(),
+    }),
+  },
+
+  'project:checkRemoteHost': {
+    request: z.object({ host: z.string() }).strict(),
+    response: z.object({
+      reachable: z.boolean(),
+      platform: z.string().nullable(),
+      quotingHolds: z.boolean(),
+      detail: z.string(),
     }),
   },
 
@@ -2250,6 +2270,12 @@ export interface ChorusApi extends WorkbenchShellApi, DetachedWindowApi {
   readonly adoptProject: (
     request: IpcRequest<'project:adopt'>
   ) => Promise<IpcResponse<'project:adopt'>>
+  readonly adoptRemoteProject: (
+    request: IpcRequest<'project:adoptRemote'>
+  ) => Promise<IpcResponse<'project:adoptRemote'>>
+  readonly checkRemoteHost: (
+    request: IpcRequest<'project:checkRemoteHost'>
+  ) => Promise<IpcResponse<'project:checkRemoteHost'>>
   readonly listProjects: (
     request: IpcRequest<'project:list'>
   ) => Promise<IpcResponse<'project:list'>>

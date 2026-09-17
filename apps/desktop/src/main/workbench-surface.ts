@@ -904,7 +904,7 @@ export async function openSurface(
 ): Promise<string> {
   const place = redeem(owner, target)
   const projectRoot = place.root
-  const claimed = claimHandoff(owner, projectRoot)
+  const claimed = claimHandoff(owner, place)
   if (claimed !== null) return claimed
 
   /*
@@ -1041,11 +1041,13 @@ export function beginHandoff(
   caller: WebContents,
   projectRoot: string,
   destination: WebContents,
-  kind: 'detach' | 'return'
+  kind: 'detach' | 'return',
+  host: string = LOCAL_HOST
 ): string {
-  const matches = [...(byOwner.get(caller) ?? [])].filter(
-    (id) => byId.get(id)?.projectRoot === projectRoot
-  )
+  const matches = [...(byOwner.get(caller) ?? [])].filter((id) => {
+    const candidate = byId.get(id)
+    return candidate?.projectRoot === projectRoot && candidate.host === host
+  })
   if (matches.length !== 1) {
     throw new Error(`No single workbench surface for "${projectRoot}" belongs to this window`)
   }
@@ -1058,7 +1060,9 @@ export function beginHandoff(
   byOwner.get(caller)?.delete(viewId)
   stopWatchingFocus(viewId)
   for (const [grant, held] of [...grants]) {
-    if (held.owner === caller && held.projectRoot === projectRoot) grants.delete(grant)
+    if (host === LOCAL_HOST && held.owner === caller && held.projectRoot === projectRoot) {
+      grants.delete(grant)
+    }
   }
   BrowserWindow.getAllWindows()
     .find((window) => window.contentView.children.includes(surface.view))
@@ -1098,8 +1102,11 @@ function expireHandoff(viewId: string): void {
   destroySurface(viewId)
 }
 
-function claimHandoff(caller: WebContents, projectRoot: string): string | null {
-  const entry = [...handoffs].find(([, pending]) => pending.projectRoot === projectRoot)
+function claimHandoff(caller: WebContents, place: WorkbenchPlace): string | null {
+  const entry = [...handoffs].find(
+    ([viewId, pending]) =>
+      pending.projectRoot === place.root && byId.get(viewId)?.host === place.host
+  )
   if (entry === undefined) return null
   const [viewId, pending] = entry
   const surface = byId.get(viewId)

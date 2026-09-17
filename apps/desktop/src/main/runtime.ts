@@ -4525,6 +4525,7 @@ export class ChorusRuntime {
   listProjects(): {
     id: string
     name: string
+    host: string
     root: string
     lastOpenedAt: number
     openConversations: number
@@ -4542,6 +4543,7 @@ export class ChorusRuntime {
     return this.projects.list().map((project) => ({
       id: project.id,
       name: project.name,
+      host: project.host,
       root: project.root,
       lastOpenedAt: project.lastOpenedAt,
       openConversations: open.get(project.id) ?? 0,

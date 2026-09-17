@@ -423,3 +423,64 @@ describe('conversation:transcript', () => {
     expect(result.events.map((e) => e.seq)).toEqual([1, 2])
   })
 })
+
+describe('project:adoptRemote', () => {
+  const ROOT = 'C:/TPA-MEDEXA/MasterTPABackend'
+  const adopted = { id: 'p1', name: 'MasterTPABackend', root: ROOT }
+
+  const handlerWith = (): {
+    readonly adoptRemote: ReturnType<typeof vi.fn>
+    readonly adopt: (request: unknown) => Promise<unknown>
+  } => {
+    showOpenDialog.mockReset()
+    const adoptRemote = vi.fn(() => ({ project: adopted, created: true }))
+    const runtime = { projects: { adoptRemote } } as unknown as ChorusRuntime
+    const adopt = buildHandlers(runtime)['project:adoptRemote'] as (r: unknown) => Promise<unknown>
+    return { adoptRemote, adopt }
+  }
+
+  it('asks where the agents run, then adopts the remote root with that folder', async () => {
+    const { adoptRemote, adopt } = handlerWith()
+    showOpenDialog.mockResolvedValueOnce({ canceled: false, filePaths: ['/Users/me/tpa-be'] })
+
+    await expect(adopt({ host: 'TPA-BE', root: ROOT })).resolves.toEqual({
+      project: { ...adopted, created: true },
+    })
+    expect(adoptRemote).toHaveBeenCalledWith({
+      host: 'tpa-be',
+      root: ROOT,
+      agentCwd: '/Users/me/tpa-be',
+    })
+  })
+
+  it('adopts nothing when the folder dialog is cancelled', async () => {
+    const { adoptRemote, adopt } = handlerWith()
+    showOpenDialog.mockResolvedValueOnce({ canceled: true, filePaths: [] })
+
+    await expect(adopt({ host: 'tpa-be', root: ROOT })).resolves.toEqual({ project: null })
+    expect(adoptRemote).not.toHaveBeenCalled()
+  })
+
+  it('refuses a bad host or an unanchored root before any dialog opens', async () => {
+    const { adoptRemote, adopt } = handlerWith()
+
+    await expect(adopt({ host: '', root: ROOT })).rejects.toThrow('Not a usable remote host')
+    await expect(adopt({ host: '-oProxyCommand=x', root: ROOT })).rejects.toThrow(
+      'Not a usable remote host'
+    )
+    await expect(adopt({ host: 'tpa-be', root: 'MasterTPABackend' })).rejects.toThrow(
+      'A remote project root must be an absolute path'
+    )
+    expect(showOpenDialog).not.toHaveBeenCalled()
+    expect(adoptRemote).not.toHaveBeenCalled()
+  })
+})
+
+describe('project:checkRemoteHost', () => {
+  it('refuses the host string itself before any ssh runs', async () => {
+    const handlers = buildHandlers({} as unknown as ChorusRuntime)
+    const check = handlers['project:checkRemoteHost'] as (r: unknown) => Promise<unknown>
+    await expect(check({ host: '' })).rejects.toThrow('Not a usable remote host')
+    await expect(check({ host: '-oProxyCommand=x' })).rejects.toThrow('Not a usable remote host')
+  })
+})
