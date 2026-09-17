@@ -18,6 +18,7 @@ import type { Database } from './port.js'
 export interface Project {
   readonly id: ProjectId
   readonly name: string
+  readonly host: string
   /**
    * The path as the person gave it — what a dialog returned, what the rail
    * shows. Kept separate from `canonicalRoot` so the UI can display the
@@ -28,6 +29,7 @@ export interface Project {
   readonly canonicalRoot: string
   /** A `.code-workspace`, or null for a plain folder. */
   readonly workspaceFile: string | null
+  readonly agentCwd: string | null
   readonly createdAt: number
   readonly lastOpenedAt: number
   /**
@@ -142,6 +144,17 @@ export class UnknownProjectError extends Error {
   }
 }
 
+export const LOCAL_HOST = ''
+
+const HOST_NAME = /^[a-z0-9][a-z0-9._@-]*$/
+
+const ProjectHost = z
+  .string()
+  .refine((host) => host === LOCAL_HOST || HOST_NAME.test(host.trim().toLowerCase()), {
+    message: 'Not a usable project host',
+  })
+  .transform((host) => host.trim().toLowerCase())
+
 /*
  * Validated because two of these fields are typed by a person and one comes from
  * a file dialog. `trim` on the name so a project called " " cannot exist and then
@@ -149,9 +162,11 @@ export class UnknownProjectError extends Error {
  */
 const CreateProjectInput = z.object({
   name: z.string().trim().min(1),
+  host: ProjectHost,
   root: z.string().min(1),
   canonicalRoot: z.string().min(1),
   workspaceFile: z.string().min(1).nullable().default(null),
+  agentCwd: z.string().min(1).nullable().default(null),
   now: z.number().int().nonnegative(),
 })
 export type CreateProjectInput = z.input<typeof CreateProjectInput>
@@ -166,9 +181,11 @@ export type RelocateProjectInput = z.input<typeof RelocateProjectInput>
 interface ProjectRow {
   id: string
   name: string
+  host: string
   root: string
   canonical_root: string
   workspace_file: string | null
+  agent_cwd: string | null
   permission_profile_id: string | null
   agent_ids: string | null
   created_at: number
@@ -183,9 +200,11 @@ function toProject(row: ProjectRow): Project {
   return {
     id: row.id as ProjectId,
     name: row.name,
+    host: row.host,
     root: row.root,
     canonicalRoot: row.canonical_root,
     workspaceFile: row.workspace_file,
+    agentCwd: row.agent_cwd,
     createdAt: row.created_at,
     lastOpenedAt: row.last_opened_at,
     profileId: row.permission_profile_id,
@@ -230,7 +249,7 @@ function parseAgentIds(raw: string | null): readonly string[] | null {
   }
 }
 
-const COLUMNS = `id, name, root, canonical_root, workspace_file, permission_profile_id, agent_ids, created_at, last_opened_at, sort_order, notes, note_width, note_height`
+const COLUMNS = `id, name, host, root, canonical_root, workspace_file, agent_cwd, permission_profile_id, agent_ids, created_at, last_opened_at, sort_order, notes, note_width, note_height`
 
 /**
  * The project registry — create, find, rename, relocate, forget.
@@ -275,8 +294,8 @@ export class ProjectStore {
 
     const insert = this.db.transaction((): Project => {
       const clash = this.db
-        .prepare(`SELECT id FROM projects WHERE canonical_key = @key`)
-        .get({ key }) as { id: string } | undefined
+        .prepare(`SELECT id FROM projects WHERE host = @host AND canonical_key = @key`)
+        .get({ host: parsed.host, key }) as { id: string } | undefined
       if (clash !== undefined) {
         throw new DuplicateProjectRootError(parsed.canonicalRoot, clash.id as ProjectId)
       }
@@ -294,26 +313,30 @@ export class ProjectStore {
       this.db
         .prepare(
           `INSERT INTO projects
-             (id, name, root, canonical_root, canonical_key, workspace_file, created_at, last_opened_at, sort_order)
+             (id, name, host, root, canonical_root, canonical_key, workspace_file, agent_cwd, created_at, last_opened_at, sort_order)
            VALUES
-             (@id, @name, @root, @canonicalRoot, @key, @workspaceFile, @now, @now, @sortOrder)`
+             (@id, @name, @host, @root, @canonicalRoot, @key, @workspaceFile, @agentCwd, @now, @now, @sortOrder)`
         )
         .run({
           id,
           name: parsed.name,
+          host: parsed.host,
           root: parsed.root,
           canonicalRoot: parsed.canonicalRoot,
           key,
           workspaceFile: parsed.workspaceFile,
+          agentCwd: parsed.agentCwd,
           now: parsed.now,
           sortOrder: next,
         })
       return {
         id,
         name: parsed.name,
+        host: parsed.host,
         root: parsed.root,
         canonicalRoot: parsed.canonicalRoot,
         workspaceFile: parsed.workspaceFile,
+        agentCwd: parsed.agentCwd,
         createdAt: parsed.now,
         lastOpenedAt: parsed.now,
         // Never asked yet. The caller supplies the default cast and profile at
@@ -344,10 +367,11 @@ export class ProjectStore {
    * The lookup Add Project makes before it creates anything, and the one that
    * makes "already open this folder" possible rather than a duplicate.
    */
-  findByCanonicalRoot(canonicalRoot: string): Project | null {
+  findByRoot(input: { readonly host: string; readonly canonicalRoot: string }): Project | null {
+    const host = ProjectHost.parse(input.host)
     const row = this.db
-      .prepare(`SELECT ${COLUMNS} FROM projects WHERE canonical_key = @key`)
-      .get({ key: this.keyFor(canonicalRoot) }) as ProjectRow | undefined
+      .prepare(`SELECT ${COLUMNS} FROM projects WHERE host = @host AND canonical_key = @key`)
+      .get({ host, key: this.keyFor(input.canonicalRoot) }) as ProjectRow | undefined
     return row === undefined ? null : toProject(row)
   }
 
@@ -472,13 +496,17 @@ export class ProjectStore {
 
     const move = this.db.transaction((): void => {
       const existing = this.db
-        .prepare(`SELECT id FROM projects WHERE id = @projectId`)
-        .get({ projectId }) as { id: string } | undefined
+        .prepare(`SELECT id, host FROM projects WHERE id = @projectId`)
+        .get({ projectId }) as { id: string; host: string } | undefined
       if (existing === undefined) throw new UnknownProjectError(projectId)
+      const host = existing.host
 
       const clash = this.db
-        .prepare(`SELECT id FROM projects WHERE canonical_key = @key AND id <> @projectId`)
-        .get({ key, projectId }) as { id: string } | undefined
+        .prepare(
+          `SELECT id FROM projects
+            WHERE host = @host AND canonical_key = @key AND id <> @projectId`
+        )
+        .get({ host, key, projectId }) as { id: string } | undefined
       if (clash !== undefined) {
         throw new DuplicateProjectRootError(parsed.canonicalRoot, clash.id as ProjectId)
       }

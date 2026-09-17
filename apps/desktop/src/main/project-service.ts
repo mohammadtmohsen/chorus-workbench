@@ -1,13 +1,15 @@
 import { statSync } from 'node:fs'
-import { basename } from 'node:path'
+import { basename, posix } from 'node:path'
 import {
   DuplicateProjectRootError,
+  LOCAL_HOST,
   UnknownProjectError,
   purgeProject,
   type Database,
   type Project,
   type ProjectStore,
 } from '@chorus/event-store'
+import { remoteProjectRoot } from '@chorus/workspace'
 import { approveProjectRoot } from './workbench-surface.js'
 
 /**
@@ -57,6 +59,20 @@ export class ProjectRootMissingError extends Error {
   ) {
     super(`The folder for this project is no longer there: ${canonicalRoot}`)
     this.name = 'ProjectRootMissingError'
+  }
+}
+
+export class AgentFolderMissingError extends Error {
+  constructor(
+    readonly projectId: string,
+    readonly agentCwd: string | null
+  ) {
+    super(
+      agentCwd === null
+        ? `This remote project has no local folder for its agents: ${projectId}`
+        : `The local folder for this project's agents is no longer there: ${agentCwd}`
+    )
+    this.name = 'AgentFolderMissingError'
   }
 }
 
@@ -112,7 +128,7 @@ export class ProjectService {
   adopt(proposed: string, name?: string): AdoptResult {
     const canonicalRoot = approveProjectRoot(proposed)
 
-    const existing = this.projects.findByCanonicalRoot(canonicalRoot)
+    const existing = this.projects.findByRoot({ host: LOCAL_HOST, canonicalRoot })
     if (existing !== null) {
       return { project: this.projects.touch(existing.id, this.clock()), created: false }
     }
@@ -130,6 +146,7 @@ export class ProjectService {
       return {
         project: this.projects.create({
           name: chosen,
+          host: LOCAL_HOST,
           root: proposed,
           canonicalRoot,
           workspaceFile: null,
@@ -152,6 +169,47 @@ export class ProjectService {
     }
   }
 
+  adoptRemote(input: {
+    readonly host: string
+    readonly root: string
+    readonly agentCwd: string
+    readonly name?: string
+  }): AdoptResult {
+    const canonicalRoot = remoteProjectRoot(input.root)
+    const agentCwd = approveProjectRoot(input.agentCwd)
+
+    const existing = this.projects.findByRoot({ host: input.host, canonicalRoot })
+    if (existing !== null) {
+      return { project: this.projects.touch(existing.id, this.clock()), created: false }
+    }
+
+    const folder = posix.basename(canonicalRoot)
+    const trimmed = input.name?.trim() ?? ''
+    const fallback = folder === '' ? canonicalRoot : folder
+    const chosen = trimmed === '' ? fallback : trimmed
+
+    try {
+      return {
+        project: this.projects.create({
+          name: chosen,
+          host: input.host,
+          root: input.root,
+          canonicalRoot,
+          workspaceFile: null,
+          agentCwd,
+          now: this.clock(),
+        }),
+        created: true,
+      }
+    } catch (error) {
+      if (error instanceof DuplicateProjectRootError) {
+        const winner = this.projects.get(error.existingProjectId)
+        if (winner !== null) return { project: winner, created: false }
+      }
+      throw error
+    }
+  }
+
   /**
    * The project at a canonical root, or null.
    *
@@ -163,7 +221,7 @@ export class ProjectService {
    * to prevent.
    */
   findByRoot(canonicalRoot: string): Project | null {
-    return this.projects.findByCanonicalRoot(canonicalRoot)
+    return this.projects.findByRoot({ host: LOCAL_HOST, canonicalRoot })
   }
 
   list(): readonly Project[] {
@@ -177,11 +235,11 @@ export class ProjectService {
   /**
    * An id to a root, and the only path by which that conversion happens.
    *
-   * This is what `redeem`'s `projectId` arm calls, and what an agent session
-   * calls to find its cwd instead of carrying one of its own. Two refusals rather
-   * than one, because they mean different things to whoever is asking:
-   * an id nobody adopted is refused outright, and an adopted id whose folder has
-   * gone is refused as a folder problem so the caller can offer to relocate it.
+   * This is what `redeem`'s `projectId` arm calls, and what `resolveAgentCwd`
+   * calls for a local project. Two refusals rather than one, because they mean
+   * different things to whoever is asking: an id nobody adopted is refused
+   * outright, and a local project whose folder has gone is refused as a folder
+   * problem so the caller can offer to relocate it.
    *
    * The existence check is deliberate and is not redundant with `adopt`. A root
    * verified at adopt time says nothing about the same root a week later, and
@@ -191,10 +249,21 @@ export class ProjectService {
   resolveRoot(projectId: string): string {
     const project = this.projects.get(projectId)
     if (project === null) throw new UnknownProjectError(projectId)
+    if (project.host !== LOCAL_HOST) return project.canonicalRoot
     if (!directoryExists(project.canonicalRoot)) {
       throw new ProjectRootMissingError(projectId, project.canonicalRoot)
     }
     return project.canonicalRoot
+  }
+
+  resolveAgentCwd(projectId: string): string {
+    const project = this.projects.get(projectId)
+    if (project === null) throw new UnknownProjectError(projectId)
+    if (project.host === LOCAL_HOST) return this.resolveRoot(projectId)
+    if (project.agentCwd === null || !directoryExists(project.agentCwd)) {
+      throw new AgentFolderMissingError(projectId, project.agentCwd)
+    }
+    return project.agentCwd
   }
 
   /**
@@ -212,7 +281,8 @@ export class ProjectService {
    */
   rootPresent(projectId: string): boolean {
     const project = this.projects.get(projectId)
-    return project !== null && directoryExists(project.canonicalRoot)
+    if (project === null) return false
+    return project.host !== LOCAL_HOST || directoryExists(project.canonicalRoot)
   }
 
   rename(projectId: string, name: string): Project {

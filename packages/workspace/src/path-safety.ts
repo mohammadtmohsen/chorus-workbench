@@ -1,5 +1,5 @@
 import { realpathSync } from 'node:fs'
-import { resolve } from 'node:path'
+import { posix, resolve, win32 } from 'node:path'
 import {
   hasRoot as hasRootOn,
   isInside as isInsideOn,
@@ -42,6 +42,20 @@ export function isWithin(root: string, target: string): boolean {
 
 export function relativeWithin(root: string, target: string): string | null {
   return relativeInsideOn(root, target, platformForRoot(root, process.platform))
+}
+
+export function remoteProjectRoot(proposed: string): string {
+  const unprefixed = /^\/[A-Za-z]:[\\/]/.test(proposed) ? proposed.slice(1) : proposed
+  if (/^[A-Za-z]:[\\/]/.test(unprefixed)) {
+    const normalized = win32.normalize(unprefixed).replace(/\\/g, '/')
+    const upperDrive = normalized.charAt(0).toUpperCase() + normalized.slice(1)
+    return upperDrive.length > 3 ? upperDrive.replace(/\/+$/, '') : upperDrive
+  }
+  if (unprefixed.startsWith('/') && !unprefixed.startsWith('//')) {
+    const normalized = posix.normalize(unprefixed)
+    return normalized.length > 1 ? normalized.replace(/\/+$/, '') : normalized
+  }
+  throw new Error(`A remote project root must be an absolute path: ${proposed}`)
 }
 
 export class PathEscapeError extends Error {

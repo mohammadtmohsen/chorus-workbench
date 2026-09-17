@@ -1,8 +1,9 @@
 import { beforeEach, describe, expect, it } from 'vitest'
-import { migrate } from './migrations.js'
+import { migrate, MIGRATIONS } from './migrations.js'
 import {
   canonicalKey,
   DuplicateProjectRootError,
+  LOCAL_HOST,
   platformCaseSensitivity,
   ProjectStore,
   UnknownProjectError,
@@ -27,7 +28,7 @@ const add = (
   name = 'Project',
   now = 1_000
 ): ReturnType<ProjectStore['create']> =>
-  store.create({ name, root, canonicalRoot: root, workspaceFile: null, now })
+  store.create({ name, host: LOCAL_HOST, root, canonicalRoot: root, workspaceFile: null, now })
 
 beforeEach(() => {
   db = openSqlite({ path: ':memory:' })
@@ -61,6 +62,7 @@ describe('create', () => {
   it('round-trips a project and stamps both times from one clock', () => {
     const project = sensitive().create({
       name: 'Chorus',
+      host: LOCAL_HOST,
       root: '/code/chorus',
       canonicalRoot: '/code/chorus',
       workspaceFile: null,
@@ -81,6 +83,7 @@ describe('create', () => {
     const store = sensitive()
     const project = store.create({
       name: 'Linked',
+      host: LOCAL_HOST,
       root: '/Users/me/shortcut',
       canonicalRoot: '/Volumes/disk/real',
       workspaceFile: null,
@@ -89,7 +92,9 @@ describe('create', () => {
     expect(project.root).toBe('/Users/me/shortcut')
     expect(project.canonicalRoot).toBe('/Volumes/disk/real')
     // Uniqueness follows the real directory, not the name somebody reached it by.
-    expect(store.findByCanonicalRoot('/Volumes/disk/real')?.id).toBe(project.id)
+    expect(store.findByRoot({ host: LOCAL_HOST, canonicalRoot: '/Volumes/disk/real' })?.id).toBe(
+      project.id
+    )
   })
 
   it('refuses a directory that is already a project, and names the one that holds it', () => {
@@ -258,6 +263,79 @@ describe('rename', () => {
   })
 })
 
+describe('a project on another host', () => {
+  const remote = (
+    store: ProjectStore,
+    host: string,
+    root: string
+  ): ReturnType<ProjectStore['create']> =>
+    store.create({ name: 'Api', host, root, canonicalRoot: root, workspaceFile: null, now: 2 })
+
+  it('lets two hosts hold the same path', () => {
+    const store = sensitive()
+    const here = add(store, 'C:/code/api')
+    const there = remote(store, 'tpa-be', 'C:/code/api')
+    expect(there.id).not.toBe(here.id)
+    expect(store.findByRoot({ host: LOCAL_HOST, canonicalRoot: 'C:/code/api' })?.id).toBe(here.id)
+    expect(store.findByRoot({ host: 'tpa-be', canonicalRoot: 'C:/code/api' })?.id).toBe(there.id)
+  })
+
+  it('still refuses the same path twice on one host', () => {
+    const store = sensitive()
+    add(store, 'C:/code/api')
+    expect(() => remote(store, 'tpa-be', 'C:/code/api')).not.toThrow()
+    expect(() => remote(store, 'tpa-be', 'C:/code/api')).toThrow(DuplicateProjectRootError)
+  })
+
+  it('folds a host the way a name is folded, not the way a path is', () => {
+    const store = sensitive()
+    const project = remote(store, '  TPA-BE  ', 'C:/code/api')
+    expect(project.host).toBe('tpa-be')
+    expect(store.findByRoot({ host: 'tpa-be', canonicalRoot: 'C:/code/api' })?.id).toBe(project.id)
+  })
+
+  it('refuses a blank host, and one that a shell would read as an option', () => {
+    const store = sensitive()
+    expect(() => remote(store, '   ', 'C:/code/api')).toThrow()
+    expect(() => remote(store, '-oProxyCommand=calc', 'C:/code/api')).toThrow()
+    expect(() => remote(store, 'tpa be', 'C:/code/api')).toThrow()
+  })
+
+  it('relocates within its own host, so a path held elsewhere does not block the move', () => {
+    const store = sensitive()
+    const there = remote(store, 'tpa-be', 'C:/code/api')
+    const moved = store.relocate(add(store, 'C:/code/other').id, {
+      root: 'C:/code/api',
+      canonicalRoot: 'C:/code/api',
+      workspaceFile: null,
+    })
+    expect(moved.root).toBe('C:/code/api')
+    expect(moved.host).toBe(LOCAL_HOST)
+    expect(store.get(there.id)?.root).toBe('C:/code/api')
+  })
+})
+
+describe('a database written before hosts existed', () => {
+  it('reads its projects as local and still refuses the same folder twice', () => {
+    const old = openSqlite({ path: ':memory:' })
+    for (const migration of MIGRATIONS.filter((m) => m.version <= 11)) old.exec(migration.up)
+    old.exec('PRAGMA user_version = 11')
+    old
+      .prepare(
+        `INSERT INTO projects
+           (id, name, root, canonical_root, canonical_key, created_at, last_opened_at)
+         VALUES ('old-project', 'Old', '/code/chorus', '/code/chorus', '/code/chorus', 1, 1)`
+      )
+      .run()
+
+    migrate(old)
+
+    const store = new ProjectStore(old, { caseSensitivePaths: true })
+    expect(store.get('old-project')?.host).toBe(LOCAL_HOST)
+    expect(() => add(store, '/code/chorus')).toThrow(DuplicateProjectRootError)
+  })
+})
+
 describe('relocate', () => {
   it('moves the root and the canonical root together', () => {
     const store = sensitive()
@@ -268,8 +346,8 @@ describe('relocate', () => {
       workspaceFile: null,
     })
     expect(moved.root).toBe('/new')
-    expect(store.findByCanonicalRoot('/old')).toBeNull()
-    expect(store.findByCanonicalRoot('/new')?.id).toBe(project.id)
+    expect(store.findByRoot({ host: LOCAL_HOST, canonicalRoot: '/old' })).toBeNull()
+    expect(store.findByRoot({ host: LOCAL_HOST, canonicalRoot: '/new' })?.id).toBe(project.id)
   })
 
   it('refuses to move onto another project, leaving the original untouched', () => {

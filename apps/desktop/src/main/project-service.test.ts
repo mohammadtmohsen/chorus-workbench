@@ -1,9 +1,13 @@
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { migrate, ProjectStore, UnknownProjectError, openSqlite } from '@chorus/event-store'
 import { beforeEach, describe, expect, it } from 'vitest'
-import { ProjectRootMissingError, ProjectService } from './project-service.js'
+import {
+  AgentFolderMissingError,
+  ProjectRootMissingError,
+  ProjectService,
+} from './project-service.js'
 
 /*
  * Real directories, not a mocked filesystem, and the reason is the bug this
@@ -14,6 +18,7 @@ import { ProjectRootMissingError, ProjectService } from './project-service.js'
 const scratch = mkdtempSync(join(tmpdir(), 'chorus-project-service-'))
 
 let service: ProjectService
+let store: ProjectStore
 let clock: number
 
 const dir = (name: string): string => {
@@ -26,7 +31,8 @@ beforeEach(() => {
   const db = openSqlite({ path: ':memory:' })
   migrate(db)
   clock = 1_000
-  service = new ProjectService(new ProjectStore(db, { caseSensitivePaths: true }), db, () => clock)
+  store = new ProjectStore(db, { caseSensitivePaths: true })
+  service = new ProjectService(store, db, () => clock)
 })
 
 describe('adopt', () => {
@@ -192,6 +198,104 @@ describe('rootPresent', () => {
     writeFileSync(path, 'not a directory')
 
     expect(service.rootPresent(project.id)).toBe(false)
+  })
+})
+
+describe('resolveAgentCwd', () => {
+  const remote = (agentCwd: string | null): ReturnType<ProjectStore['create']> =>
+    store.create({
+      name: 'Api',
+      host: 'tpa-be',
+      root: 'C:/TPA-MEDEXA/MasterTPABackend',
+      canonicalRoot: 'C:/TPA-MEDEXA/MasterTPABackend',
+      workspaceFile: null,
+      agentCwd,
+      now: clock,
+    })
+
+  it('is the project root for a local project', () => {
+    const { project } = service.adopt(dir('local-agents'))
+    expect(service.resolveAgentCwd(project.id)).toBe(service.resolveRoot(project.id))
+  })
+
+  it('is the local folder for a remote project, though its root is not on this machine', () => {
+    const folder = dir('remote-agents')
+    expect(service.resolveAgentCwd(remote(folder).id)).toBe(folder)
+  })
+
+  it('refuses a remote project with no local folder, and not as a missing root', () => {
+    const project = remote(null)
+    expect(() => service.resolveAgentCwd(project.id)).toThrow(AgentFolderMissingError)
+    expect(() => service.resolveAgentCwd(project.id)).not.toThrow(ProjectRootMissingError)
+  })
+
+  it('refuses a remote project whose local folder has gone, and names it', () => {
+    const folder = dir('gone-agents')
+    const project = remote(folder)
+    rmSync(folder, { recursive: true })
+    expect(() => service.resolveAgentCwd(project.id)).toThrow(folder)
+  })
+
+  it('refuses an id nobody adopted', () => {
+    expect(() => service.resolveAgentCwd('never-adopted')).toThrow(UnknownProjectError)
+  })
+})
+
+describe('adoptRemote', () => {
+  const api = (agentCwd: string): ReturnType<ProjectService['adoptRemote']> =>
+    service.adoptRemote({ host: 'tpa-be', root: 'C:/api', agentCwd })
+
+  it('stores the remote root in one spelling and names the project after its folder', () => {
+    const { project, created } = service.adoptRemote({
+      host: 'tpa-be',
+      root: 'c:\\TPA-MEDEXA\\MasterTPABackend\\',
+      agentCwd: dir('tpa-agents'),
+    })
+    expect(created).toBe(true)
+    expect(project.host).toBe('tpa-be')
+    expect(project.canonicalRoot).toBe('C:/TPA-MEDEXA/MasterTPABackend')
+    expect(project.name).toBe('MasterTPABackend')
+  })
+
+  it('stores the agents folder canonically, whatever path reached it', () => {
+    const real = dir('real-agents')
+    const link = join(scratch, 'linked-agents')
+    symlinkSync(real, link)
+    expect(api(link).project.agentCwd).toBe(realpathSync(real))
+  })
+
+  it('finds the project it already holds, whatever spelling of host or root', () => {
+    const agentCwd = dir('again-agents')
+    const first = service.adoptRemote({
+      host: 'tpa-be',
+      root: 'C:/TPA-MEDEXA/MasterTPABackend',
+      agentCwd,
+    })
+    const second = service.adoptRemote({
+      host: 'TPA-BE',
+      root: '/C:/TPA-MEDEXA/MasterTPABackend/',
+      agentCwd,
+    })
+    expect(second.created).toBe(false)
+    expect(second.project.id).toBe(first.project.id)
+  })
+
+  it('refuses an agents folder that is not on this machine', () => {
+    expect(() => api(join(scratch, 'absent-agents'))).toThrow()
+  })
+
+  it('refuses a root that is not anchored, and a host ssh would read as an option', () => {
+    const agentCwd = dir('refusing-agents')
+    const option = '-oProxyCommand=x'
+    expect(() => service.adoptRemote({ host: 'tpa-be', root: 'api', agentCwd })).toThrow()
+    expect(() => service.adoptRemote({ host: option, root: 'C:/api', agentCwd })).toThrow()
+  })
+
+  it('is present and resolvable, though its root is not on this machine', () => {
+    const { project } = api(dir('present-agents'))
+    expect(service.rootPresent(project.id)).toBe(true)
+    expect(service.resolveRoot(project.id)).toBe('C:/api')
+    expect(service.resolveAgentCwd(project.id)).toBe(project.agentCwd)
   })
 })
 

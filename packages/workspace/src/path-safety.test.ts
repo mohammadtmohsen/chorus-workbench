@@ -2,7 +2,7 @@ import { mkdirSync, mkdtempSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { beforeAll, describe, expect, it } from 'vitest'
-import { resolveWithinRoot } from './path-safety.js'
+import { remoteProjectRoot, resolveWithinRoot } from './path-safety.js'
 
 let root: string
 let outside: string
@@ -59,5 +59,37 @@ describe('resolveWithinRoot', () => {
     // "/tmp/x/project-evil" must not count as inside "/tmp/x/project".
     const sibling = resolve(root, '..', 'project-evil', 'f.txt')
     expect(resolveWithinRoot(root, sibling).ok).toBe(false)
+  })
+})
+
+describe('remoteProjectRoot', () => {
+  it('gives one spelling for a Windows root, however it was typed', () => {
+    const expected = 'C:/TPA-MEDEXA/MasterTPABackend'
+    expect(remoteProjectRoot('C:/TPA-MEDEXA/MasterTPABackend')).toBe(expected)
+    expect(remoteProjectRoot('/C:/TPA-MEDEXA/MasterTPABackend')).toBe(expected)
+    expect(remoteProjectRoot('c:\\TPA-MEDEXA\\MasterTPABackend\\')).toBe(expected)
+    expect(remoteProjectRoot('C:/TPA-MEDEXA//./old/../MasterTPABackend/')).toBe(expected)
+  })
+
+  it('keeps the separator on a bare drive', () => {
+    expect(remoteProjectRoot('c:\\')).toBe('C:/')
+    expect(remoteProjectRoot('C:/..')).toBe('C:/')
+  })
+
+  it('normalises a POSIX root without resolving it against this machine', () => {
+    expect(remoteProjectRoot('/home/me//proj/./src/../')).toBe('/home/me/proj')
+    expect(remoteProjectRoot('/')).toBe('/')
+  })
+
+  it('keeps a POSIX root whose first segment only looks like a drive', () => {
+    expect(remoteProjectRoot('/c:demo/proj')).toBe('/c:demo/proj')
+    expect(remoteProjectRoot('/C:/Users/user')).toBe('C:/Users/user')
+  })
+
+  it('refuses anything that is not anchored on the remote machine', () => {
+    const unanchored = ['', 'proj', './proj', 'C:proj', '\\\\server\\share', '//server/share']
+    for (const proposed of unanchored) {
+      expect(() => remoteProjectRoot(proposed)).toThrow()
+    }
   })
 })

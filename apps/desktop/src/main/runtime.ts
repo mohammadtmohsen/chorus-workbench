@@ -1731,7 +1731,7 @@ export class ChorusRuntime {
      * The root comes from the registry, and the check comes with it.
      *
      * This used to normalise a caller's string and then `describeDirectory` it.
-     * `resolveRoot` does the same job from the other end — it refuses an id
+     * `resolveAgentCwd` does the same job from the other end — it refuses an id
      * nobody adopted, and refuses an adopted id whose folder has gone — so the
      * directory is still verified before anything is spawned, which is what the
      * old check was for: a missing cwd makes the spawn fail with ENOENT, and the
@@ -1742,7 +1742,7 @@ export class ChorusRuntime {
      * now belongs to a project, and there is no project that means "nowhere in
      * particular" — whoever adopts the folder decides that, before we get here.
      */
-    const cwd = this.projects.resolveRoot(options.projectId)
+    const cwd = this.projects.resolveAgentCwd(options.projectId)
 
     /*
      * Refused here rather than at `startParticipant`, and the difference is a
@@ -3344,7 +3344,7 @@ export class ChorusRuntime {
        * folder vanished is something they may want to relocate.
        */
       try {
-        this.projects.resolveRoot(projectId)
+        this.projects.resolveAgentCwd(projectId)
       } catch (error) {
         this.log.warn('a session could not be reopened', {
           conversationId: entry.conversationId,
@@ -3394,7 +3394,7 @@ export class ChorusRuntime {
       grants,
       profile,
       projectId,
-      cwd: this.projects.resolveRoot(projectId),
+      cwd: this.projects.resolveAgentCwd(projectId),
       title: entry.title,
       lastAddressed: undefined,
       lastSeenSeq: entry.lastSeenSeq,
@@ -3825,7 +3825,7 @@ export class ChorusRuntime {
 
     // The registry decides whether this can be reopened, and it refuses both an
     // id nobody adopted and a project whose folder has gone.
-    this.projects.resolveRoot(summary.projectId)
+    this.projects.resolveAgentCwd(summary.projectId)
 
     /*
      * Who this conversation *had*, which `reopen` uses only to tell an arrival
@@ -5612,7 +5612,7 @@ function folderName(cwd: string): string {
  * Four places asked it whether a path was a usable directory: starting a
  * conversation, restoring one, reopening one from history, and repointing one.
  * The last no longer exists, and the other three now ask the registry instead —
- * `ProjectService.resolveRoot` refuses an id nobody adopted and an adopted id
+ * `ProjectService.resolveAgentCwd` refuses an id nobody adopted and an adopted id
  * whose folder has gone, which is the same question asked of the thing that
  * actually owns the answer. `approveProjectRoot` performs the equivalent check
  * once, at adoption, where a person is choosing.

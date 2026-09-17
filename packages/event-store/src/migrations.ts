@@ -510,6 +510,23 @@ export const MIGRATIONS: readonly Migration[] = [
          );
     `,
   },
+  {
+    version: 12,
+    name: 'a-project-knows-its-host',
+    up: `
+      ALTER TABLE projects ADD COLUMN host TEXT NOT NULL DEFAULT '';
+
+      DROP INDEX projects_canonical_key;
+      CREATE UNIQUE INDEX projects_canonical_key ON projects (host, canonical_key);
+    `,
+  },
+  {
+    version: 13,
+    name: 'where-a-remote-projects-agents-run',
+    up: `
+      ALTER TABLE projects ADD COLUMN agent_cwd TEXT;
+    `,
+  },
 ]
 
 export interface MigrationResult {
