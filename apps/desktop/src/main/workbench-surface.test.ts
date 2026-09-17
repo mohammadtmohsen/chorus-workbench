@@ -363,7 +363,7 @@ describe('the workbench session', () => {
     }
 
     expect(created).not.toBe(defaultSession)
-    expect(fromPartition).toHaveBeenCalledWith(surface.WORKBENCH_PARTITION)
+    expect(fromPartition).toHaveBeenCalledWith(surface.workbenchPartition(RUNTIME.remoteAuthority))
     expect(created.webRequest.onHeadersReceived).toHaveBeenCalled()
     expect(created.setPermissionRequestHandler).toHaveBeenCalled()
     expect(created.setPermissionCheckHandler).toHaveBeenCalled()
@@ -371,13 +371,21 @@ describe('the workbench session', () => {
 
   it('is in-memory, so a connection secret cannot outlive a quit in a cookie', () => {
     expect(surface.WORKBENCH_PARTITION.startsWith('persist:')).toBe(false)
+    expect(surface.workbenchPartition(RUNTIME.remoteAuthority).startsWith('persist:')).toBe(false)
   })
 
-  it('is one partition shared by every surface, not one each', async () => {
+  it('is one partition per remote authority, not one per surface nor one for the app', async () => {
+    const other = { ...RUNTIME, remoteAuthority: '127.0.0.1:51516' }
+    acquireWorkbenchRuntime.mockImplementationOnce(() => Promise.resolve(other))
+    const first = constructed.length
     await openAt(shell, ROOT_A)
+    await openAt(new FakeWebContents(), ROOT_A)
     await openAt(shell, ROOT_B)
-    const named = fromPartition.mock.calls.map(([name]) => name)
-    expect(new Set(named)).toEqual(new Set([surface.WORKBENCH_PARTITION]))
+    const sessions = constructed.slice(first).map((view) => view.webPreferences['session'])
+    expect(sessions[0]).not.toBe(sessions[1])
+    expect(sessions[2]).toBe(sessions[1])
+    expect(fromPartition).toHaveBeenCalledWith(surface.workbenchPartition(other.remoteAuthority))
+    expect(fromPartition).toHaveBeenCalledWith(surface.workbenchPartition(RUNTIME.remoteAuthority))
   })
 })
 

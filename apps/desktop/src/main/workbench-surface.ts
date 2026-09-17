@@ -188,7 +188,13 @@ interface ProjectGrant {
 }
 const grants = new Map<string, ProjectGrant>()
 
-let configuredSession: Session | null = null
+const workbenchSessions = new Map<string, Session>()
+
+export function workbenchPartition(remoteAuthority: string | null): string {
+  return remoteAuthority === null
+    ? WORKBENCH_PARTITION
+    : `${WORKBENCH_PARTITION}:${remoteAuthority}`
+}
 
 /**
  * The workbench session, with its controls installed before anything loads into
@@ -213,17 +219,12 @@ export function workbenchSession(
    */
   product: { readonly quality: string; readonly commit: string } | null
 ): Session {
-  if (configuredSession !== null) return configuredSession
-  const created = session.fromPartition(WORKBENCH_PARTITION)
-  /*
-   * Built once, with the real authority already in it — which is why the session
-   * is created on the first *open* rather than at boot. The port is ephemeral and
-   * only exists once the child has reported it, so a session built earlier could
-   * only have carried a wildcard. One shared server means one authority for the
-   * app's whole life, so "once" is not a limitation here.
-   */
+  const key = remoteAuthority ?? ''
+  const existing = workbenchSessions.get(key)
+  if (existing !== undefined) return existing
+  const created = session.fromPartition(workbenchPartition(remoteAuthority))
   applyWorkbenchContentSecurityPolicy(created, isDev, remoteAuthority, product)
-  configuredSession = created
+  workbenchSessions.set(key, created)
   return created
 }
 

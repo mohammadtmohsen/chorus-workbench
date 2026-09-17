@@ -438,10 +438,10 @@ let startAbort: AbortController | null = null
  * indistinguishable failure the connection-token bug produced.
  *
  * **That reason used to be the port**, and Phase 1 is what changed it: the
- * workbench session's CSP is built once with the first authority baked into it
- * (`workbench-surface.ts`'s `workbenchSession`), so a re-spawn used to be refused
- * by a `connect-src` naming a port the new server would not have. A fixed port
- * means the authority now survives a restart, and the token is what does not.
+ * session's CSP was built once, with the first authority baked into it, so a
+ * re-spawn used to be refused by a `connect-src` naming a port the new server
+ * would not have. A fixed port means the authority now survives a restart, and
+ * the token is what does not.
  * The conclusion is unchanged and this is still a dead end; what it is a dead end
  * *for* is worth having right, because it is the difference between two fixes
  * that look equally plausible from here. Surface recreation and a dynamic
