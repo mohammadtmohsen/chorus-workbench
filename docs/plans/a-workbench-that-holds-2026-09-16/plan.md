@@ -2,15 +2,15 @@
 
 ## Status
 
-| Phase                                 | Status                  | Commit                                                                      | Notes                                                                                                                             |
-| ------------------------------------- | ----------------------- | --------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------- |
-| 0 — Research                          | ✅ done                 | —                                                                           | Three agents, read-only. Findings below.                                                                                          |
-| 1 — The port in the name              | ✅ verified 2026-09-16  | `2cb9885`                                                                   | The branch appears on the second launch with no click. Revived the same day, once the SCM symptom proved the residual observable. |
-| 2 — A workbench that is not throttled | ✅ verified 2026-09-16  | `1de72c0`                                                                   | Measured before and after. `detached` went from `hidden` to `visible`, and no `visibilitychange` fires at all.                    |
-| 3 — Focus, honestly                   | ✅ verified 2026-09-16  | `1867518`, `2f07d03`                                                        | Measured with the workaround disabled: SCM refreshed with focus in the chat. `scm-refresh.ts` removed.                            |
-| 4 — Extensions per workspace          | ⬜ not started          | —                                                                           | Closes C-063 with upstream machinery.                                                                                             |
-| 5 — Remote over SSH                   | 🚧 verified on officepc | `a47c9f4`, `f12fa2e`, `148fce1`, `62b3d75`, `e2d4018`, `e58c580`, `f165396` | Opened from Chorus on officepc, and an agent saw the selected lines. Next: 5e, then `tpa-be`.                                     |
-| 6 — `33.0.9` → `36.2.7`               | ⬜ not started          | —                                                                           | Table stakes, not a fix. Its own migration.                                                                                       |
+| Phase                                 | Status                             | Commit                                                                                 | Notes                                                                                                                             |
+| ------------------------------------- | ---------------------------------- | -------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------- |
+| 0 — Research                          | ✅ done                            | —                                                                                      | Three agents, read-only. Findings below.                                                                                          |
+| 1 — The port in the name              | ✅ verified 2026-09-16             | `2cb9885`                                                                              | The branch appears on the second launch with no click. Revived the same day, once the SCM symptom proved the residual observable. |
+| 2 — A workbench that is not throttled | ✅ verified 2026-09-16             | `1de72c0`                                                                              | Measured before and after. `detached` went from `hidden` to `visible`, and no `visibilitychange` fires at all.                    |
+| 3 — Focus, honestly                   | ✅ verified 2026-09-16             | `1867518`, `2f07d03`                                                                   | Measured with the workaround disabled: SCM refreshed with focus in the chat. `scm-refresh.ts` removed.                            |
+| 4 — Extensions per workspace          | ⬜ not started                     | —                                                                                      | Closes C-063 with upstream machinery.                                                                                             |
+| 5 — Remote over SSH                   | ✅ verified 2026-09-17 on `tpa-be` | `a47c9f4`, `f12fa2e`, `148fce1`, `62b3d75`, `e2d4018`, `e58c580`, `f165396`, `26e8c54` | The backend opened from Chorus on `tpa-be`, and an agent answered about the selected lines. Dev build only so far.                |
+| 6 — `33.0.9` → `36.2.7`               | ⬜ not started                     | —                                                                                      | Table stakes, not a fix. Its own migration.                                                                                       |
 
 Meta: written 2026-09-16, after a research round by `claude`, `codex` and `deepseek`.
 Nothing was run and nothing was changed. Every claim below is either a citation or
@@ -781,6 +781,30 @@ on `officepc` and 385 GB on `tpa-be`, so this phase does not remove them. Whoeve
 does must hold one condition: a tree may only be removed when no server of any
 Chorus profile is running from it, which is the same ownership question the token
 answers for processes.
+
+**5e proven on `officepc`, 2026-09-17, at `26e8c54`.** The old, unsupervised server
+was stopped first, so the run could not reattach to it. A fresh open started server
+43308 under a live `powershell.exe` launcher, with the task `Running`. After the tab
+closed, the extension host exited cleanly at the 120 s grace, auto-shutdown stopped
+the server at 10:50:29, and one second later the supervisor wrote
+`server 43308 exited; reaped` to `server.reap.log`. It left no process referencing
+the tree, the task `Ready` with `LastTaskResult` 0, and the port free. So the task
+action survived about eight minutes, which was the named risk, and the fallback was
+not needed. **Still unexercised:** the kill itself, because this run left no orphan
+to kill.
+
+**Phase 5's stated goal, met on `tpa-be`, 2026-09-17.** A read-only preflight found an
+administrator account with an active console session, PowerShell 5.1 on AMD64, 393 GB
+free and port 47500 free. From this Mac, through `ProxyJump officepc`, Chorus
+installed the server under `%LOCALAPPDATA%\chorus-reh` on Ahmad's machine, started it
+under the supervising task, and opened `C:/TPA-MEDEXA/MasterTPABackend` as the remote
+project `MasterTPABackend`, with the agents' folder `~/code/tpa/tpa-be`. The status bar
+showed branch `procedure-axes-info` and Source Control his four changes. An agent then
+answered about `CreateRecordNoteCommand.kt` lines 4–11, quoting the selection
+correctly. **What this does not yet cover:** only the dev build has run it, not an
+installed app; `editor_edit` still refuses in a remote project; and file links in the
+conversation do not open remote files. Ahmad's machine now holds that server tree and
+the `Chorus Workbench Server` task, and he should be told.
 
 **Still unproven, and carried as such.** The source-level Win32-OpenSSH behaviour.
 How auto-shutdown's orphaned extension hosts behave on Windows specifically. Whether
