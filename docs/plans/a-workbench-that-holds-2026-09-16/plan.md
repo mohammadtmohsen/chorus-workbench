@@ -10,7 +10,7 @@
 | 3 — Focus, honestly                   | ✅ verified 2026-09-16             | `1867518`, `2f07d03`                                                                   | Measured with the workaround disabled: SCM refreshed with focus in the chat. `scm-refresh.ts` removed.                            |
 | 4 — Extensions per workspace          | ✅ answered 2026-09-17, no code    | —                                                                                      | The machinery was already in place and the toggle was proven by hand. Closes C-063 reframed: one install set, per-project enablement. |
 | 5 — Remote over SSH                   | ✅ verified 2026-09-17 on `tpa-be` | `a47c9f4`, `f12fa2e`, `148fce1`, `62b3d75`, `e2d4018`, `e58c580`, `f165396`, `26e8c54`, `7a05e73` | The backend opened from Chorus on `tpa-be`, in the dev build and then in the installed app. An agent answered about the selected lines, and its edits reach the remote file. |
-| 6 — `33.0.9` → `36.2.7`               | ⬜ not started                     | —                                                                                      | Table stakes, not a fix. Its own migration.                                                                                       |
+| 6 — `33.0.9` → `36.2.7`               | ⏸ parked 2026-09-17                | on `phase-6-vscode-36`                                                                 | Written and blocked outside this repository: no VSCodium server exists for the VS Code the new client is. Details at the phase.    |
 
 Meta: written 2026-09-16, after a research round by `claude`, `codex` and `deepseek`.
 Nothing was run and nothing was changed. Every claim below is either a citation or
@@ -989,6 +989,35 @@ breaking jump.
 package together, rebuild against Monaco `0.56.0`, and repatch the VSCodium REH
 to the matching client commit. Bundled with a behaviour change, a regression
 would have two candidate causes.
+
+**Parked 2026-09-17. The client was written; the server does not exist.** The work
+lives on `phase-6-vscode-36` — the 86 packages bumped, and the two breakages that
+only a bump could find — and it is blocked on something neither repository
+controls. `@codingame` and VSCodium publish against different subsets of VS Code,
+and above `1.121` the two sets do not intersect at all: `34.x` is VS Code
+`1.124.2`, `35.x` and `36.x` are `1.128`, `37.0.0` is `1.138.0`, while VSCodium's
+nearest releases either side are `1.126.04524` and `1.135.06055`. All 272 VSCodium
+releases were checked and no `1.128` exists. `assertMatchedPair` refuses to patch a
+server whose `upstreamCommit` is not the client's commit, and that refusal is the
+reason the commit patch is safe at all — it exists to fix VSCodium's
+sha-of-its-own-version quirk, not to bridge a version gap. And this is not a remote
+concern only: the local workbench runs the same server, so a client without a
+matching server cannot ship at all.
+
+What would unblock it: a VSCodium release whose upstream is `1.128.1`, or a
+`@codingame` release built on `1.126` or `1.135`. Until one of those exists this
+waits, rather than being worked around by loosening the check that makes the pair
+honest.
+
+**Two findings from the branch worth reading before anyone restarts this.** The
+phase's method above compares VS Code's own sources, and that is the wrong surface
+twice over: the packages we call are the **overrides**, whose APIs CodinGame writes
+and VS Code's tree does not contain, and one behaviour we depend on lived in **our
+own patch of a dependency**, which no comparison of published versions can show.
+Diffing those found a storage constructor that gained a second positional
+parameter — silently misdirecting `STORAGE_DATABASES` into it, past typecheck —
+and Phase 3's focus fix sitting in `patches/`, pinned to `33.0.9`, which `pnpm`
+refuses to carry forward.
 
 ## What we are deliberately not doing
 
