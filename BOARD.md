@@ -2569,9 +2569,16 @@ while two deferred rows carry another 59,538 that costs nothing until something
 loads them. A panel presenting "MCP tools: 45,930" as consumed would be wrong by
 more than twice the total.
 
-Also unused and more interesting than the breakdown: `autoCompactThreshold` is
-967,000 against a `maxTokens` of 1,000,000, so compaction fires at 96.7% and a bar
-drawn against the maximum never fills before it resets.
+**Corrected 2026-09-17.** The second half of that does not hold. Read out of the
+shipped CLI at `~/.local/share/claude/versions/2.1.273`: `maxTokens` and
+`rawMaxTokens` are set to the same value, and the CLI's own `percentage` is
+`Math.round(totalTokens / maxTokens * 100)` — so the denominator is what the CLI
+itself measures with, and a bar drawn against it does fill. The 967,000 against
+1,000,000 above is the threshold measured against the raw window, which is a
+different line from the one drawn.
+
+`autoCompactThreshold` is also no longer unused: the adapter carries it through
+and the project card marks it — `docs/plans/the-ceiling-you-can-see-2026-09-17/plan.md`.
 
 **Reopens if:** someone designs it with the deferred distinction drawn honestly.
 The blocker is design, not plumbing.

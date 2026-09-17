@@ -454,7 +454,8 @@
       "editWithoutApproval": "Claude made this edit without asking Chorus.",
       "editVisibilityUnavailable": "Chorus could not take control of edit permissions for this session — edits may not be shown before they happen.",
       "staleEditPreview": "The file changed after this was shown, so the edit was refused. Ask again to work from the current file.",
-      "contextCarried": "Continuing where the previous conversation left off — the agents here start with the transcript so far. Restart to begin fresh."
+      "contextCarried": "Continuing where the previous conversation left off — the agents here start with the transcript so far. Restart to begin fresh.",
+      "nearCompaction": "The context window is nearly full — the agent compacts at the mark. A new conversation starts clean."
     },
     "omitted": "{{bytes}} bytes omitted — the output was too large to keep",
     "detail": "Details",
@@ -555,7 +556,7 @@
   },
   "context": {
     "short": "{{percent}}% ctx",
-    "title": "Context window {{percent}}% full — the agent compacts when it fills"
+    "title": "Context window {{percent}}% full. The mark is where the agent compacts."
   },
   "notify": {
     "waiting": "{{agent}} needs a decision",

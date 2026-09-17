@@ -2077,6 +2077,8 @@ export const ContextUsagePush = z.object({
   usedTokens: z.number().int(),
   maxTokens: z.number().int(),
   percentUsed: z.number(),
+  autoCompactPercent: z.number().nullable(),
+  autoCompactEnabled: z.boolean(),
 })
 export type ContextUsagePush = z.infer<typeof ContextUsagePush>
 

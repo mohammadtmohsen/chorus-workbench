@@ -463,6 +463,7 @@ export interface ProjectFacts {
   readonly costUsd: number | null
   /** The fullest context window in the project, or null if nobody has reported. */
   readonly contextPercent: number | null
+  readonly contextMarkPercent: number | null
   readonly tasks: readonly {
     readonly id: string
     readonly kind: string
@@ -492,14 +493,17 @@ export function useProjectFacts(conversationIds: readonly string[]): ProjectFact
     let tokens = 0
     let cost: number | null = null
     let context: number | null = null
+    let mark: number | null = null
     const tasks: ProjectFacts['tasks'][number][] = []
     for (const conversationId of key === '' ? [] : key.split(',')) {
       const pulse = state.pulses[conversationId]
       if (pulse === undefined) continue
       tokens += pulse.tokens
       if (pulse.costUsd != null) cost = (cost ?? 0) + pulse.costUsd
-      for (const percent of Object.values(pulse.contextByActor)) {
-        context = context === null ? percent : Math.max(context, percent)
+      for (const reading of Object.values(pulse.contextByActor)) {
+        context = context === null ? reading.percent : Math.max(context, reading.percent)
+        if (reading.markPercent === null) continue
+        mark = mark === null ? reading.markPercent : Math.max(mark, reading.markPercent)
       }
       for (const [agentId, list] of Object.entries(pulse.tasksByActor)) {
         for (const task of list) {
@@ -513,7 +517,13 @@ export function useProjectFacts(conversationIds: readonly string[]): ProjectFact
         }
       }
     }
-    return JSON.stringify({ tokens, costUsd: cost, contextPercent: context, tasks })
+    return JSON.stringify({
+      tokens,
+      costUsd: cost,
+      contextPercent: context,
+      contextMarkPercent: mark,
+      tasks,
+    })
   })
   return useMemo(() => JSON.parse(encoded) as ProjectFacts, [encoded])
 }

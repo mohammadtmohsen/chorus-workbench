@@ -50,9 +50,12 @@ describe('reducePulse', () => {
    * empty and the sidebar would flicker back to showing nothing.
    */
   it('does not let a logged event erase pushed context fill', () => {
-    const withContext: SessionPulse = { ...PULSE, contextByActor: { claude: 72 } }
+    const withContext: SessionPulse = {
+      ...PULSE,
+      contextByActor: { claude: { percent: 72, markPercent: 79 } },
+    }
     const next = reducePulse(withContext, event('agent.message.completed', { text: 'hi' }), true)
-    expect(next.contextByActor).toEqual({ claude: 72 })
+    expect(next.contextByActor).toEqual({ claude: { percent: 72, markPercent: 79 } })
   })
 
   /* The same hazard, for the same reason: nothing in the log reports it. */

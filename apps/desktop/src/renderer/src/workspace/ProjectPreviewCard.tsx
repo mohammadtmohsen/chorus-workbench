@@ -195,6 +195,22 @@ export function ProjectPreviewCard(props: {
             <dd className="session-preview-figure">
               {t('context.short', { percent: facts.contextPercent })}
             </dd>
+            <dd
+              className="session-preview-meter"
+              title={
+                facts.contextMarkPercent === null
+                  ? undefined
+                  : t('context.title', { percent: facts.contextPercent })
+              }
+            >
+              <i style={{ width: `${String(facts.contextPercent)}%` }} />
+              {facts.contextMarkPercent !== null && (
+                <i
+                  className="session-preview-meter-mark"
+                  style={{ left: `${String(facts.contextMarkPercent)}%` }}
+                />
+              )}
+            </dd>
           </>
         )}
         {facts.tasks.length > 0 && (

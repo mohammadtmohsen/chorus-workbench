@@ -62,7 +62,7 @@ export interface SessionPulse {
   readonly tokens: number
   readonly costUsd: number | null
   /*
-   * How full each agent has filled its context window, 0-100.
+   * How full each agent has filled its context window, and where its ceiling is.
    *
    * Not reduced from events like everything else above: this is state the agent
    * reports about itself, pushed on its own channel and never written to the
@@ -73,7 +73,7 @@ export interface SessionPulse {
    * Empty until a turn finishes. Absent is the honest answer before then, and
    * different from zero, which would claim an empty context.
    */
-  readonly contextByActor: Readonly<Record<string, number>>
+  readonly contextByActor: Readonly<Record<string, ContextReading>>
   /**
    * What each agent has left running, as last pushed.
    *
@@ -116,6 +116,11 @@ export interface BackgroundTaskView {
   readonly id: string
   readonly kind: string
   readonly description: string
+}
+
+export interface ContextReading {
+  readonly percent: number
+  readonly markPercent: number | null
 }
 
 /** Drops one key without `delete`, which the lint rules forbid on a computed key. */
@@ -1096,7 +1101,13 @@ export const useWorkspaceStore = create<WorkspaceStore>()(
         set((state) => {
           const current = state.pulses[usage.conversationId]
           if (current === undefined) return state
-          if (current.contextByActor[usage.agentId] === usage.percentUsed) return state
+          const previous = current.contextByActor[usage.agentId]
+          if (
+            previous?.percent === usage.percentUsed &&
+            previous.markPercent === usage.autoCompactPercent
+          ) {
+            return state
+          }
           return {
             pulses: {
               ...state.pulses,
@@ -1104,7 +1115,10 @@ export const useWorkspaceStore = create<WorkspaceStore>()(
                 ...current,
                 contextByActor: {
                   ...current.contextByActor,
-                  [usage.agentId]: usage.percentUsed,
+                  [usage.agentId]: {
+                    percent: usage.percentUsed,
+                    markPercent: usage.autoCompactPercent,
+                  },
                 },
               },
             },

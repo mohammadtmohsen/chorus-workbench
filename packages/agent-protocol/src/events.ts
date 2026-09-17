@@ -352,6 +352,9 @@ export interface ContextUsage extends AgentEventBase {
   readonly maxTokens: number
   /** 0-100, derived here so no reader has to guess the provider's units. */
   readonly percentUsed: number
+  readonly autoCompactThreshold: number | null
+  readonly autoCompactPercent: number | null
+  readonly autoCompactEnabled: boolean
 }
 
 /** One thing the agent left running when it stopped waiting for it. */

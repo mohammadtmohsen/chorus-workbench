@@ -1134,13 +1134,39 @@ export function mapPlanUsage(usage: unknown, base: Omit<AgentEvent, 'type'>): Ag
  * actually compacts against, which is the question being asked.
  */
 export function mapContextUsage(usage: unknown, base: Omit<AgentEvent, 'type'>): AgentEvent[] {
-  const info = usage as { totalTokens?: unknown; maxTokens?: unknown } | undefined
+  const info = usage as
+    | {
+        totalTokens?: unknown
+        maxTokens?: unknown
+        autoCompactThreshold?: unknown
+        isAutoCompactEnabled?: unknown
+      }
+    | undefined
   const used = typeof info?.totalTokens === 'number' ? info.totalTokens : null
   const max = typeof info?.maxTokens === 'number' ? info.maxTokens : null
   if (used === null || max === null || max <= 0 || used < 0) return []
 
-  const percentUsed = Math.min(100, Math.round((used / max) * 100))
-  return [{ ...base, type: 'context.usage', usedTokens: used, maxTokens: max, percentUsed }]
+  const threshold =
+    typeof info?.autoCompactThreshold === 'number' && info.autoCompactThreshold > 0
+      ? info.autoCompactThreshold
+      : null
+  const clamp = (value: number): number => Math.min(100, Math.round(value))
+
+  return [
+    {
+      ...base,
+      type: 'context.usage',
+      usedTokens: used,
+      maxTokens: max,
+      percentUsed: clamp((used / max) * 100),
+      autoCompactThreshold: threshold,
+      autoCompactPercent:
+        threshold === null || info?.isAutoCompactEnabled !== true
+          ? null
+          : clamp((threshold / max) * 100),
+      autoCompactEnabled: info?.isAutoCompactEnabled === true,
+    },
+  ]
 }
 
 type RateLimitRecord = Record<

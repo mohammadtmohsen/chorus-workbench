@@ -105,6 +105,9 @@ export interface ContextWindow {
   readonly maxTokens: number
   /** 0-100. */
   readonly percentUsed: number
+  readonly autoCompactThreshold: number | null
+  readonly autoCompactPercent: number | null
+  readonly autoCompactEnabled: boolean
 }
 
 export class ConversationService {
@@ -162,6 +165,7 @@ export class ConversationService {
   private pump: Promise<void> | null = null
   /** Set when *we* asked to stop, so an interrupt is not reported as a failure. */
   private interruptRequested = false
+  private compactionNoticed = false
 
   constructor(options: ConversationServiceOptions) {
     this.store = options.store
@@ -938,13 +942,32 @@ export class ConversationService {
        * reason given on the event: it is the agent's current state rather than
        * something that happened in the conversation, and compaction resets it.
        */
-      case 'context.usage':
+      case 'context.usage': {
         this.onContextUsage?.({
           usedTokens: event.usedTokens,
           maxTokens: event.maxTokens,
           percentUsed: event.percentUsed,
+          autoCompactThreshold: event.autoCompactThreshold,
+          autoCompactPercent: event.autoCompactPercent,
+          autoCompactEnabled: event.autoCompactEnabled,
         })
+        const atCeiling =
+          event.autoCompactEnabled &&
+          event.autoCompactThreshold !== null &&
+          event.usedTokens >= event.autoCompactThreshold
+        if (atCeiling && !this.compactionNoticed) {
+          this.compactionNoticed = true
+          this.lifecycle({
+            type: 'notice.raised',
+            level: 'info',
+            source: 'system',
+            text: '',
+            code: 'nearCompaction',
+            detail: null,
+          })
+        }
         return
+      }
 
       /*
        * Pushed like the two above, and for the same reason: a list of processes
@@ -983,6 +1006,7 @@ export class ConversationService {
        * want when reading the log back and wondering why it forgot something.
        */
       case 'context.compacted':
+        this.compactionNoticed = false
         this.lifecycle({ type: 'context.compacted' })
         return
 

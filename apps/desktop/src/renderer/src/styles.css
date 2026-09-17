@@ -9110,6 +9110,31 @@ input::placeholder {
   font-family: var(--mono);
 }
 
+.session-preview-meter {
+  position: relative;
+  height: 4px;
+  border-radius: 999px;
+  background: var(--bg-canvas);
+  overflow: hidden;
+}
+
+.session-preview-meter i {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--voice);
+}
+
+.session-preview-meter i.session-preview-meter-mark {
+  position: absolute;
+  top: 0;
+  width: 2px;
+  height: 100%;
+  border-radius: 0;
+  background: var(--text-muted);
+  transform: translateX(-1px);
+}
+
 .session-preview-tasks {
   display: grid;
   gap: var(--step);
