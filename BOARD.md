@@ -262,7 +262,7 @@ target config for whoever picks this up.
 reason to believe it is the last one — each run so far has revealed exactly one
 more.
 
-### C-063 · An extension installs into every project at once, and nothing says so
+### C-063 · ~~An extension installs into every project at once, and nothing says so~~ — **closed 2026-09-17, reframed**
 
 **Live as of 2026-08-24**, the moment Phase 5 slice 5a made extensions
 installable: Mohamad installed one from Open VSX and it worked.
@@ -302,6 +302,17 @@ and the first uninstall of each surface, saying the change reaches every project
 At the moment of the action rather than in a document, because a README is read
 once and months before it matters; once per kind per surface, because five
 identical banners are noise by the second.
+
+**Closed 2026-09-17 as one install set with per-project enablement.** The plan's
+Phase 4 asked whether the install could be partitioned and found that it could not
+— `--extensions-dir` is a server-level argument with no per-connection variant, and
+one REH serves every project. What it found instead was already built: enablement
+is registered by the gallery override, workspace storage is keyed per project as
+`workspace:${workspace.id}`, and a folder is always open, so the Extensions view's
+per-workspace disable persists per project. Proven by hand the same day — disabled
+in one project, still enabled in the others after a reopen. No code was written for
+this, and the entry closes as the smaller thing rather than the thing it asked for:
+sharing the install, choosing where it runs.
 
 **The "trust hole" this entry claimed does not exist — withdrawn 2026-08-24.**
 It said trusting project A could activate an extension inside project B, which

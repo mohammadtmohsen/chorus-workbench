@@ -8,7 +8,7 @@
 | 1 — The port in the name              | ✅ verified 2026-09-16             | `2cb9885`                                                                              | The branch appears on the second launch with no click. Revived the same day, once the SCM symptom proved the residual observable. |
 | 2 — A workbench that is not throttled | ✅ verified 2026-09-16             | `1de72c0`                                                                              | Measured before and after. `detached` went from `hidden` to `visible`, and no `visibilitychange` fires at all.                    |
 | 3 — Focus, honestly                   | ✅ verified 2026-09-16             | `1867518`, `2f07d03`                                                                   | Measured with the workaround disabled: SCM refreshed with focus in the chat. `scm-refresh.ts` removed.                            |
-| 4 — Extensions per workspace          | ⬜ not started                     | —                                                                                      | Closes C-063 with upstream machinery.                                                                                             |
+| 4 — Extensions per workspace          | ✅ answered 2026-09-17, no code    | —                                                                                      | The machinery was already in place and the toggle was proven by hand. Closes C-063 reframed: one install set, per-project enablement. |
 | 5 — Remote over SSH                   | ✅ verified 2026-09-17 on `tpa-be` | `a47c9f4`, `f12fa2e`, `148fce1`, `62b3d75`, `e2d4018`, `e58c580`, `f165396`, `26e8c54`, `7a05e73` | The backend opened from Chorus on `tpa-be`, in the dev build and then in the installed app. An agent answered about the selected lines, and its edits reach the remote file. |
 | 6 — `33.0.9` → `36.2.7`               | ⬜ not started                     | —                                                                                      | Table stakes, not a fix. Its own migration.                                                                                       |
 
@@ -557,6 +557,28 @@ per-project enablement. Say so on the board when it closes.
 exists and is not installed. The profiles seam is available and unused. It is
 only worth taking if per-project extension _sets_ turn out to matter more than
 enablement, which is not established.
+
+**Answered 2026-09-17 by reading, then proven by hand — and it needed no code.**
+The three things per-project enablement depends on were all already true: the
+gallery override registers the enablement service (`services.ts:124`), workspace
+storage is real and keyed per project as `workspace:${workspace.id}`
+(`services.ts:401`) rather than served by an IndexedDB that dies with the app, and
+Chorus always opens a folder, which is the `hasWorkspace` gate upstream checks.
+Disabling an extension in one project from the Extensions view held there and left
+it enabled elsewhere. So the phase closes with nothing written.
+
+What stays as it was: an install is still shared, because one REH with one
+`--extensions-dir` serves every project, and `extension-scope.ts` still says so at
+the moment of the install. A fresh install is therefore enabled everywhere until
+someone disables it per project — deliberate, and the smaller half of what C-063
+asked for.
+
+**One risk found while reading, carried rather than closed.** A workspace id comes
+from the folder URI, and a remote folder's URI carries the tunnel port in its
+authority — `vscode-remote://127.0.0.1:48000/C:/…`. If that port differs between
+runs the id differs with it, and everything keyed on workspace scope resets:
+enablement, workspace trust, view state. How the id is computed was not read, so
+this is a thing to check before leaning on workspace scope for a remote project.
 
 ## Phase 5 — Remote over SSH
 
