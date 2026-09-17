@@ -220,8 +220,8 @@ export class ProjectService {
    * root nobody chose, which is exactly the silent adoption the registry exists
    * to prevent.
    */
-  findByRoot(canonicalRoot: string): Project | null {
-    return this.projects.findByRoot({ host: LOCAL_HOST, canonicalRoot })
+  findByPlace(place: WorkbenchPlace): Project | null {
+    return this.projects.findByRoot({ host: place.host, canonicalRoot: place.root })
   }
 
   list(): readonly Project[] {

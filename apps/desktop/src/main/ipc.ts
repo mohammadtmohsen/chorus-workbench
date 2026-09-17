@@ -73,8 +73,8 @@ import {
   requestWorkbenchSnapshot,
   setWorkbenchContextSink,
   setWorkbenchSurfaceGoneSink,
+  type WorkbenchContextReport,
 } from './workbench-surface.js'
-import type { WorkbenchContext } from '../shared/workbench-ipc.js'
 
 type Handlers = { [C in IpcChannel]: (request: never) => Promise<IpcResponse<C>> }
 
@@ -892,7 +892,7 @@ export function buildHandlers(runtime: ChorusRuntime): Handlers {
        * does, one process over — and it is the only path that carries the
        * selected **text**, which the push omits by design.
        */
-      const embedded = await requestWorkbenchSnapshot(cwd)
+      const embedded = await requestWorkbenchSnapshot(runtime.editorPlace(request.conversationId))
       /*
        * Which source answered, and what it said. This path has now been wrong
        * three times — no context at all, then a reference with no code, then a
@@ -1267,19 +1267,15 @@ export function forwardTerminalToRenderer(runtime: ChorusRuntime): () => void {
  * embedded editor. The pill was right and the send was blind, so an agent was
  * told nothing was open while a file sat open in front of the person.
  *
- * Keyed by canonical project root, because that is what a surface belongs to.
+ * Keyed by host and canonical project root, because that is what a surface belongs to.
  */
-const lastWorkbenchContext = new Map<string, WorkbenchContext>()
+const lastWorkbenchContext = new Map<string, WorkbenchContextReport>()
+
+const placeKey = (host: string, projectRoot: string): string => `${host}\n${projectRoot}`
 
 export function forwardWorkbenchContextToRenderer(runtime: ChorusRuntime): () => void {
-  const send = ({
-    projectRoot,
-    context,
-  }: {
-    projectRoot: string
-    context: WorkbenchContext
-  }): void => {
-    const conversations = runtime.conversationsForRoot(projectRoot)
+  const send = ({ host, projectRoot, context }: WorkbenchContextReport): void => {
+    const conversations = runtime.conversationsForPlace({ host, root: projectRoot })
     /*
      * Debug, because it is per keystroke — but it is the line that separates the
      * three ways this can fail, and three rounds were spent guessing between
@@ -1287,6 +1283,7 @@ export function forwardWorkbenchContextToRenderer(runtime: ChorusRuntime): () =>
      * report arriving with no selection in it. `CHORUS_DEBUG=1` to see it.
      */
     runtime.log.debug('workbench context', {
+      host,
       projectRoot,
       conversations: conversations.length,
       path: context.relativePath,
@@ -1351,7 +1348,7 @@ export function forwardWorkbenchContextToRenderer(runtime: ChorusRuntime): () =>
   }
 
   setWorkbenchContextSink((report) => {
-    lastWorkbenchContext.set(report.projectRoot, report.context)
+    lastWorkbenchContext.set(placeKey(report.host, report.projectRoot), report)
     send(report)
   })
 
@@ -1366,7 +1363,7 @@ export function forwardWorkbenchContextToRenderer(runtime: ChorusRuntime): () =>
    * it was retained for.
    */
   const replay = (): void => {
-    for (const [projectRoot, context] of lastWorkbenchContext) send({ projectRoot, context })
+    for (const report of lastWorkbenchContext.values()) send(report)
   }
   /*
    * When a project's last surface goes, its held context goes with it and the
@@ -1374,9 +1371,9 @@ export function forwardWorkbenchContextToRenderer(runtime: ChorusRuntime): () =>
    * the external bridge become visible again, since the shell prefers a
    * workbench push only while one exists.
    */
-  setWorkbenchSurfaceGoneSink((projectRoot) => {
-    lastWorkbenchContext.delete(projectRoot)
-    for (const conversationId of runtime.conversationsForRoot(projectRoot)) {
+  setWorkbenchSurfaceGoneSink((place) => {
+    lastWorkbenchContext.delete(placeKey(place.host, place.root))
+    for (const conversationId of runtime.conversationsForPlace(place)) {
       for (const window of BrowserWindow.getAllWindows()) {
         /*
          * **Both objects, because they die separately.** `window.isDestroyed()`

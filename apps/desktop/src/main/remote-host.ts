@@ -52,6 +52,8 @@ export function sshPowerShellArgv(host: string, script: string): readonly string
     'powershell.exe',
     '-NoProfile',
     '-NonInteractive',
+    '-OutputFormat',
+    'Text',
     '-EncodedCommand',
     encodedPowerShell(script),
   ]

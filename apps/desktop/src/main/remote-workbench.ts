@@ -10,7 +10,7 @@ import {
   SshRemoteHost,
   windowsArgument,
 } from './remote-host.js'
-import { acquireTunnel, lastMeaningfulLine, releaseTunnel } from './remote-tunnel.js'
+import { acquireTunnel, lastMeaningfulLine, releaseTunnel, SSH_TUNNEL } from './remote-tunnel.js'
 import {
   cachedServerArchive,
   chooseTunnelPort,
@@ -18,7 +18,9 @@ import {
   readServerPort,
   redactToken,
   serverArguments,
+  workbenchHostLog,
   workbenchShuttingDown,
+  type WorkbenchHostLog,
   type WorkbenchManifest,
   type WorkbenchRuntime,
 } from './workbench-host.js'
@@ -34,6 +36,7 @@ export interface ProvisionOptions {
   readonly manifest: WorkbenchManifest
   readonly localArchive: (platformKey: string) => Promise<string>
   readonly deadlines: RemoteServerDeadlines
+  readonly log?: WorkbenchHostLog
 }
 
 export const QUOTE_PROBE = "'‘’‚‛"
@@ -52,9 +55,18 @@ const PATCH_COMMIT_JS = [
   "fs.writeFileSync(file, JSON.stringify({ ...product, commit }, null, 2) + '\\n')",
 ].join('\n')
 
+function withoutSshWarnings(text: string): string {
+  return text
+    .split(/\r?\n/)
+    .filter((line) => !line.trim().startsWith('**'))
+    .join('\n')
+    .trim()
+}
+
 function succeeded(result: RemoteResult, step: string): string {
   if (result.exitCode !== 0) {
-    const said = result.stderr.trim() === '' ? result.stdout.trim() : result.stderr.trim()
+    const stderr = withoutSshWarnings(result.stderr)
+    const said = stderr === '' ? withoutSshWarnings(result.stdout) : stderr
     throw new Error(`${step} failed on the remote host: ${said}`)
   }
   return result.stdout
@@ -104,7 +116,7 @@ function installScript(input: {
     'if (-not ((Test-Path -LiteralPath $node) -and (Test-Path -LiteralPath $product))) {',
     "  throw 'The extracted server has no node.exe or product.json'",
     '}',
-    "$patch = Join-Path $partial 'chorus-patch-commit.js'",
+    "$patch = Join-Path $partial 'chorus-patch-commit.cjs'",
     `Set-Content -LiteralPath $patch -Encoding ASCII -Value ${powerShellLiteral(PATCH_COMMIT_JS)}`,
     `& $node $patch $product ${powerShellLiteral(input.commit)}`,
     "if ($LASTEXITCODE -ne 0) { throw 'The server product.json could not be patched' }",
@@ -133,14 +145,21 @@ export async function provisionRemoteServer(options: ProvisionOptions): Promise<
   }
 
   const finalDir = win32.join(base.trim(), `${manifest.server.release}-${key}`)
+  options.log?.info('remote server probed', { platform: key, finalDir })
   const presence = succeeded(
     await host.runPowerShell(presenceScript(finalDir, artifact.sha256), deadlines.command),
     'Checking for the server'
   )
-  if (presence.trim() === 'present') return finalDir
+  if (presence.trim() === 'present') {
+    options.log?.info('remote server already installed', { finalDir })
+    return finalDir
+  }
 
   const remoteArchive = win32.join(base.trim(), artifact.name)
-  await host.upload(await options.localArchive(key), remoteArchive, deadlines.upload)
+  const localArchive = await options.localArchive(key)
+  options.log?.info('remote server uploading', { artifact: artifact.name, bytes: artifact.size })
+  await host.upload(localArchive, remoteArchive, deadlines.upload)
+  options.log?.info('remote server uploaded', { remoteArchive })
   const install = installScript({
     archive: remoteArchive,
     finalDir,
@@ -148,6 +167,7 @@ export async function provisionRemoteServer(options: ProvisionOptions): Promise<
     commit: manifest.client.vscodeCommit,
   })
   succeeded(await host.runPowerShell(install, deadlines.install), 'Installing the server')
+  options.log?.info('remote server installed', { finalDir })
   return finalDir
 }
 
@@ -218,6 +238,7 @@ export interface StartOptions {
   readonly localTokenFile: string
   readonly port: number
   readonly deadlines: StartDeadlines
+  readonly log?: WorkbenchHostLog
 }
 
 export interface StartedServer {
@@ -315,8 +336,13 @@ export async function startRemoteServer(options: StartOptions): Promise<StartedS
   if (running === '' || !Number.isInteger(count)) {
     throw new Error(`The server check on the host was not understood: ${status}`)
   }
+  const tokenMatches = tokenHash === localHash
+  options.log?.info('remote server status', { running: count, tokenMatches, listening })
   if (count > 0) {
-    if (tokenHash === localHash && listening === 'True') return { port, reattached: true }
+    if (tokenMatches && listening === 'True') {
+      options.log?.info('remote server reattached', { port })
+      return { port, reattached: true }
+    }
     throw new Error(
       'A Chorus workbench server is already running on the host with another token or port'
     )
@@ -325,6 +351,7 @@ export async function startRemoteServer(options: StartOptions): Promise<StartedS
   await host.upload(options.localTokenFile, layout.tokenFile, deadlines.upload)
   const register = registerScript(layout, launcherScript(layout, port))
   succeeded(await host.runPowerShell(register, deadlines.command), 'Starting the server')
+  options.log?.info('remote server task started', { task: REMOTE_SERVER_TASK, port })
   const seconds = Math.ceil(deadlines.serverStart / 1000)
   const waitDeadline = deadlines.command + deadlines.serverStart
   const waited = succeeded(
@@ -340,6 +367,7 @@ export async function startRemoteServer(options: StartOptions): Promise<StartedS
   if (bound !== port) {
     throw new Error(`The server on the host bound ${String(bound)}, not ${String(port)}`)
   }
+  options.log?.info('remote server started', { port })
   return { port, reattached: false }
 }
 
@@ -356,6 +384,7 @@ const START_DEADLINES: StartDeadlines = { command: 30_000, upload: 30_000, serve
 
 interface PreparedServer {
   readonly tokenFile: string
+  readonly localPort: number
   readonly commit: string
   readonly quality: string
 }
@@ -367,6 +396,15 @@ function remoteHostDir(host: string): string {
 }
 
 async function prepareRemoteServer(host: string): Promise<PreparedServer> {
+  const log = workbenchHostLog()
+  const hostLog: WorkbenchHostLog = {
+    info: (message, fields) => {
+      log.info(message, { host, ...fields })
+    },
+    warn: (message, fields) => {
+      log.warn(message, { host, ...fields })
+    },
+  }
   const { manifest } = loadWorkbenchManifest()
   const tokenFile = join(remoteHostDir(host), 'connection-token')
   ensureLocalToken(tokenFile)
@@ -377,6 +415,7 @@ async function prepareRemoteServer(host: string): Promise<PreparedServer> {
     manifest,
     localArchive: (key) => cachedServerArchive(key, download),
     deadlines: PROVISION_DEADLINES,
+    log: hostLog,
   })
   await startRemoteServer({
     host: remote,
@@ -384,8 +423,16 @@ async function prepareRemoteServer(host: string): Promise<PreparedServer> {
     localTokenFile: tokenFile,
     port: REMOTE_SERVER_PORT,
     deadlines: START_DEADLINES,
+    log: hostLog,
   })
-  return { tokenFile, commit: manifest.client.vscodeCommit, quality: manifest.client.quality }
+  const localPort = await chooseTunnelPort(join(remoteHostDir(host), 'tunnel-port'))
+  hostLog.info('remote tunnel port chosen', { localPort })
+  return {
+    tokenFile,
+    localPort,
+    commit: manifest.client.vscodeCommit,
+    quality: manifest.client.quality,
+  }
 }
 
 function settlesWithin(promise: Promise<void>, ms: number): Promise<boolean> {
@@ -407,23 +454,41 @@ export async function acquireRemoteWorkbenchRuntime(
   if (workbenchShuttingDown()) {
     throw new Error('Chorus is shutting down; no workbench project can open.')
   }
+  const log = workbenchHostLog()
+  log.info('remote workbench opening', { host, root: holder })
   const inFlight =
     preparing.get(host) ??
     prepareRemoteServer(host).finally(() => {
       preparing.delete(host)
     })
   preparing.set(host, inFlight)
-  const prepared = await inFlight
+  let prepared: PreparedServer
+  try {
+    prepared = await inFlight
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+    log.warn('remote workbench could not be prepared', { host, root: holder, message })
+    throw error
+  }
 
-  const localPort = await chooseTunnelPort(join(remoteHostDir(host), 'tunnel-port'))
-  const tunnel = acquireTunnel({ host, localPort, remotePort: REMOTE_SERVER_PORT }, holder)
+  const { localPort } = prepared
+  const tunnel = acquireTunnel(
+    { host, localPort, remotePort: REMOTE_SERVER_PORT },
+    holder,
+    SSH_TUNNEL,
+    (state, detail) => {
+      log.info('remote tunnel', { host, localPort, state, detail })
+    }
+  )
   if (!(await settlesWithin(tunnel.firstUp, TUNNEL_UP_DEADLINE_MS))) {
     const reason = tunnel.lastFailure === '' ? 'ssh gave no reason' : tunnel.lastFailure
+    log.warn('remote tunnel did not come up', { host, root: holder, localPort, reason })
     await releaseTunnel(host, holder)
     throw new Error(
       `The tunnel to ${host} did not come up within ${String(TUNNEL_UP_DEADLINE_MS / 1000)} s: ${reason}`
     )
   }
+  log.info('remote workbench ready', { host, root: holder, localPort })
   return {
     remoteAuthority: `127.0.0.1:${String(localPort)}`,
     connectionToken: readFileSync(prepared.tokenFile, 'utf8').trim(),

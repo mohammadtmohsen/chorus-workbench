@@ -22,6 +22,8 @@ describe('sshPowerShellArgv', () => {
       'powershell.exe',
       '-NoProfile',
       '-NonInteractive',
+      '-OutputFormat',
+      'Text',
       '-EncodedCommand',
     ])
     expect(argv[argv.length - 1]).toMatch(/^[A-Za-z0-9+/]+=*$/)

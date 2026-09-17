@@ -143,6 +143,10 @@ export function setWorkbenchHostLog(next: WorkbenchHostLog): void {
   log = next
 }
 
+export function workbenchHostLog(): WorkbenchHostLog {
+  return log
+}
+
 function manifestPath(): string {
   return join(app.getAppPath(), 'build', 'workbench-runtime.json')
 }

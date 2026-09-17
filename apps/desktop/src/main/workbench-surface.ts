@@ -1141,7 +1141,7 @@ function destroySurface(viewId: string): void {
    * still showing it would drop a context that is still true.
    */
   if (![...byId.values()].some((other) => other.projectRoot === surface.projectRoot)) {
-    onSurfaceGone?.(surface.projectRoot)
+    onSurfaceGone?.({ host: surface.host, root: surface.projectRoot })
   }
   /*
    * `editorHidden` is **not** pruned here, and that is deliberate: it is keyed by
@@ -1531,7 +1531,7 @@ export function registerWorkbenchHandlers(
     if (surface === undefined) return
     const parsed = WorkbenchContext.safeParse(raw)
     if (!parsed.success) return
-    onContext?.({ projectRoot: surface.projectRoot, context: parsed.data })
+    onContext?.({ host: surface.host, projectRoot: surface.projectRoot, context: parsed.data })
   })
 
   /*
@@ -1591,9 +1591,13 @@ export function registerWorkbenchHandlers(
  * week later is worse than none, so there is no event type for this and there
  * must not be one.
  */
-let onContext:
-  ((report: { readonly projectRoot: string; readonly context: WorkbenchContext }) => void) | null =
-  null
+export interface WorkbenchContextReport {
+  readonly host: string
+  readonly projectRoot: string
+  readonly context: WorkbenchContext
+}
+
+let onContext: ((report: WorkbenchContextReport) => void) | null = null
 
 /**
  * Told when a project's last surface goes, so a held context can be dropped.
@@ -1603,9 +1607,9 @@ let onContext:
  * surface that no longer exists, while the external bridge — which may now be
  * the only editor there is — stays suppressed behind it.
  */
-let onSurfaceGone: ((projectRoot: string) => void) | null = null
+let onSurfaceGone: ((place: WorkbenchPlace) => void) | null = null
 
-export function setWorkbenchSurfaceGoneSink(sink: ((projectRoot: string) => void) | null): void {
+export function setWorkbenchSurfaceGoneSink(sink: ((place: WorkbenchPlace) => void) | null): void {
   onSurfaceGone = sink
 }
 
@@ -1616,8 +1620,7 @@ export function setHandoffExpiredSink(sink: ((projectRoot: string) => void) | nu
 }
 
 export function setWorkbenchContextSink(
-  sink:
-    ((report: { readonly projectRoot: string; readonly context: WorkbenchContext }) => void) | null
+  sink: ((report: WorkbenchContextReport) => void) | null
 ): void {
   onContext = sink
 }
@@ -1723,9 +1726,11 @@ const pendingSnapshots = new Map<string, (result: WorkbenchSnapshotResult) => vo
  * with no file open, which is a real answer and must not be retried elsewhere.
  */
 export async function requestWorkbenchSnapshot(
-  projectRoot: string
+  place: WorkbenchPlace
 ): Promise<WorkbenchSnapshotResult['snapshot'] | undefined> {
-  const surface = [...byId.values()].find((s) => s.projectRoot === projectRoot)
+  const surface = [...byId.values()].find(
+    (s) => s.host === place.host && s.projectRoot === place.root
+  )
   if (surface === undefined || surface.view.webContents.isDestroyed()) return undefined
 
   const requestId = randomUUID()

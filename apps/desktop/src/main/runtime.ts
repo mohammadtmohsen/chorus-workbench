@@ -22,11 +22,13 @@ import {
   requestWorkbenchAskDiff,
   requestWorkbenchEdit,
   requestWorkbenchSnapshot,
+  type WorkbenchPlace,
 } from './workbench-surface.js'
 import {
   AppNoteStore,
   EventStore,
   KeptNoteStore,
+  LOCAL_HOST,
   openSqlite,
   ProjectStore,
   type AppNote,
@@ -4513,6 +4515,10 @@ export class ChorusRuntime {
     return this.require(conversationId).cwd
   }
 
+  editorPlace(conversationId: string): WorkbenchPlace {
+    return this.projects.workbenchTarget(this.require(conversationId).projectId)
+  }
+
   /**
    * The registry as the shell needs it: every project, with how many of its
    * conversations are open.
@@ -4597,8 +4603,8 @@ export class ChorusRuntime {
    * if it does, delivering a stray editor's contents to every conversation is
    * the worst available answer.
    */
-  conversationsForRoot(projectRoot: string): string[] {
-    const project = this.projects.findByRoot(projectRoot)
+  conversationsForPlace(place: WorkbenchPlace): string[] {
+    const project = this.projects.findByPlace(place)
     if (project === null) return []
     return [...this.active.values()]
       .filter((conversation) => conversation.projectId === project.id)
@@ -4992,7 +4998,10 @@ export class ChorusRuntime {
     if (preview === undefined) return decision
 
     try {
-      const snapshot = await requestWorkbenchSnapshot(preview.projectRoot)
+      const snapshot = await requestWorkbenchSnapshot({
+        host: LOCAL_HOST,
+        root: preview.projectRoot,
+      })
       if (snapshot === undefined || snapshot === null) return decision
       const { startLine, endLine, text } = snapshot
       if (startLine === null || endLine === null || text.trim() === '') return decision
