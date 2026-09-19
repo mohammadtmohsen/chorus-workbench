@@ -113,6 +113,7 @@ export const Settings = z
      * existing preference on the machine would silently reset.
      */
     theme: z.enum(['system', 'light', 'dark']).default('system'),
+    completionProvider: z.enum(['auto', 'deepseek', 'codestral']).default('auto'),
   })
   /**
    * Folds the old single model and effort onto **Claude**.
@@ -150,6 +151,8 @@ export const DEFAULT_SETTINGS: Settings = {
   efforts: agentRecord(() => ''),
   // Follow the OS, which is what every version before the setting existed did.
   theme: 'system',
+  // Off: a first launch answers exactly as every launch before this existed.
+  completionProvider: 'auto',
 }
 
 function settingsPath(userDataPath: string): string {

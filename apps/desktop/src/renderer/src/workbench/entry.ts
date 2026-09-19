@@ -6,6 +6,7 @@ import { prepareWorkbench } from './services.js'
 import { reportEditorContext } from './context.js'
 import { serveWorkbenchEdits, serveWorkbenchReveal, serveWorkbenchSnapshot } from './edit.js'
 import { serveAskDiff } from './ask-diff.js'
+import { registerInlineCompletions, startLanguageServiceSampling } from './completion.js'
 import { installGateHandle } from './gate-handle.js'
 import { announceSharedExtensionScope } from './extension-scope.js'
 import { registerWorkbenchWorkers } from './workers.js'
@@ -172,6 +173,10 @@ async function main(): Promise<void> {
     const detail = error instanceof Error ? (error.stack ?? error.message) : String(error)
     logs.error(`Chorus: editor context reporting failed to start — ${detail}`)
   })
+  await registerInlineCompletions(connection.projectRoot).catch((error: unknown) => {
+    const detail = error instanceof Error ? (error.stack ?? error.message) : String(error)
+    logs.error(`Chorus: inline completions failed to register — ${detail}`)
+  })
 
   /*
    * A driver's handle on this editor, and **only** under the gate's own
@@ -191,6 +196,7 @@ async function main(): Promise<void> {
    */
   if (connection.workspaceTrust === 'waived') {
     await installGateHandle(connection.projectRoot)
+    void startLanguageServiceSampling()
   }
 }
 

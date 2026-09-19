@@ -5,6 +5,7 @@ import {
   MAX_EXPLAIN_LANGUAGE,
   normaliseExplainLanguage,
   type AgentProbeResult,
+  type IpcRequest,
   type IpcResponse,
 } from '../../shared/ipc.js'
 import { useDialog } from './useDialog.js'
@@ -307,8 +308,147 @@ function Appearance(): React.JSX.Element {
   )
 }
 
+function CompletionPreference(): React.JSX.Element {
+  const { t } = useTranslation()
+  const [provider, setProvider] = useState<'auto' | 'deepseek' | 'codestral'>('auto')
+
+  useEffect(() => {
+    let live = true
+    window.chorus
+      .readSettings()
+      .then((settings) => {
+        if (live) setProvider(settings.completionProvider)
+      })
+      .catch(() => undefined)
+    return () => {
+      live = false
+    }
+  }, [])
+
+  return (
+    <fieldset className="settings-completion">
+      <legend>{t('settings.completionHeading')}</legend>
+      <label>
+        <span>{t('settings.completionProvider')}</span>
+        <select
+          value={provider}
+          onChange={(e) => {
+            const next = e.target.value as 'auto' | 'deepseek' | 'codestral'
+            setProvider(next)
+            void window.chorus.writeSettings({ completionProvider: next })
+          }}
+        >
+          <option value="auto">{t('settings.completionAuto')}</option>
+          <option value="deepseek">{t('settings.completionDeepseek')}</option>
+          <option value="codestral">{t('settings.completionCodestral')}</option>
+        </select>
+      </label>
+    </fieldset>
+  )
+}
+
 /**
- * DeepSeek's API key.
+ * Which IPC fields and which words each stored key uses.
+ *
+ * The i18n names are written out rather than built from the id with a template
+ * literal. A missing translation is a runtime string the typechecker cannot
+ * see, and a name nothing can grep for is the trap `voice--deepseek` already
+ * set once in this codebase.
+ */
+const SECRETS = {
+  deepseek: {
+    isSet: (settings: IpcResponse<'settings:read'>) => settings.deepseekKeySet,
+    write: (value: string) => window.chorus.writeSettings({ deepseekApiKey: value }),
+    heading: 'settings.deepseekHeading',
+    label: 'settings.deepseekKey',
+    placeholder: 'settings.deepseekPlaceholder',
+    stored: 'settings.deepseekStored',
+    save: 'settings.deepseekSave',
+    clear: 'settings.deepseekClear',
+    note: 'settings.deepseekNote',
+    /* Nothing to install: DeepSeek runs through the `claude` CLI as it is. */
+    install: null,
+    /* No check offered: a DeepSeek key proves itself on the next turn, free. */
+    verify: null,
+  },
+  typesafe: {
+    isSet: (settings: IpcResponse<'settings:read'>) => settings.typesafeKeySet,
+    write: (value: string) => window.chorus.writeSettings({ typesafeApiKey: value }),
+    heading: 'settings.typesafeHeading',
+    label: 'settings.typesafeKey',
+    placeholder: 'settings.typesafePlaceholder',
+    stored: 'settings.typesafeStored',
+    save: 'settings.typesafeSave',
+    clear: 'settings.typesafeClear',
+    note: 'settings.typesafeNote',
+    /*
+     * The key alone does nothing: the agents also need the skill that teaches
+     * them the API. One install reaches `claude` and `deepseek`, which share
+     * `~/.claude` — `claude plugin install` defaults to user scope.
+     */
+    install: {
+      skill: 'typesafe',
+      label: 'settings.typesafeInstall',
+      busy: 'settings.typesafeInstalling',
+      installed: 'settings.typesafeInstalled',
+      unavailable: 'settings.typesafeNoCli',
+      unconfirmed: 'settings.typesafeUnconfirmed',
+      failed: 'settings.typesafeInstallFailed',
+    },
+    /*
+     * TypeSafe documents no free endpoint, so checking a key means spending one
+     * call's worth of tokens. `cost` is shown beside the button rather than in
+     * the outcome, because the point is to be read before the press.
+     */
+    verify: {
+      service: 'typesafe',
+      label: 'settings.typesafeVerify',
+      busy: 'settings.typesafeVerifying',
+      cost: 'settings.typesafeVerifyCost',
+      valid: 'settings.typesafeValid',
+      missing: 'settings.typesafeVerifyMissing',
+      rejected: 'settings.typesafeRejected',
+      malformed: 'settings.typesafeMalformed',
+      /* Not `busy`: that name is taken above by the button's own pending label. */
+      rateLimited: 'settings.typesafeBusy',
+      unreachable: 'settings.typesafeUnreachable',
+    },
+  },
+  completionDeepseek: {
+    isSet: (settings: IpcResponse<'settings:read'>) => settings.completionDeepseekKeySet,
+    write: (value: string) => window.chorus.writeSettings({ completionDeepseekApiKey: value }),
+    heading: 'settings.completionDeepseekHeading',
+    label: 'settings.completionDeepseekKey',
+    placeholder: 'settings.completionDeepseekPlaceholder',
+    stored: 'settings.completionDeepseekStored',
+    save: 'settings.completionDeepseekSave',
+    clear: 'settings.completionDeepseekClear',
+    note: 'settings.completionDeepseekNote',
+    install: null,
+    verify: null,
+  },
+  completionCodestral: {
+    isSet: (settings: IpcResponse<'settings:read'>) => settings.completionCodestralKeySet,
+    write: (value: string) => window.chorus.writeSettings({ completionCodestralApiKey: value }),
+    heading: 'settings.completionCodestralHeading',
+    label: 'settings.completionCodestralKey',
+    placeholder: 'settings.completionCodestralPlaceholder',
+    stored: 'settings.completionCodestralStored',
+    save: 'settings.completionCodestralSave',
+    clear: 'settings.completionCodestralClear',
+    note: 'settings.completionCodestralNote',
+    install: null,
+    verify: null,
+  },
+} as const
+
+/**
+ * A stored API key — DeepSeek's, or TypeSafe's.
+ *
+ * **One component rather than one per credential.** The two differ only in
+ * which IPC field carries the value and which words label it; a second copy
+ * would be a second place to get a credential's handling right, and this one is
+ * deliberately careful about never reading a key back.
  *
  * **Saved on a button rather than on every keystroke, unlike every other field
  * in this sheet.** The others persist as you type because losing a keystroke of
@@ -320,37 +460,45 @@ function Appearance(): React.JSX.Element {
  * answers only whether one is set — see `withSecretState` — so there is nothing
  * here to leak into a screenshot or a transcript.
  */
-function DeepseekKey(): React.JSX.Element {
+function ApiKeyField(props: { secret: keyof typeof SECRETS }): React.JSX.Element {
   const { t } = useTranslation()
+  const secret = SECRETS[props.secret]
+  /* Lifted to a const so the null check narrows inside the button's callback. */
+  const install = secret.install
+  const verify = secret.verify
   const [draft, setDraft] = useState('')
   const [isSet, setIsSet] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [installing, setInstalling] = useState(false)
+  const [outcome, setOutcome] = useState<IpcResponse<'agents:installSkill'> | null>(null)
+  const [checking, setChecking] = useState(false)
+  const [verdict, setVerdict] = useState<IpcResponse<'agents:checkServiceKey'> | null>(null)
 
   useEffect(() => {
     let live = true
     window.chorus
       .readSettings()
       .then((settings) => {
-        if (live) setIsSet(settings.deepseekKeySet)
+        if (live) setIsSet(secret.isSet(settings))
       })
       .catch(() => undefined)
     return () => {
       live = false
     }
-  }, [])
+  }, [secret])
 
   /*
-   * `deepseekKeySet` is read back off the answer rather than assumed from what
-   * was sent. Storing can fail for a reason the renderer cannot see — a profile
-   * with no OS keychain refuses rather than falling back to plaintext — and a
-   * field that says "saved" when nothing was is the failure this avoids.
+   * The set-or-not flag is read back off the answer rather than assumed from
+   * what was sent. Storing can fail for a reason the renderer cannot see — a
+   * profile with no OS keychain refuses rather than falling back to plaintext —
+   * and a field that says "saved" when nothing was is the failure this avoids.
    */
   const store = (value: string): void => {
     setError(null)
-    window.chorus
-      .writeSettings({ deepseekApiKey: value })
+    secret
+      .write(value)
       .then((settings) => {
-        setIsSet(settings.deepseekKeySet)
+        setIsSet(secret.isSet(settings))
         setDraft('')
       })
       .catch((e: unknown) => {
@@ -358,17 +506,58 @@ function DeepseekKey(): React.JSX.Element {
       })
   }
 
+  /*
+   * The result is whatever main observed afterwards, not what the button hoped
+   * for. `installSkill` runs two CLI commands and then reads the plugin list, so
+   * "installed" here means the plugin was seen rather than that a command exited
+   * zero — see `plugins.ts` for why the exit code is the wrong evidence.
+   */
+  const runInstall = (skill: IpcRequest<'agents:installSkill'>['skill']): void => {
+    setOutcome(null)
+    setInstalling(true)
+    window.chorus
+      .installSkill({ skill })
+      .then(setOutcome)
+      .catch((e: unknown) => {
+        setOutcome({ state: 'failed', detail: e instanceof Error ? e.message : String(e) })
+      })
+      .finally(() => {
+        setInstalling(false)
+      })
+  }
+
+  /*
+   * Only ever from this handler. The check is a billed call, so nothing else may
+   * trigger it — not mounting, not saving a key, not reopening the sheet.
+   */
+  const runCheck = (service: IpcRequest<'agents:checkServiceKey'>['service']): void => {
+    setVerdict(null)
+    setChecking(true)
+    window.chorus
+      .checkServiceKey({ service })
+      .then(setVerdict)
+      .catch((e: unknown) => {
+        setVerdict({
+          state: 'unreachable',
+          detail: e instanceof Error ? e.message : String(e),
+        })
+      })
+      .finally(() => {
+        setChecking(false)
+      })
+  }
+
   return (
     <fieldset className="settings-key">
-      <legend>{t('settings.deepseekHeading')}</legend>
+      <legend>{t(secret.heading)}</legend>
       <label>
-        <span>{t('settings.deepseekKey')}</span>
+        <span>{t(secret.label)}</span>
         <input
           type="password"
           value={draft}
           autoComplete="off"
           spellCheck={false}
-          placeholder={isSet ? t('settings.deepseekStored') : t('settings.deepseekPlaceholder')}
+          placeholder={isSet ? t(secret.stored) : t(secret.placeholder)}
           onChange={(e) => {
             setDraft(e.target.value)
           }}
@@ -383,7 +572,7 @@ function DeepseekKey(): React.JSX.Element {
             store(draft.trim())
           }}
         >
-          {t('settings.deepseekSave')}
+          {t(secret.save)}
         </button>
         {isSet && (
           <button
@@ -393,12 +582,64 @@ function DeepseekKey(): React.JSX.Element {
               store('')
             }}
           >
-            {t('settings.deepseekClear')}
+            {t(secret.clear)}
+          </button>
+        )}
+        {install !== null && (
+          <button
+            type="button"
+            className="btn"
+            disabled={installing}
+            onClick={() => {
+              runInstall(install.skill)
+            }}
+          >
+            {t(installing ? install.busy : install.label)}
+          </button>
+        )}
+        {verify !== null && isSet && (
+          <button
+            type="button"
+            className="btn"
+            disabled={checking}
+            onClick={() => {
+              runCheck(verify.service)
+            }}
+          >
+            {t(checking ? verify.busy : verify.label)}
           </button>
         )}
       </div>
+      {verify !== null && isSet && <p className="footnote">{t(verify.cost)}</p>}
+      {/*
+        Gated on `isSet` as well, unlike the install outcome above it. A verdict
+        describes the key that was tested, so removing the key must take it away
+        — otherwise "The key works." stays on screen beside an empty field. The
+        install outcome describes the skill, which outlives the key, and is
+        deliberately not gated the same way.
+      */}
+      {verify !== null && verdict !== null && isSet && (
+        <p className={verdict.state === 'valid' ? 'footnote' : 'settings-key-error'}>
+          {verdict.state === 'valid' && t(verify.valid)}
+          {verdict.state === 'missing' && t(verify.missing)}
+          {verdict.state === 'rejected' && t(verify.rejected)}
+          {verdict.state === 'malformed' && t(verify.malformed)}
+          {verdict.state === 'busy' && t(verify.rateLimited)}
+          {verdict.state === 'unreachable' &&
+            `${t(verify.unreachable)}${verdict.detail === '' ? '' : ` ${verdict.detail}`}`}
+        </p>
+      )}
       {error !== null && <p className="settings-key-error">{error}</p>}
-      <p className="footnote">{t('settings.deepseekNote')}</p>
+      {install !== null && outcome !== null && (
+        <p className={outcome.state === 'installed' ? 'footnote' : 'settings-key-error'}>
+          {outcome.state === 'installed' && t(install.installed)}
+          {outcome.state === 'unavailable' && t(install.unavailable)}
+          {outcome.state === 'unconfirmed' && t(install.unconfirmed)}
+          {outcome.state === 'failed' &&
+            `${t(install.failed)}${outcome.detail === '' ? '' : ` ${outcome.detail}`}`}
+        </p>
+      )}
+      <p className="footnote">{t(secret.note)}</p>
     </fieldset>
   )
 }
@@ -879,7 +1120,11 @@ export function Settings(props: {
           <DefaultModel />
 
           <Appearance />
-          <DeepseekKey />
+          <ApiKeyField secret="deepseek" />
+          <ApiKeyField secret="typesafe" />
+          <CompletionPreference />
+          <ApiKeyField secret="completionDeepseek" />
+          <ApiKeyField secret="completionCodestral" />
           <ExplainLanguage />
 
           <p className="footnote">{t('settings.paneNote')}</p>

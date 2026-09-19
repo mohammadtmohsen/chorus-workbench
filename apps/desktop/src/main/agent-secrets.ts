@@ -4,7 +4,7 @@ import type { AgentId } from '@chorus/shared'
 import { safeStorage } from 'electron'
 
 /**
- * An agent's provider credential, encrypted, and reachable only from main.
+ * A credential an agent needs, encrypted, and reachable only from main.
  *
  * **Deliberately not `workbench-secrets.ts`, and the separation is the whole
  * point of this file.** That store is correct for what it holds and is wired to
@@ -14,10 +14,18 @@ import { safeStorage } from 'electron'
  * handed it in plaintext. So this keeps the same mechanism and none of the
  * reach — a different file, and no channel anywhere names it.
  *
- * **The key is an `AgentId`, not a string.** The workbench store takes a string
+ * **The key is a `SecretId`, not a string.** The workbench store takes a string
  * because a `secretStorageProvider` must; nothing here does, and a closed set
  * means there is no such thing as asking for a key this module did not intend
  * to hold.
+ *
+ * **`SecretId` is deliberately wider than `AgentId`, and deliberately not
+ * `AgentId` itself.** A service an agent calls needs a credential without being
+ * a voice in the cast: `ACTORS` in `@chorus/shared` spreads `AGENT_IDS`, and both
+ * `AgentIdSchema` and `ActorSchema` are `z.enum` over those tuples — so a member
+ * added there becomes a speaker the event log accepts, owing a colour, a label
+ * and a row. The union keeps the closed set this file depends on without paying
+ * for any of that.
  *
  * What a caller may learn from the renderer side is whether a key is *set* —
  * never the value. A renderer that can read it is a renderer that can leak it
@@ -28,8 +36,11 @@ function secretsPath(userData: string): string {
   return join(userData, 'agent-secrets.json')
 }
 
-/** Base64 ciphertext per agent. The agent names are not secret; the values are. */
-type SecretsFile = Partial<Record<AgentId, string>>
+/** An agent, or a service an agent calls and Chorus holds the credential for. */
+export type SecretId = AgentId | 'typesafe' | 'completion-deepseek' | 'completion-codestral'
+
+/** Base64 ciphertext per holder. The names are not secret; the values are. */
+type SecretsFile = Partial<Record<SecretId, string>>
 
 function readAll(userData: string): SecretsFile {
   const path = secretsPath(userData)
@@ -39,7 +50,7 @@ function readAll(userData: string): SecretsFile {
     if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return {}
     const out: SecretsFile = {}
     for (const [key, value] of Object.entries(parsed as Record<string, unknown>)) {
-      if (typeof value === 'string') out[key as AgentId] = value
+      if (typeof value === 'string') out[key as SecretId] = value
     }
     return out
   } catch {
@@ -67,8 +78,8 @@ function write(userData: string, all: SecretsFile): void {
  * Read at spawn rather than cached at startup, which is what lets a key be
  * added, rotated or removed without restarting the app.
  */
-export function readAgentKey(userData: string, agentId: AgentId): string | null {
-  const stored = readAll(userData)[agentId]
+export function readAgentKey(userData: string, id: SecretId): string | null {
+  const stored = readAll(userData)[id]
   if (stored === undefined) return null
   if (!safeStorage.isEncryptionAvailable()) return null
   try {
@@ -84,8 +95,8 @@ export function readAgentKey(userData: string, agentId: AgentId): string | null 
 }
 
 /** Whether a key is present — the only thing a renderer is ever told. */
-export function agentKeyIsSet(userData: string, agentId: AgentId): boolean {
-  return readAgentKey(userData, agentId) !== null
+export function agentKeyIsSet(userData: string, id: SecretId): boolean {
+  return readAgentKey(userData, id) !== null
 }
 
 /**
@@ -95,19 +106,19 @@ export function agentKeyIsSet(userData: string, agentId: AgentId): boolean {
  * told their key was saved will not enter it again, and a plaintext fallback is
  * exactly the trade this file exists to refuse.
  */
-export function writeAgentKey(userData: string, agentId: AgentId, value: string): void {
+export function writeAgentKey(userData: string, id: SecretId, value: string): void {
   if (!safeStorage.isEncryptionAvailable()) {
     throw new Error('No OS keychain is available to encrypt this key')
   }
   const all = readAll(userData)
-  all[agentId] = safeStorage.encryptString(value).toString('base64')
+  all[id] = safeStorage.encryptString(value).toString('base64')
   write(userData, all)
 }
 
-export function clearAgentKey(userData: string, agentId: AgentId): void {
+export function clearAgentKey(userData: string, id: SecretId): void {
   const all = readAll(userData)
-  if (all[agentId] === undefined) return
+  if (all[id] === undefined) return
   // eslint-disable-next-line @typescript-eslint/no-dynamic-delete
-  delete all[agentId]
+  delete all[id]
   write(userData, all)
 }

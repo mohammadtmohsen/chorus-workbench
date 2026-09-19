@@ -31,6 +31,10 @@ import {
   WORKBENCH_REVEAL_RESULT_CHANNEL,
   WorkbenchContext,
   WORKBENCH_CLIPBOARD_READ_CHANNEL,
+  WORKBENCH_COMPLETION_CHANNEL,
+  WORKBENCH_COMPLETION_CANCEL_CHANNEL,
+  WORKBENCH_EDITOR_REPORT_CHANNEL,
+  WORKBENCH_COMPLETION_PROBE_CHANNEL,
   WORKBENCH_BROWSER_EXTENSIONS_CHANGED_CHANNEL,
   WORKBENCH_BROWSER_EXTENSIONS_READ_CHANNEL,
   WORKBENCH_BROWSER_EXTENSIONS_WRITE_CHANNEL,
@@ -55,6 +59,12 @@ import {
   type WorkbenchTarget,
 } from '../shared/workbench-ipc.js'
 import { acquireRemoteWorkbenchRuntime, releaseRemoteWorkbenchRuntime } from './remote-workbench.js'
+import {
+  isCompletionPayload,
+  probeCompletionCache,
+  recordEditorOutcome,
+  requestCompletion,
+} from './completion-client.js'
 import { applyWorkbenchContentSecurityPolicy, lockDownNavigation } from './security.js'
 import {
   acquireWorkbenchRuntime,
@@ -153,6 +163,9 @@ const byId = new Map<string, Surface>()
  * default.
  */
 const byContents = new Map<WebContents, Surface>()
+const completions = new Map<string, AbortController>()
+const cancelledCompletions = new Set<string>()
+const CANCELLED_COMPLETIONS_LIMIT = 512
 /**
  * Every shell whose lifecycle is being watched, with the surfaces it owns.
  *
@@ -1506,6 +1519,70 @@ export function registerWorkbenchHandlers(
   ipcMain.handle(WORKBENCH_CLIPBOARD_READ_CHANNEL, (event) => {
     if (!byContents.has(event.sender)) throw new Error('unknown workbench surface')
     return clipboard.readText()
+  })
+
+  ipcMain.handle(
+    WORKBENCH_COMPLETION_CHANNEL,
+    async (event, requestId: unknown, payload: unknown): Promise<string | null> => {
+      if (!byContents.has(event.sender)) throw new Error('unknown workbench surface')
+      if (typeof requestId !== 'string' || requestId === '')
+        throw new Error('Completion id must be text')
+      if (!isCompletionPayload(payload)) throw new Error('Invalid completion payload')
+
+      if (cancelledCompletions.has(requestId)) {
+        cancelledCompletions.delete(requestId)
+        return null
+      }
+
+      const controller = new AbortController()
+      completions.set(requestId, controller)
+
+      try {
+        if (cancelledCompletions.has(requestId)) {
+          controller.abort()
+          return null
+        }
+        return await requestCompletion(
+          app.getPath('userData'),
+          requestId,
+          payload,
+          controller.signal
+        )
+      } finally {
+        completions.delete(requestId)
+        cancelledCompletions.delete(requestId)
+      }
+    }
+  )
+
+  if (isE2eProfile()) {
+    ipcMain.handle(WORKBENCH_COMPLETION_PROBE_CHANNEL, async (event) => {
+      if (!byContents.has(event.sender)) throw new Error('unknown workbench surface')
+      await probeCompletionCache(app.getPath('userData'))
+    })
+  }
+
+  ipcMain.on(WORKBENCH_EDITOR_REPORT_CHANNEL, (event, raw: unknown) => {
+    if (!byContents.has(event.sender)) return
+    recordEditorOutcome(raw)
+  })
+
+  ipcMain.on(WORKBENCH_COMPLETION_CANCEL_CHANNEL, (event, requestId: unknown) => {
+    if (!byContents.has(event.sender)) return
+    if (typeof requestId !== 'string' || requestId === '') return
+
+    const controller = completions.get(requestId)
+    if (controller !== undefined) {
+      controller.abort()
+      completions.delete(requestId)
+      return
+    }
+
+    if (cancelledCompletions.size >= CANCELLED_COMPLETIONS_LIMIT) {
+      const oldest = cancelledCompletions.values().next().value
+      if (oldest !== undefined) cancelledCompletions.delete(oldest)
+    }
+    cancelledCompletions.add(requestId)
   })
 
   /*

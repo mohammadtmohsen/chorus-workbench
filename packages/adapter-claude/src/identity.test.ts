@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { afterEach, describe, expect, it } from 'vitest'
-import { ClaudeAdapter } from './claude-adapter.js'
+import { anthropicManagedEnv, ClaudeAdapter } from './claude-adapter.js'
 
 /**
  * One class, more than one agent.
@@ -40,7 +40,8 @@ function driveable(
   const adapter = new ClaudeAdapter({
     id,
     now: () => 1_000,
-    ...(env === undefined ? {} : { env: () => env }),
+    /* The DeepSeek pairing: inject the recipe, clear what it must not inherit. */
+    ...(env === undefined ? {} : { env: { inject: () => env, clear: anthropicManagedEnv } }),
     ...(precondition === undefined ? {} : { precondition }),
     ...(models === undefined ? {} : { models }),
     createQuery: (options) => {

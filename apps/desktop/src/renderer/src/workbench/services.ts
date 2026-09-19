@@ -752,13 +752,6 @@ export function prepareWorkbench(connection: WorkbenchConnection): WorkbenchSetu
         'ms-vscode.vscode-js-profile-table': false,
       },
       'extensions.autoCheckUpdates': true,
-      /*
-       * Inline completions are the other entrypoint and are not covered by the
-       * switch above: they are an editor feature rather than a chat view, and
-       * they would be a second model writing into the same buffer an agent is
-       * editing.
-       */
-      'editor.inlineSuggest.enabled': false,
       'window.title': '${rootName}',
       'workbench.colorTheme': 'Default Dark Modern',
       /*

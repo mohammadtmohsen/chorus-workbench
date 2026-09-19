@@ -2,7 +2,7 @@ import { existsSync, renameSync, rmSync } from 'node:fs'
 import { TRANSCRIPT_TYPES } from '../shared/transcript-events.js'
 import { homedir } from 'node:os'
 import { basename, join } from 'node:path'
-import { ClaudeAdapter, type ResolvedExecutable } from '@chorus/adapter-claude'
+import { ClaudeAdapter, anthropicManagedEnv, type ResolvedExecutable } from '@chorus/adapter-claude'
 import { CodexAdapter } from '@chorus/adapter-codex'
 import type {
   AccountSummary,
@@ -5670,8 +5670,8 @@ function defaultAdapters(userDataPath: string): Map<AgentId, AgentAdapter> {
     // The command is resolved lazily, on first use: asking a login shell at
     // module load would delay the window for something not needed until a
     // session starts.
-    ['codex', new CodexAdapter(codexOptions())],
-    ['claude', new ClaudeAdapter(claudeOptions())],
+    ['codex', new CodexAdapter(codexOptions(userDataPath))],
+    ['claude', new ClaudeAdapter(claudeOptions(userDataPath))],
     /*
      * The same class and the same binary, pointed elsewhere.
      *
@@ -5702,7 +5702,7 @@ function defaultAdapters(userDataPath: string): Map<AgentId, AgentAdapter> {
 function deepseekOptions(userDataPath: string): {
   id: AgentId
   resolveExecutable: () => Promise<ResolvedExecutable | null>
-  env: () => Record<string, string> | undefined
+  env: { inject: () => Record<string, string> | undefined; clear: (key: string) => boolean }
   precondition: () => string | null
   models: readonly ModelChoice[]
 } {
@@ -5716,9 +5716,19 @@ function deepseekOptions(userDataPath: string): {
       if (resolved === null) return null
       return { sdkPath: sdkExecutablePath(resolved), launch: spawnSpec(resolved) }
     },
-    env: () => {
-      const token = key()
-      return token === null ? undefined : deepseekEnv(token)
+    /*
+     * `clear` is `anthropicManagedEnv`, which is what the adapter used to apply
+     * to every injection. It is named here because this is the only instance
+     * that needs it: DeepSeek must remove an inherited `ANTHROPIC_API_KEY` it
+     * never sets, since that would take precedence over the saved login and bill
+     * the session to the user's own Claude account.
+     */
+    env: {
+      inject: () => {
+        const token = key()
+        return token === null ? undefined : { ...deepseekEnv(token), ...serviceEnv(userDataPath) }
+      },
+      clear: anthropicManagedEnv,
     },
     precondition: () => (key() === null ? 'DeepSeek needs an API key. Add one in Settings.' : null),
     models: DEEPSEEK_MODELS,
@@ -5806,6 +5816,24 @@ export function deepseekEnv(token: string): Record<string, string> {
  * the SDK's answer reported every npm install as unavailable.
  */
 /**
+ * The credentials of services an agent calls, as opposed to its own provider's.
+ *
+ * TypeSafe is not an agent — it has no entry in `AGENT_IDS` and no voice — so
+ * this is not a provider configuration like `deepseekEnv`. It is a key put where
+ * whatever the agent reaches for can find it: the TypeSafe Python SDK reads
+ * `TYPESAFE_API_KEY` from the environment and every client in its docs is
+ * constructed with no arguments.
+ *
+ * **Omitted rather than emptied when there is no key.** An empty string is a
+ * *present* variable, and a caller reading one would send an empty bearer token
+ * and get a 401 instead of recognising that nothing is configured.
+ */
+function serviceEnv(userDataPath: string): Record<string, string> | undefined {
+  const typesafe = readAgentKey(userDataPath, 'typesafe')
+  return typesafe === null ? undefined : { TYPESAFE_API_KEY: typesafe }
+}
+
+/**
  * Codex's lazy command lookup, lifted out of `defaultAdapters` so it can be
  * exercised rather than re-described.
  *
@@ -5813,8 +5841,9 @@ export function deepseekEnv(token: string): Record<string, string> {
  * reach it by copying its body — which asserts a duplicate and passes even if
  * the real one loses its guard. Naming it is what makes the test real.
  */
-function codexOptions(): {
+function codexOptions(userDataPath: string): {
   resolveCommand: () => Promise<{ readonly file: string; readonly args: string[] } | null>
+  env: () => Record<string, string> | undefined
 } {
   return {
     resolveCommand: async () => {
@@ -5822,14 +5851,26 @@ function codexOptions(): {
       const resolved = await resolveCommand('codex')
       return resolved === null ? null : spawnSpec(resolved)
     },
+    env: () => serviceEnv(userDataPath),
   }
 }
 
-function claudeOptions(): {
+function claudeOptions(userDataPath: string): {
   resolveExecutable: () => Promise<ResolvedExecutable | null>
+  env: { inject: () => Record<string, string> | undefined; clear: (key: string) => boolean }
   editorEdit: EditorEditCapability
 } {
   return {
+    /*
+     * Adds a service credential and clears nothing.
+     *
+     * `clear: () => false` is the whole point of the option being a pair. This
+     * is the user's own Claude agent: clearing `anthropicManagedEnv` here would
+     * strip their `ANTHROPIC_API_KEY`, `ANTHROPIC_BASE_URL` and `CLAUDE_CODE_*`
+     * out of the agent they use most, which is what the old unconditional scrub
+     * would have done the moment this instance was given any environment at all.
+     */
+    env: { inject: () => serviceEnv(userDataPath), clear: () => false },
     resolveExecutable: async () => {
       if (readOnlyProfiling()) return null
       const resolved = await resolveCommand('claude')

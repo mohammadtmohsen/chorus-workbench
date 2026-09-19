@@ -123,6 +123,8 @@ const api: ChorusApi = {
   mcpServers: () => invoke('agents:mcp')({}),
   accounts: () => invoke('agents:account')({}),
   plugins: () => invoke('agents:plugins')({}),
+  installSkill: invoke('agents:installSkill'),
+  checkServiceKey: invoke('agents:checkServiceKey'),
   stopTask: invoke('tasks:stop'),
   reopenConversation: invoke('conversation:reopen'),
   previewFile: invoke('files:preview'),

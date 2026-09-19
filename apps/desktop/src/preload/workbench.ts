@@ -1,5 +1,10 @@
 import { contextBridge, ipcRenderer } from 'electron'
-import type { ChorusWorkbenchApi, WorkbenchConnection } from '../shared/workbench-ipc.js'
+import type {
+  ChorusWorkbenchApi,
+  EditorReport,
+  CompletionPayload,
+  WorkbenchConnection,
+} from '../shared/workbench-ipc.js'
 
 /**
  * The workbench surface's own preload, and the reason it exists is what it is
@@ -80,6 +85,11 @@ export const ASK_DIFF_RESULT_CHANNEL = 'workbench:askDiff:result'
 /* Opening a file a transcript row named, in this project's editor. */
 export const REVEAL_CHANNEL = 'workbench:reveal'
 export const REVEAL_RESULT_CHANNEL = 'workbench:reveal:result'
+/* The completion request and its cancel. Spelled out here for the same reason. */
+export const COMPLETION_CHANNEL = 'workbench:completion'
+export const COMPLETION_CANCEL_CHANNEL = 'workbench:completion:cancel'
+export const EDITOR_REPORT_CHANNEL = 'workbench:editor:report'
+export const COMPLETION_PROBE_CHANNEL = 'workbench:completion:probe'
 
 /**
  * A hand-written check instead of a schema, for the reason above — and it is now
@@ -304,6 +314,23 @@ const api: ChorusWorkbenchApi = {
   readClipboard: async () => {
     const raw: unknown = await ipcRenderer.invoke(CLIPBOARD_READ_CHANNEL)
     return typeof raw === 'string' ? raw : ''
+  },
+
+  requestCompletion: async (requestId: string, payload: CompletionPayload) => {
+    const raw: unknown = await ipcRenderer.invoke(COMPLETION_CHANNEL, requestId, payload)
+    return typeof raw === 'string' ? raw : null
+  },
+
+  cancelCompletion: (requestId: string) => {
+    ipcRenderer.send(COMPLETION_CANCEL_CHANNEL, requestId)
+  },
+
+  reportEditorOutcome: (report: EditorReport) => {
+    ipcRenderer.send(EDITOR_REPORT_CHANNEL, report)
+  },
+
+  probeCompletionCache: async () => {
+    await ipcRenderer.invoke(COMPLETION_PROBE_CHANNEL)
   },
 
   onUrl: (handler: (url: string) => void) => {

@@ -150,6 +150,7 @@ export const SettingsShape = z.object({
    * before this shipped.
    */
   theme: z.enum(['system', 'light', 'dark']).default('system'),
+  completionProvider: z.enum(['auto', 'deepseek', 'codestral']).default('auto'),
 })
 
 /**
@@ -162,6 +163,14 @@ export const SettingsShape = z.object({
  */
 export const SettingsWithSecrets = SettingsShape.extend({
   deepseekKeySet: z.boolean().default(false),
+  /*
+   * TypeSafe is not an agent and has no entry in `AGENT_IDS` — it is a service
+   * the agents call, and Chorus holds its credential so they can. The boolean
+   * is the same shape as DeepSeek's for the same reason: whether, never which.
+   */
+  typesafeKeySet: z.boolean().default(false),
+  completionDeepseekKeySet: z.boolean().default(false),
+  completionCodestralKeySet: z.boolean().default(false),
 })
 export type SettingsWithSecrets = z.infer<typeof SettingsWithSecrets>
 
@@ -776,6 +785,42 @@ export const IPC_CONTRACT = {
           version: z.string().optional(),
         })
       ),
+    }),
+  },
+
+  /**
+   * Installs one of the skills Chorus offers, through the user's own `claude`.
+   *
+   * **`skill` is an enum rather than a marketplace and a plugin name**, so a
+   * renderer cannot ask for arbitrary code from an arbitrary repository — the
+   * closed set lives in `plugins.ts` and this is its boundary.
+   *
+   * The answer is what was observed afterwards, not what the command exited
+   * with. `detail` carries the CLI's own words on failure and is deliberately
+   * not a translation key: it is another program's message, like the error an
+   * API-key save shows.
+   */
+  'agents:installSkill': {
+    request: z.object({ skill: z.enum(['typesafe']) }),
+    response: z.object({
+      state: z.enum(['installed', 'unavailable', 'unconfirmed', 'failed']),
+      detail: z.string().default(''),
+    }),
+  },
+
+  /**
+   * Whether a stored service credential works, answered by using it once.
+   *
+   * **This call is billed**, because TypeSafe documents no free endpoint — see
+   * `typesafe.ts`. So it is wired to a button and to nothing else: no launch
+   * check, no poll, no revalidation when the sheet opens. A channel that looks
+   * cheap and is not is the reason this comment exists.
+   */
+  'agents:checkServiceKey': {
+    request: z.object({ service: z.enum(['typesafe']) }),
+    response: z.object({
+      state: z.enum(['valid', 'missing', 'rejected', 'malformed', 'busy', 'unreachable']),
+      detail: z.string().default(''),
     }),
   },
 
@@ -1736,6 +1781,10 @@ export const IPC_CONTRACT = {
        * one in a transcript.
        */
       deepseekApiKey: z.string().optional(),
+      /** Same contract as `deepseekApiKey`: empty clears, absent leaves alone. */
+      typesafeApiKey: z.string().optional(),
+      completionDeepseekApiKey: z.string().optional(),
+      completionCodestralApiKey: z.string().optional(),
     }),
     response: SettingsWithSecrets,
   },
@@ -2388,6 +2437,12 @@ export interface ChorusApi extends WorkbenchShellApi, DetachedWindowApi {
   readonly mcpServers: () => Promise<IpcResponse<'agents:mcp'>>
   readonly accounts: () => Promise<IpcResponse<'agents:account'>>
   readonly plugins: () => Promise<IpcResponse<'agents:plugins'>>
+  readonly installSkill: (
+    request: IpcRequest<'agents:installSkill'>
+  ) => Promise<IpcResponse<'agents:installSkill'>>
+  readonly checkServiceKey: (
+    request: IpcRequest<'agents:checkServiceKey'>
+  ) => Promise<IpcResponse<'agents:checkServiceKey'>>
   readonly stopTask: (request: IpcRequest<'tasks:stop'>) => Promise<IpcResponse<'tasks:stop'>>
   readonly readSettings: () => Promise<IpcResponse<'settings:read'>>
   readonly writeSettings: (

@@ -38,6 +38,7 @@ import { isReparentMode, runReparentCheck } from './reparent-check.js'
 import { ChorusRuntime } from './runtime.js'
 import { applyContentSecurityPolicy, lockDownNavigation } from './security.js'
 import { reapedOrphanedServers, setWorkbenchHostLog, stopWorkbenchHost } from './workbench-host.js'
+import { setCompletionLog } from './completion-client.js'
 import {
   closeAllSurfaces,
   deliverUrl,
@@ -190,6 +191,7 @@ void app.whenReady().then(async () => {
    * was invisible in the file people are told to read.
    */
   setWorkbenchHostLog(log)
+  setCompletionLog(log)
   log.info('starting', { version: app.getVersion(), electron: process.versions.electron })
 
   /*

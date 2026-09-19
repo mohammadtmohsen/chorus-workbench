@@ -76,7 +76,7 @@ import type { WorkbenchContext } from '../../../shared/workbench-ipc.js'
  * treated it as POSIX. `relativeInside` returns the platform's own separator,
  * which is `\` on Windows.
  */
-function relativeTo(root: string, filePath: string, platform: Platform): string | null {
+export function relativeTo(root: string, filePath: string, platform: Platform): string | null {
   const relative = relativeInside(root, filePath, platform)
   /*
    * An empty string means the path *is* the root — a directory, not a file.

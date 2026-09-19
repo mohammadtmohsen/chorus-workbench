@@ -328,6 +328,41 @@ export interface WorkbenchSnapshotResult {
  * the file the person is being shown a diff of, going to the surface that is
  * about to show it.
  */
+export const WORKBENCH_COMPLETION_CHANNEL = 'workbench:completion'
+export const WORKBENCH_COMPLETION_CANCEL_CHANNEL = 'workbench:completion:cancel'
+export const WORKBENCH_EDITOR_REPORT_CHANNEL = 'workbench:editor:report'
+export const WORKBENCH_COMPLETION_PROBE_CHANNEL = 'workbench:completion:probe'
+
+export type EditorReportKind =
+  | 'snoozed'
+  | 'cancelled'
+  | 'no-suggestion'
+  | 'returned'
+  | 'shown'
+  | 'returned-not-shown'
+  | 'language-service'
+
+export interface EditorReport {
+  readonly requestId: string
+  readonly outcome: EditorReportKind
+  readonly providerReturnedMs?: number
+  readonly itemShownAfterReturnMs?: number
+  readonly languageServiceQuery?: 'definitions' | 'typeDefinitions'
+  readonly queryMs?: number
+  readonly providerMissing?: boolean
+  readonly queryTimedOut?: boolean
+}
+
+export const COMPLETION_TOKENS_PER_SIDE = 600
+export const COMPLETION_CHARACTERS_PER_SIDE = COMPLETION_TOKENS_PER_SIDE * 4
+
+export interface CompletionPayload {
+  readonly prefix: string
+  readonly suffix: string
+  readonly languageId: string
+  readonly path: string | null
+}
+
 export const WORKBENCH_ASK_DIFF_CHANNEL = 'workbench:askDiff'
 export const WORKBENCH_ASK_DIFF_RESULT_CHANNEL = 'workbench:askDiff:result'
 
@@ -840,4 +875,11 @@ export interface ChorusWorkbenchApi {
    * implementation returns and what the terminal's paste already handles.
    */
   readonly readClipboard: () => Promise<string>
+  readonly requestCompletion: (
+    requestId: string,
+    payload: CompletionPayload
+  ) => Promise<string | null>
+  readonly cancelCompletion: (requestId: string) => void
+  readonly reportEditorOutcome: (report: EditorReport) => void
+  readonly probeCompletionCache: () => Promise<void>
 }

@@ -59,6 +59,93 @@ export async function listPlugins(): Promise<PluginInfo[]> {
 }
 
 /**
+ * The skills Chorus can install, and what the CLI calls each one.
+ *
+ * **A closed set, for the same reason `SecretId` is one.** This is reachable
+ * from a renderer, and a channel that took a marketplace source and a plugin
+ * name would let anything that can talk to it install arbitrary code from
+ * arbitrary GitHub repositories into the user's `~/.claude`. Naming the one
+ * skill Chorus offers means there is no such thing as asking for another.
+ */
+const INSTALLABLE = {
+  typesafe: { marketplace: 'typesafe-ai/skills', plugin: 'typesafe@typesafe-ai' },
+} as const
+
+export type InstallableSkill = keyof typeof INSTALLABLE
+
+/**
+ * `detail` is the CLI's own words, which is why it is not a translation key.
+ *
+ * **`unconfirmed` is a separate state from `failed` because the evidence is
+ * different.** `listPlugins` answers `[]` on a timeout as readily as on an empty
+ * machine, so "the plugin is not in the list" is not the same claim as "the
+ * install failed" — and asserting the second when nothing was observed is the
+ * confident-and-wrong shape this file exists to avoid.
+ */
+export type InstallOutcome =
+  | { readonly state: 'installed' }
+  | { readonly state: 'unavailable' }
+  | { readonly state: 'unconfirmed' }
+  | { readonly state: 'failed'; readonly detail: string }
+
+/** Long enough for a marketplace fetch and an install, both over the network. */
+const INSTALL_TIMEOUT_MS = 60_000
+
+/**
+ * Installs a skill through the user's own `claude`, and then goes and looks.
+ *
+ * **Two commands, because the marketplace has to be added before the plugin
+ * resolves.** Both are safe to run twice: re-adding a marketplace and
+ * re-installing a plugin are how the CLI is asked to update them.
+ *
+ * **The answer is observed rather than inferred from an exit code.** A non-zero
+ * exit can mean "already added", and a zero exit is not evidence the plugin is
+ * there — so whichever way the commands go, the result is whether the plugin is
+ * in `claude plugin list` afterwards. An exit code is the proxy; the list is the
+ * thing.
+ *
+ * **Only the `claude` route.** `claude plugin install` defaults to user scope,
+ * and DeepSeek shares `~/.claude`, so this covers two of the three agents. Codex
+ * would need `npx skills add`, which installs through a package runner Chorus
+ * does not control and — more to the point — has no list command, so its result
+ * could only be inferred from an exit code. That is the thing this function
+ * refuses to do.
+ */
+export async function installSkill(skill: InstallableSkill): Promise<InstallOutcome> {
+  const target = INSTALLABLE[skill]
+  const claude = await resolveCommand('claude')
+  if (claude === null) return { state: 'unavailable' }
+
+  let trouble = ''
+  for (const args of [
+    ['plugin', 'marketplace', 'add', target.marketplace],
+    ['plugin', 'install', target.plugin],
+  ]) {
+    try {
+      const { file, args: argv } = spawnSpec(claude, args)
+      await run(file, argv, { timeout: INSTALL_TIMEOUT_MS, maxBuffer: 4 * 1024 * 1024 })
+    } catch (error) {
+      /*
+       * Caught per command rather than around the pair, because `execFile`
+       * rejects on a non-zero exit and adding a marketplace that is already
+       * there exits non-zero. Wrapping both in one `try` meant the second press
+       * of the button skipped the install it was pressed for — the abort
+       * happening in exactly the case the rest of this comment calls benign.
+       *
+       * The last message wins, not the first: the only path that shows this text
+       * is one where the plugin is absent afterwards, and there it is the
+       * install step rather than the marketplace step that explains why.
+       */
+      trouble = error instanceof Error ? error.message : String(error)
+    }
+  }
+
+  const present = (await listPlugins()).some((plugin) => plugin.id === target.plugin)
+  if (present) return { state: 'installed' }
+  return trouble === '' ? { state: 'unconfirmed' } : { state: 'failed', detail: trouble }
+}
+
+/**
  * Exported for tests, because this is the half that can be wrong.
  *
  * Every field is checked rather than trusted. The command is another program's

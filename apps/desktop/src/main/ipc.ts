@@ -61,11 +61,13 @@ import { canonicalPath } from './real-path.js'
 import { copyNoteImageTo, fetchNoteImage, pickNoteImage, saveNoteImage } from './note-images.js'
 import { probeAgents } from './agent-probe.js'
 import { completeFiles } from './files.js'
-import { listPlugins } from './plugins.js'
+import { installSkill, listPlugins } from './plugins.js'
+import { checkTypesafeKey } from './typesafe.js'
 import type { ChorusRuntime } from './runtime.js'
 import type { WorkspaceSnapshot } from '../shared/workspace-layout.js'
 import { readSettings, writeSettings, type Settings } from './settings.js'
 import { agentKeyIsSet, clearAgentKey, writeAgentKey } from './agent-secrets.js'
+import { invalidateCompletionCredential } from './completion-client.js'
 import { applyTheme } from './theme.js'
 import { previewFile, stashFile } from './stash.js'
 import {
@@ -197,7 +199,14 @@ export function splitFileLocation(raw: string): {
  * single place to change if another agent ever needs one.
  */
 function withSecretState(settings: Settings): SettingsWithSecrets {
-  return { ...settings, deepseekKeySet: agentKeyIsSet(app.getPath('userData'), 'deepseek') }
+  const path = app.getPath('userData')
+  return {
+    ...settings,
+    deepseekKeySet: agentKeyIsSet(path, 'deepseek'),
+    typesafeKeySet: agentKeyIsSet(path, 'typesafe'),
+    completionDeepseekKeySet: agentKeyIsSet(path, 'completion-deepseek'),
+    completionCodestralKeySet: agentKeyIsSet(path, 'completion-codestral'),
+  }
 }
 
 export function buildHandlers(runtime: ChorusRuntime): Handlers {
@@ -381,6 +390,22 @@ export function buildHandlers(runtime: ChorusRuntime): Handlers {
     },
 
     'agents:plugins': async () => ({ plugins: await listPlugins() }),
+
+    'agents:installSkill': async ({ skill }) => {
+      const outcome = await installSkill(skill)
+      return outcome.state === 'failed' ? outcome : { ...outcome, detail: '' }
+    },
+
+    /*
+     * The request's `service` is an enum of one and is not read yet. It is an
+     * enum rather than an empty object so that a second service arrives as a
+     * member here rather than as a second channel — at which point this becomes
+     * a lookup and the linter's exhaustiveness check starts earning its keep.
+     */
+    'agents:checkServiceKey': async () => {
+      const check = await checkTypesafeKey(app.getPath('userData'))
+      return check.state === 'unreachable' ? check : { ...check, detail: '' }
+    },
 
     'agents:account': async () => ({
       accounts: (await runtime.accounts()).map(({ agentId, account }) => ({
@@ -682,7 +707,14 @@ export function buildHandlers(runtime: ChorusRuntime): Handlers {
 
     'settings:read': () => Promise.resolve(withSecretState(readSettings(app.getPath('userData')))),
 
-    'settings:write': (request: Partial<Settings> & { deepseekApiKey?: string }) => {
+    'settings:write': (
+      request: Partial<Settings> & {
+        deepseekApiKey?: string
+        typesafeApiKey?: string
+        completionDeepseekApiKey?: string
+        completionCodestralApiKey?: string
+      }
+    ) => {
       const path = app.getPath('userData')
       const current = readSettings(path)
       /*
@@ -691,11 +723,34 @@ export function buildHandlers(runtime: ChorusRuntime): Handlers {
        * string is a real instruction rather than a missing value: it is how the
        * field clears a key that is already there.
        */
-      const { deepseekApiKey, ...preferences } = request
+      const {
+        deepseekApiKey,
+        typesafeApiKey,
+        completionDeepseekApiKey,
+        completionCodestralApiKey,
+        ...preferences
+      } = request
       if (deepseekApiKey !== undefined) {
         if (deepseekApiKey === '') clearAgentKey(path, 'deepseek')
         else writeAgentKey(path, 'deepseek', deepseekApiKey)
       }
+      if (typesafeApiKey !== undefined) {
+        if (typesafeApiKey === '') clearAgentKey(path, 'typesafe')
+        else writeAgentKey(path, 'typesafe', typesafeApiKey)
+      }
+      const completionTouched =
+        preferences.completionProvider !== undefined ||
+        completionDeepseekApiKey !== undefined ||
+        completionCodestralApiKey !== undefined
+      if (completionDeepseekApiKey !== undefined) {
+        if (completionDeepseekApiKey === '') clearAgentKey(path, 'completion-deepseek')
+        else writeAgentKey(path, 'completion-deepseek', completionDeepseekApiKey)
+      }
+      if (completionCodestralApiKey !== undefined) {
+        if (completionCodestralApiKey === '') clearAgentKey(path, 'completion-codestral')
+        else writeAgentKey(path, 'completion-codestral', completionCodestralApiKey)
+      }
+      if (completionTouched) invalidateCompletionCredential()
       /*
        * Merged over what is on disk, so a field the renderer did not send keeps
        * whatever the menu or a previous session left there. Zod drops absent

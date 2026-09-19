@@ -17,6 +17,10 @@ import {
   WORKBENCH_EDIT_CHANNEL,
   WORKBENCH_SNAPSHOT_CHANNEL,
   WORKBENCH_EDIT_RESULT_CHANNEL,
+  WORKBENCH_COMPLETION_CHANNEL,
+  WORKBENCH_COMPLETION_CANCEL_CHANNEL,
+  WORKBENCH_EDITOR_REPORT_CHANNEL,
+  WORKBENCH_COMPLETION_PROBE_CHANNEL,
 } from '../shared/workbench-ipc.js'
 
 /**
@@ -81,6 +85,10 @@ const {
   EDIT_CHANNEL,
   EDIT_RESULT_CHANNEL,
   CLIPBOARD_READ_CHANNEL,
+  COMPLETION_CHANNEL,
+  COMPLETION_CANCEL_CHANNEL,
+  EDITOR_REPORT_CHANNEL,
+  COMPLETION_PROBE_CHANNEL,
   asConnection,
 } = await import('./workbench.js')
 
@@ -103,9 +111,13 @@ describe('the workbench preload', () => {
     expect(EDIT_CHANNEL).toBe(WORKBENCH_EDIT_CHANNEL)
     expect(EDIT_RESULT_CHANNEL).toBe(WORKBENCH_EDIT_RESULT_CHANNEL)
     expect(CLIPBOARD_READ_CHANNEL).toBe(WORKBENCH_CLIPBOARD_READ_CHANNEL)
+    expect(COMPLETION_CHANNEL).toBe(WORKBENCH_COMPLETION_CHANNEL)
+    expect(COMPLETION_CANCEL_CHANNEL).toBe(WORKBENCH_COMPLETION_CANCEL_CHANNEL)
+    expect(EDITOR_REPORT_CHANNEL).toBe(WORKBENCH_EDITOR_REPORT_CHANNEL)
+    expect(COMPLETION_PROBE_CHANNEL).toBe(WORKBENCH_COMPLETION_PROBE_CHANNEL)
   })
 
-  it('exposes exactly twenty-one methods, and no twenty-second', () => {
+  it('exposes exactly twenty-five methods, and no twenty-sixth', () => {
     // The list, not the count: a method named here is a capability a document
     // running extension code is handed, so which ones they are is the assertion.
     expect(Object.keys(exposed ?? {})).toEqual([
@@ -166,6 +178,10 @@ describe('the workbench preload', () => {
        * position here is the position in the preload.
        */
       'readClipboard',
+      'requestCompletion',
+      'cancelCompletion',
+      'reportEditorOutcome',
+      'probeCompletionCache',
       /*
        * An OAuth callback, pushed in by main. It cannot be asked for and cannot
        * be enumerated: a surface is told about exactly one URL, exactly once, and

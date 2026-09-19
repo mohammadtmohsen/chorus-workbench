@@ -100,14 +100,25 @@ export const CLAUDE_CAPABILITIES: AgentCapabilities = {
 }
 
 /**
- * Environment this adapter owns, and therefore clears before setting its own.
+ * The environment a gateway recipe owns, and therefore clears before setting.
  *
  * Both halves matter. The exact names are the provider pointers and credentials;
  * the two prefixes cover the model pins and context-window settings a gateway
  * recipe sets, which would otherwise survive from the user's shell and silently
  * contradict the ones being injected.
+ *
+ * **Exported because applying it is the caller's decision, not this file's.**
+ * `childEnv` used to apply it to every injection, which conflated two questions:
+ * what an adapter *sets*, and what it must *clear*. They coincide for most of
+ * this list and pointedly do not for `ANTHROPIC_API_KEY`, which DeepSeek never
+ * sets and must always remove — an inherited one takes precedence over a saved
+ * login, so the session would authenticate and bill as the user's own account.
+ *
+ * An injection that only *adds* something unrelated — a credential for a service
+ * the agent calls — must clear nothing, or it would strip the user's own Claude
+ * configuration out of the plain `claude` agent.
  */
-function ownedEnv(key: string): boolean {
+export function anthropicManagedEnv(key: string): boolean {
   return (
     key === 'ANTHROPIC_API_KEY' ||
     key === 'ANTHROPIC_AUTH_TOKEN' ||
@@ -150,8 +161,18 @@ export interface ClaudeAdapterOptions {
    * Absent means "inherit ours exactly", which is what Claude wants and what
    * every caller did before this existed. See `childEnv` for why a partial
    * value here would be a bug rather than a convenience.
+   *
+   * **`inject` and `clear` are one object because they must be answered
+   * together.** A caller that injects without saying what to clear is the
+   * billing bug in `anthropicManagedEnv` waiting to happen, and a default could
+   * not have prevented it: the key that causes it is one DeepSeek never sets, so
+   * no rule derived from the injected values can reach it. `clear` may be
+   * `() => false`, and that is a decision written down rather than an omission.
    */
-  readonly env?: () => Readonly<Record<string, string | undefined>> | undefined
+  readonly env?: {
+    readonly inject: () => Readonly<Record<string, string | undefined>> | undefined
+    readonly clear: (key: string) => boolean
+  }
   /**
    * Why this adapter cannot run right now, or null when it can.
    *
@@ -1084,7 +1105,7 @@ export class ClaudeAdapter implements AgentAdapter {
   /** Undefined when the host has no editor to offer; see `editorMcpServer`. */
   private readonly editorEdit: EditorEditCapability | undefined
   private readonly sessions: ClaudeSession[] = []
-  private readonly env: (() => Readonly<Record<string, string | undefined>> | undefined) | undefined
+  private readonly env: ClaudeAdapterOptions['env']
   private readonly precondition: (() => string | null) | undefined
   private readonly models: readonly ModelChoice[] | undefined
 
@@ -1109,17 +1130,21 @@ export class ClaudeAdapter implements AgentAdapter {
    * so — so `process.env` is spread here, or the CLI is handed a process with no
    * `PATH` and the failure blames the binary instead of the caller.
    *
-   * The scrub is the other half and is not optional. This process may already
-   * carry an `ANTHROPIC_API_KEY` or an `ANTHROPIC_BASE_URL` from the user's own
-   * shell, and an inherited credential takes precedence over a saved login — so
-   * a DeepSeek session would quietly authenticate, and bill, as their Claude
-   * account. Everything this adapter means to control is removed first and then
-   * set, rather than layered over whatever happened to be there.
+   * The scrub is the other half, and it is the caller's to name — see `clear` on
+   * the `env` option, and `anthropicManagedEnv` for the list DeepSeek passes.
+   * This process may already carry an `ANTHROPIC_API_KEY` or an
+   * `ANTHROPIC_BASE_URL` from the user's own shell, and an inherited credential
+   * takes precedence over a saved login, so a DeepSeek session would quietly
+   * authenticate, and bill, as their Claude account. Whatever `clear` names is
+   * removed first and the injection goes on top, rather than being layered over
+   * whatever happened to be there.
    */
   private childEnv(): Record<string, string | undefined> | undefined {
-    const injected = this.env?.()
+    const env = this.env
+    if (env === undefined) return undefined
+    const injected = env.inject()
     if (injected === undefined) return undefined
-    const inherited = Object.entries(process.env).filter(([key]) => !ownedEnv(key))
+    const inherited = Object.entries(process.env).filter(([key]) => !env.clear(key))
     return { ...Object.fromEntries(inherited), ...injected }
   }
 
