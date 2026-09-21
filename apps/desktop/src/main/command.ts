@@ -337,6 +337,61 @@ export function parseShimTarget(
 }
 
 /**
+ * The native executables a shim names, in the order it names them.
+ *
+ * **Read off a real machine, which is what `parseShimTarget` above never was.**
+ * Claude Code 2.1.278 installed with `npm -g` writes a `claude.cmd` whose last
+ * line is `"%dp0%\node_modules\@anthropic-ai\claude-code\bin\claude.exe" %*` —
+ * no script anywhere in it, because the CLI is now a native binary rather than
+ * the `cli.js` the shim used to run. `parseShimTarget` requires a `.js` and so
+ * answers null, the command degrades to `cmd-shim`, and `sdkExecutablePath`
+ * then hands the SDK nothing. The SDK falls back to its own bundled binary,
+ * which `pnpm-workspace.yaml` excludes on purpose, and the session dies at its
+ * first turn having reported itself healthy — `health()` probes through
+ * `cmd.exe`, where the shim works fine.
+ *
+ * **A list rather than one answer, because the first match is often wrong.**
+ * npm's node shims open with `IF EXIST "%dp0%\node.exe"`, a quoted `.exe` that
+ * comes before anything real and names a portable runtime almost no install
+ * has. The caller keeps the first one that exists on disk, which is the only
+ * test that separates the two.
+ */
+export function parseShimExecutables(
+  contents: string,
+  shimPath: string,
+  platform: NodeJS.Platform
+): string[] {
+  const p = ops(platform)
+  const directory = p.dirname(shimPath)
+  const pattern = /["']\s*(?:%dp0%|\$basedir)[\\/]?([^"']+?\.exe)\s*["']/gi
+  const found: string[] = []
+  for (const match of contents.matchAll(pattern)) {
+    const target = match[1]
+    if (target === undefined) continue
+    const resolved = p.resolve(directory, target.replace(/\\/g, p.sep).replace(/\//g, p.sep))
+    if (!found.includes(resolved)) found.push(resolved)
+  }
+  return found
+}
+
+/**
+ * Attach the native executable a shim was found to point at.
+ *
+ * The `.exe` sibling of `withScriptPath`, and it takes `cmd.exe` out of the
+ * launch for the same reason: argv then goes to CreateProcess under the C
+ * runtime's rules, which have no metacharacters for agent-supplied text to
+ * reach.
+ *
+ * Built fresh rather than spread over the shim it replaces. A `cmd-shim` never
+ * carries a `scriptPath`, but if one ever arrived here it would survive into a
+ * `native` command and `sdkExecutablePath` would prefer it over the executable
+ * — handing the SDK a path to something that is no longer what runs.
+ */
+export function withExecutablePath(executablePath: string): ResolvedCommand {
+  return { file: executablePath, argsPrefix: [], kind: 'native' }
+}
+
+/**
  * What to hand `spawn`/`execFile`: the file, and the prefix ahead of the args.
  *
  * The one place a `ResolvedCommand` becomes a real launch, so the prefix cannot

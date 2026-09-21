@@ -5,8 +5,10 @@ import { promisify } from 'node:util'
 import {
   classify,
   executableCandidates,
+  parseShimExecutables,
   parseShimTarget,
   spawnSpec,
+  withExecutablePath,
   withScriptPath,
   type ResolvedCommand,
 } from './command.js'
@@ -214,7 +216,8 @@ async function resolveUncached(name: string, deps: ResolveDeps): Promise<Resolve
 }
 
 /**
- * Classify a path, and read a shim to find the script behind it.
+ * Classify a path, and read a shim to find what is behind it — a script, or
+ * the native executable that replaced it.
  *
  * The read only happens for a `cmd-shim`, and only its failure is silent — a
  * shim whose format we do not recognise keeps the `cmd-shim` kind, which every
@@ -233,9 +236,24 @@ function upgrade(path: string, deps: ResolveDeps): ResolvedCommand {
 
   const contents = deps.readFile(path)
   if (contents === null) return base
+
   const script = parseShimTarget(contents, path, deps.platform)
-  if (script === null || !deps.exists(script)) return base
-  return withScriptPath(base, script)
+  if (script !== null && deps.exists(script)) return withScriptPath(base, script)
+
+  /*
+   * Script first, executable second, and the order is the whole correctness of
+   * this branch rather than a preference.
+   *
+   * A node shim quotes `%dp0%\node.exe` before it quotes the script it actually
+   * runs, so asking for an executable first turns every `codex.cmd` into a
+   * command pointing at a portable runtime that install does not have. Asking
+   * for the script first means only a shim with no script at all — which is
+   * what Claude Code's native build now writes — ever reaches here.
+   */
+  for (const executable of parseShimExecutables(contents, path, deps.platform)) {
+    if (deps.exists(executable)) return withExecutablePath(executable)
+  }
+  return base
 }
 
 /** What makes two candidates the same install: the thing that actually runs. */

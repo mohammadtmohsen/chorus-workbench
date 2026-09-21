@@ -2,11 +2,13 @@ import { describe, expect, it } from 'vitest'
 import {
   classify,
   executableCandidates,
+  parseShimExecutables,
   parseShimTarget,
   pathExtensions,
   sdkExecutablePath,
   spawnSpec,
   UnsafeCommandArgument,
+  withExecutablePath,
   withScriptPath,
 } from './command.js'
 
@@ -296,6 +298,96 @@ describe('parseShimTarget', () => {
     ).toBeNull()
     expect(parseShimTarget('', 'C:\\npm\\x.cmd', WINDOWS)).toBeNull()
     expect(parseShimTarget('#!/bin/sh\nexec claude "$@"', '/usr/local/bin/claude', MAC)).toBeNull()
+  })
+})
+
+/**
+ * The two shims above are what cmd-shim documents. These two are what a real
+ * Windows machine had on it — read verbatim off `%APPDATA%\npm` on 2026-09-21,
+ * from `claude` 2.1.278 and `codex` 0.153.4 installed with `npm -g`.
+ *
+ * They disagree, which is the finding. Codex still ships the `.js` the whole of
+ * `parseShimTarget` was written around. Claude does not: its shim runs a native
+ * `claude.exe` and contains no script at all, so the parser answered null and
+ * the SDK was handed nothing for the agent this repo is mostly used with.
+ */
+describe('parseShimExecutables, against shims off a real machine', () => {
+  const REAL_CLAUDE_CMD = [
+    '@ECHO off',
+    'GOTO start',
+    ':find_dp0',
+    'SET dp0=%~dp0',
+    'EXIT /b',
+    ':start',
+    'SETLOCAL',
+    'CALL :find_dp0',
+    '"%dp0%\\node_modules\\@anthropic-ai\\claude-code\\bin\\claude.exe"   %*',
+  ].join('\r\n')
+
+  const REAL_CODEX_CMD = [
+    '@ECHO off',
+    'GOTO start',
+    ':find_dp0',
+    'SET dp0=%~dp0',
+    'EXIT /b',
+    ':start',
+    'SETLOCAL',
+    'CALL :find_dp0',
+    '',
+    'IF EXIST "%dp0%\\node.exe" (',
+    '  SET "_prog=%dp0%\\node.exe"',
+    ') ELSE (',
+    '  SET "_prog=node"',
+    '  SET PATHEXT=%PATHEXT:;.JS;=;%',
+    ')',
+    '',
+    'endLocal & goto #_undefined_# 2>NUL || title %COMSPEC% & "%_prog%"  "%dp0%\\node_modules\\@openai\\codex\\bin\\codex.js" %*',
+  ].join('\r\n')
+
+  const NPM = 'C:\\Users\\user\\AppData\\Roaming\\npm'
+
+  it('finds the native binary a modern claude shim runs', () => {
+    expect(parseShimExecutables(REAL_CLAUDE_CMD, `${NPM}\\claude.cmd`, WINDOWS)).toEqual([
+      `${NPM}\\node_modules\\@anthropic-ai\\claude-code\\bin\\claude.exe`,
+    ])
+  })
+
+  /*
+   * The regression this ordering exists to prevent. `node.exe` is quoted, comes
+   * first, and on this machine does not exist — so an executable-first resolver
+   * would have replaced a working codex with a path to nothing.
+   */
+  it('offers the shim\u2019s portable node.exe, which is why the caller must test for existence', () => {
+    expect(parseShimExecutables(REAL_CODEX_CMD, `${NPM}\\codex.cmd`, WINDOWS)).toEqual([
+      `${NPM}\\node.exe`,
+    ])
+    expect(parseShimTarget(REAL_CODEX_CMD, `${NPM}\\codex.cmd`, WINDOWS)).toBe(
+      `${NPM}\\node_modules\\@openai\\codex\\bin\\codex.js`
+    )
+  })
+
+  it('still answers null for the claude shim through the script parser', () => {
+    expect(parseShimTarget(REAL_CLAUDE_CMD, `${NPM}\\claude.cmd`, WINDOWS)).toBeNull()
+  })
+
+  it('finds nothing in a shim that names no executable', () => {
+    expect(parseShimExecutables('@echo off\r\nnode cli.js %*', `${NPM}\\x.cmd`, WINDOWS)).toEqual([])
+  })
+
+  /*
+   * What the promotion is worth: cmd.exe leaves the launch, so `spawnSpec` no
+   * longer has to screen arguments it cannot safely escape, and the SDK gets a
+   * real path instead of null.
+   */
+  it('promotes the shim to a native command the SDK can be given', () => {
+    const exe = `${NPM}\\node_modules\\@anthropic-ai\\claude-code\\bin\\claude.exe`
+    const promoted = withExecutablePath(exe)
+    expect(promoted).toEqual({ file: exe, argsPrefix: [], kind: 'native' })
+    expect(sdkExecutablePath(promoted)).toBe(exe)
+    expect(spawnSpec(promoted, ['--print', 'a&b'])).toEqual({
+      file: exe,
+      args: ['--print', 'a&b'],
+    })
   })
 })
 
