@@ -105,6 +105,37 @@ export const WorkbenchConnection = z.object({
 })
 export type WorkbenchConnection = z.infer<typeof WorkbenchConnection>
 
+/**
+ * An OS-absolute path, spelled the way a `vscode-remote` URI requires.
+ *
+ * **A URI with an authority may not have a path that fails to begin with a
+ * slash**, and `_validateUri` throws rather than coercing. Every absolute path
+ * on macOS already satisfies that, which is why this was invisible here for as
+ * long as it was: `C:\Users\me\project` does not, and neither does `C:/Users/me`.
+ * What the person saw on Windows was the workbench never starting, with
+ * `[UriError]` and a stack ending in `prepareWorkbench`.
+ *
+ * **Lives in shared because four call sites build these URIs** — the workspace
+ * folder in `workbench-surface.ts`, the file a reveal opens, the file an
+ * answered edit reveals, and the edit request itself. Three of them take a path
+ * main resolved against the project root, so each would otherwise have needed
+ * its own copy of this rule, and a copy that drifts is how three of these four
+ * end up disagreeing about the same directory.
+ *
+ * **Idempotent, deliberately.** The root arrives here already converted, and a
+ * caller that cannot easily tell whether it has been should be able to ask
+ * twice. A leading slash means the work is done.
+ *
+ * Only a drive-letter or UNC path is touched. A backslash is a legal character
+ * in a POSIX filename, so converting them unconditionally would corrupt a
+ * directory somebody has actually named `a\b`.
+ */
+export function remotePath(path: string): string {
+  if (/^[A-Za-z]:[\\/]/.test(path)) return `/${path.replace(/\\/g, '/')}`
+  if (path.startsWith('\\\\')) return path.replace(/\\/g, '/')
+  return path
+}
+
 export const WORKBENCH_CONNECTION_CHANNEL = 'workbench:connection'
 
 /**

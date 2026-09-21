@@ -1121,6 +1121,36 @@ describe('the shared server lease', () => {
     }
   })
 
+  /*
+   * What the test above could not catch, reported from a real Windows machine.
+   *
+   * The conversion used to read `host !== LOCAL_HOST && /^[A-Za-z]:\//`, so the
+   * ordinary case on that platform — a project on this machine — reached
+   * `URI.from` with no leading slash and the workbench threw `[UriError]` out
+   * of `prepareWorkbench`. No editor appeared at all, and the remote test
+   * passed the whole time because the remote arm was the only one written.
+   *
+   * The backslashes matter as much as the slash: the old pattern demanded a
+   * forward slash after the drive letter, so a native `C:\...` path failed the
+   * test even on a remote host, where the branch was meant to be working.
+   */
+  it('gives a local Windows root the leading slash, not only a remote one', async () => {
+    surface.registerWorkbenchHandlers(undefined, () => ({
+      host: LOCAL_HOST,
+      root: 'C:\\Users\\me\\project',
+    }))
+    try {
+      await surface.openSurface(shell as never, { projectId: 'local-windows' }, undefined)
+      const view = lastView()
+      view.webContents.emit('did-finish-load')
+      expect(view.webContents.sent).toEqual([
+        { ...RUNTIME, projectRoot: '/C:/Users/me/project' },
+      ])
+    } finally {
+      surface.registerWorkbenchHandlers(undefined)
+    }
+  })
+
   it('sends an agent edit to the editor on its host, and never to a local project at that root', async () => {
     surface.registerWorkbenchHandlers(undefined, () => ({ host: 'officepc', root: 'C:/api' }))
     try {

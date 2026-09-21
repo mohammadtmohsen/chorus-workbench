@@ -4,7 +4,7 @@ import { ITextModelService } from '@codingame/monaco-vscode-api/vscode/vs/editor
 import { IModelService } from '@codingame/monaco-vscode-api/vscode/vs/editor/common/services/model.service'
 import { ILanguageService } from '@codingame/monaco-vscode-api/vscode/vs/editor/common/languages/language.service'
 import { URI } from '@codingame/monaco-vscode-api/vscode/vs/base/common/uri'
-import type { WorkbenchAskDiffResult } from '../../../shared/workbench-ipc.js'
+import { remotePath, type WorkbenchAskDiffResult } from '../../../shared/workbench-ipc.js'
 
 /**
  * The proposed edit, shown as a real diff before anything is applied.
@@ -70,11 +70,15 @@ export function serveAskDiff(remoteAuthority: string): void {
              * by the extension host. A `file:` URI for a project file resolves to
              * nothing here, which the editor reports as "the file was not found"
              * over a file that is plainly in the explorer.
+             *
+             * `remotePath` because `revealPath` is `preview.absolutePath` as
+             * main computed it, which on Windows is `C:\...` — a path a URI
+             * carrying an authority refuses outright.
              */
             resource: URI.from({
               scheme: 'vscode-remote',
               authority: remoteAuthority,
-              path: reveal,
+              path: remotePath(reveal),
             }),
             /*
              * A preview tab — italic, and replaced by the next file opened the

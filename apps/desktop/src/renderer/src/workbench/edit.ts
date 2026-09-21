@@ -4,10 +4,11 @@ import { IFileService } from '@codingame/monaco-vscode-api/vscode/vs/platform/fi
 import { IEditorService } from '@codingame/monaco-vscode-api/vscode/vs/workbench/services/editor/common/editorService.service'
 import { URI } from '@codingame/monaco-vscode-api/vscode/vs/base/common/uri'
 import { readEditorSnapshot } from './context.js'
-import type {
-  WorkbenchEditRequest,
-  WorkbenchEditResult,
-  WorkbenchRevealResult,
+import {
+  remotePath,
+  type WorkbenchEditRequest,
+  type WorkbenchEditResult,
+  type WorkbenchRevealResult,
 } from '../../../shared/workbench-ipc.js'
 
 /**
@@ -311,7 +312,18 @@ export function serveWorkbenchReveal(remoteAuthority: string): void {
     try {
       const editors = await getService(IEditorService)
       const pane = await editors.openEditor({
-        resource: URI.from({ scheme: 'vscode-remote', authority: remoteAuthority, path }),
+        /*
+         * `remotePath`, because the path arrives as main resolved it — an OS
+         * path, so `C:\project\src\index.ts` on Windows. A URI with an
+         * authority refuses a path that does not begin with a slash, and
+         * `_validateUri` throws rather than coercing, so clicking a file would
+         * raise instead of opening one.
+         */
+        resource: URI.from({
+          scheme: 'vscode-remote',
+          authority: remoteAuthority,
+          path: remotePath(path),
+        }),
         options: {
           preserveFocus: false,
           ...(line === null

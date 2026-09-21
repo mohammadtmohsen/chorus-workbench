@@ -47,6 +47,7 @@ import {
   WORKBENCH_URL_CHANNEL,
   WORKBENCH_USER_SETTINGS_READ_CHANNEL,
   WORKBENCH_USER_SETTINGS_WRITE_CHANNEL,
+  remotePath,
   type WorkbenchConnection,
   type WorkbenchEditRequest,
   type WorkbenchAskDiffRequest,
@@ -695,9 +696,6 @@ function redeem(caller: WebContents, target: WorkbenchTarget): WorkbenchPlace {
 }
 
 /** Everything a surface is told about itself. One project, one view, one server. */
-function folderPath(host: string, root: string): string {
-  return host !== LOCAL_HOST && /^[A-Za-z]:\//.test(root) ? `/${root}` : root
-}
 
 function acquireRuntime(place: WorkbenchPlace): Promise<WorkbenchRuntime> {
   return place.host === LOCAL_HOST
@@ -715,7 +713,21 @@ function releaseRuntime(place: WorkbenchPlace): void {
 
 function describe(surface: Surface): WorkbenchConnection {
   return {
-    projectRoot: folderPath(surface.host, surface.projectRoot),
+    /*
+     * Converted here rather than where the URI is built, because this is the
+     * one place the root crosses into the renderer and `workspaceIdFor` hashes
+     * whatever arrives — so normalising later would key a project's storage off
+     * a string that is not the one the workspace folder ends up on.
+     *
+     * It used to read `host !== LOCAL_HOST && /^[A-Za-z]:\//`, which is two
+     * mistakes. The host condition meant a *local* Windows root — the ordinary
+     * case on that platform — never got its leading slash, so the workbench
+     * threw `[UriError]` out of `prepareWorkbench` and no editor appeared at
+     * all. And the pattern demanded a forward slash after the drive letter, so
+     * a native `C:\...` path failed the test even on a remote host, where the
+     * branch was supposed to be doing its job.
+     */
+    projectRoot: remotePath(surface.projectRoot),
     remoteAuthority: surface.runtime.remoteAuthority,
     connectionToken: surface.runtime.connectionToken,
     commit: surface.runtime.commit,
