@@ -57,9 +57,11 @@ import {
   type WorkbenchRect,
   type WorkbenchShellResponse,
   type WorkbenchTarget,
+  type CompletionReply,
 } from '../shared/workbench-ipc.js'
 import { acquireRemoteWorkbenchRuntime, releaseRemoteWorkbenchRuntime } from './remote-workbench.js'
 import {
+  completionConfigured,
   isCompletionPayload,
   probeCompletionCache,
   recordEditorOutcome,
@@ -1523,7 +1525,7 @@ export function registerWorkbenchHandlers(
 
   ipcMain.handle(
     WORKBENCH_COMPLETION_CHANNEL,
-    async (event, requestId: unknown, payload: unknown): Promise<string | null> => {
+    async (event, requestId: unknown, payload: unknown): Promise<CompletionReply> => {
       if (!byContents.has(event.sender)) throw new Error('unknown workbench surface')
       if (typeof requestId !== 'string' || requestId === '')
         throw new Error('Completion id must be text')
@@ -1531,7 +1533,7 @@ export function registerWorkbenchHandlers(
 
       if (cancelledCompletions.has(requestId)) {
         cancelledCompletions.delete(requestId)
-        return null
+        return { configured: completionConfigured(app.getPath('userData')), text: null }
       }
 
       const controller = new AbortController()
@@ -1540,7 +1542,7 @@ export function registerWorkbenchHandlers(
       try {
         if (cancelledCompletions.has(requestId)) {
           controller.abort()
-          return null
+          return { configured: completionConfigured(app.getPath('userData')), text: null }
         }
         return await requestCompletion(
           app.getPath('userData'),

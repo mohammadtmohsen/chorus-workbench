@@ -30,6 +30,29 @@ Nothing here can be finished by me alone.
 
 ## Open
 
+### C-067 · `agent-secrets.ts` says "agent" while holding a credential that is not an agent's
+
+**Noticed 2026-09-17**, while widening that module for TypeSafe —
+`docs/plans/a-tool-that-is-not-a-voice-2026-09-17/plan.md`, Phase 1. `SecretId` is
+now `AgentId | 'typesafe'`, and the parameter was renamed with it, but six names
+still claim more than they hold: `readAgentKey`, `writeAgentKey`,
+`agentKeyIsSet` and `clearAgentKey`; the module's own filename; and the
+`agent-secrets.json` the keys are written to.
+
+**Why it matters, and why it was left.** This repo's own trap is that a wrong
+name survives a re-key where a wrong type does not, so a name that quietly
+widened its meaning is exactly the thing worth chasing. It was left out of Phase 1
+because renaming the four functions reaches `ipc.ts`, `runtime.ts`,
+`agent-probe.ts` and their tests, and the phase deliberately scoped itself to one
+file. The risk here is lower than the classic case — passing `'typesafe'` to
+`readAgentKey` does the right thing and nothing fails silently — which is why it is
+a board entry and not a blocker.
+
+**Done when** the four functions read as secrets rather than agent keys, or a
+decision is written down that they should keep the old names. **The JSON file is
+the harder half**: renaming it strands every key already stored, so it needs a
+migration or a deliberate "leave it, the filename is historical".
+
 ### C-066 · A remote-installed browser-only extension is dropped before it is ever registered, and `.excalidraw` opens as raw JSON
 
 **Reported 2026-09-01.** A `.excalidraw` file in a project pane opens as the JSON

@@ -17,7 +17,6 @@ import {
   DIAGNOSTIC_PUSH_CHANNEL,
   EVENTS_PUSH_CHANNEL,
   IDE_PUSH_CHANNEL,
-  COLLABORATION_PUSH_CHANNEL,
   CONTEXT_PUSH_CHANNEL,
   TASKS_PUSH_CHANNEL,
   TERMINAL_PUSH_CHANNEL,
@@ -1035,60 +1034,6 @@ export function buildHandlers(runtime: ChorusRuntime): Handlers {
       } as const
     },
 
-    'collaborate:start': (request: {
-      conversationId: string
-      sourceEventId: string
-      preset: 'delivery' | 'build'
-    }) =>
-      Promise.resolve(
-        runtime.startCollaboration(request.conversationId, {
-          sourceEventId: request.sourceEventId,
-          preset: request.preset,
-        })
-      ),
-
-    'collaborate:stop': (request: { conversationId: string }) => {
-      runtime.stopCollaboration(request.conversationId)
-      return Promise.resolve({ ok: true } as const)
-    },
-
-    'collaborate:status': (request: { conversationId: string }) =>
-      Promise.resolve({ status: runtime.collaborationStatus(request.conversationId) }),
-
-    'handoff:prepare': (request: {
-      conversationId: string
-      from: AgentId
-      to: AgentId
-      sourceEventIds: string[]
-      includeDiff?: boolean
-      intent?: 'implement' | 'review' | 'discuss'
-      note?: string
-    }) =>
-      Promise.resolve(
-        runtime.prepareHandoff(request.conversationId, {
-          from: request.from,
-          to: request.to,
-          sourceEventIds: request.sourceEventIds,
-          ...(request.includeDiff === undefined ? {} : { includeDiff: request.includeDiff }),
-          ...(request.intent === undefined ? {} : { intent: request.intent }),
-          ...(request.note === undefined ? {} : { note: request.note }),
-        })
-      ),
-
-    'handoff:send': (request: {
-      conversationId: string
-      from: AgentId
-      to: AgentId
-      sourceEventIds: string[]
-      brief: string
-    }) =>
-      runtime.sendHandoff(request.conversationId, {
-        from: request.from,
-        to: request.to,
-        sourceEventIds: request.sourceEventIds,
-        brief: request.brief,
-      }),
-
     /*
      * Everything the renderer says about the passage is re-checked in
      * `openAside` against what the log holds. Nothing is taken on trust here,
@@ -1239,21 +1184,6 @@ export function forwardContextUsageToRenderer(runtime: ChorusRuntime): void {
 }
 
 /** Sends what each conversation's agents have left running, as it changes. */
-/**
- * A collaboration's state, to every open window.
- *
- * Pushed on every transition **including the one where `draining` becomes
- * false**, so the UI can say when the two buttons work again instead of leaving
- * the user to guess.
- */
-export function forwardCollaborationToRenderer(runtime: ChorusRuntime): void {
-  runtime.onCollaborationStatusReported((status) => {
-    for (const window of BrowserWindow.getAllWindows()) {
-      if (!window.isDestroyed()) window.webContents.send(COLLABORATION_PUSH_CHANNEL, status)
-    }
-  })
-}
-
 export function forwardTasksToRenderer(runtime: ChorusRuntime): void {
   runtime.onTasksReported((push) => {
     for (const window of BrowserWindow.getAllWindows()) {

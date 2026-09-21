@@ -120,6 +120,31 @@ the **source document's version as well as the active buffer**, or an unchanged
 a position, so the implementation selects a bounded set of nearby identifiers and
 imports.
 
+**A hypothesis under D5, waiting on a number rather than decided.** Resolving a
+definition to text goes through `createModelReference`, whose reference must be
+disposed — and disposing it lets the refcount fall to zero, so an unloaded
+dependency is re-parsed on the next collection and the snippet cache can only
+ever hit for files the editor already holds. The likely fix is one mechanism
+rather than two: **a bounded set of held references keeps those models loaded,
+which supplies the version comparison `D5` requires _and_ makes the cache hit
+possible**, because `IModelService.getModel(uri)` then answers with the version
+the reference is pinning. That turns "N models held per collection" into "N
+models held, full stop". It is **not** adopted here, because nothing has yet
+priced resolution — Phase 2's collector now reports `snippetResolveMs`, and that
+number decides whether this is a necessary fix or machinery nobody needed.
+
+**A limitation under D5, decided rather than deferred: position is not part of
+validity.** The collected context is keyed by the model and checked against its
+version, which catches a changed buffer and **not a moved cursor in an unchanged
+one** — so between the cursor moving and the next collection completing, the
+provider is served snippets gathered for a position the user has left. That is
+accepted, because **typing moves the cursor**: a column-exact check would reject
+essentially every request and a line-exact one would reject every request after
+an Enter, which turns the feature off precisely while someone is writing. The
+staleness is bounded by one debounce plus one collection, self-corrects, and
+degrades quality rather than correctness — the snippets are declarations that
+exist in the project, near where the cursor was, and still valid code.
+
 **D6 — A replacement is never reinterpreted as an insertion, and the fallback is
 chosen before generation.** G4's capability results decide, for subsequent
 requests, whether this editor gets cross-file replacement, same-file replacement

@@ -14,7 +14,7 @@ import type { AgentId } from '@chorus/shared'
 
 export interface MentionQuery {
   /** Which menu is open. Carried so the replacement writes the right character. */
-  readonly trigger: '@' | '/'
+  readonly trigger: '@' | '/' | 'agent'
   /** Index of the trigger, so the replacement knows what to overwrite. */
   readonly start: number
   /** What has been typed after it, lowercased. Empty right after the trigger. */
@@ -190,6 +190,27 @@ export function findMentionQuery(text: string, caret: number): MentionQuery | nu
   return { trigger: '@', start: at, query: query.toLowerCase() }
 }
 
+export const AGENT_QUERY_MIN = 2
+
+export function findAgentQuery(
+  text: string,
+  caret: number,
+  names: readonly string[]
+): MentionQuery | null {
+  const word = /[a-z0-9_-]+$/i.exec(text.slice(0, caret))
+  if (word === null) return null
+
+  const start = caret - word[0].length
+  const preceding = start === 0 ? '' : text.charAt(start - 1)
+  if (preceding !== '' && !/\s/.test(preceding)) return null
+
+  const query = word[0].toLowerCase()
+  if (query.length < AGENT_QUERY_MIN) return null
+  if (!names.some((name) => name.toLowerCase().startsWith(query))) return null
+
+  return { trigger: 'agent', start, query }
+}
+
 /**
  * Finds the slash command being typed, or `null`.
  *
@@ -312,7 +333,8 @@ export function applyMention(
 ): { text: string; caret: number } {
   // A trailing space, because the next thing typed is always the message and
   // nobody wants to press space after choosing from a menu.
-  const inserted = `${option.bare === true ? '' : mention.trigger}${option.insert} `
+  const lead = option.bare === true ? '' : mention.trigger === '/' ? '/' : '@'
+  const inserted = `${lead}${option.insert} `
   return {
     text: text.slice(0, mention.start) + inserted + text.slice(caret),
     caret: mention.start + inserted.length,

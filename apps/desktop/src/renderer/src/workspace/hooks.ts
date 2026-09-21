@@ -528,6 +528,35 @@ export function useProjectFacts(conversationIds: readonly string[]): ProjectFact
   return useMemo(() => JSON.parse(encoded) as ProjectFacts, [encoded])
 }
 
+export interface ProjectWeight {
+  readonly tokens: number
+  readonly percent: number | null
+  readonly markPercent: number | null
+}
+
+export function useProjectWeight(conversationIds: readonly string[]): ProjectWeight {
+  const key = conversationIds.join(',')
+  return useWorkspaceStore(
+    useShallow((state: WorkspaceStore) => {
+      let tokens = 0
+      let percent: number | null = null
+      let markPercent: number | null = null
+      for (const id of key === '' ? [] : key.split(',')) {
+        const pulse = state.pulses[id]
+        if (pulse === undefined) continue
+        tokens += pulse.tokens
+        for (const reading of Object.values(pulse.contextByActor)) {
+          percent = percent === null ? reading.percent : Math.max(percent, reading.percent)
+          if (reading.markPercent === null) continue
+          markPercent =
+            markPercent === null ? reading.markPercent : Math.max(markPercent, reading.markPercent)
+        }
+      }
+      return { tokens, percent, markPercent }
+    })
+  )
+}
+
 /**
  * Whether **every** conversation in a project is planning.
  *

@@ -2,9 +2,15 @@ import { Fragment, useEffect, useLayoutEffect, useMemo, useRef, useState } from 
 import { createPortal } from 'react-dom'
 import type { PointerEvent as ReactPointerEvent } from 'react'
 import { useTranslation } from 'react-i18next'
-import { resetMoment } from '../format.js'
+import { compactTokens, resetMoment } from '../format.js'
 import type { SessionInfo } from '../Session.js'
-import { useActiveProjectId, useOpenProjectKey, useProjectRowState } from './hooks.js'
+import {
+  useActiveProjectId,
+  useOpenProjectKey,
+  useProjectRowState,
+  useProjectWeight,
+} from './hooks.js'
+import { StateMark } from './SessionRow.js'
 import { countRender } from './render-count.js'
 import { projectTile, type SessionPlacement } from './session-row.js'
 import {
@@ -376,6 +382,7 @@ function RailProject(props: {
   countRender('RailProject')
   const row = useProjectRowState(props.conversationIds)
   const facts = projectTile(row)
+  const weight = useProjectWeight(props.conversationIds)
   const triggers = previewTriggerProps(props.preview, props.project.id)
 
   /*
@@ -421,34 +428,6 @@ function RailProject(props: {
    * and this card is drawn on Windows too.
    */
   const folder = props.project.root.split(/[/\\]/).filter(Boolean).at(-1) ?? props.project.root
-
-  /*
-   * The third line, in words rather than in a shape.
-   *
-   * A badge and a dot said the same things in 18px and 7px, hung off the card's
-   * corners because there was nowhere else for them, and both were cut by the
-   * scroller on a card that runs the rail's full width. Two lines of type inside
-   * the card cannot be clipped, and they do not have to be learned: "2 to
-   * approve" is what the dot's colour and the badge's number meant together.
-   *
-   * **`stateOf`'s order, not the dot's.** The dot deliberately reported working
-   * over a pending request, because it could — the badge carried the other half.
-   * One line cannot, so it reports the request, which is the half that is asking
-   * for a person. That a project is *also* running something stays in
-   * `aria-label`, which has room for both.
-   */
-  const status =
-    facts.state === 'approval'
-      ? t('workspace.approvals', { count: facts.count })
-      : facts.state === 'question'
-        ? t('workspace.questions', { count: facts.count })
-        : facts.state === 'working'
-          ? t('state.working')
-          : facts.state === 'failed'
-            ? t('rail.failed')
-            : facts.count > 0
-              ? t('rail.unread', { count: facts.count })
-              : null
 
   return (
     /*
@@ -554,21 +533,32 @@ function RailProject(props: {
         <span className="rail-project-folder" aria-hidden="true">
           {folder}
         </span>
-        {status !== null && (
-          <span
-            className="rail-project-status"
-            data-state={facts.state}
-            /* Absent rather than empty when there is no single voice, for the
-               reason `StateMark` gives: the stylesheet matches on the attribute
-               existing, and `data-voice=""` would still match. */
-            {...(facts.state === 'working' && facts.voice !== null
-              ? { 'data-voice': facts.voice }
-              : {})}
-            aria-hidden="true"
-          >
-            {status}
+        <span className="rail-box" aria-hidden="true">
+          <span className="rail-box-row">
+            <MessageIcon />
+            {row.unread > 0 && row.unread}
           </span>
-        )}
+          <span className="rail-box-row">
+            <TokensIcon />
+            {weight.tokens === 0 ? '—' : compactTokens(weight.tokens)}
+          </span>
+          <span className="rail-box-row">
+            <ContextIcon />
+            {weight.percent === null ? '—' : `${String(weight.percent)}%`}
+          </span>
+          <span className="rail-box-row">
+            <CompactIcon />
+            {weight.markPercent === null ? '—' : `${String(weight.markPercent)}%`}
+          </span>
+        </span>
+        <span
+          className="rail-project-meter"
+          data-spent={weight.percent !== null && weight.percent >= 90 ? 'nearly' : undefined}
+          aria-hidden="true"
+        >
+          <i style={{ width: `${String(weight.percent ?? 0)}%` }} />
+        </span>
+        <StateMark state={facts.state} voice={facts.voice} />
       </button>
     </li>
   )
@@ -1161,6 +1151,39 @@ function FolderIcon(): React.JSX.Element {
   return (
     <svg className="rail-icon" viewBox="0 0 24 24" aria-hidden="true">
       <path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" />
+    </svg>
+  )
+}
+
+function MessageIcon(): React.JSX.Element {
+  return (
+    <svg className="rail-box-icon" viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M3 7a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2v7a2 2 0 0 1-2 2H9l-6 4z" />
+    </svg>
+  )
+}
+
+function TokensIcon(): React.JSX.Element {
+  return (
+    <svg className="rail-box-icon" viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M12 2c4.4 0 8 1.3 8 3s-3.6 3-8 3-8-1.3-8-3 3.6-3 8-3z" />
+      <path d="M4 9.5v5c0 1.7 3.6 3 8 3s8-1.3 8-3v-5c-1.7 1.4-4.6 2.2-8 2.2S5.7 10.9 4 9.5z" />
+    </svg>
+  )
+}
+
+function ContextIcon(): React.JSX.Element {
+  return (
+    <svg className="rail-box-icon" viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M12 3a9 9 0 1 1-9 9h9z" />
+    </svg>
+  )
+}
+
+function CompactIcon(): React.JSX.Element {
+  return (
+    <svg className="rail-box-icon" viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M3 4h18l-9 7zM3 20h18l-9-7z" />
     </svg>
   )
 }

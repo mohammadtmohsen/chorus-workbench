@@ -7,8 +7,6 @@ import {
   EVENTS_PUSH_CHANNEL,
   IDE_PUSH_CHANNEL,
   IdeContextPush,
-  COLLABORATION_PUSH_CHANNEL,
-  CollaborationPush,
   CONTEXT_PUSH_CHANNEL,
   ContextUsagePush,
   TasksPush,
@@ -196,11 +194,6 @@ const api: ChorusApi = {
   ideInstallExtension: () => invoke('ide:installExtension')({}),
   ideOpenProject: invoke('ide:openProject'),
   ideOpenFile: invoke('ide:openFile'),
-  prepareHandoff: invoke('handoff:prepare'),
-  sendHandoff: invoke('handoff:send'),
-  startCollaboration: invoke('collaborate:start'),
-  stopCollaboration: invoke('collaborate:stop'),
-  collaborationStatus: invoke('collaborate:status'),
   openAside: invoke('aside:open'),
   askAside: invoke('aside:ask'),
   restateAside: invoke('aside:restate'),
@@ -251,16 +244,6 @@ const api: ChorusApi = {
     ipcRenderer.on(CONTEXT_PUSH_CHANNEL, wrapped)
     return () => {
       ipcRenderer.removeListener(CONTEXT_PUSH_CHANNEL, wrapped)
-    }
-  },
-  onCollaborationStatus: (listener) => {
-    const wrapped = (_event: unknown, payload: unknown): void => {
-      const parsed = CollaborationPush.safeParse(payload)
-      if (parsed.success) listener(parsed.data)
-    }
-    ipcRenderer.on(COLLABORATION_PUSH_CHANNEL, wrapped)
-    return () => {
-      ipcRenderer.removeListener(COLLABORATION_PUSH_CHANNEL, wrapped)
     }
   },
   onTasks: (listener) => {

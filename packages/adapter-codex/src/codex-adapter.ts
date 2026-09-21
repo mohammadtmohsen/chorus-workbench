@@ -120,6 +120,21 @@ export interface CodexAdapterOptions {
     readonly args: readonly string[]
   } | null>
   readonly approvalTtlMs?: number
+  /**
+   * Variables to add to the child's environment, read at every spawn.
+   *
+   * **Adds rather than replaces, which is why there is no `clear` half here.**
+   * The asymmetry with `ClaudeAdapterOptions.env` is in the mechanism and not
+   * only in the policy: the transport *merges* — `{ ...process.env, ...added }`
+   * — so a `clear` could not be honoured without first making the transport
+   * replace rather than layer, and one added for symmetry would be a field that
+   * cannot do anything. The policy half also holds: Codex has no equivalent of
+   * the Anthropic credential a DeepSeek injection must remove.
+   *
+   * A function rather than a value: a credential captured at construction is the
+   * one the app started with, so adding or rotating one would need a restart.
+   */
+  readonly env?: () => Readonly<Record<string, string>> | undefined
   readonly createTransport?: () => Transport
   readonly now?: () => number
 }
@@ -536,11 +551,16 @@ export class CodexAdapter implements AgentAdapter {
     this.now = options.now ?? (() => Date.now())
     this.createTransport =
       options.createTransport ??
-      (() =>
-        createStdioTransport({
+      (() => {
+        const added = options.env?.()
+        return createStdioTransport({
           command: this.command,
           args: [...this.commandArgs, 'app-server'],
-        }))
+          // Omitted when there is nothing to add, so the transport keeps its own
+          // `process.env` default rather than being handed a copy of it.
+          ...(added === undefined ? {} : { env: { ...process.env, ...added } }),
+        })
+      })
   }
 
   async health(): Promise<HealthStatus> {

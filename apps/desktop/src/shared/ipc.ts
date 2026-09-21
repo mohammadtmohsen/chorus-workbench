@@ -499,70 +499,6 @@ export const ListedProject = z.object({
   missing: z.boolean(),
 })
 
-/**
- * A collaboration run's state, pushed on every transition and answerable on
- * demand.
- *
- * Both, because only the active tab of each group is mounted: a background pane
- * misses the completion it was waiting for and remounts with nothing. The
- * snapshot makes it correct immediately rather than at the next transition.
- */
-export const COLLABORATION_PUSH_CHANNEL = 'collaborate:state'
-
-const CollaborationRunState = z.discriminatedUnion('phase', [
-  z.object({
-    phase: z.literal('running'),
-    step: z.enum(['reviewPlan', 'split', 'implement', 'accept', 'report']),
-  }),
-  z.object({
-    phase: z.literal('finished'),
-    outcome: z.enum(['agreed', 'unresolved', 'unsplit', 'tooManyTasks']),
-  }),
-  z.object({
-    phase: z.literal('cancelled'),
-    by: z.enum(['stop', 'userMessage', 'manualHandoff', 'shutdown']),
-  }),
-  z.object({ phase: z.literal('interrupted'), reason: z.literal('foreignTurn') }),
-  z.object({
-    phase: z.literal('failed'),
-    reason: z.enum([
-      'delivery',
-      'acknowledgement',
-      'idle',
-      'turnFailed',
-      'noReply',
-      'sessionEnded',
-    ]),
-  }),
-])
-
-export const CollaborationPush = z.object({
-  conversationId: z.string(),
-  /**
-   * Monotonic per conversation, **across runs**, and the only ordering key.
-   *
-   * Per-run numbering could not order two runs: a delayed snapshot for an old
-   * run at version 8 would beat a push for a new one at version 1.
-   */
-  statusVersion: z.number().int(),
-  runId: z.string(),
-  state: CollaborationRunState,
-  /** True while either agent is still owned. Nothing the user types is affected. */
-  draining: z.boolean(),
-  ownership: z.enum(['owned', 'unattributable', 'free']),
-  preset: z.enum(['delivery', 'build']),
-  stepIndex: z.number().int(),
-  /**
-   * Null while the length is not yet known.
-   *
-   * The delivery pipeline cannot answer until the planner's split has been
-   * read, so the row that draws this has to survive not knowing rather than
-   * print a number nobody computed.
-   */
-  stepTotal: z.number().int().nullable(),
-})
-export type CollaborationPush = z.infer<typeof CollaborationPush>
-
 export const OpenSessionSchema = z.object({
   conversationId: z.string(),
   participants: z.array(AgentIdSchema),
@@ -1546,79 +1482,6 @@ export const IPC_CONTRACT = {
     response: z.object({ ok: z.literal(true) }),
   },
   /**
-   * Builds the packet that would cross to another agent, without sending it.
-   * The user edits this before anything moves (plan §4.5).
-   */
-  'handoff:prepare': {
-    request: z.object({
-      conversationId: z.string(),
-      from: AgentIdSchema,
-      to: AgentIdSchema,
-      sourceEventIds: z.array(z.string()).min(1),
-      includeDiff: z.boolean().optional(),
-      intent: z.enum(['implement', 'review', 'discuss']).optional(),
-      note: z.string().optional(),
-    }),
-    response: z.object({
-      brief: z.string(),
-      intent: z.enum(['implement', 'review', 'discuss']),
-      summary: z.string(),
-      sourceCount: z.number().int(),
-    }),
-  },
-  'handoff:send': {
-    request: z.object({
-      conversationId: z.string(),
-      from: AgentIdSchema,
-      to: AgentIdSchema,
-      sourceEventIds: z.array(z.string()),
-      brief: z.string().min(1),
-    }),
-    response: z.object({ handoffId: z.string() }),
-  },
-  /**
-   * Starts a review loop over one completed Claude reply.
-   *
-   * No roles and no counters cross this boundary: the preset names the shape and
-   * main assigns Claude as the worker and Codex as the reviewer, which is what
-   * makes v1's one-direction promise true rather than merely stated. A caller
-   * cannot ask for a twelve-round run because there is no number to send.
-   */
-  'collaborate:start': {
-    request: z.object({
-      conversationId: z.string(),
-      sourceEventId: z.string().min(1),
-      preset: z.enum(['delivery', 'build']),
-    }),
-    response: z.discriminatedUnion('outcome', [
-      z.object({ outcome: z.literal('started'), runId: z.string() }),
-      z.object({
-        outcome: z.literal('refused'),
-        reason: z.enum([
-          'running',
-          'draining',
-          'missingAgent',
-          'unknownEvent',
-          'notAgentMessage',
-          'notPlanner',
-          'busy',
-        ]),
-        /** Set for `busy` and `missingAgent`, so the row can name the remedy. */
-        agentId: AgentIdSchema.nullable(),
-      }),
-    ]),
-  },
-  /** Ends the run now. The agent's turn is never interrupted. */
-  'collaborate:stop': {
-    request: z.object({ conversationId: z.string() }),
-    response: z.object({ ok: z.literal(true) }),
-  },
-  /** The snapshot a remounting pane asks for. Null when this room has had no run. */
-  'collaborate:status': {
-    request: z.object({ conversationId: z.string() }),
-    response: z.object({ status: CollaborationPush.nullable() }),
-  },
-  /**
    * A small question about one passage of one reply, asked in a fork.
    *
    * `excerpt` is sent so main can check it against what the log actually holds,
@@ -2384,14 +2247,6 @@ export interface ChorusApi extends WorkbenchShellApi, DetachedWindowApi {
   readonly onLimits: (listener: (limits: LimitsPush) => void) => () => void
   readonly onContextUsage: (listener: (usage: ContextUsagePush) => void) => () => void
   readonly onTasks: (listener: (tasks: TasksPush) => void) => () => void
-  readonly startCollaboration: (
-    request: IpcRequest<'collaborate:start'>
-  ) => Promise<IpcResponse<'collaborate:start'>>
-  readonly stopCollaboration: (request: IpcRequest<'collaborate:stop'>) => Promise<{ ok: true }>
-  readonly collaborationStatus: (
-    request: IpcRequest<'collaborate:status'>
-  ) => Promise<IpcResponse<'collaborate:status'>>
-  readonly onCollaborationStatus: (listener: (status: CollaborationPush) => void) => () => void
   readonly onActivity: (listener: (activity: ActivityPush) => void) => () => void
 
   /**
@@ -2473,12 +2328,6 @@ export interface ChorusApi extends WorkbenchShellApi, DetachedWindowApi {
     request: IpcRequest<'ide:snapshot'>
   ) => Promise<IpcResponse<'ide:snapshot'>>
   readonly onIdeContext: (listener: (payload: IdeContextPush) => void) => () => void
-  readonly prepareHandoff: (
-    request: IpcRequest<'handoff:prepare'>
-  ) => Promise<IpcResponse<'handoff:prepare'>>
-  readonly sendHandoff: (
-    request: IpcRequest<'handoff:send'>
-  ) => Promise<IpcResponse<'handoff:send'>>
   readonly openAside: (request: IpcRequest<'aside:open'>) => Promise<IpcResponse<'aside:open'>>
   readonly askAside: (request: IpcRequest<'aside:ask'>) => Promise<IpcResponse<'aside:ask'>>
   readonly restateAside: (

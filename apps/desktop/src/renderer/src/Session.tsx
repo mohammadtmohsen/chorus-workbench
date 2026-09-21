@@ -11,7 +11,6 @@ import { ErrorNotice } from './ErrorNotice.js'
 import { focusedNow, mayTakeCaret } from './focus.js'
 import { profileHas, profileMark, profileMarkAfterPaint } from './profile-marks.js'
 import { thinkingWord, offsetForActor, THINKING_WORD_MS, AWAITING_MAX_MS } from './thinking-word.js'
-import { HandoffComposer, type HandoffDraft, type HandoffIntent } from './HandoffComposer.js'
 import { QuickQuestion } from './QuickQuestion.js'
 import {
   anchorOf,
@@ -21,7 +20,7 @@ import {
   type PaneAnchor,
   type SourceEntry,
 } from './quote.js'
-import type { ActivityPush, CollaborationPush, TranscriptEvent } from '../../shared/ipc.js'
+import type { ActivityPush, TranscriptEvent } from '../../shared/ipc.js'
 
 import { askableQuestion, questionText } from '../../shared/question-text.js'
 import {
@@ -46,68 +45,6 @@ import {
   type TranscriptMessage,
   type TranscriptView,
 } from './transcript.js'
-
-type CollaborationState = CollaborationPush['state']
-type CollaborationPhase<P extends CollaborationState['phase']> = Extract<
-  CollaborationState,
-  { phase: P }
->
-
-/*
- * Total maps over the unions, not a lookup with a fallback.
- *
- * `Record` over each union fails to compile when a phase, an outcome, a cause
- * or a reason is added, where a template key degrades silently — and the
- * symptom is a raw `collaborate.failed.somethingNew` in the status row at
- * exactly the moment something went wrong. Typecheck cannot see a missing
- * translation, so this is the only place the exhaustiveness can live.
- */
-export const COLLABORATION_STEP: Record<CollaborationPhase<'running'>['step'], string> = {
-  reviewPlan: 'collaborate.step.reviewPlan',
-  split: 'collaborate.step.split',
-  implement: 'collaborate.step.implement',
-  accept: 'collaborate.step.accept',
-  report: 'collaborate.step.report',
-}
-
-const COLLABORATION_OUTCOME: Record<CollaborationPhase<'finished'>['outcome'], string> = {
-  agreed: 'collaborate.outcome.agreed',
-  unresolved: 'collaborate.outcome.unresolved',
-  unsplit: 'collaborate.outcome.unsplit',
-  tooManyTasks: 'collaborate.outcome.tooManyTasks',
-}
-
-const COLLABORATION_CANCELLED: Record<CollaborationPhase<'cancelled'>['by'], string> = {
-  stop: 'collaborate.cancelled.stop',
-  userMessage: 'collaborate.cancelled.userMessage',
-  manualHandoff: 'collaborate.cancelled.manualHandoff',
-  shutdown: 'collaborate.cancelled.shutdown',
-}
-
-const COLLABORATION_FAILED: Record<CollaborationPhase<'failed'>['reason'], string> = {
-  delivery: 'collaborate.failed.delivery',
-  acknowledgement: 'collaborate.failed.acknowledgement',
-  idle: 'collaborate.failed.idle',
-  turnFailed: 'collaborate.failed.turnFailed',
-  noReply: 'collaborate.failed.noReply',
-  sessionEnded: 'collaborate.failed.sessionEnded',
-}
-
-/** Exported for a test: every terminal state has to name a key that exists. */
-export function collaborationStateKey(state: CollaborationState): string {
-  switch (state.phase) {
-    case 'running':
-      return COLLABORATION_STEP[state.step]
-    case 'finished':
-      return COLLABORATION_OUTCOME[state.outcome]
-    case 'cancelled':
-      return COLLABORATION_CANCELLED[state.by]
-    case 'interrupted':
-      return 'collaborate.interrupted'
-    case 'failed':
-      return COLLABORATION_FAILED[state.reason]
-  }
-}
 
 /**
  * Things a click must not be taken away from.
@@ -381,110 +318,6 @@ export function Session(props: {
   const backgroundAgents = useBackgroundAgents(conversationId)
   const { toggleWorkbench } = useWorkspaceActions()
   const workbenchShown = useWorkbenchShown(props.session.projectId)
-  const [handoff, setHandoff] = useState<HandoffDraft | null>(null)
-
-  /**
-   * A handoff with the sheet skipped — the transcript's one-click intents.
-   *
-   * **Never with the diff, and that restriction is the reason this exists at
-   * all.** `HandoffComposer`'s header states the rule it is departing from: the
-   * brief *is* what the receiving agent will know, so sending one unseen decides
-   * that for the user (§4.5). What makes an exception defensible is
-   * predictability — "this reply, with this instruction" is a packet you can
-   * picture from the button you pressed, and the working tree's diff is not. So
-   * `includeDiff` is hardcoded false rather than defaulted, and the sheet
-   * remains the only way to send one.
-   *
-   * Prepared and then sent rather than sent directly, because composing the
-   * brief is main's job and there is no channel that does both — the two calls
-   * are the same pair the sheet makes, with nothing in between.
-   *
-   * Declared here, above every use, because a `useCallback` dependency array is
-   * evaluated during render: this reads `participants`, and a callback placed
-   * above the thing it closes over throws a TDZ `ReferenceError` on first paint
-   * that the typechecker cannot see.
-   */
-  const quickHandOff = useCallback(
-    (message: TranscriptMessage, intent: HandoffIntent): void => {
-      if (!isAgentId(message.actor)) return
-      const from = message.actor
-      const to = participants.find((p) => p !== from)
-      if (to === undefined) return
-      const sourceEventIds = [message.eventId]
-      window.chorus
-        .prepareHandoff({ conversationId, from, to, sourceEventIds, includeDiff: false, intent })
-        .then((prepared) =>
-          window.chorus.sendHandoff({
-            conversationId,
-            from,
-            to,
-            sourceEventIds,
-            brief: prepared.brief,
-          })
-        )
-        .catch((e: unknown) => {
-          setError(e instanceof Error ? e.message : String(e))
-        })
-    },
-    [conversationId, participants]
-  )
-
-  const [collaboration, setCollaboration] = useState<CollaborationPush | null>(null)
-
-  /*
-   * A snapshot on mount, then the pushes.
-   *
-   * Only the active tab of each group is mounted, so a pane in the background
-   * misses the completion it was waiting for and remounts with nothing. The
-   * higher `statusVersion` always wins, whichever run it belongs to — the
-   * counter is per conversation and across runs, so a snapshot answered after a
-   * newer push arrived loses rather than overwriting it.
-   */
-  useEffect(() => {
-    let live = true
-    setCollaboration(null)
-    const keepNewer = (next: CollaborationPush): void => {
-      setCollaboration((current) =>
-        current !== null && current.statusVersion >= next.statusVersion ? current : next
-      )
-    }
-    window.chorus
-      .collaborationStatus({ conversationId })
-      .then((answer) => {
-        if (live && answer.status !== null) keepNewer(answer.status)
-      })
-      .catch(() => {
-        // A snapshot nobody answered is a row that fills in at the next push.
-      })
-    const stop = window.chorus.onCollaborationStatus((status) => {
-      if (status.conversationId === conversationId) keepNewer(status)
-    })
-    return () => {
-      live = false
-      stop()
-    }
-  }, [conversationId])
-
-  const startCollaboration = useCallback(
-    (message: TranscriptMessage, preset: 'delivery' | 'build'): void => {
-      window.chorus
-        .startCollaboration({ conversationId, sourceEventId: message.eventId, preset })
-        .then((answer) => {
-          if (answer.outcome !== 'refused') return
-          const agent = answer.agentId ?? ''
-          setError(
-            t(`collaborate.refused.${answer.reason}`, {
-              agent: agent === '' ? '' : agent.charAt(0).toUpperCase() + agent.slice(1),
-            })
-          )
-        })
-        .catch((e: unknown) => {
-          setError(e instanceof Error ? e.message : String(e))
-        })
-    },
-    [conversationId, t]
-  )
-
   /** A passage selected in this pane's transcript, and where to offer to quote it. */
   const [selected, setSelected] = useState<{
     text: string
@@ -1875,44 +1708,6 @@ export function Session(props: {
        * costing a line each time.
        */
       grouped={groupedWith(view.messages[index - 1], message)}
-      onHandOff={
-        // Only offered when there is somebody to hand to, and only for an
-        // agent's own words — handing the user's message back is noise.
-        participants.length > 1 && isAgentId(message.actor)
-          ? (m) => {
-              const from = isAgentId(m.actor) ? m.actor : 'codex'
-              const to = participants.find((p) => p !== from)
-              if (to !== undefined) {
-                setHandoff({ from, to, sourceEventIds: [m.eventId] })
-              }
-            }
-          : undefined
-      }
-      /* Same condition as `onHandOff`; `Entry` narrows it to the last reply. */
-      onQuickHandOff={
-        participants.length > 1 && isAgentId(message.actor) ? quickHandOff : undefined
-      }
-      /*
-       * Who would take it over, so the quick labels can say so rather than
-       * leaving it to be inferred from the speaker.
-       *
-       * Resolved the same way `quickHandOff` resolves it — the other
-       * participant — and passed rather than derived in `Entry`, which knows
-       * this message's speaker and nothing about the cast.
-       */
-      /*
-       * The loop, offered only under Claude's own replies.
-       *
-       * Main refuses anything else anyway — the source has to be a completed
-       * `agent.message.completed` whose actor is `claude` — so showing it
-       * elsewhere would be offering a press that can only be refused.
-       */
-      onCollaborate={
-        participants.includes('codex') && message.actor === 'claude'
-          ? startCollaboration
-          : undefined
-      }
-      handOffTo={participants.find((p) => p !== message.actor)}
       /*
        * Absent until a language is set, which is the gate the selection offer
        * used and the reason is unchanged: an action that cannot say which
@@ -2401,20 +2196,6 @@ export function Session(props: {
         />
       )}
 
-      {handoff !== null && (
-        <HandoffComposer
-          conversationId={conversationId}
-          draft={handoff}
-          onClose={() => {
-            setHandoff(null)
-          }}
-          onSent={() => {
-            setHandoff(null)
-          }}
-          onError={setError}
-        />
-      )}
-
       {/*
        * This session's terminal was here, and Phase 4 slice 4d retired it.
        *
@@ -2491,59 +2272,6 @@ export function Session(props: {
             explainLanguage={explainLanguage}
             onAsk={openAboutQuestion}
           />
-        )}
-
-        {/*
-          What the run is doing, and what would clear it when it cannot finish.
-          Whenever the state is terminal and the agents are still owned, this
-          says so and names Restart — for `owned` exactly as much as for
-          `unattributable`, because an acknowledgement timeout paired with an
-          ambiguous delivery rejection leaves both release proofs unreachable.
-        */}
-        {collaboration !== null && (
-          <div className="collaboration-row" role="status">
-            <span className="collaboration-row-state">
-              {collaboration.state.phase === 'running'
-                ? /*
-                   * Two strings rather than a number that might be null. The
-                   * delivery pipeline does not know how long it is until the
-                   * planner's split has been read, and "3 of null" is worse
-                   * than a line that simply does not claim a length yet.
-                   */
-                  collaboration.stepTotal === null
-                  ? t('collaborate.runningUnknown', {
-                      step: t(COLLABORATION_STEP[collaboration.state.step]),
-                      index: collaboration.stepIndex,
-                    })
-                  : t('collaborate.running', {
-                      step: t(COLLABORATION_STEP[collaboration.state.step]),
-                      index: collaboration.stepIndex,
-                      total: collaboration.stepTotal,
-                    })
-                : t(collaborationStateKey(collaboration.state))}
-            </span>
-            {collaboration.state.phase === 'running' && (
-              <button
-                type="button"
-                className="collaboration-row-stop"
-                onClick={() => {
-                  window.chorus.stopCollaboration({ conversationId }).catch((e: unknown) => {
-                    setError(e instanceof Error ? e.message : String(e))
-                  })
-                }}
-              >
-                {t('collaborate.stop')}
-              </button>
-            )}
-            {collaboration.state.phase !== 'running' && collaboration.draining && (
-              <span className="collaboration-row-drain">
-                {t('collaborate.draining')}
-                <button type="button" className="collaboration-row-stop" onClick={props.onRestart}>
-                  {t('collaborate.restart')}
-                </button>
-              </span>
-            )}
-          </div>
         )}
 
         <Composer

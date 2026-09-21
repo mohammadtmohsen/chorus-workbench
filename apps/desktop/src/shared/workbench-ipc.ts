@@ -337,10 +337,12 @@ export type EditorReportKind =
   | 'snoozed'
   | 'cancelled'
   | 'no-suggestion'
+  | 'not-configured'
   | 'returned'
   | 'shown'
   | 'returned-not-shown'
   | 'language-service'
+  | 'context-collection'
 
 export interface EditorReport {
   readonly requestId: string
@@ -351,16 +353,96 @@ export interface EditorReport {
   readonly queryMs?: number
   readonly providerMissing?: boolean
   readonly queryTimedOut?: boolean
+  readonly emptyQueries?: number
+  readonly totalQueries?: number
+  readonly snippetResolveMs?: number
+  readonly snippetExtents?: readonly number[]
+  readonly snippetPaths?: readonly (string | null)[]
+  readonly memberContext?: boolean
+  readonly memberCount?: number
+  readonly memberReceiverMatched?: boolean
+  readonly typeContext?: boolean
+  readonly typeAnchors?: number
+  readonly typeExpanded?: boolean
+  readonly typeResolved?: number
+  readonly typeStale?: boolean
 }
 
+export const COMPLETION_PATH_LIMIT = 1024
 export const COMPLETION_TOKENS_PER_SIDE = 600
 export const COMPLETION_CHARACTERS_PER_SIDE = COMPLETION_TOKENS_PER_SIDE * 4
+export const COMPLETION_PREFIX_FLOOR = 1600
+export const COMPLETION_CONTEXT_CHARACTERS =
+  COMPLETION_CHARACTERS_PER_SIDE - COMPLETION_PREFIX_FLOOR
+export const COMPLETION_CONTEXT_SNIPPETS = 3
+export const COMPLETION_SNIPPET_SOURCE_CHARACTERS = COMPLETION_CHARACTERS_PER_SIDE
+
+export interface CompletionContextSnippet {
+  readonly text: string
+  readonly path: string | null
+}
+
+const HASH_COMMENT_LANGUAGES = new Set([
+  'python',
+  'ruby',
+  'perl',
+  'r',
+  'shellscript',
+  'yaml',
+  'toml',
+  'ini',
+  'makefile',
+  'dockerfile',
+])
+
+export function commentPrefix(languageId: string): string {
+  return HASH_COMMENT_LANGUAGES.has(languageId) ? '#' : '//'
+}
+
+export interface AssembledContext {
+  readonly text: string
+  readonly whole: number
+}
+
+export function contextualise(languageId: string, snippet: CompletionContextSnippet): string {
+  const marker = commentPrefix(languageId)
+  const lines: string[] = []
+  if (snippet.path !== null) lines.push(`${marker} ${snippet.path}`)
+  for (const line of snippet.text.split('\n')) lines.push(`${marker} ${line}`)
+  return lines.join('\n')
+}
+
+export function assembleContext(
+  languageId: string,
+  context: readonly CompletionContextSnippet[]
+): AssembledContext {
+  const blocks: string[] = []
+  let whole = 0
+  let total = 0
+
+  for (const snippet of context.slice(0, COMPLETION_CONTEXT_SNIPPETS)) {
+    const block = contextualise(languageId, snippet)
+    const addition = block.length + (blocks.length === 0 ? 1 : 2)
+    if (total + addition > COMPLETION_CONTEXT_CHARACTERS) continue
+    total += addition
+    blocks.push(block)
+    whole += 1
+  }
+
+  return { text: blocks.length === 0 ? '' : `${blocks.join('\n\n')}\n`, whole }
+}
+
+export interface CompletionReply {
+  readonly configured: boolean
+  readonly text: string | null
+}
 
 export interface CompletionPayload {
   readonly prefix: string
   readonly suffix: string
   readonly languageId: string
   readonly path: string | null
+  readonly context: readonly CompletionContextSnippet[]
 }
 
 export const WORKBENCH_ASK_DIFF_CHANNEL = 'workbench:askDiff'
@@ -878,7 +960,7 @@ export interface ChorusWorkbenchApi {
   readonly requestCompletion: (
     requestId: string,
     payload: CompletionPayload
-  ) => Promise<string | null>
+  ) => Promise<CompletionReply>
   readonly cancelCompletion: (requestId: string) => void
   readonly reportEditorOutcome: (report: EditorReport) => void
   readonly probeCompletionCache: () => Promise<void>

@@ -318,7 +318,13 @@ const api: ChorusWorkbenchApi = {
 
   requestCompletion: async (requestId: string, payload: CompletionPayload) => {
     const raw: unknown = await ipcRenderer.invoke(COMPLETION_CHANNEL, requestId, payload)
-    return typeof raw === 'string' ? raw : null
+    if (typeof raw !== 'object' || raw === null) return { configured: false, text: null }
+    const record = raw as Record<string, unknown>
+    const text = record['text']
+    return {
+      configured: record['configured'] === true,
+      text: typeof text === 'string' ? text : null,
+    }
   },
 
   cancelCompletion: (requestId: string) => {

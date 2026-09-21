@@ -41,24 +41,18 @@ import {
 } from '@chorus/event-store'
 import {
   callRule,
-  composeBrief,
   composeCarryover,
   composeHistory,
   ConversationService,
   DEFAULT_PROFILE_ID,
-  defaultIntent,
   findReplyHandoff,
   parseMentions,
   profileById,
   PROFILES,
   SessionGrants,
   SupervisedSession,
-  summariseHandoff,
-  withCallRule,
   withCatchup,
   type CarryoverSource,
-  type HandoffIntent,
-  type HandoffSource,
   type PermissionProfile,
 } from '@chorus/orchestrator'
 import {
@@ -66,7 +60,6 @@ import {
   isAgentId,
   newConversationId,
   newHandoffId,
-  uuidv7,
   type AgentId,
   type ApprovalId,
   type Logger,
@@ -74,18 +67,6 @@ import {
 import { relativeWithin } from '@chorus/workspace'
 import type { ActivityPush, ContextUsagePush, TasksPush } from '../shared/ipc.js'
 import { UNREAD_EVENT_TYPES } from '../shared/unread.js'
-import {
-  CollaborationRun,
-  dispatchAndWatch,
-  PLANNER,
-  preflight,
-  rolesFor,
-  type CollaborationStart,
-  type CoordinatorPort,
-  type HandoffDispatch,
-  type Preset,
-  type RunStatus,
-} from './collaborate.js'
 import {
   openConversations,
   readOpenProjects,
@@ -1974,13 +1955,6 @@ export class ChorusRuntime {
   async send(conversationId: string, text: string, intent?: 'go'): Promise<SendResult> {
     const conversation = this.require(conversationId)
     /*
-     * Synchronously, before the append and before any delivery: a message the
-     * person typed is never refused, so what pays is the run. It also costs
-     * attribution, because something other than the coordinator has now
-     * dispatched to an agent it holds and the log does not record the routing.
-     */
-    this.collaborations.get(conversationId)?.cancel('userMessage')
-    /*
      * Addressable is the cast, not the live map, and the two differ exactly when
      * something went wrong.
      *
@@ -2851,107 +2825,6 @@ export class ChorusRuntime {
     return this.store.listAsides(conversationId, sourceEventId)
   }
 
-  /**
-   * Builds the packet that would cross to another agent — without sending it.
-   *
-   * The user sees and edits this before anything moves. Agents keep separate
-   * contexts, so a handoff *is* the cross-agent context; composing it silently
-   * would be Chorus deciding what one agent knows about another (plan §4.5).
-   */
-  prepareHandoff(
-    conversationId: string,
-    options: {
-      from: AgentId
-      to: AgentId
-      sourceEventIds: readonly string[]
-      includeDiff?: boolean
-      intent?: HandoffIntent
-      note?: string
-    }
-  ): { brief: string; intent: HandoffIntent; summary: string; sourceCount: number } {
-    const conversation = this.require(conversationId)
-    if (!conversation.participants.has(options.to)) {
-      throw new Error(`"${options.to}" is not in this conversation`)
-    }
-
-    const sources = this.sourcesFor(conversationId, options.sourceEventIds)
-    if (sources.length === 0) throw new Error('Nothing was selected to hand off')
-
-    const intent = options.intent ?? defaultIntent(options.from, options.to)
-    const diff = options.includeDiff === true ? this.latestDiff(conversationId) : undefined
-
-    return {
-      intent,
-      sourceCount: sources.length,
-      brief: composeBrief({
-        from: options.from,
-        to: options.to,
-        intent,
-        sources,
-        cwd: conversation.cwd,
-        diff,
-        note: options.note,
-      }),
-      summary: summariseHandoff({
-        from: options.from,
-        to: options.to,
-        intent,
-        sourceCount: sources.length,
-        includesDiff: diff !== undefined && diff.trim() !== '',
-      }),
-    }
-  }
-
-  /** Records the handoff and delivers the brief the user approved. */
-  async sendHandoff(
-    conversationId: string,
-    options: {
-      from: AgentId
-      to: AgentId
-      sourceEventIds: readonly string[]
-      brief: string
-    }
-  ): Promise<{ handoffId: string }> {
-    const conversation = this.require(conversationId)
-    const target = conversation.participants.get(options.to)
-    if (target === undefined) throw new Error(`"${options.to}" is not in this conversation`)
-    if (options.brief.trim() === '') throw new Error('The brief is empty')
-
-    /*
-     * A press, not something typed — so refusing costs nothing and is the safe
-     * answer while a run still owns the agents. Once it does not, the manual
-     * handoff ends the run and takes its attribution with it.
-     */
-    const run = this.collaborations.get(conversationId)
-    if (run?.status().draining === true) {
-      throw new Error('A collaboration is still finishing in this conversation')
-    }
-    run?.cancel('manualHandoff')
-
-    const handoffId = newHandoffId()
-    this.store.append({
-      conversationId,
-      actor: 'user',
-      payload: {
-        type: 'handoff.created',
-        handoffId,
-        from: options.from,
-        to: options.to,
-        sourceEventIds: [...options.sourceEventIds],
-        brief: options.brief,
-      },
-    })
-
-    // The receiving agent is now the one an unaddressed follow-up continues with.
-    conversation.lastAddressed = options.to
-    // The brief is context the user curated by hand; replaying the same events
-    // as catch-up on the next message would say it all twice.
-    target.seenSeq = this.store.lastSeq()
-    const roster = [...conversation.participants.keys()]
-    await target.service.deliver(withCallRule(roster, options.brief))
-    return { handoffId }
-  }
-
   private followHandoffs(events: readonly StoredEvent[]): void {
     for (const event of events) {
       const from = event.actor
@@ -2984,8 +2857,6 @@ export class ChorusRuntime {
     const { conversationId } = conversation
     const handoff = findReplyHandoff(reply.text, from, AGENT_IDS)
     if (handoff === null) return
-    const run = this.collaborations.get(conversationId)?.status()
-    if (run !== undefined && (run.state.phase === 'running' || run.draining)) return
 
     const epoch = conversation.handoffEpoch
     try {
@@ -3054,186 +2925,6 @@ export class ChorusRuntime {
     }
   }
 
-  private sourcesFor(conversationId: string, eventIds: readonly string[]): HandoffSource[] {
-    const wanted = new Set(eventIds)
-    const sources: HandoffSource[] = []
-
-    for (const event of this.store.read(conversationId)) {
-      if (!wanted.has(event.id)) continue
-      const payload = event.payload as { text?: string }
-      if (typeof payload.text !== 'string' || payload.text.trim() === '') continue
-      sources.push({ eventId: event.id, actor: event.actor, text: payload.text })
-    }
-    return sources
-  }
-
-  /** The most recent aggregate diff, when an agent produced one. */
-  private latestDiff(conversationId: string): string | undefined {
-    const diffs = this.store.read(conversationId, { types: ['diff.updated'] })
-    const last = diffs.at(-1)?.payload as { unifiedDiff?: string } | undefined
-    return last?.unifiedDiff
-  }
-
-  /*
-   * Collaboration runs, in memory, one per conversation.
-   *
-   * Deliberately not durable: if the app dies the run dies, and the transcript
-   * still holds every dispatch and every reply because each hop was a
-   * `handoff.created` and each reply an ordinary agent message. There is no
-   * state left behind to be wrong about, which is the whole benefit.
-   */
-  private readonly collaborations = new Map<string, CollaborationRun>()
-  /** One monotonic counter per conversation, across runs. The renderer's only ordering key. */
-  private readonly statusVersions = new Map<string, number>()
-  /** Retained until the next run starts, so a remounting pane sees how the last one ended. */
-  private readonly lastCollaborationStatus = new Map<string, RunStatus>()
-  private onCollaborationStatus: ((status: RunStatus) => void) | undefined
-
-  onCollaborationStatusReported(listener: (status: RunStatus) => void): void {
-    this.onCollaborationStatus = listener
-  }
-
-  collaborationStatus(conversationId: string): RunStatus | null {
-    return this.lastCollaborationStatus.get(conversationId) ?? null
-  }
-
-  /**
-   * Starts a review loop over one completed Claude reply.
-   *
-   * Every check is here rather than in the renderer, which renders untrusted
-   * agent output and is the least trustworthy thing in the process tree. A
-   * refusal carries its reason, and `busy` carries the agent whose turn the log
-   * never closed — restarting that agent is what clears it.
-   */
-  startCollaboration(
-    conversationId: string,
-    options: { sourceEventId: string; preset: Preset }
-  ): CollaborationStart {
-    const conversation = this.require(conversationId)
-
-    const current = this.collaborations.get(conversationId)?.status()
-    if (current?.state.phase === 'running') {
-      return { outcome: 'refused', reason: 'running', agentId: null }
-    }
-    if (current?.draining === true) {
-      return { outcome: 'refused', reason: 'draining', agentId: null }
-    }
-
-    /*
-     * The roles this preset actually dispatches to, asked of the file that
-     * dispatches. A second hardcoded pair here would be a second place to
-     * disagree with `collaborate.ts` about who a run needs.
-     */
-    for (const agentId of rolesFor(options.preset)) {
-      if (!conversation.participants.has(agentId)) {
-        return { outcome: 'refused', reason: 'missingAgent', agentId }
-      }
-    }
-
-    const events = this.store.read(conversationId)
-    const source = events.find((event) => event.id === options.sourceEventId)
-    if (source === undefined) return { outcome: 'refused', reason: 'unknownEvent', agentId: null }
-    if (source.payload.type !== 'agent.message.completed') {
-      return { outcome: 'refused', reason: 'notAgentMessage', agentId: null }
-    }
-    /*
-     * A run starts from the planner's own reply, because the first hop reviews
-     * it. Which agent that is now comes from `collaborate.ts` rather than being
-     * spelled here — the guard is about the role and was named for the agent
-     * that happened to hold it.
-     */
-    if (source.actor !== PLANNER) {
-      return { outcome: 'refused', reason: 'notPlanner', agentId: null }
-    }
-
-    const ready = preflight(events)
-    if (!ready.ok) return { outcome: 'refused', reason: 'busy', agentId: ready.busy }
-
-    this.lastCollaborationStatus.delete(conversationId)
-    const run = new CollaborationRun(this.collaborationPort(), {
-      conversationId,
-      preset: options.preset,
-      sourceEventId: options.sourceEventId,
-    })
-    this.collaborations.set(conversationId, run)
-    this.log.info('collaboration started', {
-      conversationId,
-      preset: options.preset,
-      runId: run.runId,
-    })
-    // Not awaited: the run reports through the push channel, and an IPC call
-    // that waited for it would hold the renderer for the length of four turns.
-    void run.start()
-    return { outcome: 'started', runId: run.runId }
-  }
-
-  stopCollaboration(conversationId: string): void {
-    this.collaborations.get(conversationId)?.cancel('stop')
-  }
-
-  private collaborationPort(): CoordinatorPort {
-    return {
-      handoff: (input) => this.deliverCollaborationHandoff(input),
-      sessionRef: (conversationId, agentId) =>
-        this.active.get(conversationId)?.participants.get(agentId)?.session.sessionRef ?? null,
-      watch: (request) => dispatchAndWatch(this.store, request),
-      read: (conversationId) => this.store.read(conversationId),
-      nextStatusVersion: (conversationId) => {
-        const next = (this.statusVersions.get(conversationId) ?? 0) + 1
-        this.statusVersions.set(conversationId, next)
-        return next
-      },
-      onStatus: (status) => {
-        this.lastCollaborationStatus.set(status.conversationId, status)
-        this.onCollaborationStatus?.(status)
-      },
-      newRunId: () => uuidv7(),
-    }
-  }
-
-  /**
-   * One hop, recorded and delivered **without advancing `seenSeq`**.
-   *
-   * `sendHandoff` assigns `target.seenSeq = this.store.lastSeq()`, and a scalar
-   * watermark cannot say *which* events were shown — moving it would mark the
-   * user's original request as seen by an agent that was never shown it.
-   * Nothing restores an old value either: a restore is a race, and the point is
-   * never to move it. Not reachable over IPC.
-   *
-   * `actor: 'system'` rather than `'user'`, because a round Chorus is driving
-   * and a handoff a person made are different facts — and the actor is what
-   * separates them everywhere else in the log.
-   */
-  private async deliverCollaborationHandoff(input: HandoffDispatch): Promise<void> {
-    const conversation = this.require(input.conversationId)
-    const target = conversation.participants.get(input.to)
-    if (target === undefined) throw new Error(`"${input.to}" is not in this conversation`)
-
-    const { brief } = this.prepareHandoff(input.conversationId, {
-      from: input.from,
-      to: input.to,
-      sourceEventIds: input.sourceEventIds,
-      intent: input.intent,
-      note: input.note,
-    })
-
-    this.store.append({
-      conversationId: input.conversationId,
-      actor: 'system',
-      payload: {
-        type: 'handoff.created',
-        handoffId: newHandoffId(),
-        from: input.from,
-        to: input.to,
-        sourceEventIds: [...input.sourceEventIds],
-        brief,
-      },
-    })
-
-    conversation.lastAddressed = input.to
-    await target.service.deliver(brief)
-  }
-
   /**
    * Ends one conversation, leaving every other one running.
    *
@@ -3242,8 +2933,6 @@ export class ChorusRuntime {
    */
   async closeConversation(conversationId: string): Promise<void> {
     const conversation = this.require(conversationId)
-    this.collaborations.get(conversationId)?.cancel('shutdown')
-    this.collaborations.delete(conversationId)
     this.active.delete(conversationId)
     this.rememberOpen()
     this.onConversations?.()

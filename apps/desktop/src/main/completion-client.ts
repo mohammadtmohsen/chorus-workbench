@@ -2,7 +2,15 @@ import { performance } from 'node:perf_hooks'
 import type { Logger } from '@chorus/shared'
 import { readAgentKey, type SecretId } from './agent-secrets.js'
 import { readSettings } from './settings.js'
-import { COMPLETION_CHARACTERS_PER_SIDE, type CompletionPayload } from '../shared/workbench-ipc.js'
+import {
+  COMPLETION_CHARACTERS_PER_SIDE,
+  COMPLETION_CONTEXT_SNIPPETS,
+  COMPLETION_PATH_LIMIT,
+  COMPLETION_SNIPPET_SOURCE_CHARACTERS,
+  assembleContext,
+  type CompletionPayload,
+  type CompletionReply,
+} from '../shared/workbench-ipc.js'
 
 export type CompletionProvider = 'deepseek' | 'codestral'
 
@@ -17,7 +25,6 @@ const TIMEOUT_MS = 2000
 const MAX_TOKENS = 64
 const STOP = ['\n\n']
 const LANGUAGE_ID_LIMIT = 64
-const PATH_LIMIT = 1024
 
 const SECRETS: Record<CompletionProvider, SecretId> = {
   deepseek: 'completion-deepseek',
@@ -60,6 +67,10 @@ function resolveCompletion(userData: string): ResolvedCompletion | null {
   return null
 }
 
+export function completionConfigured(userData: string): boolean {
+  return resolveCompletion(userData) !== null
+}
+
 export function isCompletionPayload(value: unknown): value is CompletionPayload {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) return false
   const record = value as Record<string, unknown>
@@ -71,7 +82,20 @@ export function isCompletionPayload(value: unknown): value is CompletionPayload 
   if (typeof prefix !== 'string' || prefix.length > COMPLETION_CHARACTERS_PER_SIDE) return false
   if (typeof suffix !== 'string' || suffix.length > COMPLETION_CHARACTERS_PER_SIDE) return false
   if (typeof languageId !== 'string' || languageId.length > LANGUAGE_ID_LIMIT) return false
-  if (path !== null && (typeof path !== 'string' || path.length > PATH_LIMIT)) return false
+  if (path !== null && (typeof path !== 'string' || path.length > COMPLETION_PATH_LIMIT))
+    return false
+
+  const context = record['context']
+  if (!Array.isArray(context) || context.length > COMPLETION_CONTEXT_SNIPPETS) return false
+  for (const entry of context) {
+    if (typeof entry !== 'object' || entry === null || Array.isArray(entry)) return false
+    const snippet = entry as Record<string, unknown>
+    const text = snippet['text']
+    const snippetPath = snippet['path']
+    if (typeof text !== 'string' || text.length > COMPLETION_SNIPPET_SOURCE_CHARACTERS) return false
+    if (snippetPath === null) continue
+    if (typeof snippetPath !== 'string' || snippetPath.length > COMPLETION_PATH_LIMIT) return false
+  }
   return true
 }
 
@@ -150,10 +174,12 @@ const EDITOR_REPORT_KINDS = new Set<string>([
   'snoozed',
   'cancelled',
   'no-suggestion',
+  'not-configured',
   'returned',
   'shown',
   'returned-not-shown',
   'language-service',
+  'context-collection',
 ])
 
 function reportedMs(value: unknown): number | undefined {
@@ -174,6 +200,33 @@ export function recordEditorOutcome(raw: unknown): void {
   const queryMs = reportedMs(record['queryMs'])
   const providerMissing = record['providerMissing'] === true
   const queryTimedOut = record['queryTimedOut'] === true
+  const emptyQueries = reportedCount(record['emptyQueries'])
+  const totalQueries = reportedCount(record['totalQueries'])
+  const snippetResolveMs = reportedCount(record['snippetResolveMs'])
+  const extents = record['snippetExtents']
+  const snippetExtents = Array.isArray(extents)
+    ? extents.filter((value): value is number => reportedCount(value) !== null).slice(0, 32)
+    : null
+  const paths = record['snippetPaths']
+  const snippetPaths = Array.isArray(paths)
+    ? paths
+        .filter((value): value is string | null => value === null || typeof value === 'string')
+        .slice(0, 32)
+        .map((value) => (value === null ? null : value.slice(0, COMPLETION_PATH_LIMIT)))
+    : null
+  const context = record['memberContext']
+  const memberContext = typeof context === 'boolean' ? context : null
+  const matched = record['memberReceiverMatched']
+  const memberReceiverMatched = typeof matched === 'boolean' ? matched : null
+  const memberCount = reportedCount(record['memberCount'])
+  const type = record['typeContext']
+  const typeContext = typeof type === 'boolean' ? type : null
+  const expanded = record['typeExpanded']
+  const typeExpanded = typeof expanded === 'boolean' ? expanded : null
+  const typeAnchors = reportedCount(record['typeAnchors'])
+  const typeResolved = reportedCount(record['typeResolved'])
+  const stale = record['typeStale']
+  const typeStale = typeof stale === 'boolean' ? stale : null
 
   log.info('completion outcome', {
     requestId,
@@ -184,6 +237,19 @@ export function recordEditorOutcome(raw: unknown): void {
     ...(queryMs === undefined ? {} : { queryMs }),
     ...(providerMissing ? { providerMissing } : {}),
     ...(queryTimedOut ? { queryTimedOut } : {}),
+    ...(emptyQueries === null ? {} : { emptyQueries }),
+    ...(totalQueries === null ? {} : { totalQueries }),
+    ...(snippetResolveMs === null ? {} : { snippetResolveMs }),
+    ...(snippetExtents === null ? {} : { snippetExtents }),
+    ...(snippetPaths === null ? {} : { snippetPaths }),
+    ...(memberContext === null ? {} : { memberContext }),
+    ...(memberCount === null ? {} : { memberCount }),
+    ...(memberReceiverMatched === null ? {} : { memberReceiverMatched }),
+    ...(typeContext === null ? {} : { typeContext }),
+    ...(typeAnchors === null ? {} : { typeAnchors }),
+    ...(typeExpanded === null ? {} : { typeExpanded }),
+    ...(typeResolved === null ? {} : { typeResolved }),
+    ...(typeStale === null ? {} : { typeStale }),
   })
 }
 
@@ -201,15 +267,23 @@ export async function requestCompletion(
   payload: CompletionPayload,
   callerSignal: AbortSignal,
   timeoutMs: number = TIMEOUT_MS
-): Promise<string | null> {
+): Promise<CompletionReply> {
   const credential = resolveCompletion(userData)
   if (credential === null) {
     log.info('completion skipped', { requestId, reason: 'no key for the chosen provider' })
-    return null
+    return { configured: false, text: null }
   }
 
   const provider = credential.provider
-  log.info('completion requested', { requestId, provider, prefix: payload.prefix.length })
+  const assembledContext = assembleContext(payload.languageId, payload.context)
+  log.info('completion requested', {
+    requestId,
+    provider,
+    prefix: payload.prefix.length,
+    context: payload.context.length,
+    contextChars: assembledContext.text.length,
+    snippetsWhole: assembledContext.whole,
+  })
   const endpoint = ENDPOINTS[provider]
   const timeoutSignal = AbortSignal.timeout(timeoutMs)
   const signal = AbortSignal.any([callerSignal, timeoutSignal])
@@ -221,7 +295,7 @@ export async function requestCompletion(
       headers: { authorization: `Bearer ${credential.key}`, 'content-type': 'application/json' },
       body: JSON.stringify({
         model: endpoint.model,
-        prompt: payload.prefix,
+        prompt: `${assembledContext.text}${payload.prefix}`,
         suffix: payload.suffix,
         max_tokens: MAX_TOKENS,
         temperature: 0,
@@ -240,7 +314,7 @@ export async function requestCompletion(
         status: response.status,
         responseHeaderArrivalMs,
       })
-      return null
+      return { configured: true, text: null }
     }
 
     const body: unknown = await response.json()
@@ -258,16 +332,16 @@ export async function requestCompletion(
       responseBodyParsedMs,
       ...outcome,
     })
-    return text
+    return { configured: true, text }
   } catch {
-    if (callerSignal.aborted) return null
+    if (callerSignal.aborted) return { configured: true, text: null }
     const elapsedMs = Math.round(performance.now() - issuedAt)
     if (timeoutSignal.aborted) {
       log.warn('completion request timed out', { requestId, provider, elapsedMs })
-      return null
+      return { configured: true, text: null }
     }
     log.warn('completion request failed', { requestId, provider, elapsedMs })
-    return null
+    return { configured: true, text: null }
   }
 }
 
@@ -278,7 +352,7 @@ const PROBE_TIMEOUT_MS = 20_000
 
 function probePayload(characters: number): CompletionPayload {
   const prefix = PROBE_LINE.repeat(Math.ceil(characters / PROBE_LINE.length)).slice(0, characters)
-  return { prefix, suffix: '', languageId: 'typescript', path: null }
+  return { prefix, suffix: '', languageId: 'typescript', path: null, context: [] }
 }
 
 function wait(ms: number): Promise<void> {

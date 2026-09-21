@@ -7,7 +7,6 @@ import { FileDiff } from './FileDiff.js'
 import { MarkdownView } from './MarkdownView.js'
 import { offersToAct } from './offer.js'
 import type { TranscriptMessage } from './transcript.js'
-import type { HandoffIntent } from './HandoffComposer.js'
 import { splitTrailingPaths } from './attach.js'
 import { SentAttachments } from './SentAttachments.js'
 import { useTypewriter } from './useTypewriter.js'
@@ -535,14 +534,10 @@ function foldedOmitted(
 export const Entry = memo(function Entry({
   message,
   cwd = '',
-  onHandOff,
-  onQuickHandOff,
-  handOffTo,
   onOpenFile,
   onExplain,
   onRecap,
   onGo,
-  onCollaborate,
   answersThinking = false,
   final = false,
   held = false,
@@ -561,51 +556,6 @@ export const Entry = memo(function Entry({
   live?: boolean
   /** The project directory, so a changed file reads as a project path. */
   cwd?: string
-  /** Absent when there is nobody to hand to — a one-agent conversation. */
-  onHandOff?: ((message: TranscriptMessage) => void) | undefined
-  /**
-   * The same handoff without the sheet: one click, one intent, sent.
-   *
-   * **It does not include the diff, and that is the condition it was accepted
-   * on.** `HandoffComposer`'s own header states the principle — the brief *is*
-   * what the receiving agent will know, so sending one unseen is Chorus deciding
-   * that for the user, which §4.5 exists to prevent. A packet of "this reply,
-   * with this instruction" is small enough to predict without reading it; one
-   * carrying the working tree's diff is not. So the quick path is restricted to
-   * the predictable half and the sheet keeps the rest.
-   *
-   * Gated on `final` at the point of use, like `onRecap`: the offer is about the
-   * reply you are looking at, and a row of them down the whole transcript is
-   * three more things to read per message for an action almost always wanted on
-   * the newest one.
-   */
-  onQuickHandOff?: ((message: TranscriptMessage, intent: HandoffIntent) => void) | undefined
-  /**
-   * Starts a review loop over this reply, rather than one transfer of it.
-   *
-   * Two presses rather than a menu, because the row already stacks its choices
-   * one per line and each label can carry what it will cost — `One-shot` is a
-   * single review, `Guided` reviews, hands the objections back, and checks the
-   * answer. A popover would be a third way to say the same thing, drawn over a
-   * pane that cannot host it.
-   *
-   * `final` only, like the quick intents: the offer is about the reply you are
-   * looking at.
-   */
-  onCollaborate?: ((message: TranscriptMessage, preset: 'delivery' | 'build') => void) | undefined
-  /**
-   * Who the quick actions would hand to, so the labels can say so.
-   *
-   * The sheet can afford `Implement this` because its header already reads
-   * `Claude → Codex`; a label on the transcript has no such header, and "who
-   * takes this over" is the one thing you need before clicking something that
-   * sends. So the name is in the label rather than in a tooltip.
-   *
-   * Passed in rather than derived, because `Entry` knows this message's speaker
-   * and nothing about the cast — the other participant is `Session`'s to name,
-   * and a conversation could one day have more than two.
-   */
-  handOffTo?: TranscriptMessage['actor'] | undefined
   /**
    * Opens a file this row names, in VS Code.
    *
@@ -1072,8 +1022,7 @@ export const Entry = memo(function Entry({
       */}
       {message.kind === 'message' &&
         message.status === 'complete' &&
-        (onHandOff !== undefined ||
-          onExplain !== undefined ||
+        (onExplain !== undefined ||
           (final && onRecap !== undefined) ||
           (final && onGo !== undefined && offersToAct(message.text))) && (
           <div className="entry-actions">
@@ -1151,117 +1100,6 @@ export const Entry = memo(function Entry({
               >
                 {t('aside.recap')}
               </button>
-            )}
-            {/*
-              Its own line, under Explain simply.
-
-              It shared the left of the first line with Explain simply, and the
-              two ran together as one phrase: "Hand off → Explain simply" reads
-              as an instruction to hand off in order to explain, which is not
-              what either does. The arrow is what makes it happen — a label
-              ending in `→` invites the next word to complete it.
-
-              Sending the reply to the *other* agent is also the only thing on
-              this row that leaves this conversation's own thread, so a line to
-              itself is the honest shape rather than only a way of breaking the
-              phrase.
-
-              Same mechanism as `Go ahead` below: `flex-basis: 100%` in the
-              wrapping row, so `.entry` keeps its three-row grid template and
-              this stays a change to one rule.
-
-              It has since become the line rather than one label on it: the three
-              quick intents stack down its left and the arrow sits at its right,
-              under `Where are we?`. Both halves are below.
-            */}
-            {onHandOff !== undefined && (
-              <span className="entry-actions-handoff">
-                {/*
-                  The sheet's three intents, one per line, down the left.
-
-                  Stacked rather than strung along one line because each names
-                  the agent that would take the reply over — `Codex implements
-                  this` — and three of those side by side is a paragraph, not a
-                  row of controls. One per line they read as a short list of
-                  answers to the same question, which is what they are.
-
-                  `final` only. The offer is about the reply you are looking at,
-                  and three more labels under every message in the transcript is
-                  a lot of chrome for something almost always wanted on the
-                  newest one — the same rule `Recap` follows two blocks up, and
-                  for the same reason.
-
-                  **These send.** No sheet, no diff — see `onQuickHandOff` for
-                  why that pair of restrictions travels together, and why the
-                  name is in the label rather than left to be inferred.
-                */}
-                <span className="entry-actions-intents" inert={held}>
-                  {final &&
-                    onQuickHandOff !== undefined &&
-                    (
-                      [
-                        ['implement', 'handoff.quickImplement'],
-                        ['review', 'handoff.quickReview'],
-                        ['discuss', 'handoff.quickDiscuss'],
-                      ] as const
-                    ).map(([intent, key]) => (
-                      <button
-                        key={intent}
-                        type="button"
-                        className="entry-action entry-action--quick"
-                        data-entry-action={`handoff-${intent}`}
-                        onClick={() => {
-                          onQuickHandOff(message, intent)
-                        }}
-                      >
-                        {t(key, { to: displayName(handOffTo) })}
-                      </button>
-                    ))}
-                  {final &&
-                    onCollaborate !== undefined &&
-                    (
-                      [
-                        ['delivery', 'collaborate.delivery'],
-                        ['build', 'collaborate.build'],
-                      ] as const
-                    ).map(([preset, key]) => (
-                      <button
-                        key={preset}
-                        type="button"
-                        className="entry-action entry-action--quick"
-                        data-entry-action={`collaborate-${preset}`}
-                        onClick={() => {
-                          onCollaborate(message, preset)
-                        }}
-                      >
-                        {t(key, { to: displayName(handOffTo) })}
-                      </button>
-                    ))}
-                </span>
-                {/*
-                  The arrow, at the right — under `Where are we?` rather than
-                  under `Explain simply`.
-
-                  The first line already splits by kind: what you can ask of this
-                  reply on the left, what you can do with it on the right. The
-                  three intents are asks and the sheet is the full form behind
-                  them, so this line repeats that split rather than inventing a
-                  second arrangement. It also stops the arrow leading a line it
-                  no longer summarises — `Hand off → Codex implements this` reads
-                  as one sentence, which is the same swallowing that moved it off
-                  the first line in the first place.
-                */}
-                <button
-                  type="button"
-                  className="entry-action"
-                  data-entry-action="handoff"
-                  onClick={() => {
-                    onHandOff(message)
-                  }}
-                >
-                  {t('handoff.action')}
-                </button>
-              </span>
             )}
             {/*
               Its own line, and a shape rather than a word.

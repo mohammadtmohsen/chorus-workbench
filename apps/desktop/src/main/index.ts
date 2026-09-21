@@ -17,7 +17,6 @@ import {
   forwardEventsToRenderer,
   forwardIdeContextToRenderer,
   forwardContextUsageToRenderer,
-  forwardCollaborationToRenderer,
   forwardTasksToRenderer,
   forwardActivityToRenderer,
   forwardDiagnosticsToRenderer,
@@ -355,7 +354,6 @@ void app.whenReady().then(async () => {
   forwardLimitsToRenderer(runtime)
   forwardContextUsageToRenderer(runtime)
   forwardTasksToRenderer(runtime)
-  forwardCollaborationToRenderer(runtime)
   forwardActivityToRenderer(runtime)
   forwardTerminalToRenderer(runtime)
   // Takes no runtime: the watches are keyed by the conversations that ask for

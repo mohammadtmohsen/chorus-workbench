@@ -351,7 +351,7 @@
    * meters ran under the border. 76px is that measurement plus the same gutter
    * the tiles get.
    */
-  --rail: 76px;
+  --rail: 92px;
   /*
    * The rail's own top inset.
    *
@@ -3909,6 +3909,7 @@ body {
  * to write rather than as an input with a button in it.
  */
 .composer-line {
+  position: relative;
   display: flex;
   flex-direction: column;
   align-items: stretch;
@@ -4800,123 +4801,6 @@ input::placeholder {
 }
 
 /*
- * `Hand off →` on a line of its own, under `Explain simply`.
- *
- * Beside it the arrow swallowed the next label — the row read "Hand off →
- * Explain simply", one phrase rather than two controls. The break is the fix,
- * and it is also the truer grouping: this is the only action here that sends
- * the reply out of this thread to the other agent.
- *
- * Same `flex-basis: 100%` line break as `.entry-actions-go`, for the same
- * reason — no new grid area, so `.entry` keeps its three-row template.
- */
-/*
- * Intents down the left, the arrow at the right — the first line's split again.
- *
- * `align-items: flex-start` rather than `baseline`, so the arrow sits level with
- * the *first* intent instead of the last: it is under `Where are we?` on the
- * line above, and dropping it to the bottom of a three-line stack would put it
- * nowhere in particular.
- */
-.entry-actions-handoff {
-  flex-basis: 100%;
-  display: flex;
-  justify-content: space-between;
-  align-items: flex-start;
-  gap: calc(var(--step) * 2);
-  margin-top: var(--step);
-}
-
-/*
- * One intent per line.
- *
- * Each names the agent taking over — `Codex implements this` — so three side by
- * side read as a sentence rather than as three choices. Stacked, they are a
- * short list of answers to one question, which is what they are.
- *
- * `align-items: flex-start` so each button is only as wide as its own label:
- * stretched to the column's width, the hover target would extend well past the
- * text and land on nothing.
- */
-.entry-actions-intents {
-  display: flex;
-  flex-direction: column;
-  align-items: flex-start;
-  gap: var(--step);
-  min-width: 0;
-}
-
-/*
- * The three intents, quieter than the arrow that opens the sheet.
- *
- * They are shortcuts through it, not siblings of it, and the arrow is what says
- * "handing off happens here" — so they sit a step back in weight and read as its
- * options rather than as three more separate offers. Hover brings them up to the
- * same colour, because at the moment of pressing they are exactly as real.
- *
- * **Not dimmed to the point of looking disabled**: each one sends, immediately,
- * with no sheet in between. A control that acts on one click should not be the
- * faintest thing on the row.
- */
-.entry-action--quick {
-  color: color-mix(in srgb, var(--voice) 45%, var(--text-muted));
-}
-
-/*
- * A review loop's state, above the composer.
- *
- * In the conversation column rather than over the pane, so it needs no shell
- * overlay — nothing here is drawn on top of a project's workbench view.
- *
- * It stays up after the run ends, because the row is where a terminal run that
- * still owns its agents says so and offers Restart. A row that vanished on
- * completion would take that remedy with it.
- */
-.collaboration-row {
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: calc(var(--step) * 2);
-  padding: var(--step) calc(var(--step) * 2);
-  margin: 0 0 var(--step);
-  border-radius: var(--radius-sm, 6px);
-  background: color-mix(in srgb, var(--voice) 6%, transparent);
-  font-size: 0.85em;
-  color: var(--text-muted);
-}
-
-.collaboration-row-state {
-  min-width: 0;
-}
-
-.collaboration-row-drain {
-  display: flex;
-  align-items: baseline;
-  gap: var(--step);
-  white-space: nowrap;
-}
-
-/*
- * A button rather than a label, because it is the only thing on the row that
- * does something — and `Stop collaboration` rather than `Stop`, since the
- * agent's turn deliberately keeps running and a shorter word would be a lie the
- * transcript contradicts a moment later.
- */
-.collaboration-row-stop {
-  border: 0;
-  background: none;
-  padding: 0;
-  font: inherit;
-  color: var(--voice);
-  cursor: pointer;
-  white-space: nowrap;
-}
-
-.collaboration-row-stop:hover {
-  text-decoration: underline;
-}
-
-/*
  * The second line, which exists so `Go ahead` is not read as part of the first.
  *
  * `flex-basis: 100%` in a wrapping row is a line break without a new grid area,
@@ -5090,13 +4974,6 @@ input::placeholder {
   text-transform: uppercase;
 }
 
-.handoff-controls {
-  display: flex;
-  gap: calc(var(--step) * 5);
-  align-items: flex-end;
-  flex-wrap: wrap;
-}
-
 .checkline {
   display: flex;
   align-items: center;
@@ -5107,12 +4984,6 @@ input::placeholder {
 
 .field--grow {
   flex: 1;
-}
-
-.handoff-brief {
-  font-size: 12.5px;
-  line-height: 1.6;
-  min-height: 260px;
 }
 
 .sheet-actions {
@@ -7209,12 +7080,28 @@ input::placeholder {
   cursor: pointer;
 }
 
-.composer-more:hover,
-.composer-more:focus-visible {
+.composer-more:not(:disabled):hover,
+.composer-more:not(:disabled):focus-visible {
   border-color: var(--border-default);
   background: var(--bg-control);
   color: var(--text-primary);
   outline: none;
+}
+
+/* No pair to hand the work to, so there is nothing this could append. */
+.composer-more:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.composer-pair {
+  position: absolute;
+  top: 0;
+  right: 0;
+}
+
+.composer-line > textarea {
+  padding-right: calc(var(--step) * 11);
 }
 
 /* Anything that is not `ready` is an explanation, not a reference. */
@@ -7902,7 +7789,7 @@ input::placeholder {
 
   align-content: center;
   justify-items: start;
-  row-gap: 2px;
+  row-gap: 8px;
   /*
    * Square, said as a ratio rather than as 70px.
    *
@@ -8026,6 +7913,72 @@ input::placeholder {
 
 .rail-project-status[data-state='working'][data-voice='deepseek'] {
   color: var(--voice-deepseek);
+}
+
+.rail-box {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 3px 4px;
+  align-items: center;
+  width: 100%;
+  min-width: 0;
+  min-height: 22px;
+  padding: 0;
+  border: 1px solid var(--border-default);
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--text-primary) 6%, transparent);
+}
+
+.rail-box-row {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 3px;
+  min-width: 0;
+  overflow: hidden;
+  font-family: var(--ui-font);
+  font-size: 9px;
+  font-weight: 600;
+  line-height: 1;
+}
+
+.rail-project > .state-mark {
+  position: absolute;
+  right: -1px;
+  top: -1px;
+}
+
+.rail-project > .state-mark[data-state='idle'] {
+  display: none;
+}
+
+.rail-project-meter {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  display: block;
+  height: 6px;
+  overflow: hidden;
+  border-radius: 0 0 7px 7px;
+  background: color-mix(in srgb, var(--text-primary) 16%, transparent);
+}
+
+.rail-project-meter i {
+  display: block;
+  height: 100%;
+  background: var(--text-primary);
+}
+
+.rail-project-meter[data-spent='nearly'] i {
+  background: var(--danger);
+}
+
+.rail-box-icon {
+  flex: none;
+  width: 8px;
+  height: 8px;
+  fill: currentcolor;
 }
 
 /*

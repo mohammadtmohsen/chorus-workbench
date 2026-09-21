@@ -12,6 +12,7 @@ import { useTranslation } from 'react-i18next'
 import { isAgentId } from '@chorus/shared'
 import type { IdeContextPush } from '../../shared/ipc.js'
 import { quotePath } from './attach.js'
+import { appendPrompt, collaborationPair } from './collaborate.js'
 import { ComposerMenu, type MenuItem } from './ComposerMenu.js'
 import { Attachments, type Attachment } from './Attachments.js'
 import { formatContextBlock, versionFor, withEditorContext } from './editor-context.js'
@@ -19,6 +20,7 @@ import {
   applyMention,
   commandOptions,
   fileOptions,
+  findAgentQuery,
   findCommandQuery,
   findMentionQuery,
   liveMention,
@@ -378,6 +380,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(
     const active = liveStamp?.query ?? null
 
     const hasDraft = draft.trim() !== '' || attached.length > 0
+    const pair = collaborationPair(draft, participants)
     props.report.current = { draft, attached }
 
     useEffect(() => {
@@ -563,7 +566,8 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(
        */
       const found =
         findCommandQuery(el.value, el.selectionStart) ??
-        findMentionQuery(el.value, el.selectionStart)
+        findMentionQuery(el.value, el.selectionStart) ??
+        findAgentQuery(el.value, el.selectionStart, participants)
       // The trigger is part of the identity: `/x` and `@x` at the same offset
       // are different menus, and Escape on one must not silence the other.
       const key = found === null ? null : `${found.trigger}${String(found.start)}:${found.query}`
@@ -589,7 +593,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(
           ? null
           : { query: found, from: el.value, rev: rev.current, caret: el.selectionStart }
       )
-    }, [])
+    }, [participants])
 
     /**
      * Types something into the box at the caret and hands the box back.
@@ -718,7 +722,9 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(
               }),
               ...commandOptions(commands, active.query),
             ]
-          : [...mentionOptions(participants as never, active.query), ...fileOptions(files)]
+          : active.trigger === 'agent'
+            ? mentionOptions(participants as never, active.query)
+            : [...mentionOptions(participants as never, active.query), ...fileOptions(files)]
     /*
      * The menu opens for a state as well as for rows.
      *
@@ -939,7 +945,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(
         : `${String(file.startLine)}-${String(file.endLine)}`
     const { onError, onSending, onSendFailed } = props
 
-    const send = useCallback(() => {
+    const send = useCallback((override?: string) => {
       /*
        * The paths join the message on the way out, not while you are writing it.
        *
@@ -948,7 +954,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(
        * characters of noise.
        */
       const paths = attached.map((item) => quotePath(item.path)).join(' ')
-      const text = draft.trim()
+      const text = (override ?? draft).trim()
       if (text === '' && paths === '') return
 
       /*
@@ -1196,7 +1202,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(
                       {/* A bare option inserts no trigger, so it must not show
                         one: a file row reading "@src/a.ts" would promise a
                         mention it does not write. */}
-                      {option.bare === true ? '' : (active?.trigger ?? '@')}
+                      {option.bare === true ? '' : active?.trigger === '/' ? '/' : '@'}
                       {option.label}
                     </span>
                     <span className="mention-detail">{option.detail}</span>
@@ -1408,6 +1414,36 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(
               send()
             }}
           />
+          <button
+            type="button"
+            className="composer-more composer-pair"
+            disabled={pair === null}
+            aria-label={
+              pair === null
+                ? t('conversation.collaborateDisabled')
+                : t('conversation.collaborate', { leader: pair.leader, partner: pair.partner })
+            }
+            title={
+              pair === null
+                ? t('conversation.collaborateDisabled')
+                : t('conversation.collaborate', { leader: pair.leader, partner: pair.partner })
+            }
+            onClick={() => {
+              if (pair === null) return
+              const prompt = t('conversation.collaboratePrompt', {
+                leader: pair.leader,
+                partner: pair.partner,
+              })
+              send(appendPrompt(draft, prompt))
+            }}
+          >
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M9 11.5a3 3 0 1 0 0-6 3 3 0 0 0 0 6Z" />
+              <path d="M3.5 19.5a5.5 5.5 0 0 1 11 0" />
+              <path d="M16 11.2a3 3 0 0 0 0-5.9" />
+              <path d="M20.5 19.5a5.5 5.5 0 0 0-3.4-5.1" />
+            </svg>
+          </button>
           {/*
           Everything about the session sits in the composer's own row.
 
