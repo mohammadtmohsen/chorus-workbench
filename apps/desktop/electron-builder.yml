@@ -116,7 +116,7 @@ asarUnpack:
   - node_modules/better-sqlite3/**
   - node_modules/node-pty/**
 
-# Windows: NSIS, x64, per-user by default.
+# Windows: NSIS, x64, per-machine.
 #
 # `asInvoker` is deliberate and is what keeps ordinary use free of a UAC prompt.
 # Nothing Chorus does needs administrator rights — it drives the user's own CLIs
@@ -141,7 +141,18 @@ nsis:
   # Assisted rather than one-click: a one-click installer gives the user no say
   # in scope or location and no visible record of what it did.
   oneClick: false
-  perMachine: false
+  # Per-machine, so an existing install is upgraded in place rather than joined.
+  #
+  # It was per-user, and the failure that changed it is not theoretical: a
+  # machine already carrying a per-machine 0.20.0 at `C:\Program Files\Chorus`
+  # would have gained a *second* Chorus under `%LOCALAPPDATA%\Programs`, two
+  # Start Menu entries with one name, both reporting the same version, and
+  # nothing to tell the running one from the new one.
+  #
+  # The cost is a UAC prompt at install time. `requestedExecutionLevel` above is
+  # unchanged and still `asInvoker`, because that governs the *app*: elevating
+  # the installer says nothing about what Chorus runs as afterwards.
+  perMachine: true
   allowToChangeInstallationDirectory: true
   createDesktopShortcut: false
   createStartMenuShortcut: true
