@@ -5,13 +5,17 @@ them, and it will not install them for you — so most of what follows is about
 getting those two working first, because a Chorus that cannot find them looks
 broken in a way that has nothing to do with Chorus.
 
-> **Status: the installer exists and is unsigned; nobody has completed an
-> install.** CI builds `Chorus-<version>-windows-x64-setup.exe` on every release
-> and attaches it with its checksum, and a verifier confirms the app launches
-> and serves its renderer from that bundle. What has **not** happened is anyone
-> running the installer, starting an agent, or opening a terminal on Windows.
-> The steps below are what should happen; treat the first report as the first
-> evidence. `docs/plans/windows-installer-2026-08-15/STATUS.md` has the detail.
+> **Status: installed and running on Windows since 2026-09-21, and still
+> unsigned.** The installer has been run, the app starts, and `codex` and
+> `claude` both join a conversation and take a turn — verified by finding a
+> `claude.exe` whose parent process is `Chorus.exe`. Two defects had to be fixed
+> to get there and both are described under Troubleshooting below, because a
+> build from before that date still has them.
+>
+> What has **still** not been exercised: uninstall, reinstall, and whether your
+> conversations survive a version change. `docs/windows-test-brief.md` is the
+> brief for that, and `docs/windows-deploy.md` is how a build gets onto a
+> machine.
 
 ## What is supported
 
@@ -19,7 +23,7 @@ broken in a way that has nothing to do with Chorus.
 | ------------- | --------------------------------------------------------------- |
 | Windows       | 10 and 11, 64-bit                                               |
 | Architecture  | x64 only — ARM64 waits for native hardware to verify it on      |
-| Install scope | Per-user by default; per-machine is offered on the install page |
+| Install scope | Per-machine. The installer asks for administrator; Chorus does not |
 | Shortcuts     | Start Menu. No desktop shortcut unless you ask for one          |
 | Updates       | Download and run the new installer over the old one             |
 | WSL           | Not supported. Agents run as native Windows processes           |
@@ -50,6 +54,15 @@ Authenticate both by running them once in a terminal and following the prompts.
 Chorus inherits whatever credentials they store; it never asks for them itself
 and has nowhere to put them.
 
+### DeepSeek
+
+Nothing to install. DeepSeek runs on the same `claude` binary, pointed at its
+own endpoint, so if `claude` works DeepSeek's half of the problem is already
+solved. What it needs is an API key, added in **Settings** — and the key is
+stored per machine, so a machine you have just installed on has none and
+DeepSeek refuses with _"DeepSeek needs an API key"_ until you add one. That is
+the expected message on a fresh install rather than a fault.
+
 ### Both CLIs must be on PATH
 
 `npm install -g` writes to `%APPDATA%\npm`, which npm adds to PATH at install
@@ -71,11 +84,25 @@ If those print nothing, neither will Chorus.
    `.sha256` beside it is the checksum for that exact file.
 2. **Expect a SmartScreen warning.** Choose "More info" then "Run anyway". This
    is not a sign that anything is wrong — see below.
-3. Choose per-user (default) or per-machine. Per-machine needs an administrator.
+3. **Approve the administrator prompt.** Chorus installs per-machine, into
+   `C:\Program Files\Chorus`, so the installer needs it.
 4. Launch from the Start Menu.
 
 Chorus itself never needs administrator rights. It runs `asInvoker` and does
-everything under your own profile.
+everything under your own profile — elevating the installer says nothing about
+what the app runs as afterwards.
+
+**Per-machine is deliberate, and it is about upgrades rather than about
+privilege.** A per-user installer landing on a machine that already had a
+per-machine Chorus produced a second copy under `%LOCALAPPDATA%\Programs`: two
+Start Menu entries with one name, both reporting the same version, and no way to
+tell which one you had just launched. One scope means an upgrade replaces rather
+than joins.
+
+**Close Chorus before upgrading if a turn is running.** The installer closes it
+for you, which is convenient and is also a decision made on your behalf — an
+agent mid-turn is killed. Nothing in your history is lost; the event log is
+append-only.
 
 ### About the SmartScreen warning
 
@@ -106,17 +133,26 @@ against the `.sha256` file published beside the installer.
 
 ## Where things go
 
-|             |                                             |
-| ----------- | ------------------------------------------- |
-| Application | `%LOCALAPPDATA%\Programs\Chorus` (per-user) |
-| Your data   | `%APPDATA%\Chorus`                          |
-| Event log   | `%APPDATA%\Chorus\chorus.db`                |
-| Logs        | `%APPDATA%\Chorus\logs`                     |
+These are the paths as observed on a real install, not as inferred from the
+config — the table here previously named `%APPDATA%\Chorus`, which does not
+exist.
+
+|             |                                        |
+| ----------- | -------------------------------------- |
+| Application | `C:\Program Files\Chorus`              |
+| Your data   | `%APPDATA%\@chorus\desktop`            |
+| Event log   | `%APPDATA%\@chorus\desktop\chorus.v2.db` |
+| Logs        | `%APPDATA%\@chorus\desktop\logs`       |
 
 **The event log is every conversation you have had.** It is the source of truth
-and it is append-only. Uninstalling deliberately leaves `%APPDATA%\Chorus`
+and it is append-only. Uninstalling deliberately leaves `%APPDATA%\@chorus`
 alone — removing it is a decision an uninstaller should not make for you. To
 remove your data, delete that folder by hand after uninstalling.
+
+`chorus.log` in that `logs` folder is the first place to look when something
+does not work. It is one JSON object per line, and its timestamps are epoch
+milliseconds — worth converting before you conclude anything, because the
+transcript replays old events and a stale error reads exactly like a live one.
 
 Upgrading installs over the previous version and does not touch it.
 
@@ -138,10 +174,28 @@ requirement.
 
 ## Troubleshooting
 
+**"Could not find the claude CLI" on a build from before 2026-09-21** — fixed,
+and worth naming because the symptom pointed away from the cause. Claude Code
+2.x installed with `npm -g` writes a `claude.cmd` that runs a native
+`claude.exe`, not the `cli.js` earlier versions ran. Chorus only knew how to
+read the older shape, so it found the shim, could not read it, and passed the
+CLI nothing — while reporting itself ready, because the version probe goes
+through `cmd.exe` where the shim works fine. `claude` and `deepseek` both joined
+a conversation and then failed on their first turn. Update, or the only fix is
+to have `claude.exe` somewhere Chorus looks directly.
+
+**The editor shows `[UriError]` instead of opening, on a build from before
+2026-09-21** — also fixed. A `vscode-remote` URI refuses a path that does not
+begin with a slash, and `C:\Users\you\project` does not. The workbench threw out
+of `prepareWorkbench` and no editor appeared at all, only the stack trace.
+Updating is the fix. Expect that project's editor layout and its workspace-trust
+answer to reset once afterwards, because the corrected path is also what keys
+the workbench's storage.
+
 **"Could not find the codex CLI" / "the claude CLI"** — `where.exe` the one it
-names. If the CLI is there but Chorus is not finding it, the likely cause is
-that Chorus resolved an npm `.cmd` shim it could not read; the log in
-`%APPDATA%\Chorus\logs` names the path it tried.
+names. If the CLI is plainly there and Chorus still cannot see it, the log in
+`%APPDATA%\@chorus\desktop\logs` names the path it tried, and that is the thing
+to report.
 
 **A terminal will not open** — Chorus uses `%COMSPEC%`, falling back to
 `cmd.exe`. Check that `%COMSPEC%` points at a file that exists:
