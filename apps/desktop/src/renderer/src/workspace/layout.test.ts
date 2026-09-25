@@ -3,6 +3,7 @@ import {
   CLOSED_TERMINAL_PANEL,
   SIDEBAR_WIDTH,
   TERMINAL_HEIGHT,
+  TRAFFIC_TAB_ID,
   type TerminalPanelState,
   type WorkspaceSnapshot,
 } from '../../../shared/workspace-layout.js'
@@ -20,6 +21,7 @@ import {
   normalizeWorkspace,
   openSession,
   placeSession,
+  reconcileConversationGroups,
   reconcileWorkspace,
   reorderTab,
   returnTab,
@@ -530,6 +532,33 @@ describe('normalizeTerminalPanel', () => {
   })
 })
 
+describe('reconcileConversationGroups', () => {
+  const arranged = (tabs: readonly string[], activeTabId: string | null) => ({
+    layout: { kind: 'leaf' as const, paneId: 'g1' },
+    panes: { g1: { id: 'g1', tabs: [...tabs], activeTabId } },
+    focusedPaneId: 'g1',
+  })
+
+  it('keeps the traffic tab when a conversation starts', () => {
+    const next = reconcileConversationGroups(arranged(['c1', TRAFFIC_TAB_ID], TRAFFIC_TAB_ID), [
+      'c1',
+      'c2',
+    ])
+    expect(next?.panes['g1']?.tabs).toEqual(['c1', TRAFFIC_TAB_ID, 'c2'])
+  })
+
+  it('keeps the arrangement when every conversation has ended', () => {
+    const next = reconcileConversationGroups(arranged(['c1', TRAFFIC_TAB_ID], 'c1'), [])
+    expect(next?.panes['g1']?.tabs).toEqual([TRAFFIC_TAB_ID])
+    expect(next?.panes['g1']?.activeTabId).toBe(TRAFFIC_TAB_ID)
+  })
+
+  it('still reports nothing for a project with no arrangement to keep', () => {
+    expect(reconcileConversationGroups(undefined, [])).toBeNull()
+    expect(reconcileConversationGroups(arranged(['c1'], 'c1'), [])).toBeNull()
+  })
+})
+
 describe('newTerminalId', () => {
   /*
    * A UUID rather than a counter, because the roster outlives the process: a
@@ -604,5 +633,36 @@ describe('detached projects', () => {
     const slot = { paneId: 'pane-1', index: virtualIndex('pane-1', 1, detached) }
     const returned = returnTab(second.workspace, 'x', slot, { ...detached, x: slot })
     expect(returned.panes['pane-1']?.tabs).toEqual(['a', 'x', 'd'])
+  })
+})
+
+/*
+ * The reserved traffic id through the two operations a drop lands on.
+ *
+ * It is a tab and it is not a conversation, and the whole of the drag's
+ * correctness rests on those operations treating it as a tab and nothing more —
+ * the source group empties and collapses on a move, and a group holding it plus
+ * one conversation can still split, which is the gesture the panel is for.
+ */
+describe('the traffic tab through a place and a split', () => {
+  it('moves rather than copies when it is placed in another group', () => {
+    const workspace = splitTab(onePane('a', 'b'), 'b', 'pane-1', 'right')
+    const second = leafPaneIds(workspace.layout)[1] ?? ''
+    const placed = placeSession(workspace, TRAFFIC_TAB_ID, second, 0)
+    expect(tabLocation(placed, TRAFFIC_TAB_ID)?.paneId).toBe(second)
+    expect(placed.panes['pane-1']?.tabs).toEqual(['a'])
+  })
+
+  it('splits a group holding it beside one conversation', () => {
+    const split = splitWithSession(onePane('a', TRAFFIC_TAB_ID), TRAFFIC_TAB_ID, 'pane-1', 'left')
+    const ids = leafPaneIds(split.layout)
+    expect(ids).toHaveLength(2)
+    expect(split.panes[ids[0] ?? '']?.tabs).toEqual([TRAFFIC_TAB_ID])
+    expect(split.panes['pane-1']?.tabs).toEqual(['a'])
+  })
+
+  it('refuses to split a group holding nothing but itself', () => {
+    const workspace = onePane(TRAFFIC_TAB_ID)
+    expect(splitWithSession(workspace, TRAFFIC_TAB_ID, 'pane-1', 'left')).toEqual(workspace)
   })
 })

@@ -25,6 +25,7 @@ import {
   forwardWorkbenchContextToRenderer,
   registerIpcHandlers,
 } from './ipc.js'
+import { TrafficIpc } from './traffic-ipc.js'
 import { createLogger } from './logging.js'
 import { registerNoteImageScheme, serveNoteImages } from './note-images.js'
 import { createQuitGate } from './quit-gate.js'
@@ -32,7 +33,7 @@ import { installMenu } from './menu.js'
 import { readSettings } from './settings.js'
 import { applyTheme } from './theme.js'
 import { applyScale, currentScale } from './scale.js'
-import { reapOrphanedAgents } from './reap.js'
+import { reapOrphanedChildren } from './reap.js'
 import { isReparentMode, runReparentCheck } from './reparent-check.js'
 import { ChorusRuntime } from './runtime.js'
 import { applyContentSecurityPolicy, lockDownNavigation } from './security.js'
@@ -48,6 +49,16 @@ import {
 import { adoptShellPath } from './which.js'
 
 const devServerUrl = process.env['ELECTRON_RENDERER_URL']
+
+/**
+ * The traffic registrar, alive for as long as the app is.
+ *
+ * Null until the runtime exists, which is why every use of it is guarded: a
+ * window is created before the runtime is ready in exactly one case — a second
+ * launch handing its argument to the first — and that window has no traffic to
+ * register until it does.
+ */
+let trafficIpc: TrafficIpc | null = null
 
 /** The shell's one document, named once so the load and the allowlist agree. */
 const SHELL_ENTRY_FILE = join(__dirname, '../renderer/index.html')
@@ -70,6 +81,7 @@ function createWindow(role: ShellWindowRole): BrowserWindow {
     minWidth: 360,
     minHeight: 420,
     show: false,
+    acceptFirstMouse: true,
     /*
      * macOS only, and the guard is load-bearing rather than tidy.
      *
@@ -109,6 +121,20 @@ function createWindow(role: ShellWindowRole): BrowserWindow {
    */
   const entry = devServerUrl ?? pathToFileURL(SHELL_ENTRY_FILE).href
   lockDownNavigation(window.webContents, [entry])
+
+  /*
+   * The shell's role, registered here rather than at each call site: this is the
+   * one place a window is made, so a new kind of window cannot be added without
+   * a role. A document with no role is refused every traffic request, which is
+   * the safe default rather than the convenient one.
+   */
+  trafficIpc?.registerShell(
+    window.webContents,
+    role.kind === 'main' ? { kind: 'main' } : { kind: 'detached', projectId: role.projectId }
+  )
+  window.webContents.on('destroyed', () => {
+    trafficIpc?.releaseShell(window.webContents)
+  })
 
   // Avoids a white flash before the renderer has painted.
   window.once('ready-to-show', () => {
@@ -233,7 +259,7 @@ void app.whenReady().then(async () => {
     })
   })
 
-  void reapOrphanedAgents().then(({ killed, inspected, skipped }) => {
+  void reapOrphanedChildren().then(({ killed, inspected, skipped }) => {
     // Said once at startup rather than never: the backstop being unavailable is
     // a fact about this platform, and a silent `killed: 0` reads as a clean
     // machine. See `reap.ts` for why Windows has no strategy yet.
@@ -356,6 +382,28 @@ void app.whenReady().then(async () => {
   forwardTasksToRenderer(runtime)
   forwardActivityToRenderer(runtime)
   forwardTerminalToRenderer(runtime)
+  /*
+   * The shell's own connection to its own saved state, resolved before anything
+   * can ask about it. `unreadable` is reported rather than thrown: a settings
+   * file somebody hand-edited is a recoverable state, and the panel is where it
+   * gets said out loud.
+   */
+  const savedTraffic = opened.syncLegacyTraffic()
+  if (savedTraffic.kind === 'unreadable') {
+    log.warn('the saved traffic connection could not be read', { reason: savedTraffic.reason })
+  }
+  trafficIpc = new TrafficIpc({
+    registry: opened.trafficRegistry(),
+    /*
+     * Adopted, not merely named. A project id that appears in a request is a
+     * claim; this is the registry answering whether the id is one it knows.
+     */
+    isAdopted: (projectId) => opened.projects.get(projectId) !== null,
+    legacy: () => opened.legacyTraffic(),
+    decideLegacy: (keep) => {
+      opened.decideLegacyTraffic(keep)
+    },
+  })
   // Takes no runtime: the watches are keyed by the conversations that ask for
   // one, not by what the runtime happens to have open.
   // Owns ⌘+ / ⌘− / ⌘0; a menu accelerator is handled before the page sees it.

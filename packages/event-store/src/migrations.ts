@@ -527,6 +527,74 @@ export const MIGRATIONS: readonly Migration[] = [
       ALTER TABLE projects ADD COLUMN agent_cwd TEXT;
     `,
   },
+  {
+    version: 14,
+    name: 'where-a-projects-traffic-listens',
+    up: `
+      ALTER TABLE projects ADD COLUMN traffic_origin TEXT;
+      ALTER TABLE projects ADD COLUMN traffic_port INTEGER
+        CHECK (traffic_port IS NULL OR traffic_port BETWEEN 1 AND 65535);
+      ALTER TABLE projects ADD COLUMN traffic_access TEXT NOT NULL DEFAULT 'loopback'
+        CHECK (traffic_access IN ('loopback', 'lan'));
+
+      CREATE UNIQUE INDEX projects_traffic_port ON projects (traffic_port)
+        WHERE traffic_port IS NOT NULL;
+
+      CREATE TABLE traffic_legacy_import (
+        id INTEGER PRIMARY KEY CHECK (id = 1),
+        completed INTEGER NOT NULL DEFAULT 0 CHECK (completed IN (0, 1)),
+        assigned_project_id TEXT
+      );
+      INSERT INTO traffic_legacy_import (id, completed) VALUES (1, 0);
+    `,
+  },
+  {
+    version: 15,
+    name: 'what-a-legacy-traffic-connection-was',
+    up: `
+      ALTER TABLE traffic_legacy_import ADD COLUMN pending_origin TEXT;
+      ALTER TABLE traffic_legacy_import ADD COLUMN pending_port INTEGER
+        CHECK (pending_port IS NULL OR pending_port BETWEEN 1 AND 65535);
+      ALTER TABLE traffic_legacy_import ADD COLUMN pending_access TEXT
+        CHECK (pending_access IS NULL OR pending_access IN ('loopback', 'lan'));
+    `,
+  },
+  {
+    version: 16,
+    name: 'a-legacy-connection-whose-port-could-not-be-read',
+    up: `
+      CREATE TABLE traffic_legacy_import_next (
+        id INTEGER PRIMARY KEY CHECK (id = 1),
+        completed INTEGER NOT NULL DEFAULT 0 CHECK (completed IN (0, 1)),
+        assigned_project_id TEXT,
+        pending_recorded INTEGER NOT NULL DEFAULT 0 CHECK (pending_recorded IN (0, 1)),
+        pending_origin TEXT,
+        pending_port INTEGER
+          CHECK (pending_port IS NULL OR pending_port BETWEEN 0 AND 65535),
+        pending_access TEXT
+          CHECK (pending_access IS NULL OR pending_access IN ('loopback', 'lan')),
+        pending_error TEXT
+      );
+
+      INSERT INTO traffic_legacy_import_next
+        (id, completed, assigned_project_id, pending_recorded, pending_origin, pending_port,
+         pending_access)
+        SELECT id, completed, assigned_project_id,
+               CASE WHEN pending_origin IS NULL AND pending_port IS NULL THEN 0 ELSE 1 END,
+               pending_origin, pending_port, pending_access
+          FROM traffic_legacy_import;
+
+      DROP TABLE traffic_legacy_import;
+      ALTER TABLE traffic_legacy_import_next RENAME TO traffic_legacy_import;
+    `,
+  },
+  {
+    version: 17,
+    name: 'the-variable-an-application-reads-its-endpoint-from',
+    up: `
+      ALTER TABLE projects ADD COLUMN traffic_env_var TEXT;
+    `,
+  },
 ]
 
 export interface MigrationResult {

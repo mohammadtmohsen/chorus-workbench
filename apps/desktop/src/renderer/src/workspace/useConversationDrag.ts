@@ -41,7 +41,7 @@ export type ConversationDropTarget =
     }
 
 export interface ConversationDragState {
-  readonly conversationId: string
+  readonly tabId: string
   /** The group it started in, so a drop back into it is a reorder. */
   readonly fromGroupId: string
   /** For the ghost — a drag with nothing following the pointer reads as a stuck tab. */
@@ -76,7 +76,7 @@ export interface ConversationDrag {
   readonly drag: ConversationDragState | null
   readonly onPointerDown: (
     groupId: string,
-    conversationId: string,
+    tabId: string,
     title: string,
     event: ReactPointerEvent<HTMLElement>
   ) => void
@@ -86,12 +86,8 @@ export interface ConversationDrag {
 
 export function useConversationDrag(options: {
   readonly groupCount: number
-  readonly onPlace: (conversationId: string, targetGroupId: string, slot: number) => void
-  readonly onSplit: (
-    conversationId: string,
-    targetGroupId: string,
-    direction: SplitDirection
-  ) => void
+  readonly onPlace: (tabId: string, targetGroupId: string, slot: number) => void
+  readonly onSplit: (tabId: string, targetGroupId: string, direction: SplitDirection) => void
 }): ConversationDrag {
   const [drag, setDrag] = useState<ConversationDragState | null>(null)
   /*
@@ -106,7 +102,7 @@ export function useConversationDrag(options: {
 
   const onPointerDown = (
     groupId: string,
-    conversationId: string,
+    tabId: string,
     title: string,
     event: ReactPointerEvent<HTMLElement>
   ): void => {
@@ -149,12 +145,12 @@ export function useConversationDrag(options: {
         started = true
       }
       const target = targetAt(moved.clientX, moved.clientY, {
-        conversationId,
+        tabId,
         fromGroupId: groupId,
         groupCount: latest.current.groupCount,
       })
       const next = {
-        conversationId,
+        tabId,
         fromGroupId: groupId,
         title,
         x: moved.clientX,
@@ -184,8 +180,8 @@ export function useConversationDrag(options: {
       suppressClick.current = true
       if (finished?.target == null) return
       if (finished.target.kind === 'split') {
-        latest.current.onSplit(conversationId, finished.target.groupId, finished.target.direction)
-      } else latest.current.onPlace(conversationId, finished.target.groupId, finished.target.slot)
+        latest.current.onSplit(tabId, finished.target.groupId, finished.target.direction)
+      } else latest.current.onPlace(tabId, finished.target.groupId, finished.target.slot)
     }
 
     tab.addEventListener('pointermove', move)
@@ -218,7 +214,7 @@ function targetAt(
   x: number,
   y: number,
   context: {
-    readonly conversationId: string
+    readonly tabId: string
     readonly fromGroupId: string
     readonly groupCount: number
   }
@@ -274,7 +270,7 @@ function targetAt(
    * group with no strip — one conversation, one group — still accepts a drop; it
    * lands at the end, which is the only slot it has.
    */
-  const tabs = [...column.querySelectorAll<HTMLElement>('[data-conversation-tab]')]
+  const tabs = [...column.querySelectorAll<HTMLElement>('[data-tab-id]')]
   let slot = tabs.length
   for (const [index, tab] of tabs.entries()) {
     const box = tab.getBoundingClientRect()
@@ -289,8 +285,7 @@ function targetAt(
 /** Whether the group the drag started in would be left with nothing. */
 function sourceWouldVanish(fromGroupId: string): boolean {
   return (
-    document.querySelectorAll(
-      `.conversation-column[data-group="${fromGroupId}"] [data-conversation-tab]`
-    ).length <= 1
+    document.querySelectorAll(`.conversation-column[data-group="${fromGroupId}"] [data-tab-id]`)
+      .length <= 1
   )
 }

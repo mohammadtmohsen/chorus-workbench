@@ -9,6 +9,12 @@ import type { ProjectInfo } from './session-row.js'
 import { useTabDrag } from './useTabDrag.js'
 
 export function DetachedStage(props: {
+  /**
+   * The one project this window may inspect, and it comes from the window's
+   * role in main rather than from anything the renderer decided. A detached
+   * window is scoped to the project it was opened for, so there is no focused
+   * pane to follow and no selector to offer.
+   */
   readonly sessions: readonly SessionInfo[]
   readonly projects: readonly ProjectInfo[]
   readonly onStartInProject: (projectId: string) => void
@@ -84,6 +90,7 @@ export function DetachedStage(props: {
           onSetProjectNoteSize={props.onSetProjectNoteSize}
           onSendProjectNoteSelection={props.onSendProjectNoteSelection}
           onCommitLayout={props.onCommitLayout}
+          trafficTerminals={[]}
           renderSession={props.renderSession}
         />
       </main>

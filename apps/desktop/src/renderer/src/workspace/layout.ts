@@ -2,6 +2,7 @@ import {
   CHORUS_WIDTH,
   SIDEBAR_WIDTH,
   TERMINAL_HEIGHT,
+  TRAFFIC_TAB_ID,
   type ConversationArrangement,
   type ProjectLayoutSlice,
   type ReturnSlot,
@@ -762,7 +763,9 @@ export function reconcileConversationGroups(
   saved: ConversationArrangement | undefined,
   conversationIds: readonly string[]
 ): ConversationArrangement | null {
-  if (conversationIds.length === 0) return null
+  const savedTabs = new Set(Object.values(saved?.panes ?? {}).flatMap((pane) => pane.tabs))
+  const keepsTraffic = savedTabs.has(TRAFFIC_TAB_ID)
+  if (conversationIds.length === 0 && !keepsTraffic) return null
   const live = new Set(conversationIds)
 
   /*
@@ -780,7 +783,10 @@ export function reconcileConversationGroups(
           panes: Object.fromEntries(
             Object.entries(saved.panes).map(([paneId, pane]) => [
               paneId,
-              { ...pane, tabs: pane.tabs.filter((id) => live.has(id)) },
+              {
+                ...pane,
+                tabs: pane.tabs.filter((id) => id === TRAFFIC_TAB_ID || live.has(id)),
+              },
             ])
           ),
           focusedPaneId: saved.focusedPaneId,

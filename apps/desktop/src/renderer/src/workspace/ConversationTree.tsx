@@ -3,6 +3,7 @@ import type { SessionInfo } from '../Session.js'
 import { ConversationColumn } from './ConversationColumn.js'
 import { resizeBranch } from './layout.js'
 import type { ConversationDrag } from './useConversationDrag.js'
+import type { TrafficTerminalOption } from '../TrafficPanel.js'
 import type {
   ConversationArrangement,
   WorkspaceLayoutNode,
@@ -49,6 +50,7 @@ export function ConversationTree(props: {
   readonly onEndConversation: (conversationId: string) => void
   /** Name one conversation — a double-click on its tab. */
   readonly onRename: (conversationId: string, title: string) => void
+  readonly trafficTerminals: readonly TrafficTerminalOption[]
   readonly renderSession: (
     session: SessionInfo,
     focused: boolean,
@@ -71,6 +73,7 @@ export function ConversationTree(props: {
         onEndConversation={props.onEndConversation}
         onRename={props.onRename}
         drag={props.drag}
+        trafficTerminals={props.trafficTerminals}
         renderSession={props.renderSession}
       />
     )
@@ -119,6 +122,7 @@ export function ConversationTree(props: {
               onNewConversation={props.onNewConversation}
               onEndConversation={props.onEndConversation}
               onRename={props.onRename}
+              trafficTerminals={props.trafficTerminals}
               renderSession={props.renderSession}
             />
           </div>

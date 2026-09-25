@@ -6,6 +6,7 @@ import { withBackgroundWork, type SessionRowState } from './session-row.js'
 import {
   CHORUS_WIDTH,
   CLOSED_TERMINAL_PANEL,
+  isConversationTab,
   type ConversationArrangement,
   type TerminalPanelState,
   type WorkspaceLayoutNode,
@@ -54,6 +55,7 @@ function selectActions(state: WorkspaceStore): WorkspaceActions {
     showConversationIn,
     focusConversationGroup,
     adoptConversation,
+    openTraffic,
     splitConversation,
     placeConversation,
     closeConversationTab,
@@ -106,6 +108,7 @@ function selectActions(state: WorkspaceStore): WorkspaceActions {
     showConversationIn,
     focusConversationGroup,
     adoptConversation,
+    openTraffic,
     splitConversation,
     placeConversation,
     closeConversationTab,
@@ -282,7 +285,15 @@ export function useFocusedConversationId(): string | null {
     if (projectId === null) return null
     const arrangement = state.conversationGroups[projectId]
     const groupId = arrangement?.focusedPaneId ?? null
-    return groupId === null ? null : (arrangement?.panes[groupId]?.activeTabId ?? null)
+    if (groupId === null) return null
+    const active = arrangement?.panes[groupId]?.activeTabId ?? null
+    /*
+     * The traffic view is a tab but not a conversation, and this is the one hook
+     * every "which conversation am I in" answer walks through. Returning its id
+     * made the note panels offer to send to a conversation that does not exist,
+     * rather than drawing the no-conversation state their own comments promise.
+     */
+    return active !== null && isConversationTab(active) ? active : null
   })
 }
 

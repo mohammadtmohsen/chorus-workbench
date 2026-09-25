@@ -1,8 +1,9 @@
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
+import { usableTrafficOrigin } from '@chorus/event-store'
 import { agentRecord } from '@chorus/shared'
 import { z } from 'zod'
-import { normaliseExplainLanguage } from '../shared/ipc.js'
+import { DEFAULT_TRAFFIC_PORT, normaliseExplainLanguage } from '../shared/ipc.js'
 
 /**
  * What a new session starts with, remembered between launches.
@@ -114,6 +115,8 @@ export const Settings = z
      */
     theme: z.enum(['system', 'light', 'dark']).default('system'),
     completionProvider: z.enum(['auto', 'deepseek', 'codestral']).default('auto'),
+    trafficOrigin: z.string().default(''),
+    trafficPort: z.number().int().min(0).max(65535).default(DEFAULT_TRAFFIC_PORT),
   })
   /**
    * Folds the old single model and effort onto **Claude**.
@@ -153,6 +156,8 @@ export const DEFAULT_SETTINGS: Settings = {
   theme: 'system',
   // Off: a first launch answers exactly as every launch before this existed.
   completionProvider: 'auto',
+  trafficOrigin: '',
+  trafficPort: DEFAULT_TRAFFIC_PORT,
 }
 
 function settingsPath(userDataPath: string): string {
@@ -167,13 +172,92 @@ function settingsPath(userDataPath: string): string {
  * bigger failure than the one it reports.
  */
 export function readSettings(userDataPath: string): Settings {
-  try {
-    const parsed = Settings.safeParse(JSON.parse(readFileSync(settingsPath(userDataPath), 'utf8')))
-    return parsed.success ? parsed.data : DEFAULT_SETTINGS
-  } catch {
-    // Missing is the common case, and it is not an error.
-    return DEFAULT_SETTINGS
+  const raw = readRawSettings(userDataPath)
+  if (raw.kind !== 'object') return DEFAULT_SETTINGS
+
+  const record = { ...raw.record }
+  if ('trafficOrigin' in record && typeof record['trafficOrigin'] !== 'string') {
+    delete record['trafficOrigin']
   }
+  if ('trafficPort' in record && !isPortNumber(record['trafficPort'])) {
+    delete record['trafficPort']
+  }
+
+  const parsed = Settings.safeParse(record)
+  return parsed.success ? parsed.data : DEFAULT_SETTINGS
+}
+
+export type SavedTrafficConnection =
+  | { readonly kind: 'absent' }
+  | { readonly kind: 'unreadable'; readonly reason: string; readonly port: number | null }
+  | {
+      readonly kind: 'configured' | 'defaults'
+      readonly origin: string | null
+      readonly port: number
+    }
+
+type RawSettings =
+  | { readonly kind: 'absent' }
+  | { readonly kind: 'unreadable'; readonly reason: string; readonly port: number | null }
+  | { readonly kind: 'object'; readonly record: Record<string, unknown> }
+
+const isPortNumber = (value: unknown): value is number =>
+  typeof value === 'number' && Number.isInteger(value) && value >= 0 && value <= 65_535
+
+function readRawSettings(userDataPath: string): RawSettings {
+  let raw: unknown
+  try {
+    raw = JSON.parse(readFileSync(settingsPath(userDataPath), 'utf8'))
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return { kind: 'absent' }
+    return {
+      kind: 'unreadable',
+      reason: error instanceof Error ? error.message : 'The settings file could not be read',
+      port: null,
+    }
+  }
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
+    return { kind: 'unreadable', reason: 'The settings file is not an object', port: null }
+  }
+  return { kind: 'object', record: raw as Record<string, unknown> }
+}
+
+export function readSavedTrafficConnection(userDataPath: string): SavedTrafficConnection {
+  const raw = readRawSettings(userDataPath)
+  if (raw.kind !== 'object') return raw
+
+  const record = raw.record
+  const hasOrigin = 'trafficOrigin' in record
+  const hasPort = 'trafficPort' in record
+  if (!hasOrigin && !hasPort) return { kind: 'absent' }
+
+  const rawOrigin = record['trafficOrigin']
+  const rawPort = record['trafficPort']
+  const savedPort = isPortNumber(rawPort) ? rawPort : null
+  const port = savedPort ?? DEFAULT_TRAFFIC_PORT
+
+  if (rawOrigin !== undefined && typeof rawOrigin !== 'string') {
+    return { kind: 'unreadable', reason: 'trafficOrigin is not a string', port: savedPort }
+  }
+  if (rawPort !== undefined && !isPortNumber(rawPort)) {
+    return { kind: 'unreadable', reason: 'trafficPort is not a port number', port: null }
+  }
+
+  const origin = typeof rawOrigin === 'string' ? rawOrigin.trim() : ''
+
+  if (origin !== '') {
+    return usableTrafficOrigin(origin)
+      ? { kind: 'configured', origin, port }
+      : {
+          kind: 'unreadable',
+          reason: 'trafficOrigin is not a usable http or https origin',
+          port,
+        }
+  }
+  if (savedPort !== null && savedPort !== DEFAULT_TRAFFIC_PORT) {
+    return { kind: 'configured', origin: null, port }
+  }
+  return { kind: 'defaults', origin: null, port }
 }
 
 /**

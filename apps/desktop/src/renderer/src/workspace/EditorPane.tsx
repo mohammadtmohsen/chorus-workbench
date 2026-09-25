@@ -3,6 +3,7 @@ import type { PointerEvent as ReactPointerEvent } from 'react'
 import { useTranslation } from 'react-i18next'
 import type { WorkspaceLayoutNode } from '../../../shared/workspace-layout.js'
 import type { SessionInfo } from '../Session.js'
+import type { TrafficTerminalOption } from '../TrafficPanel.js'
 import { ConversationTree } from './ConversationTree.js'
 import { ProjectNotes } from './ProjectNotes.js'
 import type { NoteSize } from '../noteSize.js'
@@ -63,6 +64,7 @@ export interface LayoutViewProps {
     focused: boolean,
     paneId: string
   ) => React.ReactNode
+  readonly trafficTerminals: readonly TrafficTerminalOption[]
 }
 
 export function EditorPane(
@@ -105,6 +107,7 @@ export function EditorPane(
     setConversationSizes,
     equalizeConversationBranch,
     focusConversationGroup,
+    openTraffic,
   } = useWorkspaceActions()
   const commitLayout = props.onCommitLayout
   /*
@@ -283,6 +286,15 @@ export function EditorPane(
               >
                 {t('conversation.newInGroup')}
               </button>
+              <button
+                type="button"
+                data-traffic-open="true"
+                onClick={() => {
+                  openTraffic(projectId)
+                }}
+              >
+                {t('traffic.open')}
+              </button>
             </div>
           )}
           {projectId !== null && arrangement?.layout != null && (
@@ -318,6 +330,7 @@ export function EditorPane(
               }}
               onEndConversation={props.onEndConversation}
               onRename={props.onRename}
+              trafficTerminals={props.trafficTerminals}
               renderSession={props.renderSession}
             />
           )}

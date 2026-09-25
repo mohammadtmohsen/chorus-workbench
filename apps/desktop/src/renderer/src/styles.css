@@ -7174,6 +7174,477 @@ input::placeholder {
   margin-inline: calc(var(--step) * 2);
 }
 
+.traffic-panel {
+  container-type: inline-size;
+  position: relative;
+  display: flex;
+  flex: 0 0 auto;
+  flex-direction: column;
+  height: 300px;
+  min-height: 0;
+  margin: 0 calc(var(--step) * 2) calc(var(--step) * 2);
+  border: 1px solid var(--border-default);
+  border-radius: 9px;
+  background: var(--bg-chrome);
+  overflow: hidden;
+}
+
+.traffic-head {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: calc(var(--step) * 2);
+  padding: calc(var(--step) * 2) calc(var(--step) * 3);
+  border-bottom: 1px solid var(--border-default);
+}
+
+.traffic-title {
+  flex: 0 0 auto;
+  color: var(--text-primary);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.traffic-count {
+  flex: 0 0 auto;
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+.traffic-port {
+  flex: 1 1 auto;
+  overflow: hidden;
+  color: var(--text-muted);
+  font-family: var(--mono);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.traffic-action {
+  flex: 0 0 auto;
+  padding: var(--step) calc(var(--step) * 2);
+  color: var(--text-primary);
+  font: inherit;
+  font-size: 11px;
+  background: var(--bg-control);
+  border: 1px solid var(--border-default);
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.traffic-stopped,
+.traffic-empty {
+  margin: 0;
+  padding: calc(var(--step) * 3);
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.traffic-empty p {
+  margin: 0 0 var(--step);
+}
+
+.traffic-empty p:last-child {
+  margin-bottom: 0;
+}
+
+.traffic-env-row {
+  display: flex;
+  flex: 0 0 auto;
+  padding: var(--step) calc(var(--step) * 3);
+  border-bottom: 1px solid var(--border-default);
+}
+
+/*
+ * Two situations share this row: a saved shared connection nobody has decided
+ * about, and a view that fell behind the capture. Both are things the panel is
+ * asking the person to do, so they sit above the controls rather than below the
+ * rows — a prompt under a list is one nobody scrolls to.
+ */
+.traffic-legacy {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: var(--step);
+  padding: var(--step) calc(var(--step) * 3);
+  border-bottom: 1px solid var(--border-default);
+}
+
+.traffic-legacy-text {
+  margin: 0;
+  flex: 1 1 auto;
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+/*
+ * The list, then its detail, one below the other at every width. A container
+ * query used to split them side by side once the panel passed 640px, which left
+ * the list at 45% and truncated every url in it to what fit.
+ */
+.traffic-split {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.traffic-row-button {
+  display: grid;
+  flex: 1 1 auto;
+  grid-template-columns: 4em minmax(0, 1fr) 3em 4.5em minmax(0, 14em);
+  gap: var(--step);
+  align-items: baseline;
+  width: 100%;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.traffic-row-button:focus-visible {
+  outline: 1px solid var(--focus-ring);
+  outline-offset: -1px;
+}
+
+.traffic-note {
+  display: flex;
+  gap: var(--step);
+  min-width: 0;
+  overflow: hidden;
+}
+
+.traffic-row--selected {
+  background: var(--bg-pane-active);
+}
+
+/*
+ * The details are half of what the panel has and stay that way.
+ *
+ * `1 1 auto` gave them whatever the row list left, which on a tall window is a
+ * thin strip with the JSON clipped — the thing this region exists to show.
+ * `50vh` answered the window instead, which is the same number only while the
+ * panel is the whole window: a pane split down leaves a shorter column, and the
+ * details then took more than half of it and the rows went out of sight.
+ */
+.traffic-inspector {
+  display: flex;
+  flex: 0 0 50%;
+  flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
+  border-top: 1px solid var(--border-default);
+  background: var(--bg-surface);
+}
+
+.traffic-panes {
+  display: flex;
+  flex: 1 1 auto;
+  gap: var(--step);
+  min-height: 0;
+}
+
+.traffic-pane {
+  display: flex;
+  flex: 1 1 0;
+  flex-direction: column;
+  min-width: 0;
+  overflow: auto;
+}
+
+.traffic-pane + .traffic-pane {
+  border-left: 1px solid var(--border-default);
+}
+
+.traffic-pane > .traffic-label {
+  flex: 0 0 auto;
+}
+
+.traffic-tab {
+  padding: 2px calc(var(--step) * 2);
+  border: 1px solid transparent;
+  border-radius: 4px;
+  background: none;
+  color: var(--text-muted);
+  font: inherit;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.traffic-tab[aria-pressed='true'] {
+  border-color: var(--border-strong);
+  background: var(--bg-control);
+  color: var(--accent-text);
+}
+
+/*
+ * Sized by its own content, not by the space left over. It was the only child
+ * of the details allowed below its content size, so once the request tab grew a
+ * section after it the column overflowed and this was squeezed to zero — while
+ * its bar and body kept painting, over the timing block below.
+ */
+.traffic-body-view {
+  display: flex;
+  flex: 0 0 auto;
+  flex-direction: column;
+}
+
+.traffic-body-bar {
+  display: flex;
+  flex: 0 0 auto;
+  gap: var(--step);
+  align-items: center;
+  padding: var(--step) calc(var(--step) * 2);
+}
+
+.traffic-find {
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: 2px var(--step);
+  border: 1px solid var(--border-default);
+  border-radius: 4px;
+  background: var(--bg-control);
+  color: inherit;
+  font: inherit;
+  font-size: 11px;
+}
+
+.traffic-body-text {
+  flex: 1 1 auto;
+  margin: 0;
+  padding: 0 calc(var(--step) * 2) calc(var(--step) * 2);
+  overflow: auto;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+  line-height: 1.45;
+  white-space: pre;
+  tab-size: 2;
+}
+
+.traffic-tree {
+  padding: 0 calc(var(--step) * 2) calc(var(--step) * 2);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.traffic-node {
+  display: block;
+  padding-right: calc(var(--step) * 2);
+  outline-offset: -1px;
+  white-space: pre;
+}
+
+.traffic-node:focus-visible {
+  background: var(--bg-control);
+}
+
+.traffic-twisty {
+  display: inline-block;
+  width: 1.4em;
+  color: var(--text-muted);
+}
+
+.traffic-punct {
+  color: var(--muted);
+}
+
+.traffic-fold > summary,
+.traffic-setup > summary {
+  padding: var(--step) calc(var(--step) * 2);
+  color: var(--text-muted);
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.traffic-headers,
+.traffic-general,
+.traffic-fields {
+  margin: 0;
+  padding: var(--step) calc(var(--step) * 2);
+  font-size: 11px;
+}
+
+.traffic-header,
+.traffic-general p,
+.traffic-fields p {
+  display: flex;
+  gap: var(--step);
+  margin: 0 0 2px;
+}
+
+.traffic-label {
+  flex: 0 0 10em;
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 11px;
+  font-weight: 500;
+}
+
+.traffic-header dt {
+  flex: 0 0 14em;
+  color: var(--text-muted);
+  overflow-wrap: anywhere;
+}
+
+.traffic-header dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.traffic-env {
+  overflow-x: auto;
+  color: var(--text-secondary);
+  font-family: var(--mono);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.traffic-origin {
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: var(--step) calc(var(--step) * 2);
+  color: var(--text-primary);
+  font: inherit;
+  font-family: var(--mono);
+  font-size: 11px;
+  background: var(--bg-control);
+  border: 1px solid var(--border-default);
+  border-radius: 6px;
+}
+
+.traffic-rows {
+  flex: 1 1 auto;
+  margin: 0;
+  padding: 0;
+  overflow-y: auto;
+  list-style: none;
+}
+
+.traffic-row {
+  display: flex;
+  align-items: baseline;
+  gap: calc(var(--step) * 2);
+  padding: var(--step) calc(var(--step) * 3);
+  font-family: var(--mono);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.traffic-method,
+.traffic-status,
+.traffic-outcome {
+  flex: 0 0 auto;
+  overflow: hidden;
+  color: var(--text-muted);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.traffic-method {
+  color: var(--tok-function);
+}
+
+.traffic-method[data-method='GET'] {
+  color: var(--tok-property);
+}
+
+.traffic-method[data-method='POST'] {
+  color: var(--tok-added);
+}
+
+.traffic-method[data-method='PUT'] {
+  color: var(--tok-number);
+}
+
+.traffic-method[data-method='PATCH'] {
+  color: var(--tok-keyword);
+}
+
+.traffic-method[data-method='DELETE'] {
+  color: var(--tok-removed);
+}
+
+.traffic-status[data-class='2xx'] {
+  color: var(--tok-added);
+}
+
+.traffic-status[data-class='3xx'] {
+  color: var(--tok-property);
+}
+
+.traffic-status[data-class='4xx'],
+.traffic-status[data-class='5xx'] {
+  color: var(--tok-removed);
+}
+
+.traffic-outcome[data-outcome='refused'],
+.traffic-outcome[data-outcome='backend'] {
+  color: var(--tok-removed);
+}
+
+.traffic-outcome[data-outcome='unreadable'] {
+  color: var(--tok-number);
+}
+
+.traffic-url {
+  flex: 1 1 auto;
+  overflow: hidden;
+  color: var(--text-secondary);
+  text-overflow: ellipsis;
+}
+
+.traffic-code,
+.traffic-next {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text-primary);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.traffic-source-row {
+  display: flex;
+  flex: 0 0 auto;
+  padding: var(--step) calc(var(--step) * 3);
+  border-bottom: 1px solid var(--border-default);
+}
+
+.traffic-source {
+  flex: 0 1 45%;
+  min-width: 0;
+  padding: var(--step) calc(var(--step) * 2);
+  color: var(--text-primary);
+  font: inherit;
+  font-size: 11px;
+  background: var(--bg-control);
+  border: 1px solid var(--border-default);
+  border-radius: 6px;
+}
+
+.traffic-row[data-source='log'],
+.traffic-row[data-source='logcat'] {
+  border-left: 2px solid var(--border-strong);
+}
+
+.traffic-line {
+  flex: 1 1 auto;
+  overflow: hidden;
+  color: var(--text-secondary);
+  text-overflow: ellipsis;
+}
+
+.traffic-exit {
+  flex: 0 0 auto;
+  color: var(--text-muted);
+  font-style: italic;
+}
+
 /*
  * The drag handle, sitting *above* the panel's own top edge.
  *
@@ -11794,6 +12265,24 @@ input::placeholder {
 .conversation-body > * {
   flex: 1 1 auto;
   min-height: 0;
+}
+
+/*
+ * Traffic is a tab here, so it fills the body rather than floating in it.
+ *
+ * The panel was drawn as a card beside the global terminal: a fixed 300px, its
+ * own margin, a border and a radius. All four are wrong one level in, where it
+ * is the body's only child and the column already supplies the frame — the
+ * fixed height left a gap under it and the card drew a second edge inside the
+ * group's own. `container-type` is deliberately left alone: the panel's own
+ * layout is written in container queries, and they are what makes it readable
+ * in a column this narrow.
+ */
+.conversation-body > .traffic-panel {
+  height: auto;
+  margin: 0;
+  border: 0;
+  border-radius: 0;
 }
 
 /*

@@ -1,10 +1,21 @@
 import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { migrate, ProjectStore, UnknownProjectError, openSqlite } from '@chorus/event-store'
+import {
+  migrate,
+  NoLegacyTrafficError,
+  ProjectStore,
+  UnknownProjectError,
+  UnknownTrafficOwnershipError,
+  UnresolvedLegacyTrafficError,
+  openSqlite,
+} from '@chorus/event-store'
 import { beforeEach, describe, expect, it } from 'vitest'
+import { DEFAULT_TRAFFIC_PORT } from '../shared/ipc.js'
 import {
   AgentFolderMissingError,
+  LegacyTrafficOriginMissingError,
+  LegacyTrafficPortMissingError,
   ProjectRootMissingError,
   ProjectService,
 } from './project-service.js'
@@ -361,5 +372,154 @@ describe('the rest of the registry', () => {
 
     expect(service.moveOrder(first.id, null).map((p) => p.id)).toEqual([second.id, first.id])
     expect(service.list().map((p) => p.id)).toEqual([second.id, first.id])
+  })
+})
+
+describe('the shared traffic connection', () => {
+  const settingsWith = (contents: string): string => {
+    const path = mkdtempSync(join(tmpdir(), 'chorus-traffic-'))
+    writeFileSync(join(path, 'settings.json'), contents, 'utf8')
+    return path
+  }
+
+  const configured = (): string =>
+    settingsWith(JSON.stringify({ trafficOrigin: 'http://127.0.0.1:8080', trafficPort: 30_100 }))
+
+  it('reserves the port the saved connection was on', () => {
+    service.syncLegacyTraffic(configured())
+
+    const project = service.adopt(dir('one')).project
+    expect(service.nextTrafficPort(project.id)).toBe(DEFAULT_TRAFFIC_PORT + 1)
+  })
+
+  it('reserves it for a file that holds nothing but the defaults, too', () => {
+    service.syncLegacyTraffic(
+      settingsWith(JSON.stringify({ trafficOrigin: '', trafficPort: DEFAULT_TRAFFIC_PORT }))
+    )
+
+    expect(service.trafficImport().candidate).toEqual({
+      origin: null,
+      port: DEFAULT_TRAFFIC_PORT,
+      access: 'lan',
+    })
+  })
+
+  it('decides there is nothing to import before a later write can invent one', () => {
+    service.syncLegacyTraffic(settingsWith(JSON.stringify({ theme: 'dark' })))
+
+    expect(service.trafficImport()).toEqual({
+      completed: true,
+      assignedProjectId: null,
+      candidate: null,
+      error: null,
+    })
+  })
+
+  it('reads the same file twice without moving anything', () => {
+    const settings = configured()
+    service.syncLegacyTraffic(settings)
+    const first = service.trafficImport()
+    service.syncLegacyTraffic(settings)
+
+    expect(service.trafficImport()).toEqual(first)
+  })
+
+  it('holds every project port when the saved port could not be read', () => {
+    expect(service.syncLegacyTraffic(settingsWith('{ not json'))).toMatchObject({
+      kind: 'unreadable',
+    })
+
+    expect(service.trafficImport()).toMatchObject({
+      completed: false,
+      assignedProjectId: null,
+      candidate: { origin: null, port: null, access: 'lan' },
+      error: expect.any(String),
+    })
+    const project = service.adopt(dir('one')).project
+    expect(() => service.nextTrafficPort(project.id)).toThrow(UnknownTrafficOwnershipError)
+  })
+
+  it('protects a newly disputed port even when an older candidate exists', () => {
+    service.syncLegacyTraffic(
+      settingsWith(JSON.stringify({ trafficOrigin: 'http://127.0.0.1:8080', trafficPort: 31_200 }))
+    )
+    service.syncLegacyTraffic(
+      settingsWith(JSON.stringify({ trafficOrigin: 12, trafficPort: DEFAULT_TRAFFIC_PORT }))
+    )
+    const project = service.adopt(dir('one')).project
+
+    expect(service.trafficImport().candidate?.port).toBe(DEFAULT_TRAFFIC_PORT)
+    expect(() =>
+      service.setTrafficConfig(project.id, { trafficPort: DEFAULT_TRAFFIC_PORT })
+    ).toThrow()
+    expect(() => service.adoptLegacyTraffic(project.id)).toThrow(UnresolvedLegacyTrafficError)
+  })
+
+  it('reserves the port it could still read when the rest of the file is unusable', () => {
+    service.syncLegacyTraffic(
+      settingsWith(JSON.stringify({ trafficOrigin: 12, trafficPort: 31_200 }))
+    )
+    const project = service.adopt(dir('one')).project
+
+    expect(service.trafficImport().candidate?.port).toBe(31_200)
+    expect(() => service.setTrafficConfig(project.id, { trafficPort: 31_200 })).toThrow()
+  })
+
+  it('keeps a candidate it already had when the file goes unreadable', () => {
+    service.syncLegacyTraffic(
+      settingsWith(JSON.stringify({ trafficOrigin: '', trafficPort: 31_200 }))
+    )
+    service.syncLegacyTraffic(settingsWith('{ not json'))
+
+    expect(service.trafficImport().candidate?.port).toBe(31_200)
+    expect(service.trafficImport().error).toEqual(expect.any(String))
+  })
+
+  it('never reopens a decided import, whatever the file still says', () => {
+    service.dismissLegacyTraffic()
+    service.syncLegacyTraffic(configured())
+
+    expect(service.trafficImport().completed).toBe(true)
+    expect(service.trafficImport().candidate).toBeNull()
+  })
+
+  it('hands the connection to a project, once', () => {
+    service.syncLegacyTraffic(configured())
+    const project = service.adopt(dir('one')).project
+
+    const adopted = service.adoptLegacyTraffic(project.id)
+    expect(adopted.trafficOrigin).toBe('http://127.0.0.1:8080')
+    expect(adopted.trafficPort).toBe(30_100)
+    expect(adopted.trafficAccess).toBe('lan')
+    expect(service.trafficImport().assignedProjectId).toBe(project.id)
+
+    const other = service.adopt(dir('two')).project
+    expect(() => service.adoptLegacyTraffic(other.id)).toThrow(NoLegacyTrafficError)
+  })
+
+  it('refuses to hand over a connection with nowhere to forward to', () => {
+    service.syncLegacyTraffic(
+      settingsWith(JSON.stringify({ trafficOrigin: '', trafficPort: DEFAULT_TRAFFIC_PORT }))
+    )
+    const project = service.adopt(dir('one')).project
+
+    expect(() => service.adoptLegacyTraffic(project.id)).toThrow(LegacyTrafficOriginMissingError)
+  })
+
+  it('refuses to hand over a connection with no port of its own', () => {
+    service.syncLegacyTraffic(
+      settingsWith(JSON.stringify({ trafficOrigin: 'http://127.0.0.1:8080', trafficPort: 0 }))
+    )
+    const project = service.adopt(dir('one')).project
+
+    expect(() => service.adoptLegacyTraffic(project.id)).toThrow(LegacyTrafficPortMissingError)
+  })
+
+  it('releases the port when the connection is dismissed', () => {
+    service.syncLegacyTraffic(configured())
+    service.dismissLegacyTraffic()
+
+    const project = service.adopt(dir('one')).project
+    expect(service.nextTrafficPort(project.id)).toBe(DEFAULT_TRAFFIC_PORT)
   })
 })

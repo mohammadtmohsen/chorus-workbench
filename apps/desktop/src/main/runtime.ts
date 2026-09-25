@@ -65,7 +65,14 @@ import {
   type Logger,
 } from '@chorus/shared'
 import { relativeWithin } from '@chorus/workspace'
-import type { ActivityPush, ContextUsagePush, TasksPush } from '../shared/ipc.js'
+import {
+  terminalRefKey,
+  type ActivityPush,
+  type ContextUsagePush,
+  type TasksPush,
+  type TrafficSourceShape,
+} from '../shared/ipc.js'
+import type { TrafficLegacy } from '../shared/traffic-ipc.js'
 import { UNREAD_EVENT_TYPES } from '../shared/unread.js'
 import {
   openConversations,
@@ -77,10 +84,11 @@ import { ProjectService } from './project-service.js'
 import { EditPreviews } from './edit-preview.js'
 import { containsPassage } from '../shared/plain-text.js'
 import { questionSetText } from '../shared/question-text.js'
+import { networkInterfaces } from 'node:os'
 import { readRemembered, writeRemembered } from './remembered.js'
 
 import { readAgentKey } from './agent-secrets.js'
-import { readSettings } from './settings.js'
+import { readSettings, type SavedTrafficConnection } from './settings.js'
 import {
   TerminalService,
   type TerminalAttachment,
@@ -88,6 +96,13 @@ import {
   type TerminalPush,
   type TerminalRef,
 } from './terminal.js'
+import {
+  ProjectTrafficRegistry,
+  type ProjectTrafficConfig,
+  type ProjectTrafficState,
+} from './project-traffic.js'
+import { LineCarries } from './log-lines.js'
+import { LogcatService } from './logcat.js'
 import type { WorkspaceSnapshot } from '../shared/workspace-layout.js'
 import { sdkExecutablePath, spawnSpec } from './command.js'
 import { resolveCommand } from './which.js'
@@ -1353,6 +1368,29 @@ interface RestoredConversations {
   workspace: WorkspaceSnapshot | null
 }
 
+const VIRTUAL_INTERFACE = /^(utun|bridge|awdl|llw|docker|vmnet|vboxnet|tap|tun)/
+
+const isPrivateLan = (address: string): boolean => {
+  const [first, second] = address.split('.').map(Number)
+  if (first === undefined || second === undefined) return false
+  if (first === 10) return true
+  if (first === 172) return second >= 16 && second <= 31
+  return first === 192 && second === 168
+}
+
+const lanAddress = (): string | null => {
+  const fallbacks: string[] = []
+  for (const [name, addresses] of Object.entries(networkInterfaces())) {
+    if (VIRTUAL_INTERFACE.test(name)) continue
+    for (const address of addresses ?? []) {
+      if (address.family !== 'IPv4' || address.internal) continue
+      if (isPrivateLan(address.address)) return address.address
+      fallbacks.push(address.address)
+    }
+  }
+  return fallbacks[0] ?? null
+}
+
 export class ChorusRuntime {
   private readonly active = new Map<string, ActiveConversation>()
   /**
@@ -1429,6 +1467,16 @@ export class ChorusRuntime {
     cwdFor: (ref) =>
       ref.scope === 'global' ? homedir() : (this.active.get(ref.conversationId)?.cwd ?? homedir()),
   })
+  private readonly traffic: ProjectTrafficRegistry
+  /**
+   * Partial lines, one per terminal — see `LineCarries`.
+   *
+   * It was a single string here, which is the defect: the tap fires for every
+   * session, so two terminals producing output at once shared one buffer and the
+   * line assembled from both was filed against whichever delivered the newline.
+   */
+  private readonly trafficCarry = new LineCarries()
+  private readonly logcat = new LogcatService()
   /** Last renderer-owned editor arrangement, persisted beside the active sessions. */
   private workspaceSnapshot: WorkspaceSnapshot | null = null
   /** The latest windows each provider reported, for a window opened later. */
@@ -1500,6 +1548,52 @@ export class ChorusRuntime {
     this.store.subscribe((events) => {
       this.followHandoffs(events)
     })
+    this.traffic = new ProjectTrafficRegistry({
+      config: (projectId) => this.projectTrafficConfig(projectId),
+      nextPort: (projectId) => this.projects.nextTrafficPort(projectId),
+      remember: (projectId, config) => {
+        this.projects.setTrafficConfig(projectId, {
+          trafficOrigin: config.origin,
+          trafficPort: config.port,
+          trafficAccess: config.access,
+          trafficEnvVar: config.envVar,
+        })
+      },
+      address: () => lanAddress(),
+    })
+    this.logcat.subscribe((line) => {
+      this.traffic.routeLogcatLine(line)
+    })
+    /*
+     * The tap observes; it does not read history. A terminal running Metro holds
+     * whatever was typed before Metro started, which is the sharpest instance of
+     * C-021's unsolved half — so lines flow to whichever project chose this
+     * terminal, and a terminal nobody chose sends nothing anywhere.
+     */
+    this.terminals.tap((ref, event) => {
+      const key = terminalRefKey(ref)
+      if (event.kind === 'exit') {
+        for (const line of this.trafficCarry.flush(key)) {
+          this.traffic.routeLogLine(ref, line, null)
+        }
+        this.traffic.routeLogLine(ref, '', event.code)
+        return
+      }
+      for (const line of this.trafficCarry.push(key, event.data)) {
+        this.traffic.routeLogLine(ref, line, null)
+      }
+    })
+  }
+
+  private projectTrafficConfig(projectId: string): ProjectTrafficConfig | null {
+    const project = this.projects.get(projectId)
+    if (project === null) return null
+    return {
+      origin: project.trafficOrigin,
+      port: project.trafficPort,
+      access: project.trafficAccess,
+      envVar: project.trafficEnvVar,
+    }
   }
 
   static open(
@@ -4549,6 +4643,14 @@ export class ChorusRuntime {
         closed: open.length,
       })
     }
+    /*
+     * The listener goes first, and the order is the point. `forget` deletes the
+     * registry row the listener's configuration was read from, so disposing
+     * afterwards would release a socket whose owner is already gone — and until
+     * it was released the port stayed held by a project that no longer exists
+     * and can never be started again to give it up.
+     */
+    await this.traffic.dispose(projectId)
     return { forgotten: this.projects.forget(projectId) }
   }
 
@@ -4864,6 +4966,75 @@ export class ChorusRuntime {
     return this.terminals.describe(ref)
   }
 
+  trafficRegistry(): ProjectTrafficRegistry {
+    return this.traffic
+  }
+
+  /**
+   * The device-logcat lease, and the child process behind it.
+   *
+   * **The registry decides who holds it** — one project at a time, and a second
+   * is told `source-busy` rather than being handed lines it cannot attribute.
+   * Starting and stopping `adb` stays here, because a child process is runtime's
+   * business and not a project's.
+   */
+  selectTrafficSource(projectId: string, source: TrafficSourceShape): ProjectTrafficState {
+    const state = this.traffic.selectSource(projectId, source)
+    if (state.failure !== null) return state
+
+    const running = this.logcat.state()
+    if (source.kind !== 'logcat') {
+      this.logcat.stop()
+    } else if (!running.running) {
+      this.logcat.start(source.filters)
+    } else if (running.filters !== source.filters) {
+      this.logcat.stop()
+      this.logcat.start(source.filters)
+    }
+    /*
+     * Every terminal's partial line goes, which is what this reset has always
+     * meant — it dropped the one buffer there was, and now there is one per
+     * terminal. A discard rather than a flush: a half-line belongs to the source
+     * being left, and ending it would send a line nobody typed a newline for.
+     */
+    this.trafficCarry.clear()
+    return state
+  }
+
+  syncLegacyTraffic(): SavedTrafficConnection {
+    return this.projects.syncLegacyTraffic(this.userDataPath)
+  }
+
+  legacyTraffic(): TrafficLegacy {
+    const state = this.projects.trafficImport()
+    return {
+      completed: state.completed,
+      assignedProjectId: state.assignedProjectId,
+      origin: state.candidate?.origin ?? null,
+      port: state.candidate?.port ?? null,
+      access: state.candidate?.access ?? null,
+      error: state.error,
+    }
+  }
+
+  /**
+   * The two halves of Keep / Start fresh.
+   *
+   * **Keep is deliberately unresolved.** Keeping the shared connection means the
+   * reservation it holds stays held, so the candidate is left exactly as it is
+   * and only Start fresh releases anything. Whether Keep should be remembered so
+   * the question is not asked again is an open question in the plan, not
+   * something to answer by writing a column nobody has agreed to.
+   */
+  decideLegacyTraffic(keep: boolean): void {
+    if (keep) return
+    this.projects.dismissLegacyTraffic()
+  }
+
+  disposeProjectTraffic(projectId: string): Promise<void> {
+    return this.traffic.dispose(projectId)
+  }
+
   async close(): Promise<void> {
     /*
      * Refs are read here, not only when a session starts.
@@ -4885,6 +5056,8 @@ export class ChorusRuntime {
      * service drains both kinds.
      */
     this.terminals.close()
+    this.logcat.close()
+    await this.traffic.shutdown()
 
     /*
      * Asides are closed alongside participants, not forgotten.

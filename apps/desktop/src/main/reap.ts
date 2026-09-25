@@ -4,7 +4,7 @@ import { promisify } from 'node:util'
 const run = promisify(execFile)
 
 /**
- * A backstop for agent processes left behind by a crash.
+ * A backstop for child processes left behind by a crash.
  *
  * **This is defence, not a fix for an observed leak.** Measured on macOS: when
  * the Electron main process is SIGKILLed, its stdio-connected agent children
@@ -22,12 +22,12 @@ const run = promisify(execFile)
  * writing it, and a reused pid would have us kill something unrelated. PPID 1 is
  * a fact about the process as it exists now.
  *
- * An agent started from a terminal has that shell as its parent, so it is never
+ * A child started from a terminal has that shell as its parent, so it is never
  * a candidate — which matters, because Chorus drives the same CLIs the user runs
  * by hand.
  */
 
-const AGENT_PATTERNS = ['codex app-server', 'claude --'] as const
+const CHILD_PATTERNS = ['codex app-server', 'claude --', 'adb logcat'] as const
 
 export interface ReapResult {
   readonly killed: number
@@ -60,7 +60,7 @@ export interface ReapResult {
  * replace it is a job object or a pid whose ownership is proven, and that is
  * Phase 2 work with a Windows machine attached to it.
  */
-export async function reapOrphanedAgents(
+export async function reapOrphanedChildren(
   platform: NodeJS.Platform = process.platform
 ): Promise<ReapResult> {
   if (platform === 'win32') return { killed: 0, inspected: 0, skipped: true }
@@ -68,7 +68,7 @@ export async function reapOrphanedAgents(
   let killed = 0
   let inspected = 0
 
-  for (const pattern of AGENT_PATTERNS) {
+  for (const pattern of CHILD_PATTERNS) {
     for (const pid of await findPids(pattern)) {
       inspected += 1
       if (!(await isOrphan(pid))) continue

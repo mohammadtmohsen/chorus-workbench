@@ -8,8 +8,13 @@ import {
   type Database,
   type Project,
   type ProjectStore,
+  type TrafficAccess,
+  type TrafficLegacyImport,
+  UnresolvedLegacyTrafficError,
 } from '@chorus/event-store'
 import { remoteProjectRoot } from '@chorus/workspace'
+import { DEFAULT_TRAFFIC_PORT } from '../shared/ipc.js'
+import { readSavedTrafficConnection, type SavedTrafficConnection } from './settings.js'
 import { approveProjectRoot, type WorkbenchPlace } from './workbench-surface.js'
 
 /**
@@ -61,6 +66,22 @@ export class ProjectRootMissingError extends Error {
     this.name = 'ProjectRootMissingError'
   }
 }
+
+export class LegacyTrafficOriginMissingError extends Error {
+  constructor() {
+    super('The shared connection has no origin to forward to yet')
+    this.name = 'LegacyTrafficOriginMissingError'
+  }
+}
+
+export class LegacyTrafficPortMissingError extends Error {
+  constructor() {
+    super('The shared connection has no port of its own; choose one before keeping it')
+    this.name = 'LegacyTrafficPortMissingError'
+  }
+}
+
+const LEGACY_TRAFFIC_ACCESS: TrafficAccess = 'lan'
 
 export class AgentFolderMissingError extends Error {
   constructor(
@@ -346,6 +367,68 @@ export class ProjectService {
   /** How big that scratchpad was left, on the same terms as its text. */
   setNoteSize(projectId: string, width: number | null, height: number | null): Project {
     return this.projects.setNoteSize(projectId, width, height)
+  }
+
+  setTrafficConfig(
+    projectId: string,
+    input: {
+      readonly trafficOrigin?: string | null
+      readonly trafficPort?: number | null
+      readonly trafficAccess?: TrafficAccess
+      readonly trafficEnvVar?: string | null
+    }
+  ): Project {
+    return this.projects.setTrafficConfig(projectId, input)
+  }
+
+  nextTrafficPort(projectId: string): number {
+    return this.projects.nextTrafficPort(projectId, DEFAULT_TRAFFIC_PORT)
+  }
+
+  trafficImport(): TrafficLegacyImport {
+    return this.projects.legacyTrafficImport()
+  }
+
+  syncLegacyTraffic(userDataPath: string): SavedTrafficConnection {
+    const connection = readSavedTrafficConnection(userDataPath)
+    const state = this.projects.legacyTrafficImport()
+    if (state.completed) return connection
+    if (connection.kind === 'absent') {
+      this.projects.completeLegacyTrafficImport()
+      return connection
+    }
+    if (connection.kind === 'unreadable') {
+      const kept = connection.port === null ? (state.candidate ?? null) : null
+      this.projects.recordLegacyTrafficCandidate(
+        kept ?? { origin: null, port: connection.port, access: LEGACY_TRAFFIC_ACCESS },
+        connection.reason
+      )
+      return connection
+    }
+    this.projects.recordLegacyTrafficCandidate(
+      { origin: connection.origin, port: connection.port, access: LEGACY_TRAFFIC_ACCESS },
+      null
+    )
+    return connection
+  }
+
+  adoptLegacyTraffic(projectId: string): Project {
+    const state = this.projects.legacyTrafficImport()
+    const candidate = state.candidate
+    if (candidate !== null && state.error !== null) {
+      throw new UnresolvedLegacyTrafficError()
+    }
+    if (candidate !== null && candidate.origin === null) {
+      throw new LegacyTrafficOriginMissingError()
+    }
+    if (candidate !== null && (candidate.port === null || candidate.port <= 0)) {
+      throw new LegacyTrafficPortMissingError()
+    }
+    return this.projects.adoptLegacyTraffic(projectId)
+  }
+
+  dismissLegacyTraffic(): void {
+    this.projects.completeLegacyTrafficImport()
   }
 
   /**

@@ -83,6 +83,26 @@ export interface Project {
    */
   readonly noteWidth: number | null
   readonly noteHeight: number | null
+  readonly trafficOrigin: string | null
+  readonly trafficPort: number | null
+  readonly trafficAccess: TrafficAccess
+  readonly trafficEnvVar: string | null
+}
+
+export const TrafficAccesses = z.enum(['loopback', 'lan'])
+export type TrafficAccess = z.infer<typeof TrafficAccesses>
+
+export interface TrafficLegacyImport {
+  readonly completed: boolean
+  readonly assignedProjectId: ProjectId | null
+  readonly candidate: LegacyTrafficCandidate | null
+  readonly error: string | null
+}
+
+export interface LegacyTrafficCandidate {
+  readonly origin: string | null
+  readonly port: number | null
+  readonly access: TrafficAccess
 }
 
 /**
@@ -144,6 +164,54 @@ export class UnknownProjectError extends Error {
   }
 }
 
+export class DuplicateTrafficPortError extends Error {
+  constructor(
+    readonly trafficPort: number,
+    readonly existingProjectId: ProjectId
+  ) {
+    super(`Another project already listens on ${String(trafficPort)}`)
+    this.name = 'DuplicateTrafficPortError'
+  }
+}
+
+export class ReservedTrafficPortError extends Error {
+  constructor(readonly trafficPort: number) {
+    super(`The shared connection is still holding ${String(trafficPort)}`)
+    this.name = 'ReservedTrafficPortError'
+  }
+}
+
+export class NoFreeTrafficPortError extends Error {
+  constructor(
+    readonly from: number,
+    readonly to: number
+  ) {
+    super(`Every traffic port from ${String(from)} to ${String(to)} is taken`)
+    this.name = 'NoFreeTrafficPortError'
+  }
+}
+
+export class NoLegacyTrafficError extends Error {
+  constructor() {
+    super('There is no unassigned shared connection to adopt')
+    this.name = 'NoLegacyTrafficError'
+  }
+}
+
+export class UnknownTrafficOwnershipError extends Error {
+  constructor() {
+    super('A saved connection is on a port that could not be read, so no project may take one')
+    this.name = 'UnknownTrafficOwnershipError'
+  }
+}
+
+export class UnresolvedLegacyTrafficError extends Error {
+  constructor() {
+    super('The saved connection could not be read, so it cannot be assigned yet')
+    this.name = 'UnresolvedLegacyTrafficError'
+  }
+}
+
 export const LOCAL_HOST = ''
 
 const HOST_NAME = /^[a-z0-9][a-z0-9._@-]*$/
@@ -179,6 +247,39 @@ const CreateProjectInput = z.object({
 })
 export type CreateProjectInput = z.input<typeof CreateProjectInput>
 
+const TrafficPort = z.number().int().min(1).max(65535)
+
+const TrafficEnvVar = z
+  .string()
+  .trim()
+  .min(1)
+  .max(64)
+  .regex(/^[A-Za-z_][A-Za-z0-9_]*$/)
+const SavedTrafficPort = z.number().int().min(0).max(65535).nullable()
+const TRAFFIC_PORT_SPAN = 1_000
+
+const TrafficOrigin = z.string().trim().min(1).refine(usableTrafficOrigin, {
+  message:
+    'A traffic origin must be http or https at its root, without credentials, query or fragment',
+})
+
+export function usableTrafficOrigin(raw: string): boolean {
+  let origin: URL
+  try {
+    origin = new URL(raw)
+  } catch {
+    return false
+  }
+  return (
+    (origin.protocol === 'http:' || origin.protocol === 'https:') &&
+    origin.pathname === '/' &&
+    origin.username === '' &&
+    origin.password === '' &&
+    origin.search === '' &&
+    origin.hash === ''
+  )
+}
+
 const RelocateProjectInput = z.object({
   root: z.string().min(1),
   canonicalRoot: z.string().min(1),
@@ -202,6 +303,10 @@ interface ProjectRow {
   notes: string | null
   note_width: number | null
   note_height: number | null
+  traffic_origin: string | null
+  traffic_env_var: string | null
+  traffic_port: number | null
+  traffic_access: string
 }
 
 function toProject(row: ProjectRow): Project {
@@ -221,7 +326,16 @@ function toProject(row: ProjectRow): Project {
     notes: row.notes,
     noteWidth: measure(row.note_width),
     noteHeight: measure(row.note_height),
+    trafficOrigin: row.traffic_origin,
+    trafficEnvVar: row.traffic_env_var,
+    trafficPort: measure(row.traffic_port),
+    trafficAccess: trafficAccessOf(row.traffic_access),
   }
+}
+
+const trafficAccessOf = (raw: string): TrafficAccess => {
+  const parsed = TrafficAccesses.safeParse(raw)
+  return parsed.success ? parsed.data : 'loopback'
 }
 
 /**
@@ -257,7 +371,7 @@ function parseAgentIds(raw: string | null): readonly string[] | null {
   }
 }
 
-const COLUMNS = `id, name, host, root, canonical_root, workspace_file, agent_cwd, permission_profile_id, agent_ids, created_at, last_opened_at, sort_order, notes, note_width, note_height`
+const COLUMNS = `id, name, host, root, canonical_root, workspace_file, agent_cwd, permission_profile_id, agent_ids, created_at, last_opened_at, sort_order, notes, note_width, note_height, traffic_origin, traffic_port, traffic_access, traffic_env_var`
 
 /**
  * The project registry — create, find, rename, relocate, forget.
@@ -358,6 +472,10 @@ export class ProjectStore {
         // Never dragged, so the stylesheet decides how big the pad opens.
         noteWidth: null,
         noteHeight: null,
+        trafficOrigin: null,
+        trafficPort: null,
+        trafficAccess: 'loopback',
+        trafficEnvVar: null,
       }
     })
 
@@ -607,6 +725,227 @@ export class ProjectStore {
       .run({ width, height, projectId }).changes
     if (changed === 0) throw new UnknownProjectError(projectId)
     return this.require(projectId)
+  }
+
+  setTrafficConfig(
+    projectId: string,
+    input: {
+      readonly trafficOrigin?: string | null
+      readonly trafficPort?: number | null
+      readonly trafficAccess?: TrafficAccess
+      readonly trafficEnvVar?: string | null
+    }
+  ): Project {
+    const run = this.db.transaction((): void => {
+      const current = this.require(projectId)
+      this.writeTrafficConfig(projectId, {
+        origin:
+          input.trafficOrigin === undefined
+            ? current.trafficOrigin
+            : TrafficOrigin.nullable().parse(input.trafficOrigin),
+        port:
+          input.trafficPort === undefined
+            ? current.trafficPort
+            : TrafficPort.nullable().parse(input.trafficPort),
+        access: TrafficAccesses.parse(input.trafficAccess ?? current.trafficAccess),
+        envVar:
+          input.trafficEnvVar === undefined
+            ? current.trafficEnvVar
+            : TrafficEnvVar.nullable().parse(input.trafficEnvVar),
+      })
+    })
+    run()
+    return this.require(projectId)
+  }
+
+  legacyTrafficImport(): TrafficLegacyImport {
+    const row = this.db
+      .prepare(
+        `SELECT completed, assigned_project_id, pending_recorded, pending_origin, pending_port,
+                pending_access, pending_error
+           FROM traffic_legacy_import
+          WHERE id = 1`
+      )
+      .get() as
+      | {
+          completed: number
+          assigned_project_id: string | null
+          pending_recorded: number
+          pending_origin: string | null
+          pending_port: number | null
+          pending_access: string | null
+          pending_error: string | null
+        }
+      | undefined
+    if (row === undefined) {
+      return { completed: false, assignedProjectId: null, candidate: null, error: null }
+    }
+    return {
+      completed: row.completed === 1,
+      assignedProjectId: row.assigned_project_id as ProjectId | null,
+      candidate:
+        row.pending_recorded === 0
+          ? null
+          : {
+              origin: row.pending_origin,
+              port: measure(row.pending_port),
+              access: trafficAccessOf(row.pending_access ?? ''),
+            },
+      error: row.pending_error,
+    }
+  }
+
+  recordLegacyTrafficCandidate(candidate: LegacyTrafficCandidate, error: string | null): boolean {
+    const next = {
+      origin: TrafficOrigin.nullable().parse(candidate.origin),
+      port: SavedTrafficPort.parse(candidate.port),
+      access: TrafficAccesses.parse(candidate.access),
+      error,
+    }
+    const run = this.db.transaction((): boolean => {
+      if (this.legacyTrafficImport().completed) return false
+      if (next.port !== null && next.port > 0) {
+        const held = this.db
+          .prepare(`SELECT id FROM projects WHERE traffic_port = @port`)
+          .get({ port: next.port }) as { id: string } | undefined
+        if (held !== undefined) {
+          throw new DuplicateTrafficPortError(next.port, held.id as ProjectId)
+        }
+      }
+      this.db
+        .prepare(
+          `UPDATE traffic_legacy_import
+              SET pending_recorded = 1,
+                  pending_origin = @origin,
+                  pending_port = @port,
+                  pending_access = @access,
+                  pending_error = @error
+            WHERE id = 1`
+        )
+        .run(next)
+      return true
+    })
+    return run()
+  }
+
+  adoptLegacyTraffic(projectId: string): Project {
+    const run = this.db.transaction((): void => {
+      this.require(projectId)
+      const state = this.legacyTrafficImport()
+      if (state.error !== null) throw new UnresolvedLegacyTrafficError()
+      const candidate = state.candidate
+      if (candidate === null) throw new NoLegacyTrafficError()
+      if (candidate.port === null) throw new UnknownTrafficOwnershipError()
+      this.markLegacyTrafficImport(projectId)
+      this.writeTrafficConfig(projectId, {
+        origin: candidate.origin,
+        port: candidate.port,
+        access: candidate.access,
+        envVar: null,
+      })
+    })
+    run()
+    return this.require(projectId)
+  }
+
+  completeLegacyTrafficImport(assignedProjectId: string | null = null): void {
+    this.markLegacyTrafficImport(assignedProjectId)
+  }
+
+  private markLegacyTrafficImport(assignedProjectId: string | null): void {
+    this.db
+      .prepare(
+        `UPDATE traffic_legacy_import
+            SET completed = 1,
+                assigned_project_id = @assignedProjectId,
+                pending_recorded = 0,
+                pending_origin = NULL,
+                pending_port = NULL,
+                pending_access = NULL,
+                pending_error = NULL
+          WHERE id = 1`
+      )
+      .run({ assignedProjectId })
+  }
+
+  nextTrafficPort(projectId: string, from: number): number {
+    this.require(projectId)
+    if (this.trafficOwnershipUnknown()) throw new UnknownTrafficOwnershipError()
+    const base = TrafficPort.parse(from)
+    const last = Math.min(base + TRAFFIC_PORT_SPAN - 1, 65_535)
+    const taken = this.reservedPorts()
+    for (let port = base; port <= last; port += 1) {
+      if (!taken.has(port)) return port
+    }
+    throw new NoFreeTrafficPortError(base, last)
+  }
+
+  private reservedPorts(): ReadonlySet<number> {
+    const ports = new Set<number>()
+    const rows = this.db
+      .prepare(`SELECT traffic_port FROM projects WHERE traffic_port IS NOT NULL`)
+      .all() as { traffic_port: number }[]
+    for (const row of rows) ports.add(row.traffic_port)
+    const pending = this.pendingLegacyPort()
+    if (pending !== null) ports.add(pending)
+    return ports
+  }
+
+  private pendingLegacyPort(): number | null {
+    const row = this.db
+      .prepare(
+        `SELECT pending_port FROM traffic_legacy_import
+          WHERE id = 1 AND completed = 0 AND pending_port IS NOT NULL`
+      )
+      .get() as { pending_port: number } | undefined
+    if (row === undefined || row.pending_port <= 0) return null
+    return row.pending_port
+  }
+
+  private trafficOwnershipUnknown(): boolean {
+    const state = this.legacyTrafficImport()
+    return !state.completed && state.candidate !== null && state.candidate.port === null
+  }
+
+  private trafficPortRefusal(port: number, projectId: string): Error | null {
+    const held = this.db
+      .prepare(`SELECT id FROM projects WHERE traffic_port = @port AND id <> @projectId`)
+      .get({ port, projectId }) as { id: string } | undefined
+    if (held !== undefined) return new DuplicateTrafficPortError(port, held.id as ProjectId)
+    if (this.pendingLegacyPort() === port) return new ReservedTrafficPortError(port)
+    return null
+  }
+
+  private writeTrafficConfig(
+    projectId: string,
+    next: {
+      readonly origin: string | null
+      readonly port: number | null
+      readonly access: TrafficAccess
+      readonly envVar: string | null
+    }
+  ): void {
+    if (next.port !== null) {
+      if (next.port !== this.require(projectId).trafficPort && this.trafficOwnershipUnknown()) {
+        throw new UnknownTrafficOwnershipError()
+      }
+      const refusal = this.trafficPortRefusal(next.port, projectId)
+      if (refusal !== null) throw refusal
+    }
+    this.db
+      .prepare(
+        `UPDATE projects
+            SET traffic_origin = @origin, traffic_port = @port, traffic_access = @access,
+                traffic_env_var = @envVar
+          WHERE id = @projectId`
+      )
+      .run({
+        origin: next.origin,
+        port: next.port,
+        access: next.access,
+        envVar: next.envVar,
+        projectId,
+      })
   }
 
   /**

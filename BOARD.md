@@ -30,6 +30,44 @@ Nothing here can be finished by me alone.
 
 ## Open
 
+### C-068 · The `src/main/` suite is flaky under vitest's file parallelism, and the failing tests differ every run
+
+**Noticed 2026-09-24**, during the traffic-panel work, when `pnpm check` stopped
+being green without anything in `src/main/` having changed. Three full runs of the
+desktop project gave three different failure sets: `terminal` + `reap` + `aside` +
+`session-defaults` (4 failed | 1789 passed); `reap` + `aside` + `session-defaults`
+(3 failed | 1790 passed); and, with the new test file removed as a control,
+**seven** files — `terminal`, `reap`, `aside`, `session-defaults`,
+`workbench-host` (twice), `workbench-extract`, `traffic-ipc` — for 7 failed |
+1782 passed. The same file fails in one run and passes in the next, so this is
+not a broken test: it is a broken _schedule_.
+
+**The isolating variable is vitest's own file parallelism.** The same seven files,
+run alone and concurrently, gave **3 failed | 981.95 s**. Run with
+`--no-file-parallelism` they gave **7 passed | 284 passed | exit 0 | 13.26 s**. So
+the contention is between the test files vitest is running at the same time, and
+it reproduces on demand in both directions. The affected files are exactly the
+ones that spawn real processes — `reap` kills orphaned children, `terminal` opens
+PTYs, `workbench-host` starts a REH — and each was sitting at 25–33 s, which reads
+as a timeout rather than an assertion.
+
+Two things are still unexplained and are part of the entry rather than noise. A
+full parallel run of all 96 files takes ~40–60 s, while seven of them concurrently
+took 982 s; that inversion is not accounted for. And a live Electron on
+`@chorus/desktop-dev` with five REH node processes was up throughout, which the
+concurrency result does not rule out as a **co-factor** — it is untested, not
+cleared. The test that would settle it is quitting those and re-running, and it
+was not run: the session doing the measuring was itself hosted by
+`/Applications/Chorus.app`, so quitting its Electron would have ended the
+conversation mid-answer. Anyone picking this up can run it from a plain terminal.
+
+**Done when** one of two things is true. Either the seven files are green in a
+full parallel run on a machine known to have no stray Electron or REH processes —
+which settles the co-factor in the same experiment — or a specific test's timing
+assumption is named and fixed, and the entry closes with the mechanism rather than
+the workaround. Until then `pnpm check` cannot be trusted to mean what
+`CLAUDE.md` says it means, which is the reason this is worth a board entry.
+
 ### C-067 · `agent-secrets.ts` says "agent" while holding a credential that is not an agent's
 
 **Noticed 2026-09-17**, while widening that module for TypeSafe —

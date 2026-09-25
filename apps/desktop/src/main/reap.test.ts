@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { reapOrphanedAgents } from './reap.js'
+import { reapOrphanedChildren } from './reap.js'
 
 /**
  * The Windows arm, which is a refusal rather than an implementation.
@@ -15,9 +15,9 @@ import { reapOrphanedAgents } from './reap.js'
  * binary as "nothing matched". A backstop that is absent and a backstop that
  * found nothing are different facts, and only one of them should be reassuring.
  */
-describe('reapOrphanedAgents', () => {
+describe('reapOrphanedChildren', () => {
   it('does not run on windows, and says so rather than reporting a clean sweep', async () => {
-    expect(await reapOrphanedAgents('win32')).toEqual({
+    expect(await reapOrphanedChildren('win32')).toEqual({
       killed: 0,
       inspected: 0,
       skipped: true,
@@ -27,7 +27,7 @@ describe('reapOrphanedAgents', () => {
   it('runs on unix and reports that it ran', async () => {
     // Nothing is orphaned in a test runner, so this is the "ran, found nothing"
     // case — the one that must stay distinguishable from the above.
-    const result = await reapOrphanedAgents('darwin')
+    const result = await reapOrphanedChildren('darwin')
     expect(result.skipped).toBe(false)
     expect(result.killed).toBe(0)
   })
@@ -36,6 +36,6 @@ describe('reapOrphanedAgents', () => {
     // The reaper runs at startup on every launch. A bug that widened its match
     // would take out the user's own `codex` in their own terminal, so the
     // no-orphans case returning zero kills is the property worth pinning.
-    expect((await reapOrphanedAgents('darwin')).killed).toBe(0)
+    expect((await reapOrphanedChildren('darwin')).killed).toBe(0)
   })
 })

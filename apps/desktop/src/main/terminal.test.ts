@@ -5,6 +5,7 @@ import {
   type Frame,
   type Pty,
   type PtyOptions,
+  type TerminalEvent,
   type TerminalPush,
   type TerminalRef,
 } from './terminal.js'
@@ -145,6 +146,63 @@ describe('opening', () => {
     service.detach(GLOBAL, first.epoch)
     await service.attach(GLOBAL)
     expect(spawned).toHaveLength(1)
+  })
+})
+
+describe('the tap', () => {
+  it('sees output from a shell with no view attached', async () => {
+    const { service, spawned, pushes } = build()
+    const seen: [TerminalRef, TerminalEvent][] = []
+    service.tap((ref, event) => seen.push([ref, event]))
+
+    const opened = await service.attach(GLOBAL)
+    service.detach(GLOBAL, opened.epoch)
+    spawned[0]?.emit('metro is listening')
+
+    expect(seen).toEqual([[GLOBAL, { kind: 'data', data: 'metro is listening' }]])
+    expect(pushes).toHaveLength(0)
+  })
+
+  it('sees a shell exit, which a background shell reports to no view', async () => {
+    const { service, spawned } = build()
+    const seen: TerminalEvent[] = []
+    service.tap((_ref, event) => seen.push(event))
+
+    const opened = await service.attach(GLOBAL)
+    service.detach(GLOBAL, opened.epoch)
+    spawned[0]?.finish(7)
+
+    expect(seen).toEqual([{ kind: 'exit', code: 7 }])
+  })
+
+  it('stops delivering once the tap is released', async () => {
+    const { service, spawned } = build()
+    const seen: string[] = []
+    const stop = service.tap((_ref, event) => {
+      if (event.kind === 'data') seen.push(event.data)
+    })
+    await service.attach(GLOBAL)
+
+    spawned[0]?.emit('one')
+    stop()
+    spawned[0]?.emit('two')
+
+    expect(seen).toEqual(['one'])
+  })
+
+  it('leaves the view protocol exactly as it was', async () => {
+    const { service, spawned, pushes, tick } = build()
+    service.tap(() => undefined)
+
+    const opened = await service.attach(GLOBAL)
+    spawned[0]?.emit('one')
+    spawned[0]?.emit('two')
+    tick()
+
+    expect(data(pushes)).toHaveLength(1)
+    expect(data(pushes)[0]?.seq).toBe(2)
+    expect(data(pushes)[0]?.epoch).toBe(opened.epoch)
+    expect(data(pushes)[0]?.data).toBe('onetwo')
   })
 })
 

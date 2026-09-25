@@ -166,6 +166,14 @@ export function Workspace(props: WorkspaceProps): React.JSX.Element {
     removeGlobalTerminalTab,
   } = useWorkspaceActions()
   const globalTerminal = useGlobalTerminal()
+  const trafficTerminals = useMemo(
+    () =>
+      globalTerminal.tabs.map((tab, index) => ({
+        ref: globalTerminalRef(tab.id),
+        label: t('terminal.tabLabel', { n: index + 1 }),
+      })),
+    [globalTerminal.tabs, t]
+  )
   const sessions = useMemo(
     () => new Map(props.sessions.map((session) => [session.conversationId, session])),
     [props.sessions]
@@ -470,6 +478,7 @@ export function Workspace(props: WorkspaceProps): React.JSX.Element {
             node={layout}
             path={[]}
             sessions={sessions}
+            trafficTerminals={trafficTerminals}
             focusedPaneId={focusedPaneId}
             drag={drag.drag}
             onTabPointerDown={drag.onPointerDown}

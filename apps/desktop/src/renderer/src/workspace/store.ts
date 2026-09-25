@@ -15,7 +15,11 @@ import type {
 } from '../../../shared/workspace-layout.js'
 // `WorkspaceSnapshot` is imported as a value, not a type: `SNAPSHOT_KEYS` below
 // reads its keys off the schema so the list cannot drift from the shape.
-import { CLOSED_TERMINAL_PANEL, WorkspaceSnapshot } from '../../../shared/workspace-layout.js'
+import {
+  CLOSED_TERMINAL_PANEL,
+  TRAFFIC_TAB_ID,
+  WorkspaceSnapshot,
+} from '../../../shared/workspace-layout.js'
 import {
   activateTab,
   clampChorusWidth,
@@ -310,6 +314,7 @@ export interface WorkspaceActions {
    * produce a conversation may call it without checking first.
    */
   adoptConversation: (projectId: string, conversationId: string) => void
+  openTraffic: (projectId: string, groupId?: string) => void
   /**
    * Move a conversation to a slot in a group — the inner `placeSession`.
    *
@@ -318,14 +323,14 @@ export interface WorkspaceActions {
    */
   placeConversation: (
     projectId: string,
-    conversationId: string,
+    tabId: string,
     targetGroupId: string,
     slotBefore: number
   ) => void
   /** Split a group and put the conversation in the new one — the inner `splitWithSession`. */
   splitConversation: (
     projectId: string,
-    conversationId: string,
+    tabId: string,
     targetGroupId: string,
     direction: SplitDirection
   ) => void
@@ -927,6 +932,32 @@ export const useWorkspaceStore = create<WorkspaceStore>()(
           }
         })
       },
+      openTraffic: (projectId, groupId) => {
+        set((state) => {
+          const current = state.conversationGroups[projectId]
+          if (current === undefined) {
+            const seeded = newGroupId()
+            return {
+              conversationGroups: {
+                ...state.conversationGroups,
+                [projectId]: {
+                  layout: { kind: 'leaf' as const, paneId: seeded },
+                  panes: {
+                    [seeded]: { id: seeded, tabs: [TRAFFIC_TAB_ID], activeTabId: TRAFFIC_TAB_ID },
+                  },
+                  focusedPaneId: seeded,
+                },
+              },
+            }
+          }
+          return {
+            conversationGroups: {
+              ...state.conversationGroups,
+              [projectId]: openSession(current, TRAFFIC_TAB_ID, groupId),
+            },
+          }
+        })
+      },
       focusConversationGroup: (projectId, groupId) => {
         set((state) => ({
           conversationGroups: editArrangement(state, projectId, (arrangement) =>
@@ -941,17 +972,17 @@ export const useWorkspaceStore = create<WorkspaceStore>()(
        * repairing sizes — none of it is written twice. A fix to how a pane splits
        * is a fix to how a conversation splits, by construction.
        */
-      placeConversation: (projectId, conversationId, targetGroupId, slotBefore) => {
+      placeConversation: (projectId, tabId, targetGroupId, slotBefore) => {
         set((state) => ({
           conversationGroups: editArrangement(state, projectId, (arrangement) =>
-            placeSession(arrangement, conversationId, targetGroupId, slotBefore)
+            placeSession(arrangement, tabId, targetGroupId, slotBefore)
           ),
         }))
       },
-      splitConversation: (projectId, conversationId, targetGroupId, direction) => {
+      splitConversation: (projectId, tabId, targetGroupId, direction) => {
         set((state) => ({
           conversationGroups: editArrangement(state, projectId, (arrangement) =>
-            splitWithSession(arrangement, conversationId, targetGroupId, direction)
+            splitWithSession(arrangement, tabId, targetGroupId, direction)
           ),
         }))
       },

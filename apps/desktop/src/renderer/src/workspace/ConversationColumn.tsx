@@ -3,8 +3,9 @@ import { useTranslation } from 'react-i18next'
 import type { SessionInfo } from '../Session.js'
 import { useWorkspaceActions } from './hooks.js'
 import { TabState } from './TabState.js'
+import { TrafficPanel, type TrafficTerminalOption } from '../TrafficPanel.js'
 import type { ConversationDrag } from './useConversationDrag.js'
-import type { WorkspacePane } from '../../../shared/workspace-layout.js'
+import { TRAFFIC_TAB_ID, type WorkspacePane } from '../../../shared/workspace-layout.js'
 
 /**
  * The hover tooltip's position, as an edge and a distance from it.
@@ -81,6 +82,7 @@ export function ConversationColumn(props: {
   readonly onRename: (conversationId: string, title: string) => void
   /** The pane's one conversation drag, shared by every group in it. */
   readonly drag: ConversationDrag
+  readonly trafficTerminals: readonly TrafficTerminalOption[]
   readonly renderSession: (
     session: SessionInfo,
     focused: boolean,
@@ -88,7 +90,8 @@ export function ConversationColumn(props: {
   ) => React.ReactNode
 }): React.JSX.Element {
   const { t } = useTranslation()
-  const { showConversationIn, focusConversationGroup } = useWorkspaceActions()
+  const { showConversationIn, focusConversationGroup, openTraffic, closeConversationTab } =
+    useWorkspaceActions()
 
   /*
    * Which tab is being renamed, held here rather than lifted, because nothing
@@ -181,12 +184,15 @@ export function ConversationColumn(props: {
    * has gone is dropped rather than rendered blank — reconcile removes it on the
    * next hydrate, and until then a missing session is a tab that cannot be shown.
    */
+  const hasTraffic = props.group.tabs.includes(TRAFFIC_TAB_ID)
+  const trafficActive = hasTraffic && props.group.activeTabId === TRAFFIC_TAB_ID
   const tabs = props.group.tabs.flatMap((conversationId: string) => {
     const session = props.sessions.find((candidate) => candidate.conversationId === conversationId)
     return session === undefined ? [] : [session]
   })
-  const active =
-    tabs.find((session) => session.conversationId === props.group.activeTabId) ?? tabs.at(-1)
+  const active = trafficActive
+    ? undefined
+    : (tabs.find((session) => session.conversationId === props.group.activeTabId) ?? tabs.at(-1))
 
   return (
     <div
@@ -237,17 +243,17 @@ export function ConversationColumn(props: {
              * the only one available: a `<button>` cannot contain a `<button>`,
              * so the close cannot live inside the tab it closes.
              *
-             * `data-conversation-tab` stays on the wrapper, because the drag
-             * measures tab rectangles to decide a drop slot and the rectangle
-             * that matters includes the ×.
+             * `data-tab-id` stays on the wrapper, because the drag measures tab
+             * rectangles to decide a drop slot and the rectangle that matters
+             * includes the ×. Every tab carries it, the traffic view included —
+             * a tab the drag maths cannot see takes no slot, and is not counted
+             * when it decides whether a group would be left empty.
              */
             <div
               key={session.conversationId}
               className="conversation-dock-tab"
-              data-conversation-tab={session.conversationId}
-              data-dragging={
-                props.drag.drag?.conversationId === session.conversationId ? 'true' : undefined
-              }
+              data-tab-id={session.conversationId}
+              data-dragging={props.drag.drag?.tabId === session.conversationId ? 'true' : undefined}
               data-active={session.conversationId === active?.conversationId}
               /*
                * Held at the width it had, for as long as the field is open.
@@ -394,8 +400,7 @@ export function ConversationColumn(props: {
                      * behaviour rather than collapsing the tab to nothing.
                      */
                     onDoubleClick={(event) => {
-                      const tab =
-                        event.currentTarget.closest<HTMLElement>('[data-conversation-tab]')
+                      const tab = event.currentTarget.closest<HTMLElement>('[data-tab-id]')
                       setRenaming({
                         id: session.conversationId,
                         width: tab === null ? 0 : tab.offsetWidth,
@@ -446,6 +451,48 @@ export function ConversationColumn(props: {
               )}
             </div>
           ))}
+          {hasTraffic && (
+            <div
+              className="conversation-dock-tab"
+              data-tab-id={TRAFFIC_TAB_ID}
+              data-traffic-tab="true"
+              data-dragging={props.drag.drag?.tabId === TRAFFIC_TAB_ID ? 'true' : undefined}
+              data-active={trafficActive}
+            >
+              <button
+                type="button"
+                role="tab"
+                className="conversation-dock-tab-main"
+                aria-selected={trafficActive}
+                onPointerDown={(event) => {
+                  props.drag.onPointerDown(
+                    props.group.id,
+                    TRAFFIC_TAB_ID,
+                    t('traffic.tabTitle'),
+                    event
+                  )
+                }}
+                onClick={() => {
+                  if (props.drag.consumeSuppressedClick()) return
+                  openTraffic(props.projectId, props.group.id)
+                }}
+              >
+                <span className="conversation-dock-tab-title">{t('traffic.tabTitle')}</span>
+              </button>
+              <button
+                type="button"
+                className="conversation-dock-tab-close"
+                aria-label={t('traffic.close')}
+                title={t('traffic.close')}
+                onClick={(event) => {
+                  event.stopPropagation()
+                  closeConversationTab(props.projectId, TRAFFIC_TAB_ID)
+                }}
+              >
+                <span aria-hidden="true">×</span>
+              </button>
+            </div>
+          )}
         </div>
         {/*
           Outside the tablist, and outside the scroller.
@@ -459,6 +506,18 @@ export function ConversationColumn(props: {
           It is also not a tab, so `role="tablist"` was the wrong parent: a
           screen reader counted it as one of the conversations.
         */}
+        <button
+          type="button"
+          className="conversation-dock-add"
+          data-traffic-open="true"
+          aria-label={t('traffic.open')}
+          title={t('traffic.open')}
+          onClick={() => {
+            openTraffic(props.projectId, props.group.id)
+          }}
+        >
+          <span aria-hidden="true">⇄</span>
+        </button>
         <button
           type="button"
           className="conversation-dock-add"
@@ -504,7 +563,11 @@ export function ConversationColumn(props: {
         stylesheet's note on `.conversation-body`.
       */}
       <div className="conversation-body">
-        {active !== undefined && props.renderSession(active, props.focused, props.paneId)}
+        {trafficActive ? (
+          <TrafficPanel projectId={props.projectId} terminals={props.trafficTerminals} />
+        ) : (
+          active !== undefined && props.renderSession(active, props.focused, props.paneId)
+        )}
       </div>
     </div>
   )

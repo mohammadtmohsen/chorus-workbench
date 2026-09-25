@@ -176,6 +176,12 @@ export interface PtyOptions {
 
 export type PtySpawner = (options: PtyOptions) => Pty
 
+export type TerminalEvent =
+  | { readonly kind: 'data'; readonly data: string }
+  | { readonly kind: 'exit'; readonly code: number }
+
+export type TerminalTap = (ref: TerminalRef, event: TerminalEvent) => void
+
 export interface TerminalServiceOptions {
   /** Where a terminal for this ref should open. */
   readonly cwdFor: (ref: TerminalRef) => string
@@ -282,6 +288,7 @@ export class TerminalService {
   private readonly globals = new Map<string, Session>()
   private readonly bySession = new Map<string, Map<string, Session>>()
   private readonly listeners = new Set<(push: TerminalPush) => void>()
+  private readonly taps = new Set<TerminalTap>()
 
   private readonly cwdFor: (ref: TerminalRef) => string
   private readonly spawner: PtySpawner
@@ -305,6 +312,13 @@ export class TerminalService {
     this.listeners.add(listener)
     return () => {
       this.listeners.delete(listener)
+    }
+  }
+
+  tap(listener: TerminalTap): () => void {
+    this.taps.add(listener)
+    return () => {
+      this.taps.delete(listener)
     }
   }
 
@@ -595,6 +609,7 @@ export class TerminalService {
       // failing command is lost behind the notice that it failed.
       this.drain(session)
       this.emit({ kind: 'exit', ref, epoch: session.epoch, code: exitCode })
+      for (const listener of this.taps) listener(ref, { kind: 'exit', code: exitCode })
     })
 
     if (ref.scope === 'global') this.globals.set(ref.id, session)
@@ -628,6 +643,7 @@ export class TerminalService {
       this.schedule(session)
     }
     this.pace(session)
+    for (const listener of this.taps) listener(session.ref, { kind: 'data', data })
   }
 
   /**

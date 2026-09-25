@@ -3,6 +3,7 @@ import { z } from 'zod'
 import { NOTE_SIZE, WorkspaceSnapshot } from './workspace-layout.js'
 import type { WorkbenchShellApi } from './workbench-ipc.js'
 import type { DetachedWindowApi } from './detached-window-ipc.js'
+import type { TrafficApi } from './traffic-ipc.js'
 
 /**
  * The single source of truth for the IPC surface.
@@ -151,6 +152,7 @@ export const SettingsShape = z.object({
    */
   theme: z.enum(['system', 'light', 'dark']).default('system'),
   completionProvider: z.enum(['auto', 'deepseek', 'codestral']).default('auto'),
+  trafficOrigin: z.string().default(''),
 })
 
 /**
@@ -390,6 +392,73 @@ export const TerminalRefShape = z.discriminatedUnion('scope', [
   z.object({ scope: z.literal('session'), conversationId: z.string(), id: z.string() }),
 ])
 export type TerminalRefShape = z.infer<typeof TerminalRefShape>
+
+/**
+ * One terminal's identity, as a string.
+ *
+ * `id` alone is not it — two conversations may hold the same id, which is the
+ * note above — so the whole tuple is. **One definition, because two processes
+ * read it**: main keys a per-terminal partial-line buffer on this, and the
+ * renderer keys its source selector's values on it. Two spellings of one
+ * identity is how a line gets filed against the wrong terminal, which is the
+ * defect the buffer is being keyed to fix.
+ */
+export const terminalRefKey = (ref: TerminalRefShape): string =>
+  ref.scope === 'global' ? `global:${ref.id}` : `session:${ref.conversationId}:${ref.id}`
+
+export const TrafficHttpRowShape = z.object({
+  source: z.literal('http'),
+  seq: z.number().int(),
+  /*
+   * Present from the moment the request starts, because a row is drawn before
+   * its exchange has finished — that is what "pending rows immediately" means,
+   * and a row that appeared only at settle would hide every slow request.
+   */
+  requestId: z.string(),
+  m: z.string(),
+  u: z.string(),
+  dpop: z.boolean(),
+  /** Null until upstream answered: a request in flight has no status yet. */
+  status: z.number().int().nullable(),
+  aborted: z.boolean(),
+  parsed: z.boolean(),
+  code: z.string().nullable(),
+  nextAction: z.string().nullable(),
+})
+
+export const TrafficLogRowShape = z.object({
+  source: z.literal('log'),
+  seq: z.number().int(),
+  ref: TerminalRefShape,
+  line: z.string(),
+  exit: z.number().int().nullable(),
+})
+
+export const TrafficLogcatRowShape = z.object({
+  source: z.literal('logcat'),
+  seq: z.number().int(),
+  line: z.string(),
+})
+
+export const TrafficRowShape = z.discriminatedUnion('source', [
+  TrafficHttpRowShape,
+  TrafficLogRowShape,
+  TrafficLogcatRowShape,
+])
+export type TrafficRowShape = z.infer<typeof TrafficRowShape>
+
+export const TrafficSourceShape = z.discriminatedUnion('kind', [
+  z.object({ kind: z.literal('off') }),
+  z.object({ kind: z.literal('terminal'), ref: TerminalRefShape }),
+  z.object({ kind: z.literal('logcat'), filters: z.string() }),
+])
+export type TrafficSourceShape = z.infer<typeof TrafficSourceShape>
+
+export const TRAFFIC_CAPTURE = 1_000
+
+export const DEFAULT_LOGCAT_FILTER = 'ReactNativeJS:V AndroidRuntime:E'
+
+export const DEFAULT_TRAFFIC_PORT = 30_100
 
 /**
  * What a paged transcript read cannot fold for itself.
@@ -2126,7 +2195,7 @@ export function isIpcChannel(value: string): value is IpcChannel {
  * channels are not in `IPC_CONTRACT` — they are answered by a registrar that
  * validates `event.sender`. The shape belongs beside the channels it names.
  */
-export interface ChorusApi extends WorkbenchShellApi, DetachedWindowApi {
+export interface ChorusApi extends WorkbenchShellApi, DetachedWindowApi, TrafficApi {
   readonly getAppInfo: () => Promise<AppInfo>
   /** Asks; the answer arrives on `onLimits`. */
   readonly refreshLimits: () => Promise<{ ok: true }>

@@ -24,6 +24,13 @@ import {
   type IpcResponse,
 } from '../shared/ipc.js'
 import {
+  TRAFFIC_CONTRACT,
+  TRAFFIC_PUSH_CHANNEL,
+  TrafficPush,
+  type TrafficChannel,
+  type TrafficResponse,
+} from '../shared/traffic-ipc.js'
+import {
   WORKBENCH_SHELL_CONTRACT,
   type WorkbenchShellChannel,
   type WorkbenchShellResponse,
@@ -60,6 +67,25 @@ function invoke<C extends IpcChannel>(channel: C) {
       throw new Error(`Malformed response on "${channel}": ${parsed.error.message}`)
     }
     return parsed.data as IpcResponse<C>
+  }
+}
+
+/**
+ * The same generator over the traffic contract, for the same reason.
+ *
+ * Traffic is answered by a registrar that resolves the calling document and the
+ * project it may see from `event.sender` — this map's registrar deliberately does
+ * not, so these channels are not in it. The schemas are shared and the validation
+ * is identical; only the map differs.
+ */
+function invokeTraffic<C extends TrafficChannel>(channel: C) {
+  return async (request: unknown): Promise<TrafficResponse<C>> => {
+    const raw: unknown = await ipcRenderer.invoke(channel, request)
+    const parsed = TRAFFIC_CONTRACT[channel].response.safeParse(raw)
+    if (!parsed.success) {
+      throw new Error(`Malformed response on "${channel}": ${parsed.error.message}`)
+    }
+    return parsed.data as TrafficResponse<C>
   }
 }
 
@@ -141,6 +167,19 @@ const api: ChorusApi = {
   ackTerminal: invoke('terminal:ack'),
   clearTerminal: invoke('terminal:clear'),
   describeTerminal: invoke('terminal:describe'),
+  attachTraffic: invokeTraffic('traffic:attach'),
+  detachTraffic: invokeTraffic('traffic:detach'),
+  ackTraffic: invokeTraffic('traffic:ack'),
+  snapshotTraffic: invokeTraffic('traffic:snapshot'),
+  startTraffic: invokeTraffic('traffic:start'),
+  stopTraffic: invokeTraffic('traffic:stop'),
+  clearTraffic: invokeTraffic('traffic:clear'),
+  configureTraffic: invokeTraffic('traffic:configure'),
+  selectTrafficSource: invokeTraffic('traffic:selectSource'),
+  readTrafficDetail: invokeTraffic('traffic:detail'),
+  readTrafficBody: invokeTraffic('traffic:readBody'),
+  readTrafficLegacy: invokeTraffic('traffic:legacy'),
+  decideTrafficLegacy: invokeTraffic('traffic:legacyDecide'),
   setBadge: invoke('app:setBadge'),
   focusWindow: () => invokeDetached('window:focus')({}),
   focusProjectWindow: invokeDetached('project:focusWindow'),
@@ -274,6 +313,16 @@ const api: ChorusApi = {
     ipcRenderer.on(TERMINAL_PUSH_CHANNEL, wrapped)
     return () => {
       ipcRenderer.removeListener(TERMINAL_PUSH_CHANNEL, wrapped)
+    }
+  },
+  onTraffic: (listener) => {
+    const wrapped = (_event: unknown, payload: unknown): void => {
+      const parsed = TrafficPush.safeParse(payload)
+      if (parsed.success) listener(parsed.data)
+    }
+    ipcRenderer.on(TRAFFIC_PUSH_CHANNEL, wrapped)
+    return () => {
+      ipcRenderer.removeListener(TRAFFIC_PUSH_CHANNEL, wrapped)
     }
   },
   onDiagnostic: (listener) => {

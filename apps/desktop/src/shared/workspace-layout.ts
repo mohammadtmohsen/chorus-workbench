@@ -22,9 +22,18 @@ export const WorkspaceLayoutNode: z.ZodType<WorkspaceLayoutNode> = z.lazy(() =>
   ])
 )
 
+export const TRAFFIC_TAB_ID = 'traffic'
+
+/**
+ * A tab id names a conversation, or the traffic view — one reserved id that
+ * names no conversation at all. Anything reading `tabs` or `activeTabId` and
+ * treating the value as a conversation has to ask this first.
+ */
+export const isConversationTab = (id: string): boolean => id !== TRAFFIC_TAB_ID
+
 export const WorkspacePane = z.object({
   id: z.string(),
-  /** Conversation ids, in the order their tabs appear in this pane. */
+  /** Tab ids, in the order their tabs appear in this pane. See `isConversationTab`. */
   tabs: z.array(z.string()),
   activeTabId: z.string().nullable(),
 })
