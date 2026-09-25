@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useId, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import {
   DEFAULT_LOGCAT_FILTER,
@@ -15,7 +15,14 @@ import type {
   TrafficState,
 } from '../../shared/traffic-ipc.js'
 import { TrafficRequestInspector } from './TrafficRequestInspector.js'
-import { filterRows, outcomeOf, pageOf, type TrafficOutcome } from './traffic-filter.js'
+import {
+  filterRows,
+  followsRows,
+  outcomeOf,
+  pageOf,
+  type RowScroll,
+  type TrafficOutcome,
+} from './traffic-filter.js'
 import {
   applySnapshot,
   EMPTY_TRAFFIC,
@@ -63,6 +70,12 @@ export function TrafficPanel(props: {
 }): React.JSX.Element {
   const { t } = useTranslation()
   const { projectId } = props
+  /*
+   * One base for the setup fields' ids. Two panels can be mounted at once — a
+   * pane split puts the traffic tab in each — and `htmlFor` takes a string, so
+   * the labels would point at whichever field was rendered last.
+   */
+  const fields = useId()
   const [stream, setStream] = useState<TrafficStream>(EMPTY_TRAFFIC)
   const [capture, setCapture] = useState<TrafficState>(idle)
   const [legacy, setLegacy] = useState<TrafficLegacy | null>(null)
@@ -76,11 +89,80 @@ export function TrafficPanel(props: {
   /** Null means the last page, which keeps following as rows arrive. */
   const [page, setPage] = useState<number | null>(null)
 
+  const rowsList = useRef<HTMLUListElement>(null)
+  /*
+   * Where the list stood the last time the effect looked, and the answer for a
+   * list nobody has moved since.
+   *
+   * By the time the effect below runs the new row is already in the DOM and
+   * `scrollHeight` has grown by its height, so asking "am I at the bottom"
+   * *then* answers no every single time and the list would never follow at all —
+   * which looks exactly like the feature not being wired up. This is where "was
+   * it at the bottom before this row arrived" comes from.
+   *
+   * Zeros mean "at the bottom": the first run, and the first run after a project
+   * change, both follow — which is where somebody opening the panel wants to be.
+   */
+  const settled = useRef<RowScroll>({ scrollHeight: 0, scrollTop: 0, clientHeight: 0 })
+  /** The newest row's sequence: a new row, as opposed to a pending one rewritten in place. */
+  const newestSeq = stream.rows.at(-1)?.seq ?? null
+
   // A selection belongs to the project's history, not to the panel: switching
-  // project closes whatever was open rather than describing the wrong one.
+  // project closes whatever was open rather than describing the wrong one. The
+  // scroll follows the same rule, from the other end — a different project opens
+  // on its newest row, not wherever the last one was left.
   useEffect(() => {
     setSelectedSeq(null)
+    settled.current = { scrollHeight: 0, scrollTop: 0, clientHeight: 0 }
   }, [projectId])
+
+  useEffect(() => {
+    const list = rowsList.current
+    if (list === null) return
+    const previous = settled.current
+    /*
+     * **Measured against the height the list had last time, not the height it
+     * has now.**
+     *
+     * The new row is already in the DOM, so `scrollHeight` has grown by its
+     * height — asking "am I at the bottom" against *that* answers no every time
+     * and the list would never follow at all, which looks exactly like the
+     * feature not being wired up. What is asked instead is where the person left
+     * the list, relative to the bottom they could see at the time.
+     *
+     * One rule, and it covers the case that broke the first two attempts: five
+     * rows arriving in a single render. Measuring the grown height made the list
+     * look 115px from a bottom nobody had moved away from, and the following
+     * stopped there — measured, 48px short with those rows already in the DOM.
+     *
+     * This reads no scroll event at all, deliberately. A listener sees the
+     * geometry at the moment the browser fires it, which can be a row or two
+     * after the movement it reports — measured as the following stopping dead at
+     * 1,204px from the bottom with nobody having touched the list.
+     */
+    const atBottom = followsRows(
+      {
+        scrollHeight: previous.scrollHeight,
+        scrollTop: list.scrollTop,
+        clientHeight: list.clientHeight,
+      },
+      page
+    )
+    if (atBottom) {
+      /*
+       * Assigned rather than scrolled smoothly: under a flood a smooth scroll
+       * never catches up and reads as lag rather than as motion. Nothing here
+       * touches focus — the arrow walk owns that, and a scroll that also focused
+       * would fight it.
+       */
+      list.scrollTop = list.scrollHeight
+    }
+    settled.current = {
+      scrollHeight: list.scrollHeight,
+      scrollTop: list.scrollTop,
+      clientHeight: list.clientHeight,
+    }
+  }, [newestSeq, page, projectId])
 
   useEffect(() => {
     let attachment: TrafficAttachment | null = null
@@ -291,6 +373,36 @@ export function TrafficPanel(props: {
       })
   }, [projectId, capture.capturing])
 
+  /*
+   * Emptying the history, which is a different question from forwarding.
+   *
+   * **The response's `{captureId, seq}` is deliberately dropped.** `registry.clear()`
+   * mints a new capture generation and pushes a `reset`, and `reduceTraffic` is
+   * the one place that applies it — through `belongs()`, which checks the project
+   * and the subscription as well as the generation. Writing those two fields from
+   * this response as well would be a second source of truth for state the push
+   * already owns, with the faster of the two winning. So the list is not touched
+   * here at all.
+   *
+   * The page is, and has to be: somebody who had paged back would otherwise be
+   * left on a suppressed follow over an empty list. The selection needs nothing —
+   * it is `stream.rows.find(...)`, so it falls to null on its own when the rows
+   * go. Both of those were checked rather than assumed.
+   *
+   * Available whether capture is running or not: clearing what was captured and
+   * forwarding what comes next are separate, and `clear()` leaves the socket up.
+   */
+  const clearCaptured = useCallback((): void => {
+    void window.chorus
+      .clearTraffic({ projectId })
+      .then(() => {
+        setPage(null)
+      })
+      .catch(() => {
+        setFailure('action')
+      })
+  }, [projectId])
+
   const decide = useCallback((keep: boolean): void => {
     void window.chorus
       .decideTrafficLegacy({ keep })
@@ -474,71 +586,111 @@ export function TrafficPanel(props: {
 
       <details className="traffic-setup">
         <summary className="traffic-setup-summary">{t('traffic.setup')}</summary>
+        {/*
+          A visible label tied to each field, and **the `aria-label` removed
+          rather than kept beside it**. Both would leave two names for one
+          input, and the `aria-label` is the one that wins — so a screen reader
+          would announce something other than the words on the screen, which is
+          worse than the unlabelled state this replaces. One name each, and the
+          hints are descriptions through `aria-describedby`, not part of it.
+        */}
         <div className="traffic-source-row">
-          <select
-            className="traffic-source"
-            aria-label={t('traffic.source')}
-            value={sourceValue(capture.source)}
-            onChange={(event) => {
-              choose(event.target.value)
-            }}
-          >
-            <option value="">{t('traffic.none')}</option>
-            {props.terminals.map((option) => (
-              <option key={terminalRefKey(option.ref)} value={terminalRefKey(option.ref)}>
-                {option.label}
-              </option>
-            ))}
-            <option value="logcat">{t('traffic.logcat')}</option>
-          </select>
-          <input
-            className="traffic-origin"
-            type="text"
-            spellCheck={false}
-            aria-label={t('traffic.origin')}
-            placeholder={t('traffic.originPlaceholder')}
-            value={originDraft}
-            onChange={(event) => {
-              setOriginDraft(event.target.value)
-            }}
-            onKeyDown={(event) => {
-              if (event.key === 'Enter') commitOrigin()
-            }}
-            onBlur={commitOrigin}
-          />
+          <div className="traffic-field" data-traffic-field="source">
+            <label className="traffic-field-name" htmlFor={`${fields}-source`}>
+              {t('traffic.source')}
+            </label>
+            <select
+              id={`${fields}-source`}
+              className="traffic-source"
+              value={sourceValue(capture.source)}
+              onChange={(event) => {
+                choose(event.target.value)
+              }}
+            >
+              <option value="">{t('traffic.none')}</option>
+              {props.terminals.map((option) => (
+                <option key={terminalRefKey(option.ref)} value={terminalRefKey(option.ref)}>
+                  {option.label}
+                </option>
+              ))}
+              <option value="logcat">{t('traffic.logcat')}</option>
+            </select>
+          </div>
+          <div className="traffic-field" data-traffic-field="origin">
+            <label className="traffic-field-name" htmlFor={`${fields}-origin`}>
+              {t('traffic.origin')}
+            </label>
+            <input
+              id={`${fields}-origin`}
+              className="traffic-origin"
+              type="text"
+              spellCheck={false}
+              aria-describedby={`${fields}-origin-hint`}
+              placeholder={t('traffic.originPlaceholder')}
+              value={originDraft}
+              onChange={(event) => {
+                setOriginDraft(event.target.value)
+              }}
+              onKeyDown={(event) => {
+                if (event.key === 'Enter') commitOrigin()
+              }}
+              onBlur={commitOrigin}
+            />
+            <span className="traffic-field-hint" id={`${fields}-origin-hint`}>
+              {t('traffic.originHint')}
+            </span>
+          </div>
         </div>
 
         <div className="traffic-source-row">
-          <input
-            className="traffic-origin"
-            type="text"
-            spellCheck={false}
-            aria-label={t('traffic.portField')}
-            placeholder={String(DEFAULT_TRAFFIC_PORT)}
-            value={portDraft}
-            onChange={(event) => {
-              setPortDraft(event.target.value)
-            }}
-            onKeyDown={(event) => {
-              if (event.key === 'Enter') commitPort()
-            }}
-            onBlur={commitPort}
-          />
-          <input
-            className="traffic-origin"
-            type="text"
-            spellCheck={false}
-            aria-label={t('traffic.envVarField')}
-            placeholder={t('traffic.envVarPlaceholder')}
-            value={envVarDraft}
-            onChange={(event) => {
-              setEnvVarDraft(event.target.value)
-            }}
-            onKeyDown={(event) => {
-              if (event.key === 'Enter') commitEnvVar()
-            }}
-            onBlur={commitEnvVar}
-          />
+          <div className="traffic-field" data-traffic-field="port">
+            <label className="traffic-field-name" htmlFor={`${fields}-port`}>
+              {t('traffic.portField')}
+            </label>
+            <input
+              id={`${fields}-port`}
+              className="traffic-origin"
+              type="text"
+              spellCheck={false}
+              aria-describedby={`${fields}-port-hint`}
+              placeholder={String(DEFAULT_TRAFFIC_PORT)}
+              value={portDraft}
+              onChange={(event) => {
+                setPortDraft(event.target.value)
+              }}
+              onKeyDown={(event) => {
+                if (event.key === 'Enter') commitPort()
+              }}
+              onBlur={commitPort}
+            />
+            <span className="traffic-field-hint" id={`${fields}-port-hint`}>
+              {t('traffic.portHint')}
+            </span>
+          </div>
+          <div className="traffic-field" data-traffic-field="envVar">
+            <label className="traffic-field-name" htmlFor={`${fields}-env`}>
+              {t('traffic.envVarField')}
+            </label>
+            <input
+              id={`${fields}-env`}
+              className="traffic-origin"
+              type="text"
+              spellCheck={false}
+              aria-describedby={`${fields}-env-hint`}
+              placeholder={t('traffic.envVarPlaceholder')}
+              value={envVarDraft}
+              onChange={(event) => {
+                setEnvVarDraft(event.target.value)
+              }}
+              onKeyDown={(event) => {
+                if (event.key === 'Enter') commitEnvVar()
+              }}
+              onBlur={commitEnvVar}
+            />
+            <span className="traffic-field-hint" id={`${fields}-env-hint`}>
+              {t('traffic.envVarHint')}
+            </span>
+          </div>
         </div>
 
         {envLine !== null && (
@@ -558,44 +710,90 @@ export function TrafficPanel(props: {
 
         {capture.source.kind === 'logcat' && (
           <div className="traffic-source-row">
-            <input
-              className="traffic-origin"
-              type="text"
-              spellCheck={false}
-              aria-label={t('traffic.filters')}
-              placeholder={t('traffic.filtersPlaceholder')}
-              value={filters}
-              onChange={(event) => {
-                setFilters(event.target.value)
-              }}
-              onKeyDown={(event) => {
-                if (event.key === 'Enter') commitFilters()
-              }}
-              onBlur={commitFilters}
-            />
+            <div className="traffic-field" data-traffic-field="filters">
+              <label className="traffic-field-name" htmlFor={`${fields}-filters`}>
+                {t('traffic.filters')}
+              </label>
+              <input
+                id={`${fields}-filters`}
+                className="traffic-origin"
+                type="text"
+                spellCheck={false}
+                placeholder={t('traffic.filtersPlaceholder')}
+                value={filters}
+                onChange={(event) => {
+                  setFilters(event.target.value)
+                }}
+                onKeyDown={(event) => {
+                  if (event.key === 'Enter') commitFilters()
+                }}
+                onBlur={commitFilters}
+              />
+            </div>
           </div>
         )}
       </details>
 
       <div className="traffic-source-row">
-        <input
-          className="traffic-find"
-          type="text"
-          spellCheck={false}
-          aria-label={t('traffic.search')}
-          placeholder={t('traffic.searchPlaceholder')}
-          value={search}
-          onChange={(event) => {
-            searchFor(event.target.value)
-          }}
-        />
+        <span className="traffic-find-box">
+          <input
+            className="traffic-find"
+            type="text"
+            spellCheck={false}
+            aria-label={t('traffic.search')}
+            placeholder={t('traffic.searchPlaceholder')}
+            value={search}
+            onChange={(event) => {
+              searchFor(event.target.value)
+            }}
+            onKeyDown={(event) => {
+              /*
+               * The one thing `type="search"` would have given that is worth
+               * having, for a line. The native control it would also have given
+               * was declined — see `.traffic-find-clear`.
+               */
+              if (event.key === 'Escape' && search !== '') searchFor('')
+            }}
+          />
+          {/*
+            Only while there is something to clear. A control that is always
+            there and sometimes greyed is how this started: the button beside the
+            field was `disabled` whenever the field was empty, so pressing it did
+            nothing at all and it read as broken.
+          */}
+          {search !== '' && (
+            <button
+              type="button"
+              className="traffic-find-clear"
+              data-traffic-clear="search"
+              aria-label={t('traffic.clearSearch')}
+              onClick={() => {
+                searchFor('')
+              }}
+            >
+              ×
+            </button>
+          )}
+        </span>
+        {/*
+          The capture's Clear, out of the header and down beside the field.
+
+          It was beside Start/Stop, six pixels from a control that stops the
+          capture rather than emptying it — and it began this whole thread by
+          sharing the word "Clear" with the search button that used to sit here,
+          which the person pressed expecting the rows to go. Two controls in one
+          row still clear different things, so what separates them is position
+          (the X is inside the field, this is outside it) and a name that says
+          which: the visible word is the same "Clear", and the title and the
+          accessible name both say what it clears.
+        */}
         <button
           type="button"
           className="traffic-action"
-          disabled={search === ''}
-          onClick={() => {
-            searchFor('')
-          }}
+          data-traffic-clear="captured"
+          title={t('traffic.clearCaptured')}
+          aria-label={t('traffic.clearCaptured')}
+          onClick={clearCaptured}
         >
           {t('traffic.clear')}
         </button>
@@ -652,7 +850,7 @@ export function TrafficPanel(props: {
         <p className="traffic-stopped">{t('traffic.noMatches')}</p>
       ) : (
         <div className="traffic-split">
-          <ul className="traffic-rows" onKeyDown={onRowKeyDown}>
+          <ul className="traffic-rows" ref={rowsList} onKeyDown={onRowKeyDown}>
             {shown.map((row) => (
               <li
                 className={

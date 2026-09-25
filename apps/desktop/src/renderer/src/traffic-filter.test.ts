@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { TrafficRowShape } from '../../shared/ipc.js'
-import { filterRows, outcomeOf, PAGE, pageOf } from './traffic-filter.js'
+import { filterRows, followsRows, outcomeOf, PAGE, pageOf } from './traffic-filter.js'
 
 type HttpRow = Extract<TrafficRowShape, { source: 'http' }>
 type LogRow = Extract<TrafficRowShape, { source: 'log' }>
@@ -86,5 +86,42 @@ describe('pageOf', () => {
     const page = pageOf([], null)
     expect(page.count).toBe(1)
     expect(page.rows).toEqual([])
+  })
+})
+
+/*
+ * The predicate only. Whether the effect actually scrolls is a layout question,
+ * and jsdom does no layout — `scrollHeight` and `clientHeight` are both 0 there,
+ * so a test of the scroll itself would pass without the effect existing at all.
+ * That half is the driver's, and this is the judgement it makes.
+ */
+describe('followsRows', () => {
+  const at = (scrollHeight: number, scrollTop: number, clientHeight: number) => ({
+    scrollHeight,
+    scrollTop,
+    clientHeight,
+  })
+
+  it('follows while the list is at the bottom', () => {
+    expect(followsRows(at(1_000, 400, 600), null)).toBe(true)
+  })
+
+  /*
+   * The tolerance is the feature rather than a rounding detail. This app has a
+   * zoom factor, so the three numbers are fractional and an exact comparison is
+   * never true at anything but 100% — a predicate demanding equality would
+   * report "not following" for a list sitting exactly at the bottom.
+   */
+  it('still follows from within a row of the bottom', () => {
+    expect(followsRows(at(1_000, 380, 600), null)).toBe(true)
+  })
+
+  it('stops once the person has scrolled away', () => {
+    expect(followsRows(at(1_000, 300, 600), null)).toBe(false)
+  })
+
+  /* The button's answer, and it outranks the distance: somebody chose this page. */
+  it('does not follow while a page is pinned, however near the bottom', () => {
+    expect(followsRows(at(1_000, 400, 600), 2)).toBe(false)
   })
 })

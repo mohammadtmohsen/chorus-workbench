@@ -7252,7 +7252,8 @@ input::placeholder {
 .traffic-env-row {
   display: flex;
   flex: 0 0 auto;
-  padding: var(--step) calc(var(--step) * 3);
+  gap: calc(var(--step) * 3);
+  padding: calc(var(--step) * 2) calc(var(--step) * 3);
   border-bottom: 1px solid var(--border-default);
 }
 
@@ -7401,6 +7402,13 @@ input::placeholder {
   padding: var(--step) calc(var(--step) * 2);
 }
 
+.traffic-find-box {
+  position: relative;
+  display: flex;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
 .traffic-find {
   flex: 1 1 auto;
   min-width: 0;
@@ -7411,6 +7419,56 @@ input::placeholder {
   color: inherit;
   font: inherit;
   font-size: 11px;
+}
+
+/*
+ * Room for the control, and only while it is there — the placeholder here is
+ * long enough that a permanent inset would clip its tail in a narrow panel.
+ */
+.traffic-find:has(+ .traffic-find-clear) {
+  padding-right: calc(var(--step) * 8);
+}
+
+/*
+ * The clear control, inside the field it clears.
+ *
+ * It replaced a button beside the input, which read "Clear" and was `disabled`
+ * whenever the field was already empty — so the person who wanted the *captured
+ * rows* gone pressed it, nothing happened, and the report was "the clear button
+ * is not working". A control that arrives with the text and sits in the field it
+ * belongs to cannot be that: there is nothing to press when there is nothing to
+ * clear, so the two states cannot be confused.
+ *
+ * `type="search"` would have given a native one, and this codebase refused that
+ * route once already — the reset near `styles.css:500` records hitting a native
+ * light control in a dark card and concluding the look belongs to the element. A
+ * native cancel button ignores the theme tokens, and styling it means a
+ * vendor-prefixed pseudo-element for no gain. Escape still clears, which was the
+ * one part of it worth taking.
+ */
+.traffic-find-clear {
+  position: absolute;
+  top: 50%;
+  right: calc(var(--step) * 2);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  height: 14px;
+  padding: 0;
+  transform: translateY(-50%);
+  border: 0;
+  border-radius: 50%;
+  background: none;
+  color: var(--text-muted);
+  font: inherit;
+  font-size: 12px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.traffic-find-clear:hover {
+  color: var(--text-primary);
 }
 
 .traffic-body-text {
@@ -7505,7 +7563,7 @@ input::placeholder {
 }
 
 .traffic-origin {
-  flex: 1 1 auto;
+  flex: 0 0 auto;
   min-width: 0;
   padding: var(--step) calc(var(--step) * 2);
   color: var(--text-primary);
@@ -7634,12 +7692,44 @@ input::placeholder {
 .traffic-source-row {
   display: flex;
   flex: 0 0 auto;
-  padding: var(--step) calc(var(--step) * 3);
+  gap: calc(var(--step) * 3);
+  padding: calc(var(--step) * 2) calc(var(--step) * 3);
   border-bottom: 1px solid var(--border-default);
 }
 
+/*
+ * The column that carries a label, its control and the hint under it. It is the
+ * row's flex child now, which is why the width that used to sit on
+ * `.traffic-origin` and `.traffic-source` lives here instead — those two are
+ * laid out by the column, and a `flex-basis` in a column is a height.
+ *
+ * The label is first and the hint last, so a hint that wraps to three lines
+ * beside one that wraps to two pushes nothing: the two controls stay level and
+ * the difference lands underneath them.
+ */
+.traffic-field {
+  display: flex;
+  flex: 1 1 0;
+  flex-direction: column;
+  gap: var(--step);
+  min-width: 0;
+}
+
+.traffic-field-name {
+  color: var(--text-muted);
+  font-size: 11px;
+  font-weight: 500;
+}
+
+.traffic-field-hint {
+  color: var(--text-muted);
+  font-size: 10px;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+
 .traffic-source {
-  flex: 0 1 45%;
+  flex: 0 0 auto;
   min-width: 0;
   padding: var(--step) calc(var(--step) * 2);
   color: var(--text-primary);

@@ -66,3 +66,36 @@ export const pageOf = (
   const index = page === null ? count - 1 : Math.min(Math.max(page, 0), count - 1)
   return { rows: rows.slice(index * size, (index + 1) * size), index, count }
 }
+
+/**
+ * How far from the bottom still counts as following the newest row.
+ *
+ * **A tolerance rather than equality, and the reason is measurable rather than
+ * defensive.** `scrollHeight - scrollTop - clientHeight` is fractional, and this
+ * app has a zoom factor — at anything but 100% the three numbers round to
+ * different fractions and an exact comparison is never true. A list that never
+ * follows looks exactly like a list where the feature was never wired up, which
+ * is the wrong thing to spend an afternoon on. About one row: far enough to
+ * absorb the rounding, near enough that a person a row away is not still
+ * following.
+ */
+export const FOLLOW_SLACK_PX = 24
+
+/** The three numbers a scroll container reports, and all this asks of it. */
+export interface RowScroll {
+  readonly scrollHeight: number
+  readonly scrollTop: number
+  readonly clientHeight: number
+}
+
+/**
+ * Whether the list should keep following the newest row.
+ *
+ * The page half is the button's answer: `page !== null` means somebody
+ * deliberately went back through history, and nothing may move under them while
+ * that holds. The distance half is the person's own — they scrolled up, so stop,
+ * and they scroll back down, so resume.
+ */
+export const followsRows = (metrics: RowScroll, page: number | null): boolean =>
+  page === null &&
+  metrics.scrollHeight - metrics.scrollTop - metrics.clientHeight <= FOLLOW_SLACK_PX
