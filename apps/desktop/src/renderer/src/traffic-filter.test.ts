@@ -1,6 +1,13 @@
 import { describe, expect, it } from 'vitest'
 import type { TrafficRowShape } from '../../shared/ipc.js'
-import { filterRows, followsRows, outcomeOf, PAGE, pageOf } from './traffic-filter.js'
+import {
+  filterRows,
+  followsRows,
+  outcomeOf,
+  PAGE,
+  pageOf,
+  showsForwarded,
+} from './traffic-filter.js'
 
 type HttpRow = Extract<TrafficRowShape, { source: 'http' }>
 type LogRow = Extract<TrafficRowShape, { source: 'log' }>
@@ -124,5 +131,30 @@ describe('followsRows', () => {
   /* The button's answer, and it outranks the distance: somebody chose this page. */
   it('does not follow while a page is pinned, however near the bottom', () => {
     expect(followsRows(at(1_000, 400, 600), 2)).toBe(false)
+  })
+})
+
+describe('showsForwarded', () => {
+  /*
+   * The user's report was that the `Forwarded to` line duplicates the header,
+   * and the fix is a condition rather than a deletion because it is only true
+   * most of the time. Each branch here is one of the ways it stops being true.
+   */
+  it('hides it when it would repeat the header', () => {
+    expect(showsForwarded('http://h:30081/a/b', 'http://h:30081/a/b')).toBe(false)
+  })
+
+  it('keeps it when the row has not settled and still carries the raw line', () => {
+    expect(showsForwarded('http://h:30081/a/b', '/a/b')).toBe(true)
+  })
+
+  /*
+   * A refused request is answered with no forward at all, and an empty line is
+   * not something the header could be repeating — it is nothing to say. Keeping
+   * it would draw `Forwarded to` with a blank beside it on a request that was
+   * never forwarded anywhere.
+   */
+  it('hides it when there is no forward to show', () => {
+    expect(showsForwarded('', '/not-a-url')).toBe(false)
   })
 })

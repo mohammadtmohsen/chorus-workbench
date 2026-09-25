@@ -567,6 +567,9 @@ try {
      * truncated by a rule. Both are here because the failure this replaces was
      * the second kind wearing the first kind's clothes — an ellipsis that looks
      * like a rendering choice.
+     *
+     * It reads the header now rather than the row that used to repeat it — see
+     * the note on the reading itself.
      */
     const values = JSON.parse(
       await app.evaluate(`(() => {
@@ -583,8 +586,15 @@ try {
           (row) => (row.querySelector('dt')?.textContent ?? '') === 'x-refresh-token'
         )
         return JSON.stringify({
+          /*
+           * The inspector's header, not the Forwarded-to row. That row is now
+           * conditional and is absent for every row this fixture produces, so
+           * reading it here reported undefined twice — but the claim it was
+           * making is still real and still wanted: the whole endpoint is
+           * readable in the inspector, and the header is where it lives now.
+           */
           forwarded: read(
-            document.querySelector('.traffic-pane[data-side="request"] > .traffic-general .traffic-value')
+            document.querySelector('.traffic-inspector .traffic-head .traffic-url')
           ),
           header: read(named === undefined ? null : named.querySelector('dd')),
         })
@@ -592,7 +602,7 @@ try {
     )
     say('the values in full', values)
     check(
-      'the forwarded url is not clipped',
+      'the endpoint in the header is not clipped',
       values.forwarded !== null && values.forwarded.clipped === false,
       `clipped: ${String(values.forwarded?.clipped)}`
     )
@@ -679,10 +689,24 @@ try {
         foldHeight: details === null ? null : Math.round(details.getBoundingClientRect().height),
         sizesInside: carries(inside),
         sizesOutside: outside.some((node) => carries(node)),
-        endpointOutside:
-          document.querySelector(
-            '.traffic-pane[data-side="request"] > .traffic-general .traffic-value'
-          ) !== null,
+        /*
+         * The Forwarded-to line used to be a fixed row and this asked whether
+         * it sat outside the fold. It is conditional now — dropped whenever it
+         * would repeat what the header says — so what is read is how many of
+         * them exist, and the endpoint check above the fold moved to the header,
+         * which is where the endpoint actually lives. No backticks in this
+         * comment: it lives inside a template literal.
+         */
+        forwardedRows: document.querySelectorAll(
+          '.traffic-pane[data-side="request"] > .traffic-general .traffic-value'
+        ).length,
+        headerUrl: (
+          document.querySelector('.traffic-inspector .traffic-head .traffic-url')?.innerText ?? ''
+        ).trim(),
+        headerTop: (() => {
+          const node = document.querySelector('.traffic-inspector .traffic-head')
+          return node === null ? null : Math.round(node.getBoundingClientRect().top)
+        })(),
         structure: [...document.querySelectorAll('.traffic-inspector > *')].map(
           (node) => node.tagName.toLowerCase() + '.' + (node.className || '')
         )
@@ -703,7 +727,28 @@ try {
       `${String(folded.foldHeight)}px`
     )
     check('no size rows are left outside it', folded.sizesOutside === false)
-    check('the endpoint line stays outside it', folded.endpointOutside)
+    /*
+     * Two claims in one, because they are the two halves of the same change: the
+     * endpoint is above the fold, and the `Forwarded to` line that used to say
+     * the same thing in the Request box is gone.
+     *
+     * Every row this fixture produces is settled, and `record` passes the
+     * forward target as the row's `u` — so the header already carries it and the
+     * line has nothing to add. The branch where it comes back is not reachable
+     * here: it needs a row that has not settled, or one refused with no forward
+     * at all, and this driver never produces either. That half is a unit test —
+     * `showsForwarded` — and it is a fixture limit rather than a check that
+     * passes for the wrong reason.
+     */
+    check(
+      'the endpoint is above the fold, and the line that repeated it is gone',
+      folded.forwardedRows === 0 &&
+        folded.headerUrl !== '' &&
+        folded.headerTop !== null &&
+        folded.foldTop !== null &&
+        folded.headerTop < folded.foldTop,
+      `${String(folded.forwardedRows)} forwarded rows, header ${JSON.stringify(folded.headerUrl.slice(0, 40))} at ${String(folded.headerTop)} vs fold ${String(folded.foldTop)}`
+    )
 
     const views = JSON.parse(
       await app.evaluate(`(() => {
@@ -798,6 +843,18 @@ try {
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ posting: true }),
     })
+    /*
+     * **A long path made of hyphenated words, which is the only shape that can
+     * tell the two wrap properties apart.**
+     *
+     * `overflow-wrap: anywhere` fills every line of an unbroken run like
+     * `/x-aaaaaa…`, so the check below would pass with the property the user
+     * just asked to have replaced. What it does not do is break a *word* that
+     * would otherwise fit — it prefers the hyphen — so a path of hyphenated
+     * words comes out ragged, with the rest of each line empty. That is the
+     * reported complaint, and it needs this request to exist.
+     */
+    await fetch(`http://127.0.0.1:${String(port)}/${'medical-history-'.repeat(12)}`)
     await wait(2_500)
 
     const table = JSON.parse(
@@ -998,6 +1055,143 @@ try {
         selection.shadow !== 'none' &&
         selection.otherShadow === 'none',
       `fill ${String(selection?.fill)} on ${String(selection?.ground)} — a step of ${String(selection?.step)}; accent ${String(selection?.shadow)}`
+    )
+
+    /*
+     * **The header wraps rather than clipping, and the panes survive it.**
+     *
+     * The user reported the endpoint on two lines *and* ellipsised, which is a
+     * pair that should not occur and did: the table's `white-space: nowrap` is on
+     * the list, so the header wrapped, and `text-overflow` fires anyway for a run
+     * with no break opportunity that overflows its line box. The layout moved the
+     * endpoint into a column of its own, which is most of the answer, and this is
+     * the measurement that the rest of it holds.
+     *
+     * Opened on the longest endpoint in the fixture on purpose — the row with the
+     * 200-character segment. A short one would wrap nowhere and prove nothing.
+     */
+    say(
+      'opening the inspector on the hyphenated path',
+      await app.evaluate(`(() => {
+        const rows = [...document.querySelectorAll('.traffic-row-button')]
+        const wanted = rows.find((row) =>
+          (row.querySelector('.traffic-url')?.getAttribute('title') ?? '').includes('medical-history')
+        )
+        if (wanted === undefined) return 'the hyphenated request is not listed'
+        wanted.click()
+        return 'clicked'
+      })()`)
+    )
+    await wait(1_200)
+    const header = JSON.parse(
+      await app.evaluate(`JSON.stringify((() => {
+        const node = document.querySelector('.traffic-inspector .traffic-head .traffic-url')
+        const box = document.querySelector('.traffic-inspector')
+        const panes = document.querySelector('.traffic-panes')
+        if (node === null || box === null || panes === null) return null
+        const style = getComputedStyle(node)
+        const head = document.querySelector('.traffic-inspector .traffic-head')
+        const tall = (selector) => {
+          const found = document.querySelector(selector)
+          return found === null ? null : Math.round(found.getBoundingClientRect().height)
+        }
+        return {
+          title: (node.getAttribute('title') ?? '').length,
+          /*
+           * clientWidth is zero on an inline element, so the clipping test that
+           * works on a block reports false here whatever the CSS does — a
+           * passing check for the wrong reason. The endpoint is inline text
+           * now, so what is asserted is the text it draws and the rules that
+           * could hide any of it. No backticks in this comment: it is inside a
+           * template literal and one would end it.
+           */
+          text: (node.textContent ?? '').length,
+          overflow: style.overflow,
+          ellipsis: style.textOverflow,
+          height: Math.round(node.getBoundingClientRect().height),
+          panes: Math.round(panes.getBoundingClientRect().height),
+          inside: Math.round(panes.getBoundingClientRect().bottom - box.getBoundingClientRect().bottom),
+          /* The whole chain, so a header that outgrows its box says so itself. */
+          chain: {
+            panel: tall('.traffic-panel'),
+            split: tall('.traffic-split'),
+            inspector: Math.round(box.getBoundingClientRect().height),
+            head: tall('.traffic-inspector .traffic-head'),
+            line: tall('.traffic-inspector .traffic-head-line')
+          },
+          /*
+           * **The claim the user actually made: every line but the last is
+           * full.**
+           *
+           * A height in pixels says it wrapped and proves nothing about where.
+           * An inline element broken across lines gives one rect per line box
+           * from a Range, so the lines are measured directly and compared with
+           * the width they had to fill — one character of slack, since not every
+           * character is the same width and the last one never lands exactly on
+           * the edge. No backticks in this comment: it is inside a template
+           * literal and one would end it.
+           */
+          lines: (() => {
+            const range = document.createRange()
+            range.selectNodeContents(node)
+            const boxes = [...range.getClientRects()].map((rect) => Math.round(rect.width))
+            const content =
+              head === null
+                ? null
+                : Math.round(
+                    head.clientWidth -
+                      parseFloat(getComputedStyle(head).paddingLeft) -
+                      parseFloat(getComputedStyle(head).paddingRight)
+                  )
+            const first = node.firstChild
+            let character = 0
+            if (first !== null) {
+              const probe = document.createRange()
+              probe.setStart(first, 0)
+              probe.setEnd(first, 1)
+              character = probe.getBoundingClientRect().width
+            }
+            /*
+             * The first line box is excluded as well as the last, and it has to
+             * be: the endpoint begins *beside* GET 200 on the header's first
+             * line, so that box is short by the width of the verb and the status
+             * rather than by a break opportunity. Only the lines that start at
+             * the header's left edge can be asked to reach its right edge — and
+             * at least one of those has to exist or the claim is empty.
+             */
+            const interior = boxes.slice(1, -1)
+            return {
+              count: boxes.length,
+              checked: interior.length,
+              shortest: interior.length === 0 ? null : Math.round(Math.min(...interior)),
+              content,
+              character: Math.round(character * 10) / 10,
+              short: interior.filter((width) => width < (content ?? 0) - character * 1.5).length
+            }
+          })()
+        }
+      })())`)
+    )
+    say('the header with the hyphenated endpoint in it', header)
+    check(
+      'the header draws the whole endpoint, wraps rather than clipping, and leaves the panes their room',
+      header !== null &&
+        header.title > 100 &&
+        header.text === header.title &&
+        header.overflow === 'visible' &&
+        header.ellipsis !== 'ellipsis' &&
+        header.height > 20 &&
+        header.panes > 40 &&
+        header.inside <= 1 &&
+        /*
+         * At least one interior line, so the claim is not empty; and none of
+         * them falls short of the width available.
+         */
+        header.lines.count >= 3 &&
+        header.lines.checked >= 1 &&
+        header.lines.content !== null &&
+        header.lines.short === 0,
+      `endpoint ${String(header?.title)} chars, text ${String(header?.text)}, drawn ${String(header?.height)}px tall, overflow ${String(header?.overflow)}, text-overflow ${String(header?.ellipsis)}, panes ${String(header?.panes)}px, overhang ${String(header?.inside)}, ${String(header?.lines.count)} lines of ${String(header?.lines.content)}px, shortest of ${String(header?.lines.checked)} checked ${String(header?.lines.shortest)}px, ${String(header?.lines.short)} short`
     )
 
     const methodColour = (name) => table.methods.find((each) => each.m === name)?.colour ?? null
@@ -1207,7 +1401,15 @@ try {
           at === -1
             ? null
             : (buttons[at].querySelector('.traffic-url')?.innerText ?? '').trim(),
-        head: head === null ? null : (head.innerText || '').trim(),
+        /*
+         * Whitespace flattened, because the header's endpoint wraps now and this
+         * comparison is about which row it names rather than where the lines
+         * broke. The doubled backslash is not a typo: this is inside a template
+         * literal, where a single one would be eaten and the regex would come out
+         * as the letters s+.
+         */
+        head:
+          head === null ? null : (head.innerText || '').replace(/\\s+/g, ' ').trim(),
         pressed: buttons.findIndex((b) => b.getAttribute('aria-pressed') === 'true')
       }
     })())`

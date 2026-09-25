@@ -34,6 +34,32 @@ export const outcomeOf = (row: HttpRow): TrafficOutcome => {
 }
 
 /**
+ * Whether the Request box still needs its own `Forwarded to` line.
+ *
+ * Usually it does not, and the user was right that it duplicates. `record`
+ * passes the forward target as the row's `u`, so a settled row's header already
+ * shows exactly that string — the two lines are the same twenty-six characters
+ * of origin followed by the same path.
+ *
+ * It is not always a duplicate, which is why this is a condition rather than a
+ * deletion:
+ *
+ * - **A row that has not settled.** `u` is the request line as it arrived, and
+ *   the forward is what that line resolved to. They differ whenever the app
+ *   sent an origin-form path, which is the whole reason `targetOf` exists.
+ * - **A refused request.** A line that is neither absolute nor resolvable
+ *   against the origin is answered 400 and forwardless; there is no duplicate
+ *   because there is no forward.
+ * - **And that last case is also the reason for the empty test.** A forward of
+ *   `''` does not differ from the header, it says nothing at all — keeping the
+ *   row would draw an empty `Forwarded to` on a request that was never
+ *   forwarded anywhere. Nothing is lost by dropping it: the header already
+ *   carries the line that was actually refused.
+ */
+export const showsForwarded = (forwardedUrl: string, rowUrl: string): boolean =>
+  forwardedUrl !== '' && forwardedUrl !== rowUrl
+
+/**
  * The status family a row's `data-class` is keyed on — `2xx`, `4xx`, `none`.
  *
  * Moved here from the panel when the inspector's header began carrying the same

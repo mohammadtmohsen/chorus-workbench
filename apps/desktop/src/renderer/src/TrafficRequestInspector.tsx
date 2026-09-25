@@ -22,7 +22,7 @@ import {
   type TreeRow,
   type TreeToken,
 } from './traffic-body.js'
-import { statusClassOf } from './traffic-filter.js'
+import { showsForwarded, statusClassOf } from './traffic-filter.js'
 
 /** A capture is held to a megabyte, so this cannot be reached by an honest body. */
 const MAX_BODY_PAGES = 64
@@ -427,13 +427,30 @@ export function TrafficRequestInspector(props: {
         fact about the whole line, and the endpoint reads it too.
       */}
       <header className="traffic-head" data-class={statusClassOf(row)}>
+        {/*
+          **One string, edge to edge, rather than three cells in a row.**
+
+          A flex row put the verb and the status in a column of their own beside
+          a wrapping endpoint, which left the rest of that column empty — the gap
+          under `GET 200` in the screenshot. As one run of inline text they flow
+          as a single paragraph: the endpoint's continuation lines start at the
+          header's left edge like any wrapped sentence, and nothing is left
+          blank.
+
+          The `{' '}` between them is not decoration. JSX drops whitespace that
+          contains a newline between two elements, so without it the three run
+          together as `GET200http://…`.
+
+          `data-class` stays on the header and all three parts keep reading it;
+          inline text is still a descendant.
+        */}
         <span className="traffic-method" data-method={row.m.toUpperCase()}>
           {row.m}
-        </span>
+        </span>{' '}
+        <span className="traffic-status">{row.status ?? '—'}</span>{' '}
         <span className="traffic-url" title={row.u}>
           {row.u}
         </span>
-        <span className="traffic-status">{row.status ?? '—'}</span>
       </header>
 
       {goneReason !== null ? (
@@ -444,12 +461,20 @@ export function TrafficRequestInspector(props: {
         <div className="traffic-panes">
           <div className="traffic-pane" data-side="request">
             <h3 className="traffic-label">{t('traffic.tab.request')}</h3>
-            <div className="traffic-general">
-              <p>
-                <span className="traffic-label">{t('traffic.forwardedUrl')}</span>
-                <span className="traffic-value">{detail.forwardedUrl}</span>
-              </p>
-            </div>
+            {/*
+              Present only when it says something the header does not. `record`
+              passes the forward target as the row's `u`, so for a settled row
+              these are the same string and the line was pure duplication — see
+              `showsForwarded` for the cases where they part company.
+            */}
+            {showsForwarded(detail.forwardedUrl, row.u) && (
+              <div className="traffic-general">
+                <p>
+                  <span className="traffic-label">{t('traffic.forwardedUrl')}</span>
+                  <span className="traffic-value">{detail.forwardedUrl}</span>
+                </p>
+              </div>
+            )}
 
             {isForm(detail.requestBody.contentType) && bytes.request.length > 0 ? (
               <div className="traffic-fields">

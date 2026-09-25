@@ -7189,13 +7189,45 @@ input::placeholder {
   overflow: hidden;
 }
 
+/*
+ * **One string, edge to edge — a block, not a row of cells.**
+ *
+ * Three flex items put the verb and the status in a column of their own beside a
+ * wrapping endpoint, and that column was one line tall against an endpoint three
+ * or four — the empty space under `GET 200` the user photographed. As ordinary
+ * inline text the three flow as one paragraph, so a wrapped endpoint's
+ * continuation lines begin at the header's left edge and there is nothing left
+ * blank anywhere.
+ *
+ * **`max-height` and its own scroll are not decoration, and the driver found
+ * them.** With `flex: 0 0 auto` and no bound, a pathological endpoint makes the
+ * header taller than the inspector — measured, a header of 139px above panes of
+ * 0 in a 133px inspector, with the panes pushed 7px out of the box and clipped.
+ * The pane below is the thing this panel exists for. Forty percent keeps it, and
+ * past that the header scrolls: every character is still there, which is the
+ * difference between this and clipping the endpoint.
+ *
+ * The two sizes are set here rather than inherited, because what the header
+ * inherits is the app's base size and "smaller" against an unknown base is a
+ * guess. 12 and 10: the verb at the size of the text around it, the result a
+ * step down so the pair reads as one fact rather than two columns of data.
+ */
 .traffic-head {
-  display: flex;
+  display: block;
   flex: 0 0 auto;
-  align-items: center;
-  gap: calc(var(--step) * 2);
+  max-height: 40%;
+  overflow-y: auto;
+  overflow-wrap: anywhere;
   padding: calc(var(--step) * 2) calc(var(--step) * 3);
   border-bottom: 1px solid var(--border-default);
+}
+
+.traffic-head .traffic-method {
+  font-size: 12px;
+}
+
+.traffic-head .traffic-status {
+  font-size: 10px;
 }
 
 .traffic-title {
@@ -7864,6 +7896,62 @@ input::placeholder {
   overflow: hidden;
   color: var(--text-secondary);
   text-overflow: ellipsis;
+}
+
+/*
+ * **The header's endpoint wraps and never clips — and why it was doing both.**
+ *
+ * `.traffic-url` above is the table's rule, and the header shares the class, so
+ * bounding the table reached in here too, where the whole endpoint is the one
+ * thing meant to be readable. What it produced reads as a contradiction: the
+ * screenshot has the URL on two lines *and* ellipsised.
+ *
+ * Two rules met, and neither alone would have done it. The table's
+ * `white-space: nowrap` is on `.traffic-rows`, which the header is not inside,
+ * so the header's URL wrapped — and `text-overflow` does nothing to text that
+ * wraps, with exactly one exception: a run with no break opportunity inside it
+ * overflows its line box and *that line* is clipped and ellipsised. The 200
+ * character segment in the fixture is that run. Two lines, and an ellipsis on
+ * the first.
+ *
+ * Giving this cell its own line is the larger half of the answer — but it is not
+ * the whole of it, and that is why this rule survives two changes of layout.
+ * Without it the ellipsis rule stays on an element that wraps, and the first
+ * unbreakable token in any URL brings the contradiction straight back: a header
+ * that is two lines tall and silently missing its tail.
+ *
+ * `overflow-wrap: anywhere` is the same answer `.traffic-value` uses for the
+ * forwarded line: break the token, take the lines the header needs, clip
+ * nothing.
+ *
+ * Checked rather than assumed — the driver selects the longest endpoint in the
+ * fixture and asserts this cell is taller than one line and not clipped, with
+ * the panes still visible underneath it. Reverting this rule makes that check
+ * fail with `clipped: true`, which is the contradiction coming back.
+ *
+ * The general shape, for anyone who meets it again: **a flex row with default
+ * `white-space` wraps, and `text-overflow` still fires inside it for any run
+ * with no break opportunity** — so `overflow: hidden` plus `text-overflow:
+ * ellipsis` on a wrapping element produces two lines and an ellipsis at once.
+ */
+.traffic-head .traffic-url {
+  overflow: visible;
+  text-overflow: clip;
+  white-space: normal;
+  /*
+   * **Breaks at any character, not at the first opportunity.**
+   *
+   * `overflow-wrap: anywhere` was here and is not the same property: it breaks a
+   * word only when the word will not fit at all, and until then still prefers a
+   * natural opportunity — so a path like `/medical-history-of-the-patient`
+   * breaks after each hyphen and leaves the rest of every line empty. `break-all`
+   * fills them, which is what a URL wants and what the user asked for.
+   *
+   * On the endpoint rather than on the header, deliberately: on the header it
+   * would make `GET` and the status breakable too, and they are short enough
+   * that it would never show — wrong, and invisible until the day it is not.
+   */
+  word-break: break-all;
 }
 
 /*
