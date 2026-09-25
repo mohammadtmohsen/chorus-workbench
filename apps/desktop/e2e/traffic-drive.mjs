@@ -382,6 +382,64 @@ try {
   say('the long request', `status ${first.status} ${await first.text()}`)
 
   /*
+   * **A short list in a tall box, and it has to be here rather than later.**
+   *
+   * The rows came out about seventy pixels apart, because a grid stretches
+   * auto-sized rows over leftover height and the list never said `align-content`
+   * — the user's screenshot was thirteen rows spread down a tall panel.
+   *
+   * It only happens while the content is *shorter* than the box, and every other
+   * check in this file runs against sixty-odd rows. The first attempt at this
+   * check sat beside the table reading, where four rows already filled the 127px
+   * box exactly — so there was no leftover to distribute and it passed with the
+   * fix reverted. Two rows in the same box is the condition, and it exists only
+   * for the first few requests of a run.
+   *
+   * The precondition is asserted, not assumed: if the list ever stops fitting
+   * here the check fails and says so, rather than passing for having nothing to
+   * measure.
+   */
+  await fetch(`http://127.0.0.1:${String(port)}/second`)
+  await wait(1_500)
+  const shortList = JSON.parse(
+    await app.evaluate(`JSON.stringify((() => {
+      const list = document.querySelector('.traffic-rows')
+      if (list === null) return null
+      const rows = [...list.querySelectorAll('.traffic-row-button')]
+      return {
+        rows: rows.length,
+        box: Math.round(list.clientHeight),
+        /*
+         * **The row's own height, not the gap between rows.**
+         *
+         * The gap is what the eye reads as "seventy pixels apart", and it is the
+         * one measurement that cannot move: row-gap is a fixed length, and the
+         * stretch spends the leftover height *inside* each track rather than
+         * between them. The first version of this check measured the gap and
+         * passed with the fix reverted. What grows is the row, so that is what
+         * is read — against a line of text inside it, which the stretch does not
+         * touch.
+         */
+        heights: rows.map((row) => Math.round(row.getBoundingClientRect().height)),
+        line: Math.round(
+          rows[0]?.querySelector('.traffic-method')?.getBoundingClientRect().height ?? 0
+        )
+      }
+    })())`)
+  )
+  say('a short list in a tall box', shortList)
+  check(
+    'a row is its own height, not a share of the leftover space in the box',
+    shortList !== null &&
+      shortList.rows >= 2 &&
+      shortList.line > 0 &&
+      /* Room to stretch: several rows' worth of height with only two rows in it. */
+      shortList.box > shortList.rows * 40 &&
+      shortList.heights.every((height) => height <= shortList.line + 24),
+    `${String(shortList?.rows)} rows in a box of ${String(shortList?.box)}, a line is ${String(shortList?.line)}px, rows [${(shortList?.heights ?? []).join(', ')}]`
+  )
+
+  /*
    * The guard, while the socket is genuinely open. `access` is read once in
    * `start` to pick the bind host and nothing rebinds, so a change taken here
    * would persist and the panel would offer a reach the listener does not have.
@@ -752,8 +810,22 @@ try {
           rows: cells.length,
           lefts,
           aligned: new Set(lefts).size === 1,
-          twoHundred: colour(document.querySelector('.traffic-status[data-class="2xx"]')),
-          fourHundred: colour(document.querySelector('.traffic-status[data-class="4xx"]')),
+          /*
+           * Scoped to the row, because data-class lives on the row's box now
+           * rather than on the status cell — that is what lets the endpoint read
+           * the same signal the status is coloured by. No backticks in this
+           * comment: it is inside a template literal and one would end it.
+           */
+          twoHundred: colour(
+            document.querySelector('.traffic-row-button[data-class="2xx"] .traffic-status')
+          ),
+          fourHundred: colour(
+            document.querySelector('.traffic-row-button[data-class="4xx"] .traffic-status')
+          ),
+          urlOk: colour(document.querySelector('.traffic-row-button[data-class="2xx"] .traffic-url')),
+          urlFailed: colour(
+            document.querySelector('.traffic-row-button[data-class="4xx"] .traffic-url')
+          ),
           methods: methods.map((node) => ({
             m: node.innerText.trim(),
             colour: getComputedStyle(node).color
@@ -800,6 +872,24 @@ try {
         table.twoHundred !== table.fourHundred,
       `${String(table.twoHundred)} vs ${String(table.fourHundred)}`
     )
+    /*
+     * The endpoint, red with the status it failed on.
+     *
+     * Asserted against the *status cell's own colour* rather than against a
+     * literal red, because the claim is that the two cannot disagree: both read
+     * the one `data-class` on the row's box. A literal would pass with the URL
+     * coloured from a second, separately-derived idea of failure.
+     */
+    check(
+      'the endpoint goes red with the status it failed on',
+      table.urlOk !== null &&
+        table.urlFailed !== null &&
+        table.fourHundred !== null &&
+        table.urlOk !== table.urlFailed &&
+        table.urlFailed === table.fourHundred,
+      `2xx endpoint ${String(table.urlOk)} | 4xx endpoint ${String(table.urlFailed)} | 4xx status ${String(table.fourHundred)}`
+    )
+
     const methodColour = (name) => table.methods.find((each) => each.m === name)?.colour ?? null
     const methodColours = new Set(table.methods.map((each) => each.colour))
     check(

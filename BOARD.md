@@ -76,6 +76,19 @@ It is `/[0-9]+ captured/` now. A suite that reports success while silently skipp
 its subject is the same class as this file's own note about an assertion that can
 never fail, and it is worse than a red run, because nobody goes looking.
 
+**A fourth shape, and the hardest of the four to notice: a fixture that excludes
+the case rather than a check that misses it.** The row list stretched its rows
+about seventy pixels apart whenever the content was shorter than the box — and
+every run of this driver loads sixty-odd rows, so the list is _always_ taller than
+its box and there is never leftover height to distribute. Nothing failed, because
+the condition could not occur. A missing assertion is visible by reading the file;
+a fixture that cannot reach a state is not, and it reads as coverage. **The tell is
+a clause about the fixture rather than about the code** — this one is "it always
+loads sixty rows" — and the fix is a check whose _precondition_ is asserted, so a
+future fixture that stops producing the state fails loudly instead of passing by
+having nothing to test. See the short-list check in `traffic-drive.mjs` for the
+shape.
+
 **The class bit again inside the change that renamed a button**, which is the
 evidence that paragraph was missing. `listState` found the search Clear by the
 text `'Clear'`; the rename made that lookup match nothing, and it reported
