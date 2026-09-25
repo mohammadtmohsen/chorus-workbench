@@ -209,20 +209,20 @@ export function TrafficRequestInspector(props: {
 
   const goneReason = gone !== null && gone.kind !== 'detail' ? gone.kind : failure ? 'failed' : null
 
-  if (goneReason !== null) {
-    return (
-      <section className="traffic-inspector" aria-label={t('traffic.detailTitle')}>
-        <p className="traffic-stopped">{t(`traffic.gone.${goneReason}`)}</p>
-      </section>
-    )
-  }
-  if (detail === null) {
-    return (
-      <section className="traffic-inspector" aria-label={t('traffic.detailTitle')}>
-        <p className="traffic-stopped">{t('traffic.detailLoading')}</p>
-      </section>
-    )
-  }
+  /*
+   * **No early return, because the header no longer needs the detail.**
+   *
+   * It used to: everything above the panes was read from `detail`, so a row
+   * whose read had not landed yet rendered "Loading" and nothing else. That is
+   * fine when a row is chosen by a click and nobody is watching, and wrong now
+   * that the arrow keys move the selection — passing through six rows would
+   * flash six identical Loading panes with no way to tell which row you were on.
+   *
+   * The header is drawn from `row`, which the panel already has synchronously
+   * and which says the same thing: `record` sets the snapshot's status and the
+   * request line from the same values the detail carries. So the identity of
+   * the request changes on the keystroke, and only the panes wait.
+   */
 
   const renderBody = (side: Side): React.JSX.Element => {
     const body = bodyOf(side)
@@ -415,125 +415,144 @@ export function TrafficRequestInspector(props: {
   return (
     <section className="traffic-inspector" aria-label={t('traffic.detailTitle')}>
       <header className="traffic-head">
-        <span className="traffic-method">{detail.method}</span>
-        <span className="traffic-url" title={detail.url}>
-          {detail.url}
+        <span className="traffic-method">{row.m}</span>
+        <span className="traffic-url" title={row.u}>
+          {row.u}
         </span>
-        <span className="traffic-status">{detail.status ?? '—'}</span>
+        <span className="traffic-status">{row.status ?? '—'}</span>
       </header>
 
-      <div className="traffic-panes">
-        <div className="traffic-pane" data-side="request">
-          <h3 className="traffic-label">{t('traffic.tab.request')}</h3>
-          <div className="traffic-general">
-            <p>
-              <span className="traffic-label">{t('traffic.forwardedUrl')}</span>
-              <span className="traffic-value">{detail.forwardedUrl}</span>
-            </p>
+      {goneReason !== null ? (
+        <p className="traffic-stopped">{t(`traffic.gone.${goneReason}`)}</p>
+      ) : detail === null ? (
+        <p className="traffic-stopped">{t('traffic.detailLoading')}</p>
+      ) : (
+        <div className="traffic-panes">
+          <div className="traffic-pane" data-side="request">
+            <h3 className="traffic-label">{t('traffic.tab.request')}</h3>
+            <div className="traffic-general">
+              <p>
+                <span className="traffic-label">{t('traffic.forwardedUrl')}</span>
+                <span className="traffic-value">{detail.forwardedUrl}</span>
+              </p>
+            </div>
+
+            {isForm(detail.requestBody.contentType) && bytes.request.length > 0 ? (
+              <div className="traffic-fields">
+                {formFields(textOf(bytes.request)).map(([name, value], index) => (
+                  <p key={`${name}-${String(index)}`}>
+                    <span className="traffic-label">{name}</span>
+                    <span>{value}</span>
+                  </p>
+                ))}
+              </div>
+            ) : null}
+            {renderBody('request')}
+
+            <details className="traffic-fold">
+              <summary className="traffic-fold-summary">{t('traffic.headersAndTiming')}</summary>
+              <div className="traffic-general">
+                <p>
+                  <span className="traffic-label">{t('traffic.requestSize')}</span>
+                  <span>
+                    {t('traffic.sizeOf', {
+                      kept: detail.requestBody.capturedBytes,
+                      seen: detail.requestBody.observedBytes,
+                    })}
+                  </span>
+                </p>
+                <p>
+                  <span className="traffic-label">{t('traffic.responseSize')}</span>
+                  <span>
+                    {t('traffic.sizeOf', {
+                      kept: detail.responseBody.capturedBytes,
+                      seen: detail.responseBody.observedBytes,
+                    })}
+                  </span>
+                </p>
+              </div>
+              <div className="traffic-headers-view">
+                <div className="traffic-body-bar">
+                  <button
+                    type="button"
+                    className="traffic-tab"
+                    aria-pressed={reveal}
+                    onClick={() => {
+                      setReveal((shown) => !shown)
+                    }}
+                  >
+                    {reveal ? t('traffic.hideCredentials') : t('traffic.reveal')}
+                  </button>
+                  <button
+                    type="button"
+                    className="traffic-tab"
+                    onClick={() => {
+                      copy(
+                        headerRows(detail.requestHeaders, reveal)
+                          .map(([name, value]) => `${name}: ${value}`)
+                          .join('\n')
+                      )
+                    }}
+                  >
+                    {t('traffic.copy')}
+                  </button>
+                </div>
+                <h3 className="traffic-label">{t('traffic.requestHeaders')}</h3>
+                {pairList(headerRows(detail.requestHeaders, reveal))}
+                <h3 className="traffic-label">{t('traffic.forwardedHeaders')}</h3>
+                {pairList(headerRows(detail.forwardedHeaders, reveal))}
+                <h3 className="traffic-label">{t('traffic.responseHeaders')}</h3>
+                {pairList(headerRows(detail.responseHeaders, reveal))}
+                {detail.trailers.length > 0 && (
+                  <>
+                    <h3 className="traffic-label">{t('traffic.trailers')}</h3>
+                    {pairList(detail.trailers)}
+                  </>
+                )}
+              </div>
+
+              <div className="traffic-general">
+                <h3 className="traffic-label">{t('traffic.tab.timing')}</h3>
+                <p>
+                  <span className="traffic-label">{t('traffic.timingUpstream')}</span>
+                  <span>{millis(detail.timing.startedAt, detail.timing.upstreamAt)}</span>
+                </p>
+                <p>
+                  <span className="traffic-label">{t('traffic.timingBody')}</span>
+                  <span>{millis(detail.timing.upstreamAt, detail.timing.upstreamDoneAt)}</span>
+                </p>
+                <p>
+                  <span className="traffic-label">{t('traffic.timingTotal')}</span>
+                  <span>
+                    {millis(
+                      detail.timing.startedAt,
+                      detail.timing.settledAt ?? detail.timing.upstreamDoneAt
+                    )}
+                  </span>
+                </p>
+              </div>
+            </details>
           </div>
 
-          {isForm(detail.requestBody.contentType) && bytes.request.length > 0 ? (
-            <div className="traffic-fields">
-              {formFields(textOf(bytes.request)).map(([name, value], index) => (
-                <p key={`${name}-${String(index)}`}>
-                  <span className="traffic-label">{name}</span>
-                  <span>{value}</span>
-                </p>
-              ))}
-            </div>
-          ) : null}
-          {renderBody('request')}
-
-          <details className="traffic-fold">
-            <summary className="traffic-fold-summary">{t('traffic.headersAndTiming')}</summary>
-            <div className="traffic-general">
-              <p>
-                <span className="traffic-label">{t('traffic.requestSize')}</span>
-                <span>
-                  {t('traffic.sizeOf', {
-                    kept: detail.requestBody.capturedBytes,
-                    seen: detail.requestBody.observedBytes,
-                  })}
-                </span>
+          <div className="traffic-pane" data-side="response">
+            <h3 className="traffic-label">{t('traffic.tab.response')}</h3>
+            {/*
+            Above the body rather than inside it, because there is no body for
+            these and that is the whole complaint: the pane rendered its empty
+            state and the person was left to decide whether the panel was broken
+            or the backend was. The reason goes first and the body follows, so a
+            socket that died mid-body reads as both — what arrived, and why it
+            stopped.
+          */}
+            {detail.transport !== null && (
+              <p className="traffic-stopped">
+                {t('traffic.transportFailed', { reason: detail.transport })}
               </p>
-              <p>
-                <span className="traffic-label">{t('traffic.responseSize')}</span>
-                <span>
-                  {t('traffic.sizeOf', {
-                    kept: detail.responseBody.capturedBytes,
-                    seen: detail.responseBody.observedBytes,
-                  })}
-                </span>
-              </p>
-            </div>
-            <div className="traffic-headers-view">
-              <div className="traffic-body-bar">
-                <button
-                  type="button"
-                  className="traffic-tab"
-                  aria-pressed={reveal}
-                  onClick={() => {
-                    setReveal((shown) => !shown)
-                  }}
-                >
-                  {reveal ? t('traffic.hideCredentials') : t('traffic.reveal')}
-                </button>
-                <button
-                  type="button"
-                  className="traffic-tab"
-                  onClick={() => {
-                    copy(
-                      headerRows(detail.requestHeaders, reveal)
-                        .map(([name, value]) => `${name}: ${value}`)
-                        .join('\n')
-                    )
-                  }}
-                >
-                  {t('traffic.copy')}
-                </button>
-              </div>
-              <h3 className="traffic-label">{t('traffic.requestHeaders')}</h3>
-              {pairList(headerRows(detail.requestHeaders, reveal))}
-              <h3 className="traffic-label">{t('traffic.forwardedHeaders')}</h3>
-              {pairList(headerRows(detail.forwardedHeaders, reveal))}
-              <h3 className="traffic-label">{t('traffic.responseHeaders')}</h3>
-              {pairList(headerRows(detail.responseHeaders, reveal))}
-              {detail.trailers.length > 0 && (
-                <>
-                  <h3 className="traffic-label">{t('traffic.trailers')}</h3>
-                  {pairList(detail.trailers)}
-                </>
-              )}
-            </div>
-
-            <div className="traffic-general">
-              <h3 className="traffic-label">{t('traffic.tab.timing')}</h3>
-              <p>
-                <span className="traffic-label">{t('traffic.timingUpstream')}</span>
-                <span>{millis(detail.timing.startedAt, detail.timing.upstreamAt)}</span>
-              </p>
-              <p>
-                <span className="traffic-label">{t('traffic.timingBody')}</span>
-                <span>{millis(detail.timing.upstreamAt, detail.timing.upstreamDoneAt)}</span>
-              </p>
-              <p>
-                <span className="traffic-label">{t('traffic.timingTotal')}</span>
-                <span>
-                  {millis(
-                    detail.timing.startedAt,
-                    detail.timing.settledAt ?? detail.timing.upstreamDoneAt
-                  )}
-                </span>
-              </p>
-            </div>
-          </details>
+            )}
+            {renderBody('response')}
+          </div>
         </div>
-
-        <div className="traffic-pane" data-side="response">
-          <h3 className="traffic-label">{t('traffic.tab.response')}</h3>
-          {renderBody('response')}
-        </div>
-      </div>
+      )}
     </section>
   )
 }

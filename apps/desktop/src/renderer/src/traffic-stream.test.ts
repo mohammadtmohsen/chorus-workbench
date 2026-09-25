@@ -28,6 +28,7 @@ const row = (seq: number, over: Partial<HttpRow> = {}): HttpRow => ({
   aborted: false,
   parsed: true,
   code: 'OK',
+  transport: null,
   nextAction: null,
   ...over,
 })

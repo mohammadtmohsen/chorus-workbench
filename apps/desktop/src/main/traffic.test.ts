@@ -76,6 +76,25 @@ const through = (
     req.end()
   })
 
+/**
+ * Resolves on the response head, not on the end.
+ *
+ * `through` waits for the whole body, which is exactly what a truncated one
+ * never delivers — so a test that has to act *after* the headers and *before*
+ * the end needs the head on its own.
+ */
+const headersOf = (proxyPort: number, url: string): Promise<IncomingMessage> =>
+  new Promise<IncomingMessage>((resolve, reject) => {
+    const req = httpRequest(
+      { host: '127.0.0.1', port: proxyPort, path: url, method: 'GET' },
+      (res) => {
+        resolve(res)
+      }
+    )
+    req.on('error', reject)
+    req.end()
+  })
+
 const post = (
   proxyPort: number,
   path: string,
@@ -328,7 +347,7 @@ describe('TrafficService', () => {
     expect(httpRow(service).code).toBeNull()
   })
 
-  it('records a 502 when the upstream is unreachable', async () => {
+  it('records a 502 that names why the upstream could not be reached', async () => {
     const { service, port } = await proxy()
     const dead = await answering('{}')
     const deadPort = dead.port
@@ -337,9 +356,81 @@ describe('TrafficService', () => {
     const reply = await through(port, `http://127.0.0.1:${String(deadPort)}/gone`)
     expect(reply.status).toBe(502)
     await until(() => service.snapshot().length === 1)
-    expect(httpRow(service).status).toBe(502)
-    expect(httpRow(service).aborted).toBe(false)
-    expect(httpRow(service).parsed).toBe(false)
+    const row = httpRow(service)
+    expect(row.status).toBe(502)
+    expect(row.aborted).toBe(false)
+    expect(row.parsed).toBe(false)
+
+    /*
+     * The half that used to be thrown away, and the reason the person had
+     * nowhere to look. A 502 is this side's own verdict and says nothing about
+     * *why* — a shut port, a name that would not resolve and a host that does
+     * not exist all arrive as the same row. Node is standing on the connection
+     * and holds the difference; `up.on('error')` discarded it unbound.
+     *
+     * `code` rather than the message, because `ECONNREFUSED` is the token a
+     * person searches for and it does not vary with the address. Asserting it on
+     * the snapshot is what says the reason travels all the way to the row the
+     * panel draws, rather than only as far as the capture.
+     */
+    expect(row.transport).toBe('ECONNREFUSED')
+    /* It is not an envelope's code, and a reader must not be able to mistake it for one. */
+    expect(row.code).toBeNull()
+    /* And the same reason reaches the detail, which is what draws the Response pane. */
+    expect(service.captured(row.requestId)?.transport).toBe('ECONNREFUSED')
+  })
+
+  /*
+   * The other half of the same question, and the one a 502 cannot express.
+   *
+   * Here the headers are already through, so `sentStatus()` answers with the
+   * upstream's own 200 and the row is *not* a backend failure by status. The
+   * exchange still failed — the body stopped four bytes into a promised
+   * sixty-four — and before the reason was carried that row was indistinguishable
+   * from a complete one whose body merely looked short.
+   */
+  /*
+   * The other half of the same question, and the one a 502 cannot express: here
+   * the headers are through, so this side answers with the upstream's own status
+   * and the row is not a backend failure by status at all. The exchange failed
+   * anyway — the body stopped four bytes into a chunked stream that never ended —
+   * and before the reason was carried, that row was indistinguishable from a
+   * complete one whose body merely looked short.
+   *
+   * **The kill waits for the headers to arrive at the test's own client.** A
+   * `destroy()` inside the handler races the flush: on this machine it produced a
+   * 502, because the reset beat the headers and the proxy never got a status.
+   * Waiting for them at the far end is what makes "headers were already sent" a
+   * fact rather than a hope, and it is the whole difference between this test and
+   * the refusal one above it.
+   */
+  it('names the reason when the upstream dies part-way through the body', async () => {
+    /*
+     * A holder rather than a `let`: the assignment happens inside the upstream's
+     * request handler, which the compiler cannot see run, so it narrows a bare
+     * `let` to its initial `null` and the call below stops compiling.
+     */
+    const killer: { kill: (() => void) | null } = { kill: null }
+    const source = await upstream((_req, res) => {
+      res.writeHead(200, { 'content-type': 'text/plain' })
+      res.write('half')
+      killer.kill = () => {
+        res.socket?.destroy()
+      }
+    })
+    const { service, port } = await proxy({ origin: `http://127.0.0.1:${String(source.port)}` })
+
+    const answered = await headersOf(port, '/api/mobile/v1/truncated')
+    expect(answered.statusCode).toBe(200)
+    killer.kill?.()
+    answered.resume()
+
+    await until(() => service.snapshot().length === 1 && httpRow(service).transport !== null)
+    const row = httpRow(service)
+    /* The upstream's status, not this side's 502 — the reason is the only thing that says so. */
+    expect(row.status).toBe(200)
+    expect(row.transport).toBe('ECONNRESET')
+    expect(row.code).toBeNull()
   })
 
   it('resolves an origin-form request against the upstream and records where it went', async () => {

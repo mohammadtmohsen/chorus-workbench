@@ -18,6 +18,16 @@ type HttpRow = Extract<TrafficRowShape, { source: 'http' }>
 export const outcomeOf = (row: HttpRow): TrafficOutcome => {
   if (row.aborted) return 'aborted'
   if (isRefusal(row)) return 'refused'
+  /*
+   * Two ways to be a backend failure, and the second is not the first restated.
+   *
+   * A 502 is this side's own verdict when it could not reach upstream at all.
+   * A `transport` reason means the exchange failed — which includes the case the
+   * status cannot express: headers already sent, the socket dying part-way
+   * through the body. That one carries the upstream's real status, so without
+   * this line it read as a successful exchange whose body merely stopped.
+   */
+  if (row.transport !== null) return 'backend'
   if (row.status === 502) return 'backend'
   if (!row.parsed) return 'unreadable'
   return 'read'
@@ -36,7 +46,8 @@ export const filterRows = (
       : row.m.toLowerCase().includes(needle) ||
         row.u.toLowerCase().includes(needle) ||
         (row.code ?? '').toLowerCase().includes(needle) ||
-        (row.nextAction ?? '').toLowerCase().includes(needle)
+        (row.nextAction ?? '').toLowerCase().includes(needle) ||
+        (row.transport ?? '').toLowerCase().includes(needle)
   )
 }
 

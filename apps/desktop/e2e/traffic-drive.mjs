@@ -2,7 +2,7 @@ import { existsSync, mkdtempSync, writeFileSync } from 'node:fs'
 import { spawnSync } from 'node:child_process'
 import { createServer } from 'node:http'
 import { gzipSync } from 'node:zlib'
-import { homedir, tmpdir } from 'node:os'
+import { homedir, networkInterfaces, tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { ensureBuilt, launch, wait } from './harness.mjs'
 
@@ -119,6 +119,21 @@ try {
       return 'clicked'
     })()`)
 
+  /*
+   * A `<select>` through React's `onChange`, which for a select is the native
+   * `change` event — the setter is the prototype's own, because assigning to
+   * `select.value` directly is what React's value tracking ignores.
+   */
+  const picked = (selector, value) =>
+    app.evaluate(`(() => {
+      const select = document.querySelector(${JSON.stringify(selector)})
+      if (select === null) return 'missing: ' + ${JSON.stringify(selector)}
+      const setter = Object.getOwnPropertyDescriptor(window.HTMLSelectElement.prototype, 'value').set
+      setter.call(select, ${JSON.stringify(value)})
+      select.dispatchEvent(new Event('change', { bubbles: true }))
+      return { readBack: select.value }
+    })()`)
+
   await app.evaluate(`(() => {
     const tile = [...document.querySelectorAll('.rail-item.rail-project')]
       .find((node) => (node.innerText || '').includes(${JSON.stringify(PROJECT)}))
@@ -204,6 +219,86 @@ try {
     })`)
   )
 
+  /*
+   * The reach control, read through the DOM it actually renders rather than the
+   * state it was handed. The round-trip half runs with capture off, and the
+   * guard half with it on, below.
+   *
+   * **Nothing here binds `0.0.0.0`.** The one assertion that would need it — that
+   * a LAN capture reports the machine's own address — is left untested, because
+   * opening a wide listener inside this run is how macOS comes up with its
+   * incoming-connections prompt and a run that hangs on a system dialog is
+   * exactly the failure C-069 would file as another intermittent mode.
+   */
+  const reachState = `JSON.stringify((() => {
+    const field = document.querySelector('[data-traffic-field="access"]')
+    const select = field === null ? null : field.querySelector('select')
+    return {
+      present: field !== null && select !== null,
+      value: select === null ? null : select.value,
+      options: select === null ? null : [...select.options].map((option) => option.value),
+      label: field?.querySelector('.traffic-field-name')?.innerText.trim() ?? null,
+      hint: field?.querySelector('.traffic-field-hint')?.innerText.trim() ?? null,
+      described:
+        field === null || select === null
+          ? null
+          : select.getAttribute('aria-describedby') === (field.querySelector('.traffic-field-hint')?.id ?? ''),
+      disabled: select === null ? null : select.disabled,
+      stopped: document.querySelector('.traffic-stopped')?.innerText.trim() ?? null
+    }
+  })())`
+
+  /*
+   * What this asserts flipped with the default: it used to claim the panel
+   * opened on `loopback`, and now claims it opens on `lan`. Nothing was
+   * relaxed — the two are the same assertion about which value a project
+   * starts with, and the second is the one the product now means.
+   *
+   * The non-default choice is the one worth walking, so the round trip below
+   * goes out to `loopback` and back rather than the other way round.
+   */
+  const reachBefore = JSON.parse(await app.evaluate(reachState))
+  say('the reach control before choosing', reachBefore)
+  check(
+    'the reach control opens on the network — the default — with both choices and a label',
+    reachBefore.present &&
+      reachBefore.value === 'lan' &&
+      reachBefore.options.length === 2 &&
+      reachBefore.options.includes('loopback') &&
+      reachBefore.label !== null &&
+      reachBefore.label !== '' &&
+      reachBefore.described === true,
+    `value ${String(reachBefore.value)}, options [${(reachBefore.options ?? []).join(', ')}], label ${JSON.stringify(reachBefore.label)}`
+  )
+
+  say(
+    'choosing this machine only',
+    await picked('[data-traffic-field="access"] select', 'loopback')
+  )
+  await wait(1_200)
+  const reachNarrow = JSON.parse(await app.evaluate(reachState))
+  say('the reach control after narrowing', reachNarrow)
+  check(
+    'narrowing to this machine takes, and says what is left reachable',
+    reachNarrow.value === 'loopback' &&
+      reachNarrow.stopped === null &&
+      reachNarrow.hint !== reachBefore.hint &&
+      (reachNarrow.hint ?? '').includes('Only this machine'),
+    `value ${String(reachNarrow.value)}, hint ${JSON.stringify(reachNarrow.hint)}`
+  )
+
+  say('back to the network', await picked('[data-traffic-field="access"] select', 'lan'))
+  await wait(1_200)
+  const reachBack = JSON.parse(await app.evaluate(reachState))
+  say('the reach control, back on the default', reachBack)
+  check(
+    'and it goes back to the network, with the warning that describes it',
+    reachBack.value === 'lan' &&
+      reachBack.hint === reachBefore.hint &&
+      (reachBack.hint ?? '').includes('incoming connections'),
+    `value ${String(reachBack.value)}, hint ${JSON.stringify(reachBack.hint)}`
+  )
+
   say(
     'preload / console calibration',
     await app.evaluate(`(() => {
@@ -240,7 +335,31 @@ try {
   say('header after start', header.split('\n').slice(0, 3).join(' | '))
   say('renderer console', app.console().slice(-12).join('\n'))
   say('window body', await app.evaluate(`document.body.innerText.slice(0, 200)`))
-  check('the listener bound', header.includes('Listening on 127.0.0.1:'))
+  /*
+   * What this claims changed with the default, and it is not the same assertion
+   * relaxed. It used to read `Listening on 127.0.0.1:` — which, now that a
+   * project starts open to the network, would be the statement that the default
+   * is *not* applied.
+   *
+   * The host is checked against this machine's own non-internal IPv4 addresses,
+   * read here from Node, rather than against a pattern or against `lanAddress`'s
+   * private-first search. A pattern would pass on any dotted quad including the
+   * wildcard, and re-implementing the search would fail whenever the two
+   * disagreed about which interface counts — neither of which is the claim.
+   */
+  const localAddresses = Object.values(networkInterfaces())
+    .flatMap((each) => each ?? [])
+    .filter((address) => address.family === 'IPv4' && !address.internal)
+    .map((address) => address.address)
+  const listening = /Listening on ([^\s]+)/.exec(header)?.[1] ?? null
+  const listeningHost = listening === null ? null : (listening.split(':')[0] ?? null)
+  say('what the listener reports', listening ?? 'nothing')
+  say('this machine is reachable at', localAddresses)
+  check(
+    'the listener bound on the network, naming an address this machine actually has',
+    listeningHost !== null && listeningHost !== '0.0.0.0' && localAddresses.includes(listeningHost),
+    `reported ${String(listening)}, machine has [${localAddresses.join(', ')}]`
+  )
 
   /*
    * The port the panel reports, never a fixed one: this machine may already be
@@ -261,6 +380,29 @@ try {
   const longPath = `/x-${'a'.repeat(200)}`
   const first = await fetch(`http://127.0.0.1:${String(port)}${longPath}`)
   say('the long request', `status ${first.status} ${await first.text()}`)
+
+  /*
+   * The guard, while the socket is genuinely open. `access` is read once in
+   * `start` to pick the bind host and nothing rebinds, so a change taken here
+   * would persist and the panel would offer a reach the listener does not have.
+   * Asserting the refusal *and* that the choice did not move is the pair that
+   * makes this check worth having — a refusal that stored the value anyway would
+   * pass on the message alone.
+   */
+  say(
+    'asking for this machine only, while capturing',
+    await picked('[data-traffic-field="access"] select', 'loopback')
+  )
+  await wait(1_200)
+  const reachGuard = JSON.parse(await app.evaluate(reachState))
+  say('the reach control while capturing', reachGuard)
+  check(
+    'a change to the reach is refused mid-capture, and the choice does not move',
+    reachGuard.value === 'lan' &&
+      reachGuard.stopped !== null &&
+      reachGuard.stopped.includes('Stop capture'),
+    `value ${String(reachGuard.value)}, said ${JSON.stringify(reachGuard.stopped)}`
+  )
 
   const answer = await fetch(`http://127.0.0.1:${String(port)}/hello`)
   say('request through the listener', `status ${answer.status} ${await answer.text()}`)
@@ -628,10 +770,16 @@ try {
               const node = document.querySelector(selector)
               return node === null ? null : Math.round(node.getBoundingClientRect().width)
             }
+            /*
+             * The row itself is not measured any more: it is display: contents
+             * so the whole list can share one set of column tracks, and a
+             * box-less element measures zero. A diagnostic reading 0 for a row
+             * that is plainly 1,300px wide is worse than not reading it. The
+             * button is the row's box now.
+             */
             return {
               panel: box('.traffic-panel'),
               rows: box('.traffic-rows'),
-              row: box('.traffic-row'),
               button: box('.traffic-row-button'),
               step: getComputedStyle(document.querySelector('.traffic-row-button')).gap
             }
@@ -699,34 +847,90 @@ try {
         }
       })())`)
     )
-    const truncation = JSON.parse(
+    /*
+     * **This check used to claim the opposite, and the claim is what changed.**
+     *
+     * It asked the longest trailing value to be one line tall, `overflow:
+     * hidden`, `text-overflow: ellipsis` and `scrollWidth > clientWidth` — a
+     * value deliberately cut off. That was built earlier the same day and is now
+     * the thing being removed, so asserting it would pass only if the change had
+     * not happened.
+     *
+     * What replaces it is the same measurement pointed the other way: no cell in
+     * the table hides any of its text, and the list scrolls sideways so the
+     * widest row is reachable rather than merely uncut. Every cell of every
+     * request row, not one sample — a column that clips is a column that clips,
+     * and sampling the longest value would miss a short one that still overflowed.
+     */
+    const overflowed = JSON.parse(
       await app.evaluate(`JSON.stringify((() => {
-        const cells = [...document.querySelectorAll('.traffic-row-button .traffic-code')]
-        const longest = cells.reduce(
-          (best, node) => ((node.innerText ?? '').length > (best?.innerText ?? '').length ? node : best),
-          null
-        )
-        if (longest === null) return null
-        const style = getComputedStyle(longest)
-        const note = longest.parentElement
-        const row = longest.closest('.traffic-row-button')
-        const range = document.createRange()
-        range.selectNodeContents(longest)
+        const list = document.querySelector('.traffic-rows')
+        const rows = [...document.querySelectorAll('.traffic-row-button')]
+        const cells = rows.flatMap((row) => [...row.children])
         return {
-          text: longest.innerText,
-          height: Math.round(longest.getBoundingClientRect().height),
-          cell: Math.round(longest.getBoundingClientRect().width),
-          clientWidth: longest.clientWidth,
-          scrollWidth: longest.scrollWidth,
-          textWidth: Math.round(range.getBoundingClientRect().width),
-          note: note === null ? null : Math.round(note.getBoundingClientRect().width),
-          row: row === null ? null : Math.round(row.getBoundingClientRect().width),
-          columns: row === null ? null : getComputedStyle(row).gridTemplateColumns,
-          whiteSpace: style.whiteSpace,
-          overflow: style.overflow,
-          ellipsis: style.textOverflow
+          rows: rows.length,
+          cells: cells.length,
+          clipped: cells
+            .filter((cell) => cell.scrollWidth > cell.clientWidth + 1)
+            .map((cell) => cell.className + ':' + (cell.innerText ?? '').slice(0, 24)),
+          hiding: cells
+            .filter((cell) => getComputedStyle(cell).overflow === 'hidden')
+            .map((cell) => cell.className),
+          ellipsised: cells
+            .filter((cell) => getComputedStyle(cell).textOverflow === 'ellipsis')
+            .map((cell) => cell.className),
+          listClient: list === null ? null : list.clientWidth,
+          listScroll: list === null ? null : list.scrollWidth
         }
       })())`)
+    )
+    say('what the table needs to show everything', overflowed)
+    check(
+      'no cell hides its text, and the list is wider than its own window',
+      overflowed.rows >= 2 &&
+        overflowed.cells >= overflowed.rows * 5 &&
+        overflowed.clipped.length === 0 &&
+        overflowed.hiding.length === 0 &&
+        overflowed.ellipsised.length === 0 &&
+        overflowed.listScroll > overflowed.listClient,
+      `clipped [${overflowed.clipped.join(', ')}] hidden [${overflowed.hiding.join(', ')}] ellipsised [${overflowed.ellipsised.join(', ')}] list ${String(overflowed.listScroll)} in ${String(overflowed.listClient)}`
+    )
+
+    /*
+     * Uncut is not the same as reachable, and only this half proves the scroll.
+     * The longest row is the one with the 200-character segment in it, so
+     * scrolling to the far end has to put its last cell inside the list's own
+     * box — a list that overflows but cannot be scrolled all the way would pass
+     * everything above and still hide the end of the URL.
+     */
+    const reach = JSON.parse(
+      await app.evaluate(`JSON.stringify((() => {
+        const list = document.querySelector('.traffic-rows')
+        const rows = [...document.querySelectorAll('.traffic-row-button')]
+        if (list === null || rows.length === 0) return null
+        const widest = rows.reduce((best, row) =>
+          row.getBoundingClientRect().width > best.getBoundingClientRect().width ? row : best
+        )
+        const before = list.scrollLeft
+        list.scrollLeft = list.scrollWidth
+        const box = list.getBoundingClientRect()
+        const last = widest.lastElementChild
+        const end = last === null ? null : last.getBoundingClientRect()
+        const answer = {
+          moved: list.scrollLeft > before,
+          atEnd: end !== null && end.right <= box.right + 1,
+          overhang: end === null ? null : Math.round(end.right - box.right),
+          url: (widest.querySelector('.traffic-url')?.innerText ?? '').length
+        }
+        list.scrollLeft = before
+        return answer
+      })())`)
+    )
+    say('scrolling to the end of the widest row', reach)
+    check(
+      'and scrolling to the far end actually reveals the longest URL',
+      reach !== null && reach.moved && reach.atEnd && reach.url > 100,
+      JSON.stringify(reach)
     )
     const edges = JSON.parse(
       await app.evaluate(`JSON.stringify((() => {
@@ -756,17 +960,6 @@ try {
         : edges.map((each) => `${each.cell}:${String(each.textLeft - each.cellLeft)}`).join(' ')
     )
 
-    say('the longest trailing value', truncation)
-    check(
-      'a long value stays on one line and ellipsizes',
-      truncation !== null &&
-        truncation.height <= 20 &&
-        truncation.scrollWidth > truncation.clientWidth &&
-        truncation.overflow === 'hidden' &&
-        truncation.ellipsis === 'ellipsis',
-      JSON.stringify(truncation)
-    )
-
     say('literal comments in the rows', leaked)
     check(
       'no row renders a comment as text',
@@ -774,25 +967,75 @@ try {
       leaked.offenders.slice(0, 2).join(' | ')
     )
 
-    const walk = JSON.parse(
-      await app.evaluate(`JSON.stringify((() => {
-        const buttons = [...document.querySelectorAll('.traffic-row-button')]
-        if (buttons.length < 3) return null
-        const at = () => buttons.indexOf(document.activeElement)
-        buttons[0].focus()
-        const seen = [at()]
-        for (const key of ['ArrowDown', 'ArrowDown', 'ArrowUp']) {
-          document.activeElement.dispatchEvent(new KeyboardEvent('keydown', { key, bubbles: true }))
-          seen.push(at())
-        }
-        return seen
-      })())`)
-    )
+    /*
+     * **What this claims changed with the feature, so the check changed too.**
+     *
+     * It used to assert the arrows "walk the rows without opening anything" —
+     * focus moved and the panes did not, which was the behaviour and is now the
+     * defect. The claim is now the one the user asked for: the inspector names
+     * the row the arrow landed on, at every step rather than only at the end.
+     *
+     * Read one step at a time, from Node, rather than in a single synchronous
+     * loop inside the page. The selection is set by the keydown handler and the
+     * header renders from it, and whether that render has been committed by the
+     * time `dispatchEvent` returns is a batching detail this check should not
+     * depend on. A wait between steps makes it a fact.
+     */
+    const walkState = `JSON.stringify((() => {
+      const buttons = [...document.querySelectorAll('.traffic-row-button')]
+      if (buttons.length === 0) return null
+      const at = buttons.indexOf(document.activeElement)
+      const head = document.querySelector('.traffic-inspector .traffic-head .traffic-url')
+      return {
+        count: buttons.length,
+        at,
+        url:
+          at === -1
+            ? null
+            : (buttons[at].querySelector('.traffic-url')?.innerText ?? '').trim(),
+        head: head === null ? null : (head.innerText || '').trim(),
+        pressed: buttons.findIndex((b) => b.getAttribute('aria-pressed') === 'true')
+      }
+    })())`
+
+    await app.evaluate(`(() => {
+      const buttons = [...document.querySelectorAll('.traffic-row-button')]
+      if (buttons.length > 0) buttons[0].focus()
+      return true
+    })()`)
+    await wait(500)
+
+    const walk = [JSON.parse(await app.evaluate(walkState))]
+    for (const key of ['ArrowDown', 'ArrowDown', 'ArrowUp']) {
+      await app.evaluate(`(() => {
+        document.activeElement?.dispatchEvent(
+          new KeyboardEvent('keydown', { key: ${JSON.stringify(key)}, bubbles: true })
+        )
+        return true
+      })()`)
+      await wait(500)
+      walk.push(JSON.parse(await app.evaluate(walkState)))
+    }
+
     say('the arrows', walk)
+    /*
+     * The first reading is the one before any arrow: focus is on row 0 and
+     * nothing has selected it, which is the state the walk starts from. The
+     * three after it are the arrows, and every one of them has to have moved
+     * both — focus, selection, and the row the inspector names.
+     */
+    const steps = walk.slice(1)
     check(
-      'the arrows walk the rows without opening anything',
-      walk !== null && walk.join(',') === '0,1,2,1',
-      String(walk)
+      'the arrows walk the rows, and the inspector names the row they land on',
+      walk.map((each) => each.at).join(',') === '0,1,2,1' &&
+        steps.length === 3 &&
+        steps.every((each) => each.pressed === each.at) &&
+        steps.every((each) => each.url !== null && each.url !== '' && each.head === each.url),
+      walk
+        .map(
+          (each) => `${String(each.at)}/${String(each.pressed)}:${(each.head ?? 'none').slice(-28)}`
+        )
+        .join(' | ')
     )
 
     /*
@@ -807,6 +1050,25 @@ try {
       await fetch(`http://127.0.0.1:${String(port)}/fill/${String(i)}`)
     }
     await wait(2_500)
+
+    /*
+     * **The bottom, stated rather than inherited.**
+     *
+     * The arrow walk above focuses a row, and focusing scrolls the list to it —
+     * which it should. Following is a claim about a list the person is standing
+     * at the bottom of, so the bottom is the precondition, and leaving it to
+     * whatever the previous check happened to leave behind made this pass or
+     * fail for a reason that has nothing to do with following. It also makes the
+     * walk's own consequence explicit rather than accidental: arrow away from
+     * the bottom and following stops, which is the behaviour the check three
+     * below this one asserts on purpose.
+     */
+    await app.evaluate(`(() => {
+      const list = document.querySelector('.traffic-rows')
+      if (list !== null) list.scrollTop = list.scrollHeight
+      return true
+    })()`)
+    await wait(400)
 
     const scrolled = () =>
       app.evaluate(`(() => {
@@ -1098,7 +1360,7 @@ try {
     check(
       'every field in the setup names itself with a visible label, tied to its control',
       fieldsOpen.open === true &&
-        openFields.length === 4 &&
+        openFields.length === 5 &&
         openFields.every(
           (field) =>
             field.drawn && field.label !== null && field.label !== '' && field.names.length === 1
@@ -1115,7 +1377,7 @@ try {
         .join(' | ') || 'none'
     )
     check(
-      'the hints are descriptions, on the three fields that earn one',
+      'the hints are descriptions, on origin, port, the variable and the reach',
       ['origin', 'port', 'envVar'].every((key) => hinted.some((field) => field.key === key)) &&
         hinted.every((field) => field.described === true),
       hinted
@@ -1141,17 +1403,24 @@ try {
     check(
       'and it still collapses at that width, taking its fields with it',
       fieldsShut.open === false &&
-        (fieldsShut.fields ?? []).length === 4 &&
+        (fieldsShut.fields ?? []).length === 5 &&
         (fieldsShut.fields ?? []).every((field) => field.drawn === false),
-      `open ${String(fieldsShut.open)}, drawn ${String((fieldsShut.fields ?? []).filter((field) => field.drawn).length)} of 4`
+      `open ${String(fieldsShut.open)}, drawn ${String((fieldsShut.fields ?? []).filter((field) => field.drawn).length)} of 5`
     )
 
     await fetch(`http://127.0.0.1:${String(port)}/gz`)
     await wait(2_500)
+    /*
+     * Found on the button, not the list item. The row is display: contents now,
+     * so it has no box — and innerText is *rendered* text, which for a box-less
+     * element is not the same guarantee. A row that matched nothing would leave
+     * this click doing nothing at all and every check below it failing for a
+     * reason three steps away, which is C-069's exact shape.
+     */
     await app.evaluate(`(() => {
-      const row = [...document.querySelectorAll('.traffic-row')]
+      const row = [...document.querySelectorAll('.traffic-row-button')]
         .find((node) => (node.innerText || '').includes('/gz'))
-      if (row !== undefined) (row.querySelector('button') ?? row).click()
+      if (row !== undefined) row.click()
       return true
     })()`)
     await wait(2_000)

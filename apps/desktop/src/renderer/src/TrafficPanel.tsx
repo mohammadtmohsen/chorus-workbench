@@ -46,7 +46,7 @@ const idle: TrafficState = {
   wantedPort: null,
   address: null,
   origin: null,
-  access: 'loopback',
+  access: 'lan',
   envVar: null,
   source: { kind: 'off' },
   failure: null,
@@ -57,7 +57,7 @@ const FAILURE_KEYS: Record<TrafficFailure, string> = {
   failed: 'traffic.startFailed',
   'source-busy': 'traffic.sourceBusy',
   'unknown-project': 'traffic.unknownProject',
-  capturing: 'traffic.portCapturing',
+  capturing: 'traffic.capturingChange',
   'no-port': 'traffic.noPort',
   'no-origin': 'traffic.noOrigin',
   'ownership-unknown': 'traffic.ownershipUnknown',
@@ -84,6 +84,16 @@ export function TrafficPanel(props: {
   const [envVarDraft, setEnvVarDraft] = useState('')
   const [filters, setFilters] = useState(DEFAULT_LOGCAT_FILTER)
   const [failure, setFailure] = useState<TrafficFailure | 'action' | 'origin' | null>(null)
+  /*
+   * Which field the last refusal belongs to.
+   *
+   * The message is a fact about one control, and it used to render at the foot
+   * of the panel — far enough away that a person whose correction had just been
+   * refused went on reading their own text in the box as though it had been
+   * taken. Naming the field is what lets it appear under the control it is
+   * about, in the hint slot that is already there.
+   */
+  const [refusedAt, setRefusedAt] = useState<'origin' | 'port' | 'envVar' | null>(null)
   const [selectedSeq, setSelectedSeq] = useState<number | null>(null)
   const [search, setSearch] = useState('')
   /** Null means the last page, which keeps following as rows arrive. */
@@ -301,13 +311,30 @@ export function TrafficPanel(props: {
     if (capture.source.kind === 'logcat') select({ kind: 'logcat', filters: next })
   }, [filters, capture.source, select])
 
+  /*
+   * **All three of these put the field back from `state`, taken or refused.**
+   *
+   * The two used to disagree, and the disagreement was the defect: `commitPort`
+   * restored the field only when the change was *refused*, `commitOrigin` only
+   * when it *succeeded*. So refusing an origin change — which `configure` does
+   * on purpose while a capture is running, because the socket is already bound
+   * and the forward target is read once at `Start` — left the rejected text
+   * sitting in the box. The panel showed `:30081` and the listener went on
+   * forwarding to `:3008`, and every row was a 502 against a port with nothing
+   * on it. `commitEnvVar` already had the honest form.
+   *
+   * `state` is authoritative either way: `configure` returns before it stores
+   * anything when it refuses, so the value it hands back is the stored one. One
+   * rule for the three, and no branch to get wrong.
+   */
   const commitOrigin = useCallback((): void => {
     void window.chorus
       .configureTraffic({ projectId, config: { origin: originDraft.trim() } })
       .then(({ state, failure: refused }) => {
         setCapture(state)
         setFailure(refused)
-        if (refused === null) setOriginDraft(state.origin ?? '')
+        setRefusedAt(refused === null ? null : 'origin')
+        setOriginDraft(state.origin ?? '')
       })
       .catch(() => {
         setFailure('origin')
@@ -326,7 +353,8 @@ export function TrafficPanel(props: {
       .then(({ state, failure: refused }) => {
         setCapture(state)
         setFailure(refused)
-        if (refused !== null) setPortDraft(String(state.wantedPort ?? DEFAULT_TRAFFIC_PORT))
+        setRefusedAt(refused === null ? null : 'port')
+        setPortDraft(String(state.wantedPort ?? DEFAULT_TRAFFIC_PORT))
       })
       .catch(() => {
         setFailure('action')
@@ -340,12 +368,34 @@ export function TrafficPanel(props: {
       .then(({ state, failure: refused }) => {
         setCapture(state)
         setFailure(refused)
+        /*
+         * Nothing refuses an env-var change today — it is not one of the moves
+         * `configure` guards — so this branch cannot fire yet. It is here so the
+         * three handlers read the same, and so a guard added to that field
+         * later reports at the field rather than at the foot of the panel.
+         */
+        setRefusedAt(refused === null ? null : 'envVar')
         setEnvVarDraft(state.envVar ?? '')
       })
       .catch(() => {
         setFailure('action')
       })
   }, [projectId, envVarDraft])
+
+  const chooseAccess = useCallback(
+    (value: string): void => {
+      void window.chorus
+        .configureTraffic({ projectId, config: { access: value === 'lan' ? 'lan' : 'loopback' } })
+        .then(({ state, failure: refused }) => {
+          setCapture(state)
+          setFailure(refused)
+        })
+        .catch(() => {
+          setFailure('action')
+        })
+    },
+    [projectId]
+  )
 
   const copy = useCallback((text: string): void => {
     void window.chorus.copyText({ text })
@@ -437,6 +487,25 @@ export function TrafficPanel(props: {
     return `${String(Math.floor(row.status / 100))}xx`
   }
 
+  /*
+   * **The arrows move the selection as well as the focus.**
+   *
+   * They used to move focus alone, and selection was written only by `onClick`,
+   * so walking the list left the inspector describing whatever had last been
+   * clicked — the highlight moved past it and the panes did not.
+   *
+   * This is the same `setSelectedSeq` the click calls, minus the toggle: a click
+   * on the selected row closes the pane, and an arrow that closed the pane on the
+   * row it had just opened would make the walk unusable. The two paths share the
+   * setter and not the handler, deliberately.
+   *
+   * Nothing here waits. The selection lands on the keystroke, so the highlight
+   * and the inspector's header — both drawn from the row — change with it, and
+   * only the detail read settles. That is what keeps a held arrow key from
+   * putting a `readTrafficDetail` through a synchronous main thread per row
+   * passed over: the reads still happen, but the panes never wait for the ones
+   * you have already left.
+   */
   const onRowKeyDown = (event: React.KeyboardEvent<HTMLUListElement>): void => {
     if (event.key !== 'ArrowDown' && event.key !== 'ArrowUp') return
     const buttons = [...event.currentTarget.querySelectorAll<HTMLElement>('.traffic-row-button')]
@@ -445,7 +514,30 @@ export function TrafficPanel(props: {
     if (at === -1 || next === undefined) return
     event.preventDefault()
     next.focus()
+    const seq = Number(next.dataset['seq'])
+    if (Number.isInteger(seq)) setSelectedSeq(seq)
   }
+
+  /*
+   * One place that turns a failure into words, because it is now drawn in two —
+   * under the field that was refused, and at the foot of the panel for the ones
+   * that belong to no field. Two copies would agree until one was edited.
+   */
+  const failureText = (which: TrafficFailure | 'action' | 'origin'): string =>
+    which === 'origin'
+      ? t('traffic.originFailed')
+      : which === 'action'
+        ? t('traffic.actionFailed')
+        : t(FAILURE_KEYS[which], { port: capture.wantedPort ?? DEFAULT_TRAFFIC_PORT })
+
+  /*
+   * `capturing` is the only failure `configure` can return — its guard refusing
+   * an origin, port or reach change while a socket is bound. Testing the failure
+   * rather than trusting `refusedAt` alone is what stops a later Start failure —
+   * "set an address first" — from rendering under a setup field it has nothing
+   * to do with, without having to clear `refusedAt` at every other call site.
+   */
+  const refusedField = failure === 'capturing' ? refusedAt : null
 
   const outcomeBadge = (row: Extract<TrafficRowShape, { source: 'http' }>): React.JSX.Element => (
     <span className="traffic-outcome" data-outcome={outcomeOf(row)}>
@@ -483,6 +575,7 @@ export function TrafficPanel(props: {
         </span>
         {outcomeBadge(row)}
         <span className="traffic-note">
+          {row.transport !== null && <span className="traffic-transport">{row.transport}</span>}
           {row.code !== null && <span className="traffic-code">{row.code}</span>}
           {row.nextAction !== null && <span className="traffic-next">{row.nextAction}</span>}
         </span>
@@ -636,8 +729,14 @@ export function TrafficPanel(props: {
               }}
               onBlur={commitOrigin}
             />
-            <span className="traffic-field-hint" id={`${fields}-origin-hint`}>
-              {t('traffic.originHint')}
+            <span
+              className="traffic-field-hint"
+              id={`${fields}-origin-hint`}
+              data-refused={refusedField === 'origin' ? 'true' : 'false'}
+            >
+              {refusedField === 'origin' && failure !== null
+                ? failureText(failure)
+                : t('traffic.originHint')}
             </span>
           </div>
         </div>
@@ -663,8 +762,14 @@ export function TrafficPanel(props: {
               }}
               onBlur={commitPort}
             />
-            <span className="traffic-field-hint" id={`${fields}-port-hint`}>
-              {t('traffic.portHint')}
+            <span
+              className="traffic-field-hint"
+              id={`${fields}-port-hint`}
+              data-refused={refusedField === 'port' ? 'true' : 'false'}
+            >
+              {refusedField === 'port' && failure !== null
+                ? failureText(failure)
+                : t('traffic.portHint')}
             </span>
           </div>
           <div className="traffic-field" data-traffic-field="envVar">
@@ -689,6 +794,37 @@ export function TrafficPanel(props: {
             />
             <span className="traffic-field-hint" id={`${fields}-env-hint`}>
               {t('traffic.envVarHint')}
+            </span>
+          </div>
+        </div>
+
+        {/*
+          On its own row rather than paired, unlike the four above it: the hint
+          is the only one in this block that describes a consequence rather than
+          a setting, and it swaps with the choice. Two columns would have broken
+          it mid-sentence at 300px.
+        */}
+        <div className="traffic-source-row">
+          <div className="traffic-field" data-traffic-field="access">
+            <label className="traffic-field-name" htmlFor={`${fields}-access`}>
+              {t('traffic.access')}
+            </label>
+            <select
+              id={`${fields}-access`}
+              className="traffic-source"
+              aria-describedby={`${fields}-access-hint`}
+              value={capture.access}
+              onChange={(event) => {
+                chooseAccess(event.target.value)
+              }}
+            >
+              <option value="loopback">{t('traffic.accessLoopback')}</option>
+              <option value="lan">{t('traffic.accessLan')}</option>
+            </select>
+            <span className="traffic-field-hint" id={`${fields}-access-hint`}>
+              {capture.access === 'lan'
+                ? t('traffic.accessLanHint')
+                : t('traffic.accessLoopbackHint')}
             </span>
           </div>
         </div>
@@ -827,14 +963,8 @@ export function TrafficPanel(props: {
         </div>
       )}
 
-      {failure !== null && (
-        <p className="traffic-stopped">
-          {failure === 'origin'
-            ? t('traffic.originFailed')
-            : failure === 'action'
-              ? t('traffic.actionFailed')
-              : t(FAILURE_KEYS[failure], { port: capture.wantedPort ?? DEFAULT_TRAFFIC_PORT })}
-        </p>
+      {failure !== null && refusedField === null && (
+        <p className="traffic-stopped">{failureText(failure)}</p>
       )}
 
       {stream.rows.length === 0 ? (
@@ -864,6 +994,8 @@ export function TrafficPanel(props: {
                     type="button"
                     className="traffic-row-button"
                     aria-pressed={row.seq === selectedSeq}
+                    /* What the arrow walk selects by: the button is the row's box, so it is the row. */
+                    data-seq={row.seq}
                     onClick={() => {
                       setSelectedSeq((current) => (current === row.seq ? null : row.seq))
                     }}

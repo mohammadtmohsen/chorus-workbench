@@ -19,6 +19,11 @@ const ROWS_PER_PROJECT = 1_000
 const ROWS_OVERALL = 4_000
 const LOOPBACK = '127.0.0.1'
 const EVERY_INTERFACE = '0.0.0.0'
+/*
+ * The same default the column carries and migration 18 gave every existing row,
+ * stated once here so the two fallbacks below cannot drift from it.
+ */
+const DEFAULT_ACCESS: TrafficAccess = 'lan'
 
 const BYTES_PER_PROJECT = 16 * 1_024 * 1_024
 const BYTES_OVERALL = 64 * 1_024 * 1_024
@@ -156,13 +161,23 @@ export class ProjectTrafficRegistry {
     const entry = this.entry(projectId)
     const movesOrigin = config.origin !== undefined && config.origin !== entry.config?.origin
     const movesPort = config.port !== undefined && config.port !== entry.config?.port
-    if (entry.service !== null && (movesOrigin || movesPort)) {
+    /*
+     * `access` is guarded with the other two even though it needs no teardown to
+     * apply. It is read once, in `start`, to choose the bind host, and nothing
+     * rebinds the socket afterwards — so accepting it mid-capture would leave the
+     * panel showing "Anything on this network" beside a listener still bound to
+     * `127.0.0.1`, and a person whose phone cannot reach it with no statement on
+     * screen that the change waits for a restart. Refusing says the same thing
+     * the other two say: stop, change it, start again.
+     */
+    const movesAccess = config.access !== undefined && config.access !== entry.config?.access
+    if (entry.service !== null && (movesOrigin || movesPort || movesAccess)) {
       return this.publish(entry, { failure: 'capturing' })
     }
     const next: ProjectTrafficConfig = {
       origin: config.origin === undefined ? (entry.config?.origin ?? null) : config.origin,
       port: config.port === undefined ? (entry.config?.port ?? null) : config.port,
-      access: config.access ?? entry.config?.access ?? 'loopback',
+      access: config.access ?? entry.config?.access ?? DEFAULT_ACCESS,
       envVar: config.envVar === undefined ? (entry.config?.envVar ?? null) : config.envVar,
     }
     this.deps.remember(projectId, next)
@@ -315,6 +330,7 @@ export class ProjectTrafficRegistry {
       responseHeaders: [...captured.responseHeaders],
       trailers: [...captured.trailers],
       status: captured.status,
+      transport: captured.transport,
       timing: {
         startedAt: captured.startedAt,
         upstreamAt: captured.upstreamAt,
@@ -425,6 +441,12 @@ export class ProjectTrafficRegistry {
    * address cannot be found the wildcard is still what is reported, because a
    * wrong-looking address is better than a blank one that hides a running
    * listener.
+   *
+   * Re-read when `lan` became the default and this stopped being hypothetical:
+   * `lanAddress` answers null only when the machine has no non-internal IPv4
+   * interface at all. That is also the machine on which nothing on a network
+   * could reach this listener, so the uncopyable address is not the thing that
+   * is wrong with it — and it is not a state a laptop on Wi-Fi reaches.
    */
   private addressFor(port: number, access: TrafficAccess): string {
     if (access === 'loopback') return `${LOOPBACK}:${String(port)}`
@@ -532,7 +554,7 @@ export class ProjectTrafficRegistry {
         wantedPort: null,
         address: null,
         origin: this.deps.config(projectId)?.origin ?? null,
-        access: this.deps.config(projectId)?.access ?? 'loopback',
+        access: this.deps.config(projectId)?.access ?? DEFAULT_ACCESS,
         envVar: this.deps.config(projectId)?.envVar ?? null,
         source: { kind: 'off' },
         failure: null,

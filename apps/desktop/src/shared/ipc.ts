@@ -424,6 +424,14 @@ export const TrafficHttpRowShape = z.object({
   parsed: z.boolean(),
   code: z.string().nullable(),
   nextAction: z.string().nullable(),
+  /**
+   * Why the exchange failed to happen — `ECONNREFUSED`, `upstream timeout`.
+   *
+   * Not folded into `code`, which is parsed from a response body and is null
+   * exactly when there was no body. A transport failure is the other fact: no
+   * answer, and this is why.
+   */
+  transport: z.string().nullable(),
 })
 
 export const TrafficLogRowShape = z.object({

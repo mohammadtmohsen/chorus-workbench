@@ -115,6 +115,8 @@ export const TrafficDetail = z.object({
   responseHeaders: z.array(TrafficHeader),
   trailers: z.array(TrafficHeader),
   status: z.number().int().nullable(),
+  /** How the transport failed, when it did. See `TrafficHttpRowShape`. */
+  transport: z.string().nullable(),
   timing: TrafficTiming,
   requestBody: TrafficBodyDescriptor,
   responseBody: TrafficBodyDescriptor,

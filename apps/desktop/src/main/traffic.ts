@@ -34,6 +34,18 @@ export interface TrafficHttpRow {
   readonly parsed: boolean
   readonly code: string | null
   readonly nextAction: string | null
+  /**
+   * Why the exchange failed to happen, when it did not happen.
+   *
+   * Separate from `code`, and the separation is the point. `code` is parsed out
+   * of a response body — a thing the backend *said*, and it is null precisely
+   * when there was no body to parse. A transport failure is the opposite fact:
+   * there was no answer, and this is why. One field holding both would make
+   * `ECONNREFUSED` and `APP_SESSION_REVOKED` indistinguishable to every reader
+   * downstream, which is the blank this exists to replace with provenance rather
+   * than without it.
+   */
+  readonly transport: string | null
 }
 
 export interface TrafficLogRow {
@@ -83,6 +95,7 @@ const PENDING_HIGH = 64
 const PENDING_LOW = 16
 const TAP = 8_192
 const UPSTREAM_TIMEOUT_MS = 30_000
+const UPSTREAM_TIMEOUT = 'upstream timeout'
 
 /**
  * What a listener binds when no host is named.
@@ -108,6 +121,19 @@ interface Envelope {
 }
 
 const UNREAD: Envelope = { parsed: false, code: null, nextAction: null }
+
+/**
+ * The shortest true name for a failed exchange.
+ *
+ * `code` first, because `ECONNREFUSED` is the token people search for and it
+ * does not vary with the address. A `destroy` given a hand-made Error — the
+ * timeout — carries none, so its message is the name; and a message that is
+ * somehow empty is no name at all rather than a blank one.
+ */
+const reasonOf = (error: NodeJS.ErrnoException): string | null => {
+  const named = error.code ?? error.message
+  return named === '' ? null : named
+}
 
 const isPlainObject = (value: unknown): value is Record<string, unknown> =>
   typeof value === 'object' && value !== null && !Array.isArray(value)
@@ -470,6 +496,7 @@ export class TrafficCaptured {
   responseHeaders: readonly HeaderPair[] = []
   trailers: readonly HeaderPair[] = []
   status: number | null = null
+  transport: string | null = null
   outcome: BodyState = 'pending'
   upstreamAt: number | null = null
   upstreamDoneAt: number | null = null
@@ -696,6 +723,7 @@ export class TrafficService {
           parsed: false,
           code: null,
           nextAction: null,
+          transport: null,
         })
       })
       server.on('error', (error: Error) => {
@@ -820,13 +848,21 @@ export class TrafficService {
       parsed: false,
       code: null,
       nextAction: null,
+      transport: null,
     })
 
     let recorded = false
-    const record = (u: string, status: number, envelope: Envelope, aborted: boolean): void => {
+    const record = (
+      u: string,
+      status: number,
+      envelope: Envelope,
+      aborted: boolean,
+      transport: string | null
+    ): void => {
       if (recorded) return
       recorded = true
       capture.status = status
+      capture.transport = transport
       capture.settledAt = this.now()
       capture.outcome = aborted ? 'aborted' : 'complete'
       capture.request.settle(capture.request.state === 'pending' ? 'unavailable' : 'complete')
@@ -841,6 +877,7 @@ export class TrafficService {
           status,
           aborted,
           requestId: capture.id,
+          transport,
           ...envelope,
         },
         rowSeq
@@ -855,7 +892,7 @@ export class TrafficService {
       res.on('error', () => undefined)
       res.writeHead(400)
       res.end()
-      record(line, 400, UNREAD, false)
+      record(line, 400, UNREAD, false, null)
       return
     }
     const url = target.toString()
@@ -886,14 +923,28 @@ export class TrafficService {
           capture.trailers = trailerPairs(upRes.trailers)
         })
         const envelope = this.tap(upRes)
-        const settle = (read: Envelope): void => {
-          record(url, status, read, false)
+        const settle = (read: Envelope, transport: string | null): void => {
+          record(url, status, read, false, transport)
         }
         upRes.on('end', () => {
-          void envelope.then(settle)
+          void envelope.then((read) => {
+            settle(read, null)
+          })
         })
-        upRes.on('error', () => {
-          void envelope.then(settle)
+        /*
+         * **A second failure path, and the one a status cannot describe.**
+         *
+         * `up` errors when the connection never establishes; this one errors when
+         * the response stream dies *after* the headers are through — the upstream
+         * process exiting mid-body, a reset. The status here is the upstream's
+         * own, so the row is not a 502 and nothing else about it says the
+         * exchange failed; without a reason it read as a complete response whose
+         * body merely looked short.
+         */
+        upRes.on('error', (error: NodeJS.ErrnoException) => {
+          void envelope.then((read) => {
+            settle(read, reasonOf(error))
+          })
         })
       }
     )
@@ -901,15 +952,29 @@ export class TrafficService {
     const sentStatus = (): number => (res.headersSent ? res.statusCode : 502)
     const gone = (): boolean => res.writableEnded || res.destroyed
     const abandon = (): void => {
-      record(url, sentStatus(), UNREAD, true)
+      record(url, sentStatus(), UNREAD, true, null)
       up.destroy()
     }
 
     up.setTimeout(UPSTREAM_TIMEOUT_MS, () => {
-      up.destroy(new Error('upstream timeout'))
+      up.destroy(new Error(UPSTREAM_TIMEOUT))
     })
-    up.on('error', () => {
-      record(url, sentStatus(), UNREAD, false)
+    /*
+     * The one moment this knows something the app under test cannot.
+     *
+     * The app is handed a bare 502 and cannot tell a refused socket from a
+     * timeout from a DNS failure — it only sees that the call failed. Chorus is
+     * standing on the connection and holds the reason, and it used to drop it
+     * here: the error was not even bound. So every unreachable backend produced
+     * a row with nothing behind it, and the person debugging had nowhere to
+     * look, which is the whole thing this panel is for.
+     *
+     * `code` when Node gives one, because `ECONNREFUSED` is the token people
+     * search for and it is stable. A `destroy` with a hand-made Error — the
+     * timeout above — carries no code, so its message is the name.
+     */
+    up.on('error', (error: NodeJS.ErrnoException) => {
+      record(url, sentStatus(), UNREAD, false, reasonOf(error))
       if (gone()) return
       if (!res.headersSent) res.writeHead(502)
       res.end()
@@ -959,6 +1024,7 @@ export class TrafficService {
       parsed: false,
       code: null,
       nextAction: null,
+      transport: null,
     })
   }
 

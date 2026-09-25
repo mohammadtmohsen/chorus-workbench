@@ -116,3 +116,32 @@ describe('the retained-byte budget across a stop', () => {
     expect(detail?.responseBody.capturedBytes).toBe(BODY_LIMIT)
   })
 })
+
+describe('the access setting while capturing', () => {
+  /*
+   * `access` is read once, in `start`, to choose the bind host, and nothing
+   * rebinds afterwards. Taken mid-capture it would persist and surface — the
+   * panel would offer "Anything on this network" beside a socket still on
+   * `127.0.0.1` — and the person whose phone cannot reach it would have nothing
+   * on screen saying the change waits for a restart.
+   *
+   * The `loopback` assertion is the one that matters and the one a guard alone
+   * would satisfy: refusing without also leaving the stored value alone would
+   * move the label and keep the refusal.
+   */
+  it('refuses a change while capturing, and takes it once stopped', async () => {
+    const origin = await serving(Buffer.alloc(8, 97))
+    const registry = registryFor(origin, 1)
+    registry.configure(PROJECT, {})
+
+    await registry.start(PROJECT)
+    const refused = registry.configure(PROJECT, { access: 'lan' })
+    expect(refused.failure).toBe('capturing')
+    expect(refused.access).toBe('loopback')
+
+    await registry.stop(PROJECT)
+    const taken = registry.configure(PROJECT, { access: 'lan' })
+    expect(taken.failure).toBeNull()
+    expect(taken.access).toBe('lan')
+  })
+})

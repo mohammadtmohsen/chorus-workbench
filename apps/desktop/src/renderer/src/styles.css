@@ -7293,11 +7293,9 @@ input::placeholder {
 
 .traffic-row-button {
   display: grid;
-  flex: 1 1 auto;
-  grid-template-columns: 4em minmax(0, 1fr) 3em 4.5em minmax(0, 14em);
-  gap: var(--step);
+  grid-column: 1 / -1;
+  grid-template-columns: subgrid;
   align-items: baseline;
-  width: 100%;
   padding: 0;
   border: 0;
   background: none;
@@ -7305,6 +7303,17 @@ input::placeholder {
   font: inherit;
   text-align: left;
   cursor: pointer;
+}
+
+/*
+ * A log line is one cell, not five. It spans the row rather than landing in the
+ * method column, and it keeps the left rule that told a log row from a request
+ * back when the row itself had a box to draw it on.
+ */
+.traffic-row[data-source='log'] > *,
+.traffic-row[data-source='logcat'] > * {
+  grid-column: 1 / -1;
+  border-left: 2px solid var(--border-strong);
 }
 
 .traffic-row-button:focus-visible {
@@ -7315,11 +7324,14 @@ input::placeholder {
 .traffic-note {
   display: flex;
   gap: var(--step);
-  min-width: 0;
-  overflow: hidden;
 }
 
-.traffic-row--selected {
+/*
+ * On the button, because the row has no box of its own any more — `display:
+ * contents` paints nothing, so the class stays where it belongs and the ink
+ * lands on the widest child instead.
+ */
+.traffic-row--selected > .traffic-row-button {
   background: var(--bg-pane-active);
 }
 
@@ -7575,31 +7587,58 @@ input::placeholder {
   border-radius: 6px;
 }
 
+/*
+ * **The list is the table, and the row is a subgrid of it.**
+ *
+ * Every row used to be its own grid with its own tracks, which only lined up
+ * because four of the five were fixed `em` values — the URL took `1fr` and the
+ * note column was capped at `14em`, so both truncated. Nothing can be
+ * un-truncated while each row sizes its own columns: the widest URL in the list
+ * would set the width of one row and no other.
+ *
+ * `max-content` tracks on the list fix that — the widest cell in a column sets
+ * that column for every row — and a row adopts those tracks with `subgrid`
+ * rather than restating them. The row keeps its own box, which is what carries
+ * the focus ring, the selection background and the click target; `display:
+ * contents` on the button would have shared the tracks too, and destroyed all
+ * three.
+ *
+ * The url track is `minmax(max-content, 1fr)`: never narrower than the longest
+ * URL, and it takes the slack when the list is wider than its content, so a
+ * quiet panel is still filled edge to edge. Past that the list scrolls sideways
+ * as one — which is the whole point of columns that align.
+ */
 .traffic-rows {
+  display: grid;
   flex: 1 1 auto;
+  grid-template-columns:
+    max-content minmax(max-content, 1fr)
+    max-content max-content max-content;
+  column-gap: var(--step);
+  row-gap: calc(var(--step) * 2);
+  min-width: 0;
   margin: 0;
-  padding: 0;
-  overflow-y: auto;
-  list-style: none;
-}
-
-.traffic-row {
-  display: flex;
-  align-items: baseline;
-  gap: calc(var(--step) * 2);
   padding: var(--step) calc(var(--step) * 3);
+  overflow: auto;
   font-family: var(--mono);
   font-size: 11px;
   white-space: nowrap;
+  list-style: none;
+}
+
+/*
+ * No box of its own, so its children land in the list's grid. `data-source`
+ * still reads on it — an attribute selector does not need a box — which is how
+ * a log row is still told apart from a request.
+ */
+.traffic-row {
+  display: contents;
 }
 
 .traffic-method,
 .traffic-status,
 .traffic-outcome {
-  flex: 0 0 auto;
-  overflow: hidden;
   color: var(--text-muted);
-  text-overflow: ellipsis;
   white-space: nowrap;
 }
 
@@ -7649,11 +7688,17 @@ input::placeholder {
   color: var(--tok-number);
 }
 
+/*
+ * Drawn whole, and the reason the list scrolls sideways.
+ *
+ * This carried `overflow: hidden; text-overflow: ellipsis` — which is what the
+ * request asked to be rid of — and the two only worked together with the capped
+ * `1fr` track they sat in. Neither survives the change: the track is now
+ * `max-content`, so there is nothing to clip against, and clipping is the
+ * behaviour being removed.
+ */
 .traffic-url {
-  flex: 1 1 auto;
-  overflow: hidden;
   color: var(--text-secondary);
-  text-overflow: ellipsis;
 }
 
 /*
@@ -7681,11 +7726,18 @@ input::placeholder {
 
 .traffic-code,
 .traffic-next {
-  flex: 0 1 auto;
-  min-width: 0;
-  overflow: hidden;
   color: var(--text-primary);
-  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/*
+ * Sized and truncated like the code beside it, and coloured differently on
+ * purpose: `ECONNREFUSED` in the same ink as `APP_SESSION_REVOKED` would read as
+ * one kind of fact. It is not — one was said by the backend, the other happened
+ * instead of the backend saying anything.
+ */
+.traffic-transport {
+  color: var(--text-secondary);
   white-space: nowrap;
 }
 
@@ -7728,6 +7780,16 @@ input::placeholder {
   overflow-wrap: anywhere;
 }
 
+/*
+ * A refusal borrows the hint slot rather than a new surface, and the colour is
+ * the whole reason it cannot be missed: as muted as the hint it replaces, it
+ * would read as one more line of guidance and the person who typed the rejected
+ * value would go on believing it had been taken.
+ */
+.traffic-field-hint[data-refused='true'] {
+  color: var(--tok-removed);
+}
+
 .traffic-source {
   flex: 0 0 auto;
   min-width: 0;
@@ -7746,10 +7808,7 @@ input::placeholder {
 }
 
 .traffic-line {
-  flex: 1 1 auto;
-  overflow: hidden;
   color: var(--text-secondary);
-  text-overflow: ellipsis;
 }
 
 .traffic-exit {
