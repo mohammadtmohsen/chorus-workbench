@@ -7331,22 +7331,53 @@ input::placeholder {
  * contents` paints nothing, so the class stays where it belongs and the ink
  * lands on the widest child instead.
  */
+/*
+ * **The selected row, made findable.**
+ *
+ * It was `--bg-pane-active`, which is `color-mix(in srgb, var(--bone) 2%,
+ * var(--sunken))` — two percent of the text colour against the ground it sits on,
+ * which is a whisper. Nobody could see which row the inspector was describing.
+ *
+ * `--bg-pane-active` itself is not raised: it is a shared token and the tab over
+ * an active pane uses it at that deliberate two percent. The stronger fill
+ * belongs here, and `--bg-control` is the next surface up rather than an
+ * invented colour — the same step an input takes from the ground it sits on.
+ *
+ * **The accent is an inset shadow and not a border**, which is the one thing
+ * that could not be guessed: the row is a subgrid spanning every column, so a
+ * `border-left` would inset that row's content box by two pixels and push its
+ * whole line of cells out of line with every other row's. A shadow draws inside
+ * the box and moves nothing.
+ *
+ * Blue rather than a neutral edge, because `--focus-ring` is already this app's
+ * "the thing you are on", and since the arrows move selection with focus the two
+ * agreeing is the point rather than a collision. It is deliberately not a fill
+ * change to red or green — the row's text now uses those for outcome, and a
+ * selection that borrowed them would say something about the call.
+ */
 .traffic-row--selected > .traffic-row-button {
-  background: var(--bg-pane-active);
+  background: var(--bg-control);
+  box-shadow: inset 2px 0 0 var(--focus-ring);
 }
 
 /*
- * The details are half of what the panel has and stay that way.
+ * The details are most of what the panel has and stay that way.
  *
  * `1 1 auto` gave them whatever the row list left, which on a tall window is a
  * thin strip with the JSON clipped — the thing this region exists to show.
  * `50vh` answered the window instead, which is the same number only while the
  * panel is the whole window: a pane split down leaves a shorter column, and the
  * details then took more than half of it and the rows went out of sight.
+ *
+ * Seventy rather than fifty because the two halves are not read the same way:
+ * the list is scanned and a dozen rows is usually enough of it, while a body is
+ * read and every line the region cannot show is a scroll. The rows keep the
+ * remainder rather than a share of their own, so a panel with nothing selected
+ * still gives them all of it.
  */
 .traffic-inspector {
   display: flex;
-  flex: 0 0 50%;
+  flex: 0 0 70%;
   flex-direction: column;
   min-height: 0;
   overflow: hidden;
@@ -7692,16 +7723,28 @@ input::placeholder {
  * the backend answered with a failure. A 404 is the second and not the first,
  * which is the case the user was looking at.
  */
-.traffic-row-button[data-class='2xx'] .traffic-status {
+/*
+ * `.traffic-head` is in the list beside `.traffic-row-button`, not instead of it:
+ * the inspector's header carries the same attributes because it describes the
+ * same call, and widening the selector is what keeps the two from being two
+ * declarations that agree today. It is keyed on the attribute rather than on
+ * `.traffic-head` alone — the panel has a header of that class too, and it has
+ * no row behind it to have a class *of*.
+ */
+.traffic-row-button[data-class='2xx'] .traffic-status,
+.traffic-head[data-class='2xx'] .traffic-status {
   color: var(--tok-added);
 }
 
-.traffic-row-button[data-class='3xx'] .traffic-status {
+.traffic-row-button[data-class='3xx'] .traffic-status,
+.traffic-head[data-class='3xx'] .traffic-status {
   color: var(--tok-property);
 }
 
 .traffic-row-button[data-class='4xx'] .traffic-status,
-.traffic-row-button[data-class='5xx'] .traffic-status {
+.traffic-row-button[data-class='5xx'] .traffic-status,
+.traffic-head[data-class='4xx'] .traffic-status,
+.traffic-head[data-class='5xx'] .traffic-status {
   color: var(--tok-removed);
 }
 
@@ -7712,7 +7755,9 @@ input::placeholder {
  * status cell colours it separately for that reason.
  */
 .traffic-row-button[data-class='4xx'] .traffic-url,
-.traffic-row-button[data-class='5xx'] .traffic-url {
+.traffic-row-button[data-class='5xx'] .traffic-url,
+.traffic-head[data-class='4xx'] .traffic-url,
+.traffic-head[data-class='5xx'] .traffic-url {
   color: var(--tok-removed);
 }
 

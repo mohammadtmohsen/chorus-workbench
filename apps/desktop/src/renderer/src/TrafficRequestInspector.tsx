@@ -22,6 +22,7 @@ import {
   type TreeRow,
   type TreeToken,
 } from './traffic-body.js'
+import { statusClassOf } from './traffic-filter.js'
 
 /** A capture is held to a megabyte, so this cannot be reached by an honest body. */
 const MAX_BODY_PAGES = 64
@@ -414,8 +415,21 @@ export function TrafficRequestInspector(props: {
 
   return (
     <section className="traffic-inspector" aria-label={t('traffic.detailTitle')}>
-      <header className="traffic-head">
-        <span className="traffic-method">{row.m}</span>
+      {/*
+        The same attributes a row carries, on the same class names, because the
+        colours are keyed on the attributes rather than the classes. Without
+        them every rule that tints a method, reddens a failed endpoint or colours
+        a status simply did not match here — the header was grey whatever the row
+        said, which is a header describing a call it does not look like.
+
+        `data-class` goes on the header rather than on the status cell, for the
+        reason it goes on the row button rather than on the cell there: it is one
+        fact about the whole line, and the endpoint reads it too.
+      */}
+      <header className="traffic-head" data-class={statusClassOf(row)}>
+        <span className="traffic-method" data-method={row.m.toUpperCase()}>
+          {row.m}
+        </span>
         <span className="traffic-url" title={row.u}>
           {row.u}
         </span>

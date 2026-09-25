@@ -33,6 +33,19 @@ export const outcomeOf = (row: HttpRow): TrafficOutcome => {
   return 'read'
 }
 
+/**
+ * The status family a row's `data-class` is keyed on — `2xx`, `4xx`, `none`.
+ *
+ * Moved here from the panel when the inspector's header began carrying the same
+ * attribute: the header has to name the same family the row does, and two copies
+ * of this would agree until one was edited, at which point a failed endpoint
+ * would be red in the list and grey in the header describing it.
+ */
+export const statusClassOf = (row: HttpRow): string => {
+  if (row.aborted || row.status === null) return 'none'
+  return `${String(Math.floor(row.status / 100))}xx`
+}
+
 export const filterRows = (
   rows: readonly TrafficRowShape[],
   search: string

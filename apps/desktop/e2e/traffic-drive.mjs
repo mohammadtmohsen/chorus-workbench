@@ -890,6 +890,116 @@ try {
       `2xx endpoint ${String(table.urlOk)} | 4xx endpoint ${String(table.urlFailed)} | 4xx status ${String(table.fourHundred)}`
     )
 
+    /*
+     * **The inspector's header describes the same call, so it has to look like
+     * it.** It carried the right class names and none of the attributes those
+     * classes are keyed on, so it was grey whatever the row said.
+     *
+     * Opened on a failed row on purpose: a 2xx proves nothing about the method
+     * colours, and the red endpoint is the case the user was looking at. Split
+     * across two evaluates with a wait, because the inspector renders from the
+     * selection and whether that commit has landed by the time `click()` returns
+     * is a batching detail this check should not rest on.
+     */
+    say(
+      'opening the inspector on a failed call',
+      await app.evaluate(`(() => {
+        const row = document.querySelector('.traffic-row-button[data-class="4xx"]')
+        if (row === null) return 'no failed row is listed'
+        row.click()
+        return 'clicked'
+      })()`)
+    )
+    await wait(1_200)
+    const headerColours = JSON.parse(
+      await app.evaluate(`JSON.stringify((() => {
+        const colour = (node) => (node === null ? null : getComputedStyle(node).color)
+        const pick = (root) =>
+          root === null
+            ? null
+            : {
+                method: colour(root.querySelector('.traffic-method')),
+                url: colour(root.querySelector('.traffic-url')),
+                status: colour(root.querySelector('.traffic-status'))
+              }
+        const selected = [...document.querySelectorAll('.traffic-row-button')].find(
+          (row) => row.getAttribute('aria-pressed') === 'true'
+        )
+        return {
+          row: pick(selected ?? null),
+          head: pick(document.querySelector('.traffic-inspector .traffic-head')),
+          className: selected?.getAttribute('data-class') ?? null
+        }
+      })())`)
+    )
+    say('the header against the row it describes', headerColours)
+    check(
+      'the inspector header is coloured like the row it describes',
+      headerColours.row !== null &&
+        headerColours.head !== null &&
+        headerColours.className === '4xx' &&
+        headerColours.head.method !== null &&
+        headerColours.head.method === headerColours.row.method &&
+        headerColours.head.status === headerColours.row.status &&
+        headerColours.head.url === headerColours.row.url,
+      `row ${JSON.stringify(headerColours.row)} | head ${JSON.stringify(headerColours.head)}`
+    )
+
+    /*
+     * **Visible is a magnitude, not a difference.**
+     *
+     * Comparing the selected row's background against a neighbour's would pass
+     * on the two-percent mix that was there before, because a whisper is still a
+     * difference. What makes it readable is how far the fill steps away from the
+     * ground it sits on, so this measures that step — and the accent, which the
+     * old rule did not have at all.
+     */
+    const selection = JSON.parse(
+      await app.evaluate(`JSON.stringify((() => {
+        const list = document.querySelector('.traffic-rows')
+        const buttons = [...document.querySelectorAll('.traffic-row-button')]
+        const selected = buttons.find((row) => row.getAttribute('aria-pressed') === 'true')
+        const other = buttons.find((row) => row.getAttribute('aria-pressed') !== 'true')
+        if (list === null || selected === undefined || other === undefined) return null
+        /*
+         * The first ancestor that actually paints. The walk starts at the
+         * *parent*: starting at the row itself finds the fill under test and
+         * reports a step of zero against itself, which is what the first version
+         * of this did.
+         */
+        const groundOf = (node) => {
+          let at = node.parentElement
+          while (at !== null) {
+            const fill = getComputedStyle(at).backgroundColor
+            if (fill !== 'rgba(0, 0, 0, 0)' && fill !== 'transparent') return fill
+            at = at.parentElement
+          }
+          return 'rgb(0, 0, 0)'
+        }
+        const rgb = (value) => (value.match(/[0-9]+/g) ?? []).slice(0, 3).map(Number)
+        const fill = getComputedStyle(selected).backgroundColor
+        const ground = rgb(groundOf(selected))
+        const step = Math.max(...rgb(fill).map((each, at) => Math.abs(each - (ground[at] ?? 0))))
+        return {
+          fill,
+          ground: groundOf(selected),
+          step,
+          neighbour: getComputedStyle(other).backgroundColor,
+          shadow: getComputedStyle(selected).boxShadow,
+          otherShadow: getComputedStyle(other).boxShadow
+        }
+      })())`)
+    )
+    say('the selected row against its ground', selection)
+    check(
+      'the selected row steps away from the ground, and carries an accent',
+      selection !== null &&
+        selection.step >= 10 &&
+        selection.shadow !== 'none' &&
+        selection.otherShadow === 'none',
+      `fill ${String(selection?.fill)} on ${String(selection?.ground)} — a step of ${String(selection?.step)}; accent ${String(selection?.shadow)}`
+    )
+
     const methodColour = (name) => table.methods.find((each) => each.m === name)?.colour ?? null
     const methodColours = new Set(table.methods.map((each) => each.colour))
     check(
@@ -1864,13 +1974,32 @@ try {
         }
       })())`)
     )
+    /*
+     * **The share changed, so the number in the check changed with it — and one
+     * of the two clauses could not survive.**
+     *
+     * This asserted `details == list / 2` and `|details - window / 2| > 2`: the
+     * first said the details are sized by the box they sit in, the second said
+     * that box is not the screen — which was a real bug once, when the rule was
+     * `50vh` and a split pane gave the details more than half of a shorter
+     * column.
+     *
+     * At seventy percent the two numbers collide here: 70% of a 612px split is
+     * 428, and half of an 860px window is 430. They are the same to within the
+     * tolerance, so that clause cannot tell the two rules apart at this window
+     * size and is not kept as if it could. What is left is the claim the user
+     * actually made — the details take the share of their box — plus the fact
+     * that the box is shorter than the window, which is the condition under
+     * which a viewport-sized value would have been wrong in the first place.
+     */
+    const DETAIL_SHARE = 0.7
     say('the details against their box', box)
     check(
-      'the details are half the box they sit in, not half the screen',
+      'the details take the share of their box that the panel asks for',
       box !== null &&
-        Math.abs(box.details - Math.round(box.list / 2)) <= 2 &&
-        Math.abs(box.details - Math.round(box.window / 2)) > 2,
-      `details ${String(box?.details)} of list ${String(box?.list)}, window ${String(box?.window)}`
+        Math.abs(box.details - Math.round(box.list * DETAIL_SHARE)) <= 2 &&
+        box.list < box.window,
+      `details ${String(box?.details)} of list ${String(box?.list)} (70% is ${String(Math.round((box?.list ?? 0) * DETAIL_SHARE))}), window ${String(box?.window)}`
     )
 
     say(

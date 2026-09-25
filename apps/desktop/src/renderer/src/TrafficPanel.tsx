@@ -20,6 +20,7 @@ import {
   followsRows,
   outcomeOf,
   pageOf,
+  statusClassOf,
   type RowScroll,
   type TrafficOutcome,
 } from './traffic-filter.js'
@@ -480,11 +481,6 @@ export function TrafficPanel(props: {
   const searchFor = (next: string): void => {
     setSearch(next)
     setPage(null)
-  }
-
-  const statusClassOf = (row: Extract<TrafficRowShape, { source: 'http' }>): string => {
-    if (row.aborted || row.status === null) return 'none'
-    return `${String(Math.floor(row.status / 100))}xx`
   }
 
   /*
