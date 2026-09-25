@@ -7598,6 +7598,29 @@ input::placeholder {
   text-overflow: ellipsis;
 }
 
+/*
+ * A value inside the inspector, in full.
+ *
+ * The forwarded URL was drawn with `.traffic-url` above — the row list's cell
+ * class, whose whole job is to fit a URL into a table row that has exactly one
+ * line to give. A detail is not a cell: opening one is how the value gets read,
+ * so it gets its own rule and wraps.
+ *
+ * **`anywhere` rather than `break-word`, and the difference is the case that
+ * matters here.** A JWT or a base64 token has no break opportunity inside it, so
+ * `break-word` leaves the token overflowing and the rule accomplishes nothing —
+ * measured, the forwarded URL wrapped to two lines and was *still* clipped. Only
+ * `anywhere` breaks inside the token.
+ *
+ * No `overflow` and no `text-overflow`, both deliberately: either one
+ * reintroduces exactly the clipping this exists to remove.
+ */
+.traffic-value {
+  min-width: 0;
+  color: var(--text-secondary);
+  overflow-wrap: anywhere;
+}
+
 .traffic-code,
 .traffic-next {
   flex: 0 1 auto;

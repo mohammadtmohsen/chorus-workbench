@@ -428,7 +428,7 @@ export function TrafficRequestInspector(props: {
           <div className="traffic-general">
             <p>
               <span className="traffic-label">{t('traffic.forwardedUrl')}</span>
-              <span className="traffic-url">{detail.forwardedUrl}</span>
+              <span className="traffic-value">{detail.forwardedUrl}</span>
             </p>
           </div>
 
