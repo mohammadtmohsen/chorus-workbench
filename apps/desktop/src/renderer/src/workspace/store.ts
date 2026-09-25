@@ -32,6 +32,7 @@ import {
   leafPaneIds,
   moveTab,
   newGroupId,
+  onScreenConversations,
   openSession,
   placeSession,
   reconcileWorkspace,
@@ -351,7 +352,16 @@ export interface WorkspaceActions {
    * that happen to match today.
    */
   equalizeConversationBranch: (projectId: string, path: readonly number[]) => void
-  ingestEvents: (events: readonly TranscriptEvent[]) => void
+  /**
+   * Fold a batch of logged events into the pulses.
+   *
+   * `reported` is what another window says it is showing — see
+   * `onScreenConversations`, whose answer this is. Passed in rather than read
+   * from a store field because a detached window's visibility lives in the shell
+   * that received the push, and a store that grew a second copy of it would be
+   * the drift this whole change is about.
+   */
+  ingestEvents: (events: readonly TranscriptEvent[], reported?: readonly string[]) => void
   /** Pushed state, not a logged event — see the action for why it is separate. */
   ingestContextUsage: (usage: ContextUsagePush) => void
   ingestTasks: (push: TasksPush) => void
@@ -1024,15 +1034,19 @@ export const useWorkspaceStore = create<WorkspaceStore>()(
           return { workbenchHidden: { ...state.workbenchHidden, [projectId]: true } }
         })
       },
-      ingestEvents: (events) => {
+      ingestEvents: (events, reported) => {
         if (events.length === 0) return
         set((state) => {
           let changed = false
           const pulses = { ...state.pulses }
+          /*
+           * Once for the batch, not once per event. The answer is a property of
+           * the layout, and a streaming turn delivers hundreds of events through
+           * this loop between two renders.
+           */
+          const onScreen = onScreenConversations(state, reported)
           for (const event of events) {
-            const location = tabLocation(state, event.conversationId)
-            const pane = location === null ? undefined : state.panes[location.paneId]
-            const visible = pane?.activeTabId === event.conversationId
+            const visible = onScreen.has(event.conversationId)
             const current = pulses[event.conversationId] ?? EMPTY_PULSE
             const next = reducePulse(current, event, visible)
             if (next !== current) {

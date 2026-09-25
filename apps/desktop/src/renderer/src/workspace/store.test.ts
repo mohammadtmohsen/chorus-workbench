@@ -2,10 +2,11 @@ import { describe, expect, it, vi } from 'vitest'
 import type { IdeContextPush, TranscriptEvent } from '../../../shared/ipc.js'
 import {
   CLOSED_TERMINAL_PANEL,
+  TRAFFIC_TAB_ID,
   WorkspaceSnapshot,
   type TerminalPanelState,
 } from '../../../shared/workspace-layout.js'
-import { EMPTY_WORKSPACE } from './layout.js'
+import { EMPTY_WORKSPACE, onScreenConversations } from './layout.js'
 import {
   reducePulse,
   sameWorkspaceSnapshot,
@@ -135,6 +136,84 @@ describe('reducePulse', () => {
       true
     )
     expect(stopped.failed).toBe(true)
+  })
+})
+
+describe('which conversations count as on screen', () => {
+  /*
+   * The defect these guard, and it was live rather than theoretical: `visible`
+   * was computed by looking a **conversation** id up in the outer pane record,
+   * whose tabs hold **project** ids. That lookup could never match, so `visible`
+   * was always false and a conversation being read counted as unseen — its badge
+   * climbed while it was open, and only an explicit clear knocked it back down.
+   *
+   * `p1` is showing; `c1` is its group's active tab and `c2` sits behind it in
+   * the same group. `p2` has a tab in the same pane but is not the active one.
+   */
+  const seed = (): void => {
+    useWorkspaceStore.setState({
+      pulses: {},
+      panes: { 'pane-1': { id: 'pane-1', tabs: ['p1', 'p2'], activeTabId: 'p1' } },
+      conversationGroups: {
+        p1: {
+          layout: { kind: 'leaf', paneId: 'g1' },
+          panes: { g1: { id: 'g1', tabs: ['c1', 'c2'], activeTabId: 'c1' } },
+          focusedPaneId: 'g1',
+        },
+        p2: {
+          layout: { kind: 'leaf', paneId: 'g2' },
+          panes: { g2: { id: 'g2', tabs: ['c3'], activeTabId: 'c3' } },
+          focusedPaneId: 'g2',
+        },
+      },
+    })
+  }
+
+  const unread = (conversationId: string): number =>
+    useWorkspaceStore.getState().pulses[conversationId]?.unread ?? 0
+
+  const said = (conversationId: string): TranscriptEvent => ({
+    ...event('agent.message.completed', { text: 'hi' }),
+    conversationId,
+  })
+
+  it('does not count an unread for the conversation showing in the active project', () => {
+    seed()
+    useWorkspaceStore.getState().ingestEvents([said('c1')])
+    expect(unread('c1')).toBe(0)
+  })
+
+  /*
+   * The control, and the half that must keep working: the same event for a
+   * project that has a tab in the pane but is not the one showing still counts.
+   */
+  it('counts one for a conversation in a project that is not showing', () => {
+    seed()
+    useWorkspaceStore.getState().ingestEvents([said('c3')])
+    expect(unread('c3')).toBe(1)
+  })
+
+  /*
+   * Why both levels are required rather than the inner one alone: this
+   * conversation is in the project that is showing, in the group that is
+   * showing, and it is still not on screen.
+   */
+  it('counts one for a conversation behind another tab of the same project', () => {
+    seed()
+    useWorkspaceStore.getState().ingestEvents([said('c2')])
+    expect(unread('c2')).toBe(1)
+  })
+
+  /*
+   * A detached window reports what it is showing, and traffic is a tab that
+   * names no conversation — so it must not enter the set however it arrives.
+   */
+  it('never takes the traffic tab for a conversation', () => {
+    const showing = onScreenConversations({ panes: {}, conversationGroups: {} }, [
+      TRAFFIC_TAB_ID,
+      'c9',
+    ])
+    expect([...showing]).toEqual(['c9'])
   })
 })
 

@@ -3,6 +3,7 @@ import {
   SIDEBAR_WIDTH,
   TERMINAL_HEIGHT,
   TRAFFIC_TAB_ID,
+  isConversationTab,
   type ConversationArrangement,
   type ProjectLayoutSlice,
   type ReturnSlot,
@@ -821,6 +822,55 @@ export function reconcileConversationGroups(
   }
 
   return arrangement
+}
+
+/**
+ * The conversations on screen in this window, and **the only answer to that**.
+ *
+ * There were two, and they disagreed — which is the whole reason this exists.
+ * The unread count asked `tabLocation` over the *outer* pane record and compared
+ * the tab it found to a conversation id. That record's `activeTabId` names a
+ * **project**, so the comparison could never be true: a conversation being read
+ * counted as unseen for as long as the re-key that made a tab a project, and its
+ * badge climbed while it was open. The notice path asked the inner level and got
+ * it right. Two implementations of "what is on screen" is the defect; the
+ * disagreement is only how it showed.
+ *
+ * **Both levels are required.** A conversation is on screen when its project is
+ * the active tab of an outer pane *and* it is the active tab of one of that
+ * project's groups. Either half alone overcounts: a conversation can be its
+ * group's active tab while its project sits behind another tab, and a project
+ * can be showing while its group is on a different conversation.
+ *
+ * Every pane counts rather than only the focused one, because every pane is
+ * drawn. Traffic is excluded by `isConversationTab` — it is a tab, and it names
+ * no conversation for anything downstream to act on.
+ *
+ * `reported` is what *another* window says it is showing. A detached window
+ * renders one project in its own process and its own store answers for itself by
+ * calling this with its own state; the window that owns the rail merges what
+ * that one reports, so a conversation being read over there is not counted
+ * unread over here.
+ */
+export function onScreenConversations(
+  state: {
+    readonly panes: Record<string, WorkspacePane>
+    readonly conversationGroups: Record<string, ConversationArrangement>
+  },
+  reported: readonly string[] = []
+): ReadonlySet<string> {
+  const showing = new Set(reported.filter((id) => isConversationTab(id)))
+  for (const pane of Object.values(state.panes)) {
+    const projectId = pane.activeTabId
+    if (projectId === null) continue
+    const arrangement = state.conversationGroups[projectId]
+    if (arrangement === undefined) continue
+    for (const group of Object.values(arrangement.panes)) {
+      const active = group.activeTabId
+      if (active !== null && isConversationTab(active)) showing.add(active)
+    }
+  }
+  return showing
 }
 
 /** One empty group, which is what a project with no stored arrangement starts as. */

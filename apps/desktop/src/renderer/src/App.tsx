@@ -25,6 +25,7 @@ import {
   detachTab,
   detachedSnapshot,
   mergeSlice,
+  onScreenConversations,
   returnTab,
   sliceOf,
   virtualIndex,
@@ -32,7 +33,7 @@ import {
 } from './workspace/layout.js'
 import { measureTabGeometry, resolveTarget } from './workspace/useTabDrag.js'
 import { reorderSessions } from './workspace/session-row.js'
-import { NOTE_SIZE } from '../../shared/workspace-layout.js'
+import { isConversationTab, NOTE_SIZE } from '../../shared/workspace-layout.js'
 import { setRunningPlatform } from './shortcuts.js'
 
 /**
@@ -179,6 +180,23 @@ export function App({ role }: { readonly role: WindowRole }): React.JSX.Element 
   const [restored, setRestored] = useState(false)
   const [zoom, setZoom] = useState<number | null>(null)
 
+  /*
+   * What the detached windows say they are showing, and only while one of them
+   * has focus — a window behind another is not where anybody is reading.
+   *
+   * One derivation because two effects ask the same question: the unread fold
+   * and the notice gate both need to know that a conversation being read in a
+   * detached window is being read. Written twice, they would be the drift the
+   * `onScreenConversations` parameter exists to prevent, one level up.
+   */
+  const detachedShown = useCallback(
+    (): readonly string[] =>
+      [...detachedVisibility.current.values()]
+        .filter((visibility) => visibility.focused)
+        .flatMap((visibility) => visibility.visibleConversationIds),
+    []
+  )
+
   const markSeenSoon = useCallback(() => {
     clearTimeout(seenTimer.current)
     seenTimer.current = setTimeout(() => {
@@ -251,9 +269,9 @@ export function App({ role }: { readonly role: WindowRole }): React.JSX.Element 
   useEffect(
     () =>
       window.chorus.onEvents((events) => {
-        useWorkspaceStore.getState().ingestEvents(events)
+        useWorkspaceStore.getState().ingestEvents(events, detachedShown())
       }),
-    []
+    [detachedShown]
   )
 
   /*
@@ -305,10 +323,17 @@ export function App({ role }: { readonly role: WindowRole }): React.JSX.Element 
         pending.current = trackPending(pending.current, events)
         void window.chorus.setBadge({ count: roomsWaiting(pending.current) })
 
-        const panes = useWorkspaceStore.getState().panes
-        const visibleConversationIds = Object.values(panes)
-          .map((pane) => pane.activeTabId)
-          .filter((id): id is string => id !== null)
+        /*
+         * Read through the one helper rather than off `panes` — which is where
+         * this went wrong. `panes[i].activeTabId` names a *project*, so the ids
+         * this collected were projects wearing a conversation's name, and both
+         * the watermark below and the notice gate were answering about a
+         * conversation id that could never appear.
+         */
+        const detached = detachedShown()
+        const visibleConversationIds = [
+          ...onScreenConversations(useWorkspaceStore.getState(), detached),
+        ]
 
         /*
          * Record how far each visible card has been read, so the next launch can
@@ -331,14 +356,17 @@ export function App({ role }: { readonly role: WindowRole }): React.JSX.Element 
 
         // Absent in a test renderer, and not worth a failed turn.
         if (!('Notification' in window)) return
-        const detachedSeen = [...detachedVisibility.current.values()]
-          .filter((visibility) => visibility.focused)
-          .flatMap((visibility) => visibility.visibleConversationIds)
         for (const notice of noticesFrom(events)) {
           if (
             !shouldRaise(notice, {
-              windowFocused: document.hasFocus() || detachedSeen.includes(notice.conversationId),
-              visibleConversationIds: [...visibleConversationIds, ...detachedSeen],
+              /*
+               * Still the detached clause, and it is not the same question as
+               * the one below it: a detached window with focus makes the app
+               * focused for *that* project's notices, while the main window's
+               * own `hasFocus()` is false because a different window has it.
+               */
+              windowFocused: document.hasFocus() || detached.includes(notice.conversationId),
+              visibleConversationIds,
             })
           ) {
             continue
@@ -349,7 +377,7 @@ export function App({ role }: { readonly role: WindowRole }): React.JSX.Element 
           raise(notice, session?.title ?? '', t, session?.projectId ?? '')
         }
       }),
-    [t, markSeenSoon, role.kind]
+    [t, markSeenSoon, detachedShown, role.kind]
   )
 
   /*
@@ -524,7 +552,7 @@ export function App({ role }: { readonly role: WindowRole }): React.JSX.Element 
       const arrangement = useWorkspaceStore.getState().conversationGroups[projectId]
       const visibleConversationIds = Object.values(arrangement?.panes ?? {})
         .map((pane) => pane.activeTabId)
-        .filter((id): id is string => id !== null)
+        .filter((id): id is string => id !== null && isConversationTab(id))
       window.chorus
         .sendProjectVisibility({ projectId, focused: document.hasFocus(), visibleConversationIds })
         .catch(fail(setError))
