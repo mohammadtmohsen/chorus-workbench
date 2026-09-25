@@ -45,6 +45,13 @@ const upstream = await new Promise((resolve) => {
     const deep = JSON.stringify({ ok: true, nested: { a: 1, b: [1, 2] }, hello: 'readable' })
     const many = {}
     for (let i = 0; i < 16; i++) many[`x-filler-${String(i)}`] = `value ${String(i)}`.repeat(4)
+    /*
+     * One header long enough that its value cannot fit on a single line, and
+     * shaped like the things that actually are that long: a JWT has no break
+     * opportunity inside it, which is the case `overflow-wrap: break-word` does
+     * not cover and `anywhere` does.
+     */
+    many['x-refresh-token'] = `eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.${'A'.repeat(160)}`
     if ((request.url ?? '').startsWith('/gz')) {
       response.writeHead(200, {
         'content-type': 'application/json',
@@ -83,11 +90,17 @@ try {
   await app.until(`document.querySelector('#root') !== null`, { timeout: 120_000 })
   await wait(4_000)
 
-  const typed = (label, text) =>
+  /*
+   * A CSS selector, not the accessible name. The setup fields name themselves
+   * with a visible `<label>` now, so looking one up by `aria-label` finds nothing
+   * and reports a missing field rather than a wrong one — C-069's fourth instance
+   * of the same class. `[data-traffic-field="port"]` is a hook the field owns and
+   * no wording change can move.
+   */
+  const typed = (selector, text) =>
     app.evaluate(`(() => {
-      const input = [...document.querySelectorAll('.traffic-panel input')]
-        .find((node) => node.getAttribute('aria-label') === ${JSON.stringify(label)})
-      if (input === undefined) return 'missing field: ' + ${JSON.stringify(label)}
+      const input = document.querySelector(${JSON.stringify(selector)})
+      if (input === null) return 'missing field: ' + ${JSON.stringify(selector)}
       input.focus()
       const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set
       setter.call(input, ${JSON.stringify(text)})
@@ -121,7 +134,7 @@ try {
     await app.evaluate(`(() => {
       const details = document.querySelector('.traffic-setup')
       const outside = (node) => node !== null && (details === null || !details.contains(node))
-      const origin = document.querySelector('[aria-label="Forward to"]')
+      const origin = document.querySelector('[data-traffic-field="origin"] input')
       return JSON.stringify({
         present: details !== null,
         open: details === null ? null : details.open,
@@ -141,11 +154,21 @@ try {
 
   await clicked('.traffic-setup summary')
   await wait(600)
+  /*
+   * The console before the reading, and the reading made total. The panel has
+   * vanished between two evaluates twice in a row while this was being written —
+   * C-069's undiagnosed mode — and a driver that dies on `details.open` reports
+   * a stack instead of the absence plus whatever the renderer said on the way
+   * down.
+   */
+  say('renderer console after the summary click', app.console().slice(-15).join('\n'))
   const setupOpen = JSON.parse(
     await app.evaluate(`(() => {
       const details = document.querySelector('.traffic-setup')
-      const origin = document.querySelector('[aria-label="Forward to"]')
+      if (details === null) return JSON.stringify({ present: false, open: null, originShown: null })
+      const origin = document.querySelector('[data-traffic-field="origin"] input')
       return JSON.stringify({
+        present: true,
         open: details.open,
         originShown: origin === null ? null : origin.checkVisibility()
       })
@@ -154,16 +177,22 @@ try {
   say('the capture setup, opened', setupOpen)
   check(
     'it opens on click, and its inputs appear',
-    setupOpen.open === true && setupOpen.originShown === true
+    setupOpen.present === true && setupOpen.open === true && setupOpen.originShown === true
   )
 
   const origin = `http://127.0.0.1:${upstream.port}`
-  say('origin set to', `${origin} (asking: ${await typed('Forward to', origin)})`)
   say(
-    'variable set to',
-    `${VARIABLE} (asking: ${await typed('Variable your app reads', VARIABLE)})`
+    'origin (Forward to) set to',
+    `${origin} ${JSON.stringify(await typed('[data-traffic-field="origin"] input', origin))}`
   )
-  say('port set to', `${String(capturePort)} (asking: ${await typed('Port', String(capturePort))})`)
+  say(
+    'variable (Variable your app reads) set to',
+    `${VARIABLE} ${JSON.stringify(await typed('[data-traffic-field="envVar"] input', VARIABLE))}`
+  )
+  say(
+    'port set to',
+    `${String(capturePort)} ${JSON.stringify(await typed('[data-traffic-field="port"] input', String(capturePort)))}`
+  )
   await wait(1_500)
 
   say(
@@ -223,6 +252,16 @@ try {
     return match === null ? null : Number(match[1])
   })()`)
   say('listening port', String(port))
+  /*
+   * Sent first, so it is the row the inspector opens on, and long enough that
+   * the forwarded URL has to wrap. One unbreakable segment rather than a path
+   * with separators in it: a path that could wrap at a slash would prove nothing
+   * about a value that cannot.
+   */
+  const longPath = `/x-${'a'.repeat(200)}`
+  const first = await fetch(`http://127.0.0.1:${String(port)}${longPath}`)
+  say('the long request', `status ${first.status} ${await first.text()}`)
+
   const answer = await fetch(`http://127.0.0.1:${String(port)}/hello`)
   say('request through the listener', `status ${answer.status} ${await answer.text()}`)
 
@@ -241,9 +280,23 @@ try {
   )
   const text = await app.evaluate(`document.querySelector('.traffic-panel')?.innerText ?? ''`)
   say('panel text after the request', text.slice(0, 700))
-  check('a row appeared', /1 captured|hello/.test(text), `${String(rows)} row nodes`)
+  /*
+   * `[0-9]+`, not `1`.
+   *
+   * The literal was a trap that fired: this driver sends more than one request
+   * now, the panel said `5 captured`, and every check in the block below it was
+   * skipped — the run ended `ALL PASSED` over fourteen checks instead of fifty.
+   * A count is what "capturing" looks like; the number is not the assertion.
+   * The digits matter: the button beside it reads "Close captured traffic", so a
+   * bare `captured` would be true with nothing captured at all.
+   */
+  check(
+    'a row appeared',
+    /[0-9]+ captured/.test(text) || /hello/.test(text),
+    `${String(rows)} row nodes`
+  )
 
-  if (/1 captured/.test(text)) {
+  if (/[0-9]+ captured/.test(text)) {
     say(
       'row markup',
       await app.evaluate(`(() => {
@@ -303,6 +356,62 @@ try {
         boxes.rightHead !== null &&
         boxes.rightHead < 30,
       `${String(boxes.leftHead)}px / ${String(boxes.rightHead)}px`
+    )
+
+    /*
+     * A detail is read, not scanned, so nothing in it may be cut off.
+     *
+     * `scrollWidth > clientWidth` is the measurement that matters and the text
+     * is the weak half beside it: `textContent` is whole whatever the CSS does,
+     * so it catches a value truncated in JavaScript and the width catches one
+     * truncated by a rule. Both are here because the failure this replaces was
+     * the second kind wearing the first kind's clothes — an ellipsis that looks
+     * like a rendering choice.
+     */
+    const values = JSON.parse(
+      await app.evaluate(`(() => {
+        const read = (node) =>
+          node === null || node === undefined
+            ? null
+            : {
+                clipped: node.scrollWidth > node.clientWidth,
+                text: node.textContent,
+                height: Math.round(node.getBoundingClientRect().height),
+                line: parseFloat(getComputedStyle(node).lineHeight) || 0,
+              }
+        const named = [...document.querySelectorAll('.traffic-header')].find(
+          (row) => (row.querySelector('dt')?.textContent ?? '') === 'x-refresh-token'
+        )
+        return JSON.stringify({
+          forwarded: read(
+            document.querySelector('.traffic-pane[data-side="request"] > .traffic-general .traffic-value')
+          ),
+          header: read(named === undefined ? null : named.querySelector('dd')),
+        })
+      })()`)
+    )
+    say('the values in full', values)
+    check(
+      'the forwarded url is not clipped',
+      values.forwarded !== null && values.forwarded.clipped === false,
+      `clipped: ${String(values.forwarded?.clipped)}`
+    )
+    check(
+      'and it carries the whole forwarded url',
+      values.forwarded?.text === `http://127.0.0.1:${String(upstream.port)}${longPath}`,
+      String(values.forwarded?.text)
+    )
+    check(
+      'a long header value is not clipped',
+      values.header !== null && values.header.clipped === false,
+      `clipped: ${String(values.header?.clipped)}`
+    )
+    check(
+      'and it took more than one line to say in full',
+      values.header !== null &&
+        values.header.line > 0 &&
+        values.header.height > values.header.line * 1.5,
+      `${String(values.header?.height)}px tall, one line is ${String(values.header?.line)}px`
     )
 
     await wait(4_000)
@@ -372,7 +481,7 @@ try {
         sizesOutside: outside.some((node) => carries(node)),
         endpointOutside:
           document.querySelector(
-            '.traffic-pane[data-side="request"] > .traffic-general .traffic-url'
+            '.traffic-pane[data-side="request"] > .traffic-general .traffic-value'
           ) !== null,
         structure: [...document.querySelectorAll('.traffic-inspector > *')].map(
           (node) => node.tagName.toLowerCase() + '.' + (node.className || '')
@@ -431,30 +540,46 @@ try {
       `${String(folded.foldHeight)}px → ${String(opened.foldHeight)}px`
     )
 
+    /*
+     * `clearState`, and **not** `clearDisabled`.
+     *
+     * The old control was always there and disabled when the field was empty, so
+     * the state worth asserting was its `disabled` flag. The X arrives with the
+     * text, which makes absence a *correct* state rather than a failure — the
+     * distinction this driver has already got wrong twice, and the one C-069's
+     * guard paragraph is about. So absence is written as its own expected value,
+     * asserted at the moment it is expected, rather than as a hook that failed
+     * to resolve.
+     */
     const listState = `JSON.stringify({
       rows: document.querySelectorAll('.traffic-rows .traffic-row').length,
       searched: document.querySelector('[aria-label="Search the list"]')?.value ?? null,
-      clearDisabled: (() => {
-        const button = [...document.querySelectorAll('.traffic-panel button')]
-          .find((node) => (node.innerText || '').trim() === 'Clear')
-        return button === undefined ? 'no button' : button.disabled
-      })(),
+      clearState: document.querySelector('[data-traffic-clear="search"]') === null
+        ? 'absent'
+        : 'offered',
       empty: (document.querySelector('.traffic-panel')?.innerText ?? '').includes('Nothing matches')
     })`
 
-    say('before searching', await typed('Search the list', 'zzz-nothing'))
+    const quiet = JSON.parse(await app.evaluate(listState))
+    check(
+      'no X before there is a search to clear',
+      quiet.clearState === 'absent',
+      `X ${String(quiet.clearState)} with ${String(quiet.rows)} rows`
+    )
+
+    say('before searching', await typed('.traffic-find', 'zzz-nothing'))
     await wait(900)
     const narrowed = JSON.parse(await app.evaluate(listState))
     say('the list, searched', narrowed)
     check(
-      'the search narrows the list, and Clear is offered',
-      narrowed.rows === 0 && narrowed.empty && narrowed.clearDisabled === false,
-      `${String(narrowed.rows)} rows`
+      'the search narrows the list, and the X arrives with it',
+      narrowed.rows === 0 && narrowed.empty && narrowed.clearState === 'offered',
+      `${String(narrowed.rows)} rows, X ${String(narrowed.clearState)}`
     )
 
     await app.evaluate(`(() => {
-      const button = [...document.querySelectorAll('.traffic-panel button')]
-        .find((node) => (node.innerText || '').trim() === 'Clear')
+      const button = document.querySelector('[data-traffic-clear="search"]')
+      if (button === null) return false
       button.click()
       return true
     })()`)
@@ -462,9 +587,9 @@ try {
     const cleared = JSON.parse(await app.evaluate(listState))
     say('the list, cleared', cleared)
     check(
-      'Clear empties the search and the rows come back',
-      cleared.searched === '' && cleared.rows > 0 && cleared.clearDisabled === true,
-      `${String(cleared.rows)} rows`
+      'the X empties the search and goes with it, and the rows come back',
+      cleared.searched === '' && cleared.rows > 0 && cleared.clearState === 'absent',
+      `${String(cleared.rows)} rows, X ${String(cleared.clearState)}`
     )
 
     await fetch(`http://127.0.0.1:${String(port)}/missing`)
@@ -668,6 +793,357 @@ try {
       'the arrows walk the rows without opening anything',
       walk !== null && walk.join(',') === '0,1,2,1',
       String(walk)
+    )
+
+    /*
+     * Following the newest row, while the person is still at the bottom.
+     *
+     * **The list has to be genuinely scrollable or none of this means
+     * anything** — a container whose content fits reports the same three numbers
+     * whatever it does, and every assertion below would hold with the feature
+     * removed. So the precondition is checked rather than assumed.
+     */
+    for (let i = 0; i < 60; i++) {
+      await fetch(`http://127.0.0.1:${String(port)}/fill/${String(i)}`)
+    }
+    await wait(2_500)
+
+    const scrolled = () =>
+      app.evaluate(`(() => {
+        const list = document.querySelector('.traffic-rows')
+        return list === null
+          ? null
+          : {
+              scrollHeight: list.scrollHeight,
+              clientHeight: list.clientHeight,
+              scrollTop: Math.round(list.scrollTop),
+              fromBottom: Math.round(list.scrollHeight - list.scrollTop - list.clientHeight),
+            }
+      })()`)
+
+    /*
+     * **Not the predicate's 24px.** A zoomed list needs that much slack to keep
+     * following at all, but a list that has *followed* is at the bottom — and
+     * asserting the slack is what let this check pass with the feature removed:
+     * measured, five rows moved the list exactly 24px, so a list that never
+     * followed satisfied "within 24px of the bottom". The two numbers are
+     * deliberately different, and this is the smaller one because it is the one
+     * that can fail.
+     */
+    const AT_BOTTOM_PX = 4
+
+    const filled = await scrolled()
+    check(
+      'the list is long enough to scroll, or following proves nothing',
+      filled !== null && filled.scrollHeight > filled.clientHeight,
+      `content ${String(filled?.scrollHeight)} vs box ${String(filled?.clientHeight)}`
+    )
+
+    /*
+     * Several rows, not one, and the arithmetic is why: this list is 261px tall
+     * holding about 1,500px of rows, so a single row is roughly 23px — under the
+     * 24px tolerance that keeps a zoomed list following at all. One row would
+     * land inside the slack and the check would pass with the feature removed
+     * entirely, which is the failure mode this whole exercise is about.
+     */
+    for (let i = 0; i < 5; i++) {
+      await fetch(`http://127.0.0.1:${String(port)}/followed/${String(i)}`)
+    }
+    await wait(1_500)
+    const followed = await scrolled()
+    check(
+      'a new row keeps the list at the bottom while it is following',
+      followed !== null && followed.fromBottom <= AT_BOTTOM_PX,
+      `${String(followed?.fromBottom)}px from the bottom`
+    )
+
+    await app.evaluate(`(() => {
+      document.querySelector('.traffic-rows').scrollTop = 0
+      return true
+    })()`)
+    await wait(400)
+    const parked = await scrolled()
+    say('parked at the top before the rows arrive', parked)
+    for (let i = 0; i < 5; i++) {
+      await fetch(`http://127.0.0.1:${String(port)}/while-reading/${String(i)}`)
+    }
+    await wait(1_500)
+    const stayed = await scrolled()
+    say('after the rows while parked', stayed)
+    check(
+      'and it does not move a list somebody has scrolled away from',
+      parked !== null && stayed !== null && stayed.scrollTop === parked.scrollTop,
+      `scrollTop ${String(parked?.scrollTop)} to ${String(stayed?.scrollTop)}`
+    )
+
+    await app.evaluate(`(() => {
+      const list = document.querySelector('.traffic-rows')
+      list.scrollTop = list.scrollHeight
+      return true
+    })()`)
+    await wait(400)
+    for (let i = 0; i < 5; i++) {
+      await fetch(`http://127.0.0.1:${String(port)}/resumed/${String(i)}`)
+    }
+    await wait(1_500)
+    const resumed = await scrolled()
+    check(
+      'and scrolling back down resumes it',
+      resumed !== null && resumed.fromBottom <= AT_BOTTOM_PX,
+      `${String(resumed?.fromBottom)}px from the bottom`
+    )
+
+    /*
+     * Clearing the history, which was built end to end and had no button.
+     *
+     * Written so that "there is no button" is **its own answer** rather than a
+     * thrown TypeError: before this change nothing matched the selector at all,
+     * and a driver that crashes on the missing element cannot say which of its
+     * expectations went unmet — it reports a stack instead of an absence. The
+     * two checks are separate for the same reason: the button existing and the
+     * button working are different claims.
+     *
+     * Found by its `data-` hook, not by its text. Both Clear buttons used to be
+     * looked up by the word they happened to display, and renaming one of them
+     * made two checks report a wrong value instead of failing — see C-069.
+     */
+    const pressed = JSON.parse(
+      await app.evaluate(`(() => {
+        const button = document.querySelector('[data-traffic-clear="captured"]')
+        if (button === null) return JSON.stringify({ found: false, beside: false })
+        const row = button.closest('.traffic-source-row')
+        button.click()
+        return JSON.stringify({
+          found: true,
+          beside: row !== null && row.querySelector('[aria-label="Search the list"]') !== null,
+        })
+      })()`)
+    )
+    await wait(1_500)
+    const emptied = JSON.parse(
+      await app.evaluate(`(() => {
+        const count = document.querySelector('.traffic-count')
+        return JSON.stringify({
+          rows: document.querySelectorAll('.traffic-row').length,
+          count: count === null ? null : count.innerText,
+        })
+      })()`)
+    )
+    say('after the capture Clear', emptied)
+    check(
+      'a Clear that acts on the capture is offered, beside the search field',
+      pressed.found === true && pressed.beside === true,
+      pressed.found === true
+        ? `found, in the search row: ${String(pressed.beside)}`
+        : 'no button carrying data-traffic-clear="captured"'
+    )
+    check(
+      'and pressing it empties the rows and takes the count to zero',
+      emptied.rows === 0 && (emptied.count || '').includes('0 captured'),
+      `${String(emptied.rows)} rows, count ${String(emptied.count)}`
+    )
+
+    /*
+     * The header holds no Clear at all, and that is a stronger claim than the
+     * one it replaces.
+     *
+     * "Clear is 42px from Stop" was the property while Clear lived in the
+     * header. The user moved it out, so the property becomes an absence — and an
+     * absence cannot be eroded by a reflow, which is the argument for stating it
+     * this way rather than deleting the check along with the spacer it guarded.
+     * A gap measuring nothing is the tail this repo's own note warns about.
+     *
+     * **The width precondition stays, and it is worth more than the check it was
+     * written for.** It is what caught a vacuous pass of its predecessor: the
+     * panel takes its width from the Chorus column and not from the viewport, so
+     * an `Emulation` override measured the same layout twice and the narrow half
+     * proved nothing at all. Here it guards the absence — a header never laid
+     * out narrow would not show the crowding this is about.
+     */
+    const headerClear = () =>
+      app.evaluate(`(() => {
+        const header = document.querySelector('.traffic-head')
+        const panel = document.querySelector('.traffic-panel')
+        if (header === null || panel === null) return null
+        return {
+          inside: header.querySelector('[data-traffic-clear]') !== null,
+          panel: Math.round(panel.getBoundingClientRect().width),
+        }
+      })()`)
+
+    const wide = await headerClear()
+    /*
+     * **The narrow width is set on the panel itself, and that is deliberate
+     * rather than a shortcut.** The panel's width comes from the Chorus column —
+     * a value the person drags and the app stores — and not from the viewport,
+     * which is why an `Emulation` override changed nothing and measured the same
+     * layout twice at 417px. This supplies the container's width, and the
+     * assertion that the panel actually got narrower is what stops the injection
+     * from hiding a reflow that never happened.
+     */
+    const restoredWidth = await app.evaluate(`(() => {
+      const panel = document.querySelector('.traffic-panel')
+      if (panel === null) return null
+      const before = panel.style.width
+      panel.style.width = '300px'
+      return before
+    })()`)
+    await wait(700)
+    const narrow = await headerClear()
+
+    /*
+     * The shape of the capture setup: one name per field, the hints attached as
+     * descriptions, and the columns in each row actually separated. Read at 300px
+     * because that is where a label that does not fit and a row with no gap show
+     * up first.
+     *
+     * `control.labels` is the browser's own association — the `<label for>` to
+     * `id` link, already made — and not a re-derivation from the markup. Reading
+     * it is the difference between "there is a label element nearby" and "this
+     * control's accessible name is that text"; only the second is what the
+     * `aria-label` removal was for.
+     */
+    const fieldShape = `JSON.stringify((() => {
+      const panel = document.querySelector('.traffic-panel')
+      if (panel === null) return { present: false }
+      const setup = panel.querySelector('.traffic-setup')
+      const right = (node) => Math.round(node.getBoundingClientRect().right)
+      const fields = [...panel.querySelectorAll('[data-traffic-field]')].map((field) => {
+        const control = field.querySelector('input, select')
+        const hint = field.querySelector('.traffic-field-hint')
+        const described = control === null ? null : control.getAttribute('aria-describedby')
+        return {
+          key: field.getAttribute('data-traffic-field'),
+          drawn: control !== null && control.checkVisibility(),
+          label: field.querySelector('.traffic-field-name')?.innerText.trim() ?? null,
+          names: control === null || control.labels === null
+            ? []
+            : [...control.labels].map((node) => node.innerText.trim()),
+          aria: control === null ? null : control.getAttribute('aria-label'),
+          hint: hint === null ? null : hint.innerText.trim(),
+          described: described !== null && hint !== null && described === hint.id,
+          right: control === null ? null : right(control)
+        }
+      })
+      const rows = [...panel.querySelectorAll('.traffic-source-row')]
+      const gaps = rows
+        .map((row) => [...row.children].map((node) => node.getBoundingClientRect()))
+        .filter((boxes) => boxes.length > 1)
+        .map((boxes) => Math.round(boxes[1].left - boxes[0].right))
+      /*
+       * Between the rows, and measured child to child rather than box to box:
+       * two adjacent block boxes are flush at zero, because the padding that
+       * separates them is inside both of them. The children sit in the content
+       * area, so their boxes are what actually moved apart.
+       */
+      const stacked = rows
+        .slice(1)
+        .map((row, index) => {
+          const above = rows[index].lastElementChild
+          const below = row.firstElementChild
+          if (above === null || below === null) return null
+          return Math.round(
+            below.getBoundingClientRect().top - above.getBoundingClientRect().bottom
+          )
+        })
+        .filter((gap) => gap !== null)
+      return {
+        present: true,
+        open: setup === null ? null : setup.open,
+        fields,
+        gaps,
+        stacked,
+        overflow: [...panel.querySelectorAll('.traffic-setup input, .traffic-setup select')]
+          .filter((node) => right(node) > right(panel))
+          .map((node) => node.id)
+      }
+    })())`
+
+    const setSetupOpen = async (open) => {
+      await app.evaluate(`(() => {
+        const setup = document.querySelector('.traffic-setup')
+        if (setup !== null) setup.open = ${String(open)}
+        return true
+      })()`)
+      await wait(700)
+    }
+
+    const fieldsOpen = JSON.parse(await app.evaluate(fieldShape))
+    await setSetupOpen(false)
+    const fieldsShut = JSON.parse(await app.evaluate(fieldShape))
+    await setSetupOpen(true)
+
+    await app.evaluate(`(() => {
+      const panel = document.querySelector('.traffic-panel')
+      if (panel !== null) panel.style.width = ${JSON.stringify(restoredWidth ?? '')}
+      return true
+    })()`)
+    await wait(700)
+    say('Clear in the header', { wide, narrow })
+    check(
+      'the header holds no Clear at all, at this width or a narrower one',
+      wide !== null &&
+        narrow !== null &&
+        !wide.inside &&
+        !narrow.inside &&
+        narrow.panel < wide.panel,
+      `in header ${String(wide?.inside)} at ${String(wide?.panel)}px, ${String(narrow?.inside)} at ${String(narrow?.panel)}px`
+    )
+
+    const openFields = fieldsOpen.fields ?? []
+    const hinted = openFields.filter((field) => field.hint !== null && field.hint !== '')
+    const describe = (field) =>
+      `${String(field.key)}: ${JSON.stringify(field.label)} -> [${field.names.join(', ')}]`
+    say('the capture setup at 300px, open', fieldsOpen)
+    check(
+      'every field in the setup names itself with a visible label, tied to its control',
+      fieldsOpen.open === true &&
+        openFields.length === 4 &&
+        openFields.every(
+          (field) =>
+            field.drawn && field.label !== null && field.label !== '' && field.names.length === 1
+        ) &&
+        openFields.every((field) => field.names[0] === field.label),
+      openFields.map(describe).join(' | ')
+    )
+    check(
+      'and no field carries a second name beside the visible one',
+      openFields.every((field) => field.aria === null),
+      openFields
+        .filter((field) => field.aria !== null)
+        .map((field) => `${String(field.key)}: ${String(field.aria)}`)
+        .join(' | ') || 'none'
+    )
+    check(
+      'the hints are descriptions, on the three fields that earn one',
+      ['origin', 'port', 'envVar'].every((key) => hinted.some((field) => field.key === key)) &&
+        hinted.every((field) => field.described === true),
+      hinted
+        .map(
+          (field) =>
+            `${String(field.key)}: ${JSON.stringify(field.hint)} described=${String(field.described)}`
+        )
+        .join(' | ')
+    )
+    check(
+      'the two columns in a row are separated, and nothing spills past the panel',
+      fieldsOpen.gaps.length >= 2 &&
+        fieldsOpen.gaps.every((gap) => gap >= 6) &&
+        fieldsOpen.overflow.length === 0,
+      `gaps [${fieldsOpen.gaps.join(', ')}]px, overflowing [${fieldsOpen.overflow.join(', ')}]`
+    )
+    check(
+      'and the rows stack with room between them, not flush',
+      fieldsOpen.stacked.length >= 2 && fieldsOpen.stacked.every((gap) => gap >= 10),
+      `stacked [${fieldsOpen.stacked.join(', ')}]px between rows`
+    )
+    say('the capture setup at 300px, closed', fieldsShut)
+    check(
+      'and it still collapses at that width, taking its fields with it',
+      fieldsShut.open === false &&
+        (fieldsShut.fields ?? []).length === 4 &&
+        (fieldsShut.fields ?? []).every((field) => field.drawn === false),
+      `open ${String(fieldsShut.open)}, drawn ${String((fieldsShut.fields ?? []).filter((field) => field.drawn).length)} of 4`
     )
 
     await fetch(`http://127.0.0.1:${String(port)}/gz`)

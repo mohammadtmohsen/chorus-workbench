@@ -30,6 +30,72 @@ Nothing here can be finished by me alone.
 
 ## Open
 
+### C-069 · `traffic-drive.mjs` fails somewhere different every run, and one of those places may be the app
+
+**Noticed 2026-09-25**, while proving a CSS change to the traffic inspector. Five
+consecutive runs of `apps/desktop/e2e/traffic-drive.mjs` gave three distinct
+outcomes, and only one of them was the defect under test:
+
+| run | outcome                                                                          |
+| --- | -------------------------------------------------------------------------------- |
+| 1   | `.traffic-panel` mounted, then unmounted; the run crashed reading `details.open` |
+| 2   | `ALL PASSED` — over 14 checks instead of 50 (see the guard below)                |
+| 3   | 53 checks, 1 failure: the inspector truncated the forwarded URL                  |
+| 4   | 51 checks, the inspector green, 2 failures in the tab strip                      |
+| 5   | 6 checks — the capture never started, and `.traffic-panel` was gone again        |
+
+**This is not C-029 and must not be folded into it.** C-029 is the e2e _spec
+suite_'s pass rate under load and C-042 is nine specs failing deterministically;
+this is a standalone driver launched by hand, with its own failure modes and its
+own fix.
+
+**Mode one — the panel unmounts after it has mounted. Unresolved, and it may be
+the application.** Runs 1 and 5 each lost `.traffic-panel` mid-run, and that is
+not a harness story to file away: `until` throws on a timeout and did not, so the
+panel was genuinely there and then was not. An app that unmounts a live panel is a
+real defect rather than noise. Run 1 is the one that matters — the only changes in
+the tree were to the driver itself, so this predates the work these runs were made
+for. It has not been diagnosed, and nothing here is a conclusion.
+
+**Mode two — the seed is a live database. Not a flake, a property, and fixable.**
+`seed()` copies `~/Library/Application Support/@chorus/desktop-dev/chorus.v2.db`
+with `sqlite3 .backup`, which is the right way not to tear a WAL and the wrong way
+to get a reproducible run: the app that owns that file is running and writing to
+it. Run 3's tab strip read `tpa-web-1 | tpa-web-1 | Traffic`; run 4's read
+`tpa-mobile | Traffic`. One conversation fewer and a different project showing,
+which turned into two check failures that said nothing about the code. **The fix
+is a deterministic seed** — build the fixture database from a fixed script, or pin
+the rows the checks depend on — rather than measuring whatever the person's dev
+app happened to be doing that afternoon.
+
+**And the guard, which is the part worth remembering.** The whole inspector section
+sat behind `if (/1 captured/.test(text))`. Adding one request to the fixture made
+the panel say `5 captured`, the literal stopped matching, and the section was
+skipped — so run 2 printed **`ALL PASSED` over fourteen checks instead of fifty**.
+It is `/[0-9]+ captured/` now. A suite that reports success while silently skipping
+its subject is the same class as this file's own note about an assertion that can
+never fail, and it is worse than a red run, because nobody goes looking.
+
+**The class bit again inside the change that renamed a button**, which is the
+evidence that paragraph was missing. `listState` found the search Clear by the
+text `'Clear'`; the rename made that lookup match nothing, and it reported
+`clearDisabled: "no button"` — a wrong value rather than a failure, which is the
+silent half and the reason it was not noticed. Two search checks failed and
+neither of them said why.
+
+**A `data-` hook on the control is the fix for the class, and exactly two controls
+have one.** `data-traffic-clear="search"` and `data-traffic-clear="captured"` are
+the buttons that bit. Every other lookup in this driver still finds controls by
+their visible text and is still brittle in the same way — the hooks were applied
+where the damage happened, not swept, so the rest is a known gap rather than an
+oversight.
+
+**Done when** a run either passes or fails in a way someone can act on: green
+meaning every check ran, red naming the code rather than the seed. The
+deterministic seed is the first half of that and is uncontroversial. The panel
+unmounting is the second and needs a diagnosis before anyone can say whether the
+fix belongs in the driver or in `TrafficPanel`.
+
 ### C-068 · The `src/main/` suite is flaky under vitest's file parallelism, and the failing tests differ every run
 
 **Noticed 2026-09-24**, during the traffic-panel work, when `pnpm check` stopped
