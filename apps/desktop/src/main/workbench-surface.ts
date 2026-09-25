@@ -69,6 +69,7 @@ import {
   requestCompletion,
 } from './completion-client.js'
 import { applyWorkbenchContentSecurityPolicy, lockDownNavigation } from './security.js'
+import { currentScale, onScaleChange } from './scale.js'
 import {
   acquireWorkbenchRuntime,
   releaseWorkbenchRuntime,
@@ -158,6 +159,14 @@ interface Surface {
 
 const HANDOFF_EXPIRY_MS = 10_000
 const byId = new Map<string, Surface>()
+
+/*
+ * The view is a webContents of its own, so the shell's factor has to be given
+ * to it as well or the editor draws at 100% inside a region sized for 90%.
+ */
+onScaleChange((scale) => {
+  for (const surface of byId.values()) surface.view.webContents.setZoomFactor(scale)
+})
 /**
  * Keyed by the `WebContents` itself, which is what makes §4.1b rule 4 cheap.
  * `IpcMainEvent.senderFrame` may be null once a frame has navigated or been
@@ -992,6 +1001,12 @@ export async function openSurface(
     },
   })
 
+  /*
+   * A surface opened while the shell is already zoomed never sees a change, so
+   * the subscription above cannot be the only place this is applied.
+   */
+  view.webContents.setZoomFactor(currentScale())
+
   const surface: Surface = {
     id,
     host: place.host,
@@ -1227,7 +1242,19 @@ export function closeSurface(caller: WebContents, viewId: string): void {
 }
 
 export function setSurfaceBounds(caller: WebContents, viewId: string, rect: WorkbenchRect): void {
-  ownedSurface(caller, viewId).view.setBounds(rect)
+  /*
+   * The renderer measures its placeholder in the shell's own CSS pixels, and a
+   * zoomed shell's CSS pixel is not a device pixel. `setBounds` is in device
+   * pixels, so the factor is applied here, where the rect is used, rather than
+   * asked of every caller.
+   */
+  const scale = currentScale()
+  ownedSurface(caller, viewId).view.setBounds({
+    x: Math.round(rect.x * scale),
+    y: Math.round(rect.y * scale),
+    width: Math.round(rect.width * scale),
+    height: Math.round(rect.height * scale),
+  })
 }
 
 /** Every open surface, for shutdown. */

@@ -27,6 +27,21 @@ export function currentScale(): number {
   return current
 }
 
+export type ScaleListener = (scale: number) => void
+
+const listeners = new Set<ScaleListener>()
+
+/*
+ * A workbench surface is a `WebContentsView` with its own webContents, so the
+ * window's factor says nothing about it. Whoever owns those views subscribes
+ * here rather than being called by name, which keeps this module ignorant of
+ * them and the factor's one source intact.
+ */
+export function onScaleChange(listener: ScaleListener): void {
+  listeners.add(listener)
+  listener(current)
+}
+
 export function applyScale(scale: number): void {
   for (const window of BrowserWindow.getAllWindows()) {
     window.webContents.setZoomFactor(scale)
@@ -34,6 +49,7 @@ export function applyScale(scale: number): void {
     // drawn at, and it is the one that has to say what just happened.
     window.webContents.send(SCALE_PUSH_CHANNEL, scale)
   }
+  for (const listener of listeners) listener(scale)
 }
 
 /**

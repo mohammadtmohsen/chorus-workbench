@@ -304,10 +304,18 @@ export function WorkbenchFrame({
      * idle workbench sends nothing at all after its opening report.
      *
      * Bounds are read in CSS pixels and sent as device-independent pixels, which
-     * are the same number only while the zoom factor is 1. Chorus has a zoom
-     * (⌘+ / ⌘−) and this still does not compensate for it, so a zoomed shell will
-     * mispose the view. That half is untouched here on purpose: it is a unit
-     * conversion, not a tracking failure, and it is recorded as such.
+     * are the same number only while the zoom factor is 1. The conversion is real
+     * and it happens on the other side of this boundary: `setSurfaceBounds`
+     * multiplies by the current factor as it applies the rectangle. Main is where
+     * that belongs — it is the process that holds the factor, `setBounds` is the
+     * call that wants device pixels, and doing it here would put a second copy of
+     * main's state inside a loop that runs on every frame.
+     *
+     * A zoom change still needs no report of its own, which is worth saying
+     * because it looks like it should. `setZoomFactor` scales the CSS viewport by
+     * the reciprocal, so every rectangle this loop measures changes with it and
+     * the next frame reports — and the view keeps the physical rectangle it had,
+     * because CSS pixels and the factor move in opposite directions.
      */
     let last: WorkbenchRect | null = null
 

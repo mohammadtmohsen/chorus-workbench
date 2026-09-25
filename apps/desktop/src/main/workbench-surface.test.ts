@@ -60,6 +60,15 @@ class FakeWebContents {
     return this
   }
   readonly setWindowOpenHandler = vi.fn()
+  /**
+   * Recorded for the same reason `setBounds` is: the factor a workbench view is
+   * drawn at is product behaviour, not bookkeeping.
+   */
+  zoomFactor: number | null = null
+  setZoomFactor(next: number): void {
+    this.zoomFactor = next
+  }
+
   send(_channel: string, payload: unknown): void {
     this.sent.push(payload)
   }
@@ -241,6 +250,8 @@ const fakeWindow = {
       this.children = this.children.filter((child) => child !== view)
     },
   },
+  /* The shell's own webContents, which zoom is applied to. */
+  webContents: new FakeWebContents(),
   listeners: new Map<string, ((...args: unknown[]) => void)[]>(),
   on(event: string, listener: (...args: unknown[]) => void): void {
     this.listeners.set(event, [...(this.listeners.get(event) ?? []), listener])
@@ -289,6 +300,7 @@ afterAll(() => {
 })
 
 const surface = await import('./workbench-surface.js')
+const scale = await import('./scale.js')
 
 // Registered once, because the chooser is only reachable through its channel:
 // there is no exported mint, deliberately, so a main-side caller cannot conjure a
@@ -877,9 +889,9 @@ describe('a surface changing hands', () => {
         'detach',
         'officepc'
       )
-      await expect(
-        surface.openSurface(shell as never, { grant }, undefined)
-      ).resolves.toEqual(expect.any(String))
+      await expect(surface.openSurface(shell as never, { grant }, undefined)).resolves.toEqual(
+        expect.any(String)
+      )
     } finally {
       surface.registerWorkbenchHandlers(undefined)
     }
@@ -1143,9 +1155,7 @@ describe('the shared server lease', () => {
       await surface.openSurface(shell as never, { projectId: 'local-windows' }, undefined)
       const view = lastView()
       view.webContents.emit('did-finish-load')
-      expect(view.webContents.sent).toEqual([
-        { ...RUNTIME, projectRoot: '/C:/Users/me/project' },
-      ])
+      expect(view.webContents.sent).toEqual([{ ...RUNTIME, projectRoot: '/C:/Users/me/project' }])
     } finally {
       surface.registerWorkbenchHandlers(undefined)
     }
@@ -1264,5 +1274,38 @@ describe('the window a surface reports on', () => {
      */
     expect(fakeWindow.listeners.get('focus')).toHaveLength(0)
     expect(fakeWindow.listeners.get('blur')).toHaveLength(0)
+  })
+})
+
+/*
+ * The renderer measures its placeholder in the shell's own CSS pixels, and a
+ * zoomed shell's CSS pixel is not a device pixel. A rectangle sent through
+ * unchanged put the native view wider and taller than its region — over the
+ * Chorus column beside it — and because the zoom lasts the launch, nothing
+ * reset it and resizing could not clear it.
+ */
+describe('a zoomed shell and a surface rectangle', () => {
+  it('gives the view device pixels, and the factor to its own webContents', async () => {
+    scale.stepScale(0)
+    scale.stepScale(-1)
+    scale.stepScale(-1)
+    try {
+      expect(scale.currentScale()).toBe(0.9)
+      // Opened while the shell is already zoomed, so no change will fire for it.
+      const viewId = await openAt(shell, ROOT_A)
+      const view = lastView()
+      expect(view.webContents.zoomFactor).toBe(0.9)
+
+      surface.setSurfaceBounds(shell as never, viewId, { x: 100, y: 50, width: 400, height: 300 })
+      expect(view.bounds).toEqual({ x: 90, y: 45, width: 360, height: 270 })
+
+      // And the factor moving under a view that is already open.
+      scale.stepScale(-1)
+      expect(view.webContents.zoomFactor).toBe(0.85)
+      scale.stepScale(1)
+      expect(view.webContents.zoomFactor).toBe(0.9)
+    } finally {
+      scale.stepScale(0)
+    }
   })
 })
