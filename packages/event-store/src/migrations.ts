@@ -595,6 +595,83 @@ export const MIGRATIONS: readonly Migration[] = [
       ALTER TABLE projects ADD COLUMN traffic_env_var TEXT;
     `,
   },
+  {
+    version: 18,
+    name: 'a-listener-reachable-from-the-network-by-default',
+    up: `
+      /*
+       * Rewriting every stored row is legitimate here, and the reason is
+       * narrower than "the default changed".
+       *
+       * The traffic panel has never had a control for this setting — the
+       * column, the schema, the IPC and main's handling all shipped, and the
+       * one thing that could express a preference did not. So a stored
+       * 'loopback' cannot be somebody's answer, because there was nowhere to
+       * give one. The column writes it in exactly two places, and both are
+       * "what a thing gets before anyone has asked": the DEFAULT below, and
+       * the literal at the insert in projects.ts. The third writer is the
+       * legacy import, which carries the constant 'lan' — which is why every
+       * project that predates the column reads 'lan' already, and is a fair
+       * sign this was always the intent.
+       *
+       * A per-row UPDATE ... WHERE traffic_access = 'loopback' would say the
+       * same thing for the two values this column can hold; the copy states
+       * 'lan' outright so a value the CHECK would have rejected cannot ride
+       * through on a row nobody thought about.
+       *
+       * **SQLite cannot alter a column's DEFAULT**, so the only way to change
+       * it is to rebuild the table — which is what the rest of this is. There
+       * are no foreign keys, views or triggers anywhere in this schema, so the
+       * rename rewrites nothing and the whole thing is one transaction with
+       * the rest of the migration run.
+       */
+      CREATE TABLE projects_rebuilt (
+        id                    TEXT    PRIMARY KEY,
+        name                  TEXT    NOT NULL,
+        root                  TEXT    NOT NULL,
+        canonical_root        TEXT    NOT NULL,
+        canonical_key         TEXT    NOT NULL,
+        workspace_file        TEXT,
+        permission_profile_id TEXT,
+        created_at            INTEGER NOT NULL,
+        last_opened_at        INTEGER NOT NULL,
+        agent_ids             TEXT,
+        sort_order            INTEGER,
+        notes                 TEXT,
+        note_width            REAL,
+        note_height           REAL,
+        host                  TEXT    NOT NULL DEFAULT '',
+        agent_cwd             TEXT,
+        traffic_origin        TEXT,
+        traffic_port          INTEGER
+          CHECK (traffic_port IS NULL OR traffic_port BETWEEN 1 AND 65535),
+        traffic_access        TEXT    NOT NULL DEFAULT 'lan'
+          CHECK (traffic_access IN ('loopback', 'lan')),
+        traffic_env_var       TEXT
+      );
+
+      INSERT INTO projects_rebuilt (
+        id, name, root, canonical_root, canonical_key, workspace_file,
+        permission_profile_id, created_at, last_opened_at, agent_ids, sort_order,
+        notes, note_width, note_height, host, agent_cwd, traffic_origin,
+        traffic_port, traffic_access, traffic_env_var
+      )
+      SELECT
+        id, name, root, canonical_root, canonical_key, workspace_file,
+        permission_profile_id, created_at, last_opened_at, agent_ids, sort_order,
+        notes, note_width, note_height, host, agent_cwd, traffic_origin,
+        traffic_port, 'lan', traffic_env_var
+      FROM projects;
+
+      DROP TABLE projects;
+      ALTER TABLE projects_rebuilt RENAME TO projects;
+
+      CREATE INDEX projects_last_opened ON projects (last_opened_at DESC);
+      CREATE UNIQUE INDEX projects_canonical_key ON projects (host, canonical_key);
+      CREATE UNIQUE INDEX projects_traffic_port ON projects (traffic_port)
+        WHERE traffic_port IS NOT NULL;
+    `,
+  },
 ]
 
 export interface MigrationResult {

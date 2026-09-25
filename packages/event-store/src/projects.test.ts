@@ -434,11 +434,11 @@ describe('traffic configuration', () => {
     access: 'lan' as const,
   })
 
-  it('starts a project with no connection of its own', () => {
+  it('starts a project with no connection of its own, open to the network', () => {
     const project = add(sensitive(), '/code/one')
     expect(project.trafficOrigin).toBeNull()
     expect(project.trafficPort).toBeNull()
-    expect(project.trafficAccess).toBe('loopback')
+    expect(project.trafficAccess).toBe('lan')
   })
 
   it('offers the first free port from the one it is asked, and the next to the next project', () => {
@@ -691,7 +691,7 @@ describe('traffic configuration', () => {
 })
 
 describe('the traffic tables, added to a database that already has projects', () => {
-  it('leaves existing projects exactly as they were', () => {
+  it('leaves the fields an existing project already had alone', () => {
     const upgraded = openSqlite({ path: ':memory:' })
     for (const step of MIGRATIONS.filter((m) => m.version <= 13)) {
       upgraded.exec(step.up)
@@ -706,13 +706,48 @@ describe('the traffic tables, added to a database that already has projects', ()
       ...before,
       trafficOrigin: null,
       trafficPort: null,
-      trafficAccess: 'loopback',
+      trafficAccess: 'lan',
     })
     expect(after.legacyTrafficImport()).toEqual({
       completed: false,
       assignedProjectId: null,
       candidate: null,
       error: null,
+    })
+  })
+
+  /*
+   * The two things migration 18 does that could quietly go wrong, on one row
+   * that has a value in every column the rebuild copies.
+   *
+   * The first is the claim the row rewrite makes — that a stored `loopback` is
+   * the column's default and not an answer, so flipping it takes nothing away.
+   * The second is the rebuild itself: `projects` is dropped and recreated to
+   * change a column's DEFAULT, which SQLite will not do in place, and a column
+   * missed in the copy comes back empty rather than raising.
+   */
+  it('flips a stored loopback and carries every other column through the rebuild', () => {
+    const upgraded = openSqlite({ path: ':memory:' })
+    for (const step of MIGRATIONS.filter((m) => m.version <= 17)) {
+      upgraded.exec(step.up)
+      upgraded.exec(`PRAGMA user_version = ${String(step.version)}`)
+    }
+    const store = new ProjectStore(upgraded, { caseSensitivePaths: true })
+    const before = add(store, '/code/older')
+    store.setTrafficConfig(before.id, {
+      trafficOrigin: 'http://127.0.0.1:8080',
+      trafficPort: 30_100,
+      trafficAccess: 'loopback',
+      trafficEnvVar: 'API_URL',
+    })
+    const chosen = store.get(before.id)
+    expect(chosen?.trafficAccess).toBe('loopback')
+
+    migrate(upgraded)
+
+    expect(new ProjectStore(upgraded, { caseSensitivePaths: true }).get(before.id)).toEqual({
+      ...chosen,
+      trafficAccess: 'lan',
     })
   })
 

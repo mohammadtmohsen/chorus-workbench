@@ -92,6 +92,17 @@ export interface Project {
 export const TrafficAccesses = z.enum(['loopback', 'lan'])
 export type TrafficAccess = z.infer<typeof TrafficAccesses>
 
+/**
+ * What a project's listener is open to before anybody has said otherwise, and
+ * the value migration 18 gives every row that predates the choice.
+ *
+ * Not the same question as `trafficAccessOf`'s fallback one screen down, which
+ * decides what to do with a value the column's own CHECK should have made
+ * impossible: a default is what a project gets, a fallback is what an
+ * unreadable one gets, and the narrow answer is right for the second.
+ */
+const DEFAULT_TRAFFIC_ACCESS: TrafficAccess = 'lan'
+
 export interface TrafficLegacyImport {
   readonly completed: boolean
   readonly assignedProjectId: ProjectId | null
@@ -474,7 +485,7 @@ export class ProjectStore {
         noteHeight: null,
         trafficOrigin: null,
         trafficPort: null,
-        trafficAccess: 'loopback',
+        trafficAccess: DEFAULT_TRAFFIC_ACCESS,
         trafficEnvVar: null,
       }
     })
