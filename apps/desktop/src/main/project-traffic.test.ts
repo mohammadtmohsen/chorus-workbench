@@ -35,6 +35,41 @@ const serving = (body: Buffer): Promise<number> =>
  * the same path a real project takes the first time it is started — and it saves
  * a test from racing for a free port of its own.
  */
+/*
+ * One origin that holds `/slow` open and answers everything else at once.
+ *
+ * The path that can put the list out of order needs a request still in flight
+ * when the window has moved past it — and the window belongs to the service, so
+ * the requests that fill it have to go to the same origin and be answered
+ * immediately. Two servers would be two origins, and the slow request would
+ * never share a window with the fast ones.
+ */
+const slowFirst = (): Promise<{ port: number; release: () => void }> =>
+  new Promise((resolve) => {
+    let pending: (() => void) | null = null
+    const server = createServer((request, response) => {
+      if ((request.url ?? '').startsWith('/slow')) {
+        pending = () => {
+          response.writeHead(200, { 'content-type': 'text/plain' })
+          response.end('late')
+        }
+        return
+      }
+      response.writeHead(200, { 'content-type': 'text/plain' })
+      response.end('ok')
+    })
+    servers.push(server)
+    server.listen(0, '127.0.0.1', () => {
+      const address = server.address()
+      resolve({
+        port: address !== null && typeof address === 'object' ? address.port : 0,
+        release: () => {
+          pending?.()
+        },
+      })
+    })
+  })
+
 const registryFor = (origin: number, capture: number): ProjectTrafficRegistry =>
   new ProjectTrafficRegistry({
     config: () => ({
@@ -114,6 +149,61 @@ describe('the retained-byte budget across a stop', () => {
 
     expect(detail?.responseBody.truncation).toBeNull()
     expect(detail?.responseBody.capturedBytes).toBe(BODY_LIMIT)
+  })
+})
+
+describe('a settle whose row the window has already trimmed', () => {
+  /*
+   * The one path that puts the list out of order, and it needs a *small* window
+   * to reach — which is why nothing found it: the fixture every other test uses
+   * holds a thousand rows, and a request has to outlive the whole window to be
+   * trimmed before its answer arrives. Three is enough, and the whole run is
+   * about a second.
+   *
+   * Three layers answer this one event and used to disagree: the service
+   * appended, the registry appended, and the renderer dropped. Appending puts
+   * the oldest sequence in the newest position — a list that lies about its own
+   * order — so the renderer was right and the two below it now agree with it.
+   */
+  it('drops it rather than appending it out of order', async () => {
+    const held = await slowFirst()
+    const registry = registryFor(held.port, 3)
+    registry.configure(PROJECT, {})
+    await registry.start(PROJECT)
+    const port = registry.state(PROJECT)?.port ?? 0
+
+    /* Started first, answered last: this is the row the window will pass. */
+    const slow = fetch(`http://127.0.0.1:${String(port)}/slow`).catch(() => undefined)
+    await vi.waitFor(() => {
+      expect(registry.journal(PROJECT)?.rows.length).toBe(1)
+    })
+
+    for (const path of ['/a', '/b', '/c']) {
+      const answer = await fetch(`http://127.0.0.1:${String(port)}${path}`)
+      await answer.arrayBuffer()
+    }
+    await vi.waitFor(() => {
+      expect(registry.journal(PROJECT)?.rows.length).toBe(3)
+    })
+
+    held.release()
+    await slow
+    /*
+     * The settle runs on a microtask after the body is buffered, so a bare
+     * assertion here would race it — and racing it means asserting before the
+     * thing under test has happened, which passes for the wrong reason.
+     */
+    await new Promise((resolve) => {
+      setTimeout(resolve, 50)
+    })
+
+    const rows = registry.journal(PROJECT)?.rows ?? []
+    const seqs = rows.map((row) => row.seq)
+    expect(rows.length).toBe(3)
+    /* Ascending is the invariant the whole list rests on. */
+    expect([...seqs].sort((a, b) => a - b)).toEqual(seqs)
+    /* And the trimmed row is gone rather than sitting at the end. */
+    expect(rows.some((row) => row.source === 'http' && row.u.endsWith('/slow'))).toBe(false)
   })
 })
 

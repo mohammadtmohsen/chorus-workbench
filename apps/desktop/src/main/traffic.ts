@@ -1085,6 +1085,23 @@ export class TrafficService {
     if (at === null) this.seq = seq
     const row: TrafficRow = { ...entry, seq }
     const existing = this.rows.findIndex((each) => each.seq === seq)
+    /*
+     * **A settle for a row the window has already trimmed is dropped, not
+     * appended.**
+     *
+     * `at` is the sequence the request was given when it started. A row is only
+     * ever trimmed from the front, so a request slow enough to outlive the whole
+     * window settles with no row left to rewrite — and pushing it here would put
+     * the oldest sequence in the newest position, which is a list that lies
+     * about its own order.
+     *
+     * Nothing is lost by dropping it. The window is a bound on what is *shown*,
+     * and this row was already outside it: appending would undo the trim that
+     * removed it. The exchange is still in the capture store while the service
+     * lives, so the only thing given up is a listing that would have been in the
+     * wrong place.
+     */
+    if (at !== null && existing === -1) return seq
     if (existing === -1) this.rows.push(row)
     else this.rows[existing] = row
     const overflow = this.rows.length - this.capture

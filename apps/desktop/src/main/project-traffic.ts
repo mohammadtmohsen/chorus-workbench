@@ -580,12 +580,29 @@ export class ProjectTrafficRegistry {
    */
   private append(entry: Entry, rows: readonly TrafficRow[]): void {
     if (rows.length === 0) return
+    const stored: TrafficRow[] = []
     for (const row of rows) {
       const at = entry.journal.findIndex((each) => each.seq === row.seq)
+      /*
+       * **The same rule the service applies one layer down, and the renderer a
+       * layer above: a settle for a row this journal has trimmed is dropped.**
+       *
+       * `entry.seq` is the highest sequence ever seen here, so a row at or below
+       * it that is not in the journal is one the window has already let go —
+       * it can only be a late settle. Appending it would carry the oldest
+       * sequence into the newest position, which is the ordering the whole list
+       * depends on.
+       *
+       * It is not emitted either. A push carrying a row the journal does not
+       * hold would draw a row a later read of this same journal cannot find.
+       */
+      if (at === -1 && row.seq <= entry.seq) continue
       if (at === -1) entry.journal.push(row)
       else entry.journal[at] = row
       if (row.seq > entry.seq) entry.seq = row.seq
+      stored.push(row)
     }
+    if (stored.length === 0) return
     const overflow = entry.journal.length - this.capture
     if (overflow > 0) entry.journal.splice(0, overflow)
     this.trimOverall()
@@ -594,7 +611,7 @@ export class ProjectTrafficRegistry {
       projectId: entry.projectId,
       captureId: entry.captureId,
       seq: entry.seq,
-      rows,
+      rows: stored,
     })
   }
 
