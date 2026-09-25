@@ -7611,6 +7611,20 @@ input::placeholder {
 .traffic-rows {
   display: grid;
   flex: 1 1 auto;
+  /*
+   * **`start`, and it is a regression fix rather than a preference.**
+   *
+   * The default is `stretch`, and a grid taller than its content shares the
+   * leftover height out among auto-sized rows — so thirteen rows in a tall box
+   * came out about seventy pixels apart. It only shows when the content is
+   * shorter than the box, which is why a fixture that always loads sixty rows
+   * never saw it.
+   *
+   * The gap stays at six: that is what the rows were spaced by before any of
+   * this, as `var(--step)` of padding above and below each one, and the seventy
+   * was the stretch rather than the spacing.
+   */
+  align-content: start;
   grid-template-columns:
     max-content minmax(max-content, 1fr)
     max-content max-content max-content;
@@ -7666,16 +7680,39 @@ input::placeholder {
   color: var(--tok-removed);
 }
 
-.traffic-status[data-class='2xx'] {
+/*
+ * `data-class` is on the button, the row's box, rather than on the status cell.
+ *
+ * The endpoint is meant to go red with the status, and a cell cannot be coloured
+ * from a sibling's attribute — so the two would have had to carry the same
+ * attribute twice, from one call, which is one edit away from disagreeing about
+ * whether a call failed. On the row, both cells read it and neither can drift
+ * from the other. The other candidate was the outcome badge's `data-outcome`,
+ * and it is a different fact: it says the exchange went wrong, where this says
+ * the backend answered with a failure. A 404 is the second and not the first,
+ * which is the case the user was looking at.
+ */
+.traffic-row-button[data-class='2xx'] .traffic-status {
   color: var(--tok-added);
 }
 
-.traffic-status[data-class='3xx'] {
+.traffic-row-button[data-class='3xx'] .traffic-status {
   color: var(--tok-property);
 }
 
-.traffic-status[data-class='4xx'],
-.traffic-status[data-class='5xx'] {
+.traffic-row-button[data-class='4xx'] .traffic-status,
+.traffic-row-button[data-class='5xx'] .traffic-status {
+  color: var(--tok-removed);
+}
+
+/*
+ * The endpoint, in the same red. Three class selectors against `.traffic-url`'s
+ * one, so it wins on specificity and this stylesheet keeps its no-`!important`
+ * rule. 3xx is deliberately left out: a redirect is not a failed call, and the
+ * status cell colours it separately for that reason.
+ */
+.traffic-row-button[data-class='4xx'] .traffic-url,
+.traffic-row-button[data-class='5xx'] .traffic-url {
   color: var(--tok-removed);
 }
 

@@ -570,9 +570,7 @@ export function TrafficPanel(props: {
         <span className="traffic-url" title={row.u}>
           {row.u}
         </span>
-        <span className="traffic-status" data-class={statusClassOf(row)}>
-          {row.status ?? '—'}
-        </span>
+        <span className="traffic-status">{row.status ?? '—'}</span>
         {outcomeBadge(row)}
         <span className="traffic-note">
           {row.transport !== null && <span className="traffic-transport">{row.transport}</span>}
@@ -996,6 +994,12 @@ export function TrafficPanel(props: {
                     aria-pressed={row.seq === selectedSeq}
                     /* What the arrow walk selects by: the button is the row's box, so it is the row. */
                     data-seq={row.seq}
+                    /*
+                     * On the row rather than on the status cell, so the endpoint
+                     * can read the same signal the status is coloured by. See
+                     * the rule in `styles.css`.
+                     */
+                    data-class={statusClassOf(row)}
                     onClick={() => {
                       setSelectedSeq((current) => (current === row.seq ? null : row.seq))
                     }}
