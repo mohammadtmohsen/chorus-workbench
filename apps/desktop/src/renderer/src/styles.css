@@ -7323,7 +7323,9 @@ input::placeholder {
 
 .traffic-note {
   display: flex;
+  min-width: 0;
   gap: var(--step);
+  overflow: hidden;
 }
 
 /*
@@ -7656,19 +7658,84 @@ input::placeholder {
    * was the stretch rather than the spacing.
    */
   align-content: start;
+  /*
+   * **Bounded, so the row can never be wider than the list.**
+   *
+   * The first three are `max-content` because they are bounded by their own
+   * vocabulary — a method is one of eight words, a status is three digits, an
+   * outcome is one of five phrases — so they size to content and stay aligned
+   * without ever growing past a few ems.
+   *
+   * The endpoint and the trailing detail are not bounded by anything: a URL is
+   * as long as the request, and a `code` is whatever the backend chose to call
+   * the failure. `minmax(0, …fr)` is what keeps those from widening the row —
+   * `max-content` on the endpoint is what made every row 1,997px wide inside a
+   * 417px panel and sent the whole table sideways.
+   *
+   * The endpoint takes the larger share because it is the column people read;
+   * the detail takes the rest and gives it up first.
+   */
   grid-template-columns:
-    max-content minmax(max-content, 1fr)
-    max-content max-content max-content;
+    max-content minmax(0, 3fr)
+    max-content max-content minmax(0, 1fr);
   column-gap: var(--step);
   row-gap: calc(var(--step) * 2);
   min-width: 0;
   margin: 0;
   padding: var(--step) calc(var(--step) * 3);
-  overflow: auto;
+  /* Vertical only. The row is bounded now, so there is nothing to scroll to. */
+  overflow-x: hidden;
+  overflow-y: auto;
   font-family: var(--mono);
   font-size: 11px;
   white-space: nowrap;
   list-style: none;
+}
+
+/*
+ * The header, in the same grid and adopting the same tracks.
+ *
+ * A grid item of the list rather than a block above it, because `subgrid` is the
+ * only thing that makes its columns the rows' columns — a header outside this
+ * element would be measured against the panel and drift from the rows the moment
+ * a track changed size. `sticky` keeps it in view while the list scrolls; a
+ * header visible only to somebody who has not scrolled is worse than none.
+ *
+ * The background is not decoration: without one the rows scroll underneath it
+ * and the labels sit on top of the data.
+ */
+.traffic-head-row {
+  display: grid;
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  grid-column: 1 / -1;
+  grid-template-columns: subgrid;
+  align-items: baseline;
+  background: var(--bg-canvas);
+  color: var(--text-muted);
+}
+
+.traffic-head-cell {
+  min-width: 0;
+  padding-bottom: var(--step);
+  overflow: hidden;
+  font-weight: 500;
+  text-overflow: ellipsis;
+}
+
+/*
+ * A rule between the columns and not around them.
+ *
+ * `* + *` is the whole trick: every cell except the first carries a left border,
+ * so the first column has nothing on its left to double up against the panel's
+ * own edge and the last has nothing on its right. The padding is what keeps the
+ * rule off both neighbours' text.
+ */
+.traffic-row-button > * + *,
+.traffic-head-row > * + * {
+  padding-left: calc(var(--step) * 2);
+  border-left: 1px solid var(--border-default);
 }
 
 /*
@@ -7779,8 +7846,24 @@ input::placeholder {
  * `max-content`, so there is nothing to clip against, and clipping is the
  * behaviour being removed.
  */
+/*
+ * **Truncated again, and it is the origin stripping that makes that acceptable.**
+ *
+ * This was `overflow: hidden; text-overflow: ellipsis` before the table was
+ * un-truncated, and the argument for taking it off was that a clipped URL hides
+ * which request it is. With the origin gone every row now leads with the part
+ * that differs, so what ellipsis takes is the tail of a long path rather than
+ * the whole identity of the call — and the whole URL is still in the `title`.
+ *
+ * `min-width: 0` is what lets it shrink: a grid item's automatic minimum size is
+ * its content, and without this the `minmax(0, 3fr)` track would be floored at
+ * the longest URL and push the row wide again.
+ */
 .traffic-url {
+  min-width: 0;
+  overflow: hidden;
   color: var(--text-secondary);
+  text-overflow: ellipsis;
 }
 
 /*
@@ -7808,7 +7891,10 @@ input::placeholder {
 
 .traffic-code,
 .traffic-next {
+  min-width: 0;
+  overflow: hidden;
   color: var(--text-primary);
+  text-overflow: ellipsis;
   white-space: nowrap;
 }
 
@@ -7819,7 +7905,10 @@ input::placeholder {
  * instead of the backend saying anything.
  */
 .traffic-transport {
+  min-width: 0;
+  overflow: hidden;
   color: var(--text-secondary);
+  text-overflow: ellipsis;
   white-space: nowrap;
 }
 
@@ -7889,8 +7978,16 @@ input::placeholder {
   border-left: 2px solid var(--border-strong);
 }
 
+/*
+ * A log line truncates, which is a consequence rather than a request: with no
+ * horizontal scroll a line longer than the list has to end somewhere, and the
+ * terminal this came from already wraps it in the mirror it is read from.
+ */
 .traffic-line {
+  min-width: 0;
+  overflow: hidden;
   color: var(--text-secondary);
+  text-overflow: ellipsis;
 }
 
 .traffic-exit {

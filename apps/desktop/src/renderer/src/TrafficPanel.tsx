@@ -20,6 +20,7 @@ import {
   followsRows,
   outcomeOf,
   pageOf,
+  pathOf,
   statusClassOf,
   type RowScroll,
   type TrafficOutcome,
@@ -564,7 +565,7 @@ export function TrafficPanel(props: {
           {row.m}
         </span>
         <span className="traffic-url" title={row.u}>
-          {row.u}
+          {pathOf(row.u)}
         </span>
         <span className="traffic-status">{row.status ?? '—'}</span>
         {outcomeBadge(row)}
@@ -975,6 +976,29 @@ export function TrafficPanel(props: {
       ) : (
         <div className="traffic-split">
           <ul className="traffic-rows" ref={rowsList} onKeyDown={onRowKeyDown}>
+            {/*
+              The header is a grid item of the list, not a block above it.
+
+              It adopts the same `subgrid` tracks every row does, which is the
+              only reason its columns line up with theirs — a header outside this
+              element would be laid out against the panel's width and drift from
+              the rows the moment a column changed size. `sticky` keeps it there
+              while the list scrolls; without that it is visible only to somebody
+              who has not scrolled yet, which is nobody who needs it.
+
+              No column roles. The rows are buttons wrapping five cells, and a
+              `row` may only contain `cell`s — so marking this up as a table
+              would mean rebuilding focus and selection on `<tr>`, which is the
+              trade this layout was chosen to avoid. The labels are ordinary
+              text, and the first list item a screen reader meets.
+            */}
+            <li className="traffic-head-row">
+              <span className="traffic-head-cell">{t('traffic.columnMethod')}</span>
+              <span className="traffic-head-cell">{t('traffic.columnEndpoint')}</span>
+              <span className="traffic-head-cell">{t('traffic.columnStatus')}</span>
+              <span className="traffic-head-cell">{t('traffic.columnOutcome')}</span>
+              <span className="traffic-head-cell">{t('traffic.columnDetail')}</span>
+            </li>
             {shown.map((row) => (
               <li
                 className={

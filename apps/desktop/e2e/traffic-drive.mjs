@@ -1048,116 +1048,130 @@ try {
       })())`)
     )
     /*
-     * **This check used to claim the opposite, and the claim is what changed.**
+     * **Two checks inverted here, and the claims are what changed.**
      *
-     * It asked the longest trailing value to be one line tall, `overflow:
-     * hidden`, `text-overflow: ellipsis` and `scrollWidth > clientWidth` — a
-     * value deliberately cut off. That was built earlier the same day and is now
-     * the thing being removed, so asserting it would pass only if the change had
-     * not happened.
+     * The first asked that no cell hide its text and that the list be *wider*
+     * than its window — the un-truncated, sideways-scrolling table. The second
+     * asked that scrolling to the far end reveal the longest URL, which only
+     * means anything if there is a far end to scroll to. The user has now seen
+     * that table and asked for the opposite: bounded rows, no horizontal scroll,
+     * and the endpoint ellipsised inside it.
      *
-     * What replaces it is the same measurement pointed the other way: no cell in
-     * the table hides any of its text, and the list scrolls sideways so the
-     * widest row is reachable rather than merely uncut. Every cell of every
-     * request row, not one sample — a column that clips is a column that clips,
-     * and sampling the longest value would miss a short one that still overflowed.
+     * So this is the same measurement pointed the other way. Every row fits the
+     * list, the list does not scroll sideways, and the longest endpoint is
+     * genuinely clipped rather than merely short — with the whole URL still in
+     * the title, which is what keeps the cut from being a loss.
      */
-    const overflowed = JSON.parse(
-      await app.evaluate(`JSON.stringify((() => {
-        const list = document.querySelector('.traffic-rows')
-        const rows = [...document.querySelectorAll('.traffic-row-button')]
-        const cells = rows.flatMap((row) => [...row.children])
-        return {
-          rows: rows.length,
-          cells: cells.length,
-          clipped: cells
-            .filter((cell) => cell.scrollWidth > cell.clientWidth + 1)
-            .map((cell) => cell.className + ':' + (cell.innerText ?? '').slice(0, 24)),
-          hiding: cells
-            .filter((cell) => getComputedStyle(cell).overflow === 'hidden')
-            .map((cell) => cell.className),
-          ellipsised: cells
-            .filter((cell) => getComputedStyle(cell).textOverflow === 'ellipsis')
-            .map((cell) => cell.className),
-          listClient: list === null ? null : list.clientWidth,
-          listScroll: list === null ? null : list.scrollWidth
-        }
-      })())`)
-    )
-    say('what the table needs to show everything', overflowed)
-    check(
-      'no cell hides its text, and the list is wider than its own window',
-      overflowed.rows >= 2 &&
-        overflowed.cells >= overflowed.rows * 5 &&
-        overflowed.clipped.length === 0 &&
-        overflowed.hiding.length === 0 &&
-        overflowed.ellipsised.length === 0 &&
-        overflowed.listScroll > overflowed.listClient,
-      `clipped [${overflowed.clipped.join(', ')}] hidden [${overflowed.hiding.join(', ')}] ellipsised [${overflowed.ellipsised.join(', ')}] list ${String(overflowed.listScroll)} in ${String(overflowed.listClient)}`
-    )
-
-    /*
-     * Uncut is not the same as reachable, and only this half proves the scroll.
-     * The longest row is the one with the 200-character segment in it, so
-     * scrolling to the far end has to put its last cell inside the list's own
-     * box — a list that overflows but cannot be scrolled all the way would pass
-     * everything above and still hide the end of the URL.
-     */
-    const reach = JSON.parse(
+    const bounded = JSON.parse(
       await app.evaluate(`JSON.stringify((() => {
         const list = document.querySelector('.traffic-rows')
         const rows = [...document.querySelectorAll('.traffic-row-button')]
         if (list === null || rows.length === 0) return null
-        const widest = rows.reduce((best, row) =>
-          row.getBoundingClientRect().width > best.getBoundingClientRect().width ? row : best
+        const endpoints = [...document.querySelectorAll('.traffic-row-button .traffic-url')]
+        const longest = endpoints.reduce(
+          (best, node) =>
+            (node.innerText ?? '').length > (best?.innerText ?? '').length ? node : best,
+          null
         )
-        const before = list.scrollLeft
-        list.scrollLeft = list.scrollWidth
-        const box = list.getBoundingClientRect()
-        const last = widest.lastElementChild
-        const end = last === null ? null : last.getBoundingClientRect()
-        const answer = {
-          moved: list.scrollLeft > before,
-          atEnd: end !== null && end.right <= box.right + 1,
-          overhang: end === null ? null : Math.round(end.right - box.right),
-          url: (widest.querySelector('.traffic-url')?.innerText ?? '').length
+        return {
+          rows: rows.length,
+          listClient: list.clientWidth,
+          listScroll: list.scrollWidth,
+          widest: Math.round(
+            Math.max(...rows.map((row) => row.getBoundingClientRect().width))
+          ),
+          drawn: longest === null ? null : (longest.innerText ?? '').length,
+          title: longest === null ? null : (longest.getAttribute('title') ?? '').length,
+          clipped: longest === null ? null : longest.scrollWidth > longest.clientWidth + 1,
+          ellipsis: longest === null ? null : getComputedStyle(longest).textOverflow
         }
-        list.scrollLeft = before
-        return answer
       })())`)
     )
-    say('scrolling to the end of the widest row', reach)
+    say('the row against the box it has to fit', bounded)
     check(
-      'and scrolling to the far end actually reveals the longest URL',
-      reach !== null && reach.moved && reach.atEnd && reach.url > 100,
-      JSON.stringify(reach)
+      'every row fits the list, and the longest endpoint is ellipsised inside it',
+      bounded !== null &&
+        bounded.listScroll <= bounded.listClient + 1 &&
+        bounded.widest <= bounded.listClient + 1 &&
+        bounded.clipped === true &&
+        bounded.ellipsis === 'ellipsis' &&
+        bounded.drawn !== null &&
+        bounded.title !== null &&
+        bounded.title > bounded.drawn,
+      `list ${String(bounded?.listScroll)} in ${String(bounded?.listClient)}, widest row ${String(bounded?.widest)}, endpoint drawn ${String(bounded?.drawn)} of a title of ${String(bounded?.title)}`
     )
-    const edges = JSON.parse(
+
+    /*
+     * What replaced the sideways scroll: the origin is not drawn, and the whole
+     * URL is still reachable.
+     *
+     * Both halves matter and the second is the half a later edit breaks — the
+     * inspector draws the same row's `u` and must keep drawing it whole, so this
+     * is the check that says "table only" was the request and stayed the
+     * behaviour.
+     */
+    const origins = JSON.parse(
       await app.evaluate(`JSON.stringify((() => {
-        const row = document.querySelector('.traffic-row-button')
-        if (row === null) return null
-        const cells = [...row.children]
-        return cells.map((cell) => {
-          const box = cell.getBoundingClientRect()
-          const range = document.createRange()
-          range.selectNodeContents(cell)
-          const text = range.getBoundingClientRect()
-          return {
-            cell: cell.className,
-            cellLeft: Math.round(box.left),
-            textLeft: Math.round(text.left),
-            same: Math.abs(text.left - box.left) <= 1
-          }
-        })
+        const endpoints = [...document.querySelectorAll('.traffic-row-button .traffic-url')]
+        const drawn = endpoints.map((node) => (node.innerText ?? '').trim())
+        const titles = endpoints.map((node) => node.getAttribute('title') ?? '')
+        const inspector = document.querySelector('.traffic-inspector .traffic-head .traffic-url')
+        return {
+          rows: endpoints.length,
+          withScheme: drawn.filter((text) => text.includes('://')).length,
+          notPath: drawn.filter((text) => !text.startsWith('/')).length,
+          titlesWhole: titles.filter((text) => text.includes('://')).length,
+          inspector: inspector === null ? null : (inspector.innerText ?? '').trim()
+        }
       })())`)
     )
-    say("where each cell's text starts", edges)
+    say('the endpoint with the origin taken off', origins)
     check(
-      "every cell's text starts at its column's left edge",
-      edges !== null && edges.length === 5 && edges.every((each) => each.same),
-      edges === null
-        ? 'no row'
-        : edges.map((each) => `${each.cell}:${String(each.textLeft - each.cellLeft)}`).join(' ')
+      'the origin is gone from the table, the title keeps it, and the inspector still shows it',
+      origins.rows >= 2 &&
+        origins.withScheme === 0 &&
+        origins.notPath === 0 &&
+        origins.titlesWhole === origins.rows &&
+        origins.inspector !== null &&
+        origins.inspector.includes('://'),
+      `${String(origins.rows)} endpoints, ${String(origins.withScheme)} drawn with a scheme, ${String(origins.notPath)} not a path, ${String(origins.titlesWhole)} titles whole, inspector ${JSON.stringify(origins.inspector)}`
+    )
+
+    /*
+     * The claim that survives unchanged, and the one that proves the header:
+     * every column sits on the same line in every row, and the header is on
+     * those lines too.
+     *
+     * The check this replaces asserted each cell's text started at its own box's
+     * left edge — which the inter-column rules changed, since four of the five
+     * cells now have a border and its padding. The edges moved; the lines they
+     * moved to are shared, and that is what was ever worth asserting.
+     */
+    const columns = JSON.parse(
+      await app.evaluate(`JSON.stringify((() => {
+        const leftsOf = (root) =>
+          root === null
+            ? null
+            : [...root.children].map((cell) => Math.round(cell.getBoundingClientRect().left))
+        const rows = [...document.querySelectorAll('.traffic-row-button')]
+        const head = document.querySelector('.traffic-head-row')
+        if (rows.length < 2 || head === null) return null
+        return {
+          cells: [...head.children].length,
+          head: leftsOf(head),
+          first: leftsOf(rows[0]),
+          second: leftsOf(rows[1])
+        }
+      })())`)
+    )
+    say('the column lines, header and rows', columns)
+    check(
+      'every column sits on one line across rows, and the header sits on those lines',
+      columns !== null &&
+        columns.cells === 5 &&
+        columns.head.join(',') === columns.first.join(',') &&
+        columns.first.join(',') === columns.second.join(','),
+      `head [${(columns?.head ?? []).join(', ')}] first [${(columns?.first ?? []).join(', ')}] second [${(columns?.second ?? []).join(', ')}]`
     )
 
     say('literal comments in the rows', leaked)
@@ -1223,14 +1237,33 @@ try {
      * nothing has selected it, which is the state the walk starts from. The
      * three after it are the arrows, and every one of them has to have moved
      * both — focus, selection, and the row the inspector names.
+     *
+     * **The comparison changed with the table, and it had to.** This asserted
+     * the inspector's header text equalled the row's drawn text, which held
+     * while both drew `row.u`. The table now draws the path with the origin
+     * stripped and the inspector still draws the whole URL on purpose, so the
+     * claim is that the header *ends with* the path the row shows — and that
+     * what precedes it is one and the same origin at every step, which is what
+     * stops a matching suffix from standing in for the wrong row.
      */
     const steps = walk.slice(1)
+    const prefixes = steps
+      .filter((each) => each.head !== null && each.url !== null)
+      .map((each) => (each.head ?? '').slice(0, (each.head ?? '').length - (each.url ?? '').length))
     check(
       'the arrows walk the rows, and the inspector names the row they land on',
       walk.map((each) => each.at).join(',') === '0,1,2,1' &&
         steps.length === 3 &&
         steps.every((each) => each.pressed === each.at) &&
-        steps.every((each) => each.url !== null && each.url !== '' && each.head === each.url),
+        steps.every(
+          (each) =>
+            each.url !== null &&
+            each.url !== '' &&
+            each.head !== null &&
+            each.head.endsWith(each.url)
+        ) &&
+        prefixes.length === 3 &&
+        new Set(prefixes).size === 1,
       walk
         .map(
           (each) => `${String(each.at)}/${String(each.pressed)}:${(each.head ?? 'none').slice(-28)}`
@@ -1250,6 +1283,44 @@ try {
       await fetch(`http://127.0.0.1:${String(port)}/fill/${String(i)}`)
     }
     await wait(2_500)
+
+    /*
+     * **The header sticks, and this is measured rather than assumed.**
+     *
+     * `position: sticky` on a grid item of a list whose rows are `display:
+     * contents` is exactly the kind of rule that reads correctly in a stylesheet
+     * and does nothing on screen — a sticky element sticks within its scrolling
+     * ancestor, and whether this one has a scrollport to stick in depends on a
+     * structure two elements away. A header that scrolls away is visible only to
+     * somebody who has not scrolled yet, which is nobody who needs it.
+     *
+     * `scrolled > 100` is the control: without it this passes on a list that
+     * never moved, which is the failure mode the whole check exists to catch.
+     */
+    const sticky = JSON.parse(
+      await app.evaluate(`JSON.stringify((() => {
+        const list = document.querySelector('.traffic-rows')
+        const head = document.querySelector('.traffic-head-row')
+        if (list === null || head === null) return null
+        const offset = () =>
+          Math.round(head.getBoundingClientRect().top - list.getBoundingClientRect().top)
+        const atRest = offset()
+        const before = list.scrollTop
+        list.scrollTop = 400
+        const scrolled = Math.round(list.scrollTop)
+        const whileScrolled = offset()
+        list.scrollTop = before
+        return { atRest, scrolled, whileScrolled }
+      })())`)
+    )
+    say('the header while the rows scroll under it', sticky)
+    check(
+      'the header holds the top of the list while the rows scroll under it',
+      sticky !== null &&
+        sticky.scrolled > 100 &&
+        Math.abs(sticky.whileScrolled - sticky.atRest) <= 2,
+      `at rest ${String(sticky?.atRest)}px from the top; scrolled ${String(sticky?.scrolled)}px it is ${String(sticky?.whileScrolled)}px`
+    )
 
     /*
      * **The bottom, stated rather than inherited.**

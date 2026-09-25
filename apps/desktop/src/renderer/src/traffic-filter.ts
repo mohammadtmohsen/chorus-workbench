@@ -46,6 +46,32 @@ export const statusClassOf = (row: HttpRow): string => {
   return `${String(Math.floor(row.status / 100))}xx`
 }
 
+/**
+ * What the table draws for an endpoint: the path and query, without the origin.
+ *
+ * Every row of a real capture begins with the same twenty-six characters —
+ * `http://88.99.104.107:30081` — so the part that differs starts a quarter of the
+ * way across the line, and the origin is the same string on every row. Dropping
+ * it is what makes the column narrow enough to bound.
+ *
+ * **Display only, and deliberately not a change to `row.u`.** `isRefusal` tests
+ * `isAbsolute(row.u)` and `filterRows` searches the whole value, so searching
+ * for the host still has to find its rows even though the host is no longer
+ * drawn. The full URL stays in the cell's `title`, and the inspector is
+ * untouched — the request was for the table only.
+ *
+ * A line that is not an absolute URL — the 400 a proxy request without a target
+ * produces — comes back as it is, because there is no origin to remove.
+ */
+export const pathOf = (url: string): string => {
+  try {
+    const parsed = new URL(url)
+    return `${parsed.pathname}${parsed.search}`
+  } catch {
+    return url
+  }
+}
+
 export const filterRows = (
   rows: readonly TrafficRowShape[],
   search: string
