@@ -1,6 +1,7 @@
 /** @vitest-environment jsdom */
 import { act, cleanup, fireEvent, render } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import type { TrafficRowShape } from '../../shared/ipc.js'
 import type { TrafficState } from '../../shared/traffic-ipc.js'
 import { TrafficPanel } from './TrafficPanel.js'
 
@@ -47,18 +48,37 @@ const state = (over: Partial<TrafficState> = {}): TrafficState => ({
 
 type Chorus = typeof window.chorus
 
-const bridge = (configure: Chorus['configureTraffic']): Partial<Chorus> => ({
+const bridge = (
+  configure: Chorus['configureTraffic'],
+  rows: Record<string, readonly TrafficRowShape[]> = {}
+): Partial<Chorus> => ({
   onTraffic: () => () => undefined,
-  attachTraffic: () =>
+  /* Per project, because the attach is what carries a project's rows. */
+  attachTraffic: (request) =>
     Promise.resolve({
-      subscriptionId: 'sub-1',
-      captureId: 'cap-1',
-      rows: [],
-      seq: 0,
+      subscriptionId: `sub-${request.projectId}`,
+      captureId: `cap-${request.projectId}`,
+      rows: [...(rows[request.projectId] ?? [])],
+      seq: rows[request.projectId]?.at(-1)?.seq ?? 0,
       state: state(),
     }),
   ackTraffic: () => Promise.resolve({ ok: true as const }),
   detachTraffic: () => Promise.resolve({ ok: true as const }),
+  /*
+   * Needed as soon as a row exists, because a selected row mounts the
+   * inspector. `not-found` rather than a detail: what these tests assert is
+   * which row is selected, and an empty inspector is the shortest way to have
+   * one without describing an exchange.
+   */
+  readTrafficDetail: (request) =>
+    Promise.resolve({
+      kind: 'not-found' as const,
+      key: {
+        projectId: request.projectId,
+        captureId: request.captureId,
+        requestId: request.requestId,
+      },
+    }),
   readTrafficLegacy: () =>
     Promise.resolve({
       completed: true,
@@ -122,8 +142,16 @@ describe('a refused change to Forward to', () => {
     const hint = hintFor(field)
     expect(hint.dataset['refused']).toBe('true')
     expect(hint.textContent).toBe('traffic.capturingChange')
-    /* And not also at the foot of the panel — one fact, one place. */
-    expect(document.querySelectorAll('.traffic-stopped')).toHaveLength(0)
+    /*
+     * And not also at the foot of the panel — one fact, one place.
+     *
+     * Asserted on the refusal's own words rather than on the class: the empty
+     * inspector draws a `.traffic-stopped` of its own, so counting the class
+     * would now fail for a reason that has nothing to do with where a refusal
+     * is reported.
+     */
+    const shown = [...document.querySelectorAll('.traffic-stopped')].map((node) => node.textContent)
+    expect(shown).not.toContain('traffic.capturingChange')
   })
 
   it('takes the new address and goes back to the ordinary hint when it is accepted', async () => {
@@ -158,5 +186,56 @@ describe('a refused change to Forward to', () => {
     await commit(port, '39999')
     expect(port.value).toBe('30100')
     expect(hintFor(port).dataset['refused']).toBe('true')
+  })
+})
+
+/** One settled request. Enough of the shape for a row to draw and be selected. */
+const httpRow = (seq: number): TrafficRowShape => ({
+  source: 'http',
+  seq,
+  requestId: `r${String(seq)}`,
+  m: 'GET',
+  u: `http://127.0.0.1:9000/n/${String(seq)}`,
+  dpop: false,
+  status: 200,
+  aborted: false,
+  parsed: true,
+  code: 'OK',
+  nextAction: null,
+  transport: null,
+})
+
+describe('switching project', () => {
+  /*
+   * The case the first version of the auto-selection missed, and it was missed
+   * in the reasoning rather than in the code: nothing clears the stream when the
+   * project changes, so for one round trip `rows` still belongs to the project
+   * being left. Reading them armed the guard against the *new* project while
+   * selecting a stale row — and the reset effect then cleared that selection, so
+   * the new project never selected anything at all and the inspector stayed
+   * empty until somebody clicked.
+   */
+  it('selects the first call of the project being switched to', async () => {
+    Object.assign(
+      installed,
+      bridge(() => Promise.resolve({ state: state(), failure: null }), {
+        p1: [httpRow(1)],
+        p2: [httpRow(7)],
+      })
+    )
+    const { container, rerender } = render(<TrafficPanel projectId="p1" terminals={[]} />)
+    await act(() => Promise.resolve())
+
+    const chosen = () =>
+      container
+        .querySelector('.traffic-row-button[aria-pressed="true"]')
+        ?.getAttribute('data-seq') ?? null
+    expect(chosen()).toBe('1')
+
+    rerender(<TrafficPanel projectId="p2" terminals={[]} />)
+    await act(() => Promise.resolve())
+    await act(() => Promise.resolve())
+
+    expect(chosen()).toBe('7')
   })
 })

@@ -703,6 +703,7 @@
     "unresolved": "The saved connection could not be read, so it cannot be assigned yet.",
     "actionFailed": "That did not work.",
     "detailTitle": "Request detail",
+    "noSelection": "Pick a call above to see its request and response.",
     "detailLoading": "Loading what was captured…",
     "gone": {
       "failed": "That detail could not be read.",

@@ -119,6 +119,60 @@ export function TrafficPanel(props: {
   /** The newest row's sequence: a new row, as opposed to a pending one rewritten in place. */
   const newestSeq = stream.rows.at(-1)?.seq ?? null
 
+  /*
+   * **The project whose first call has already been selected for the reader.**
+   *
+   * The inspector sits below the list and describes nothing until a row is
+   * chosen, so a started capture used to open on a bare table with the detail
+   * region absent — and then jump to its share of the panel the moment anything
+   * was clicked. Selecting the first call as it arrives removes the click and
+   * the jump together.
+   *
+   * **Once, and against the project rather than against "nothing is selected".**
+   * A guard that re-fired whenever the selection was empty would walk the
+   * inspector through every arriving call, firing a detail read for each, and
+   * would undo a deliberate deselect the instant it happened — clicking the
+   * selected row closes it, and it would reopen behind the person.
+   *
+   * Holding the project id also answers the other two transitions without a
+   * second rule: an emptied list clears it, so the next call after a clear is
+   * the first call of a fresh run and gets the same treatment; and a different
+   * project never matches, so its first call is selected too.
+   *
+   * At the transition there is exactly one row, so "the first" and "the newest"
+   * are the same row and there is nothing to choose between — which is what
+   * keeps this from fighting the list's own following of the bottom.
+   */
+  const firstChosenFor = useRef<string | null>(null)
+  useEffect(() => {
+    /*
+     * **Rows belonging to another project are not this project's first call.**
+     *
+     * Nothing clears the stream when the project changes — the attach that
+     * replaces it resolves a round trip later — so for that window `rows` is
+     * still the project being left. Reading them here armed the ref against the
+     * *new* project while selecting a stale row, and the reset effect below then
+     * cleared that selection. When the new project's rows finally arrived the
+     * ref already matched and this returned without selecting: switching
+     * projects left an empty inspector, which is the behaviour this exists to
+     * remove.
+     *
+     * Guarding on the stream's own project is what makes that impossible rather
+     * than unlikely. Clearing the ref in the reset effect, or moving that effect
+     * above this one, would both work — and both would hold only while the two
+     * effects stayed in that order, which is what made it fragile to begin with.
+     */
+    if (stream.projectId !== projectId) return
+    const first = stream.rows.find((row) => row.source === 'http')
+    if (first === undefined) {
+      firstChosenFor.current = null
+      return
+    }
+    if (firstChosenFor.current === projectId) return
+    firstChosenFor.current = projectId
+    setSelectedSeq(first.seq)
+  }, [stream.projectId, stream.rows, projectId])
+
   // A selection belongs to the project's history, not to the panel: switching
   // project closes whatever was open rather than describing the wrong one. The
   // scroll follows the same rule, from the other end — a different project opens
@@ -606,6 +660,20 @@ export function TrafficPanel(props: {
             row.source === 'http' && row.seq === selectedSeq
         ) ?? null)
 
+  /* Where to send the app, before there is anything to show — used whole-panel
+   * before a capture and as the top half of the split while one is running. One
+   * value rather than two copies, which would agree until one was edited. */
+  const guidance = (
+    <div className="traffic-empty">
+      <p>
+        {capture.address === null
+          ? t('traffic.empty')
+          : t('traffic.pointAt', { host: capture.address })}
+      </p>
+      <p>{capture.source.kind === 'off' ? t('traffic.noTerminal') : t('traffic.waiting')}</p>
+    </div>
+  )
+
   return (
     <section className="traffic-panel" aria-label={t('traffic.title')}>
       <header className="traffic-head">
@@ -962,21 +1030,33 @@ export function TrafficPanel(props: {
         <p className="traffic-stopped">{failureText(failure)}</p>
       )}
 
-      {stream.rows.length === 0 ? (
-        <div className="traffic-empty">
-          <p>
-            {capture.address === null
-              ? t('traffic.empty')
-              : t('traffic.pointAt', { host: capture.address })}
-          </p>
-          <p>{capture.source.kind === 'off' ? t('traffic.noTerminal') : t('traffic.waiting')}</p>
-        </div>
-      ) : filtered.length === 0 ? (
-        <p className="traffic-stopped">{t('traffic.noMatches')}</p>
+      {/*
+        **The split is drawn from the moment a capture starts, not from the
+        moment a row arrives.**
+
+        It used to appear only once there were rows *and* something selected, so
+        a started capture opened on a table with no detail region and jumped to
+        its share of the panel on the first click. The region is now always
+        there, with its own empty state, and the first call selects itself — see
+        `firstChosenFor` above.
+
+        Before a capture the guidance still takes the whole panel. Rendering the
+        split around it would put a seventy-percent box under a sentence about
+        pointing an app at an address, which is a worse trade than the jump it
+        would avoid — and there is no jump there, because there is nothing yet
+        to jump to.
+      */}
+      {stream.rows.length === 0 && !capture.capturing ? (
+        guidance
       ) : (
         <div className="traffic-split">
-          <ul className="traffic-rows" ref={rowsList} onKeyDown={onRowKeyDown}>
-            {/*
+          {stream.rows.length === 0 ? (
+            guidance
+          ) : filtered.length === 0 ? (
+            <p className="traffic-stopped">{t('traffic.noMatches')}</p>
+          ) : (
+            <ul className="traffic-rows" ref={rowsList} onKeyDown={onRowKeyDown}>
+              {/*
               The header is a grid item of the list, not a block above it.
 
               It adopts the same `subgrid` tracks every row does, which is the
@@ -992,53 +1072,61 @@ export function TrafficPanel(props: {
               trade this layout was chosen to avoid. The labels are ordinary
               text, and the first list item a screen reader meets.
             */}
-            <li className="traffic-head-row">
-              <span className="traffic-head-cell">{t('traffic.columnMethod')}</span>
-              <span className="traffic-head-cell">{t('traffic.columnEndpoint')}</span>
-              <span className="traffic-head-cell">{t('traffic.columnStatus')}</span>
-              <span className="traffic-head-cell">{t('traffic.columnOutcome')}</span>
-              <span className="traffic-head-cell">{t('traffic.columnDetail')}</span>
-            </li>
-            {shown.map((row) => (
-              <li
-                className={
-                  row.seq === selectedSeq ? 'traffic-row traffic-row--selected' : 'traffic-row'
-                }
-                key={row.seq}
-                data-source={row.source}
-              >
-                {row.source === 'http' ? (
-                  <button
-                    type="button"
-                    className="traffic-row-button"
-                    aria-pressed={row.seq === selectedSeq}
-                    /* What the arrow walk selects by: the button is the row's box, so it is the row. */
-                    data-seq={row.seq}
-                    /*
-                     * On the row rather than on the status cell, so the endpoint
-                     * can read the same signal the status is coloured by. See
-                     * the rule in `styles.css`.
-                     */
-                    data-class={statusClassOf(row)}
-                    onClick={() => {
-                      setSelectedSeq((current) => (current === row.seq ? null : row.seq))
-                    }}
-                  >
-                    {bodyOf(row)}
-                  </button>
-                ) : (
-                  bodyOf(row)
-                )}
+              <li className="traffic-head-row">
+                <span className="traffic-head-cell">{t('traffic.columnMethod')}</span>
+                <span className="traffic-head-cell">{t('traffic.columnEndpoint')}</span>
+                <span className="traffic-head-cell">{t('traffic.columnStatus')}</span>
+                <span className="traffic-head-cell">{t('traffic.columnOutcome')}</span>
+                <span className="traffic-head-cell">{t('traffic.columnDetail')}</span>
               </li>
-            ))}
-          </ul>
-          {selected !== null && (
+              {shown.map((row) => (
+                <li
+                  className={
+                    row.seq === selectedSeq ? 'traffic-row traffic-row--selected' : 'traffic-row'
+                  }
+                  key={row.seq}
+                  data-source={row.source}
+                >
+                  {row.source === 'http' ? (
+                    <button
+                      type="button"
+                      className="traffic-row-button"
+                      aria-pressed={row.seq === selectedSeq}
+                      /* What the arrow walk selects by: the button is the row's box, so it is the row. */
+                      data-seq={row.seq}
+                      /*
+                       * On the row rather than on the status cell, so the endpoint
+                       * can read the same signal the status is coloured by. See
+                       * the rule in `styles.css`.
+                       */
+                      data-class={statusClassOf(row)}
+                      onClick={() => {
+                        setSelectedSeq((current) => (current === row.seq ? null : row.seq))
+                      }}
+                    >
+                      {bodyOf(row)}
+                    </button>
+                  ) : (
+                    bodyOf(row)
+                  )}
+                </li>
+              ))}
+            </ul>
+          )}
+          {selected !== null ? (
             <TrafficRequestInspector
               projectId={projectId}
               subscriptionId={stream.subscriptionId}
               captureId={stream.captureId}
               row={selected}
             />
+          ) : (
+            <section
+              className="traffic-inspector traffic-inspector--empty"
+              aria-label={t('traffic.detailTitle')}
+            >
+              <p className="traffic-stopped">{t('traffic.noSelection')}</p>
+            </section>
           )}
         </div>
       )}

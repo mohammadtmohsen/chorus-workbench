@@ -505,20 +505,38 @@ try {
         return row === undefined ? 'no row node' : row.outerHTML.slice(0, 400)
       })()`)
     )
-    await app.evaluate(`(() => {
-      const row = [...document.querySelectorAll('.traffic-panel *')]
-        .find((n) => (n.className || '').toString().includes('traffic-row'))
-      if (row === null) return false
-      const target = row.tagName === 'BUTTON' ? row : (row.querySelector('button') ?? row)
-      target.click()
-      return true
-    })()`)
+    /*
+     * **Nothing is clicked here any more, and that is the change under test.**
+     *
+     * The first call selects itself as it arrives, so the inspector is already
+     * describing one. The click this used to make would now land on that same
+     * selected row — and clicking the selected row closes it — leaving this
+     * check and every one below it describing an empty box. That is the failure
+     * the shape of this edit avoids, not a tidiness.
+     */
     await wait(3_000)
-    const inspector = await app.evaluate(
-      `document.querySelector('.traffic-inspector')?.innerText.slice(0, 300) ?? null`
+    const inspector = JSON.parse(
+      await app.evaluate(`JSON.stringify((() => {
+        const box = document.querySelector('.traffic-inspector')
+        const head = box === null ? null : box.querySelector('.traffic-head .traffic-url')
+        return {
+          present: box !== null,
+          empty: box === null ? null : box.classList.contains('traffic-inspector--empty'),
+          url: head === null ? null : (head.innerText ?? '').trim(),
+          selected: document.querySelectorAll('.traffic-row-button[aria-pressed="true"]').length
+        }
+      })())`)
     )
-    say('inspector', inspector)
-    check('the inspector opened', inspector !== null)
+    say('the inspector, untouched', inspector)
+    check(
+      'the inspector is already showing the first call, with nothing clicked',
+      inspector.present &&
+        inspector.empty === false &&
+        inspector.selected === 1 &&
+        inspector.url !== null &&
+        inspector.url.includes('://'),
+      `${String(inspector.selected)} selected, empty ${String(inspector.empty)}, url ${JSON.stringify((inspector.url ?? '').slice(0, 40))}`
+    )
 
     const boxes = JSON.parse(
       await app.evaluate(`(() => {
@@ -571,6 +589,69 @@ try {
      * It reads the header now rather than the row that used to repeat it — see
      * the note on the reading itself.
      */
+    /*
+     * **The shape of the two panes, which nothing here asserted before.**
+     *
+     * Every other check passed with the panes sharing the width, each taking the
+     * whole of it, and each sized to its content — the ones around this read the
+     * *contents* of the panes, and contents survive a layout change. This is the
+     * one that claims the layout.
+     *
+     * The claim is **fit, not full**: a pane is as wide as what it holds, so at
+     * least one of them is narrower than the wrapper — which is what the
+     * full-width version made impossible and what the sharing version got wrong
+     * from the other end. The wrapper's content is therefore the sum of the two
+     * rather than either one, and the wrapper is what scrolls.
+     *
+     * `hiding === 0` is the real risk of the shape rather than the widths. A pane
+     * with no horizontal scroll that is narrower than its content clips in
+     * silence, and `scrollWidth > clientWidth` is what catches it.
+     */
+    const panes = JSON.parse(
+      await app.evaluate(`JSON.stringify((() => {
+        const wrap = document.querySelector('.traffic-panes')
+        const both = [...document.querySelectorAll('.traffic-pane')]
+        if (wrap === null || both.length !== 2) return null
+        const wide = (node) => Math.round(node.getBoundingClientRect().width)
+        const visible = wide(wrap)
+        const before = wrap.scrollLeft
+        wrap.scrollLeft = wrap.scrollWidth
+        const moved = Math.round(wrap.scrollLeft)
+        wrap.scrollLeft = before
+        const widths = both.map(wide)
+        return {
+          visible,
+          panes: widths,
+          sum: widths.reduce((total, width) => total + width, 0),
+          narrower: widths.filter((width) => width < visible - 2).length,
+          content: Math.round(wrap.scrollWidth),
+          moved,
+          across: getComputedStyle(wrap).overflowX,
+          hiding: both.filter((pane) => pane.scrollWidth > pane.clientWidth + 1).length,
+          down: both.map((pane) => getComputedStyle(pane).overflowY)
+        }
+      })())`)
+    )
+    say('the two panes against their wrapper', panes)
+    /*
+     * `moved > 0` is deliberately not claimed here. Both panes are at their
+     * floor in this state — the long header values are inside a closed
+     * `details`, so they contribute nothing to the pane's width yet — and two
+     * panes of 200 fit the wrapper, so there is nothing to scroll to. The
+     * sideways scroll is proved where the content is actually wide, after the
+     * fold is opened.
+     */
+    check(
+      'each pane is sized by its content, and the wrapper is what can carry the sum',
+      panes !== null &&
+        panes.narrower >= 1 &&
+        panes.hiding === 0 &&
+        panes.content >= panes.sum &&
+        panes.across === 'auto' &&
+        panes.down.every((axis) => axis === 'auto'),
+      `panes [${(panes?.panes ?? []).join(', ')}] in ${String(panes?.visible)}, ${String(panes?.narrower)} narrower than the wrapper, content ${String(panes?.content)} for a sum of ${String(panes?.sum)}, overflow-x ${String(panes?.across)}, hiding ${String(panes?.hiding)}`
+    )
+
     const values = JSON.parse(
       await app.evaluate(`(() => {
         const read = (node) =>
@@ -597,6 +678,13 @@ try {
             document.querySelector('.traffic-inspector .traffic-head .traffic-url')
           ),
           header: read(named === undefined ? null : named.querySelector('dd')),
+          /*
+           * Which row the inspector is describing. It reads null on a row whose
+           * response has not arrived, because a pending capture has request
+           * headers and no response headers at all — and this check flaked once
+           * in three runs before that was visible, so it is worth keeping.
+           */
+          selected: document.querySelectorAll('.traffic-row-button[aria-pressed="true"]').length
         })
       })()`)
     )
@@ -783,6 +871,46 @@ try {
       'and it grows well past the summary',
       opened.foldHeight > folded.foldHeight + 40,
       `${String(folded.foldHeight)}px → ${String(opened.foldHeight)}px`
+    )
+
+    /*
+     * **The sideways scroll, proved where there is content to need it.**
+     *
+     * The panes check above runs with the fold closed, where the long header
+     * values are inside a `details` and contribute nothing to the pane's width —
+     * so both panes sit at their floor, the pair fits the wrapper, and nothing
+     * scrolls. Opening the fold is what makes the request pane wide, which is the
+     * state this claims: the pane is at its content's width, that is wider than
+     * the wrapper, and the wrapper is what moves to reach the end of it.
+     */
+    const acrossFold = JSON.parse(
+      await app.evaluate(`JSON.stringify((() => {
+        const wrap = document.querySelector('.traffic-panes')
+        const both = [...document.querySelectorAll('.traffic-pane')]
+        if (wrap === null || both.length !== 2) return null
+        const widths = both.map((pane) => Math.round(pane.getBoundingClientRect().width))
+        const before = wrap.scrollLeft
+        wrap.scrollLeft = wrap.scrollWidth
+        const moved = Math.round(wrap.scrollLeft)
+        wrap.scrollLeft = before
+        return {
+          panes: widths,
+          content: Math.round(wrap.scrollWidth),
+          visible: Math.round(wrap.getBoundingClientRect().width),
+          moved,
+          hiding: both.filter((pane) => pane.scrollWidth > pane.clientWidth + 1).length
+        }
+      })())`)
+    )
+    say('the panes once the fold is open', acrossFold)
+    check(
+      'a pane wider than the wrapper scrolls the wrapper, and hides nothing',
+      acrossFold !== null &&
+        acrossFold.panes.some((width) => width > acrossFold.visible + 1) &&
+        acrossFold.content > acrossFold.visible + 1 &&
+        acrossFold.moved > 1 &&
+        acrossFold.hiding === 0,
+      `panes [${(acrossFold?.panes ?? []).join(', ')}] in ${String(acrossFold?.visible)}, content ${String(acrossFold?.content)}, scrolled ${String(acrossFold?.moved)}, hiding ${String(acrossFold?.hiding)}`
     )
 
     /*
@@ -1893,8 +2021,16 @@ try {
     await app.evaluate(`(() => {
       const row = [...document.querySelectorAll('.traffic-row-button')]
         .find((node) => (node.innerText || '').includes('/gz'))
-      if (row !== undefined) row.click()
-      return true
+      if (row === undefined) return 'the gzipped request is not listed'
+      /*
+       * Clicked only if it is not already the selection. The clear above empties
+       * the rows, which re-arms the auto-selection for the next call — and the
+       * next call is this one, so /gz arrives already selected. Clicking a
+       * selected row closes it, so the plain click this used to make would
+       * deselect the very row the next four checks describe.
+       */
+      if (row.getAttribute('aria-pressed') !== 'true') row.click()
+      return 'showing the gzipped request'
     })()`)
     await wait(2_000)
     await wait(4_000)

@@ -7419,19 +7419,66 @@ input::placeholder {
   background: var(--bg-surface);
 }
 
+/*
+ * The empty state keeps the same share as a filled one, and that is the point
+ * rather than an oversight.
+ *
+ * A smaller share while empty would mean the region *grows* the moment a call is
+ * selected — a jump, which is the thing the empty state exists to remove. The
+ * share is what must not move; what fills it may.
+ */
+.traffic-inspector--empty {
+  padding: calc(var(--step) * 2) calc(var(--step) * 3);
+}
+
+/*
+ * **The wrapper scrolls sideways; the panes scroll down.**
+ *
+ * The two used to share the width — `flex: 1 1 0` each — which at a 417px panel
+ * gave Request and Response about 200px apiece and neither was readable. Now
+ * each pane is as wide as its content and the one you are not reading sits off
+ * to the right, so the wrapper is what moves between them. Measured with the
+ * request's headers fold open, that is a pane of 1,578px inside a wrapper of
+ * 417 scrolling 1,367px to the far side.
+ *
+ * `overflow-y: hidden` rather than `visible`, which would compute to `auto`
+ * beside an `auto` on the other axis and put a second vertical scrollbar around
+ * two panes that already have one each.
+ */
 .traffic-panes {
   display: flex;
   flex: 1 1 auto;
   gap: var(--step);
   min-height: 0;
+  overflow-x: auto;
+  overflow-y: hidden;
 }
 
 .traffic-pane {
   display: flex;
-  flex: 1 1 0;
+  /*
+   * **As wide as its content, not as wide as the inspector.**
+   *
+   * `flex: 1 1 0` shared the width, which at 417px gave each about 200 and
+   * neither was readable. `width: 100%` gave each the whole of it, which read
+   * well until a pane held nothing — a GET's request body is a heading and a
+   * copy button, and a full-width pane for it is a mostly empty box.
+   *
+   * With no width and `flex-shrink: 0` the flex base is the item's max-content
+   * size, so the pane grows to its longest line and stops. Nothing is clipped
+   * and nothing is padded out; the wrapper below carries the sum.
+   *
+   * The floor is for the empty case. Without it a request pane collapses to its
+   * heading, maybe 60px, and sits beside a response pane ten times its width.
+   * Two hundred is not a share of anything — two of them and the gap still fit
+   * the narrowest panel this opens at, so a pair of short panes does not scroll
+   * when it has no need to.
+   */
+  flex: 0 0 auto;
   flex-direction: column;
-  min-width: 0;
-  overflow: auto;
+  min-width: 200px;
+  overflow-x: hidden;
+  overflow-y: auto;
 }
 
 .traffic-pane + .traffic-pane {
@@ -7548,11 +7595,29 @@ input::placeholder {
   color: var(--text-primary);
 }
 
+/*
+ * **Untouched by the wrapper's sideways scroll, and why it can be.**
+ *
+ * This was briefly `pre-wrap` with `overflow-wrap: anywhere`, because a pane
+ * sized to the inspector clipped a long line that had nowhere to go. A pane
+ * sized to its content has the opposite problem — it is as wide as its longest
+ * line by construction — so the wrapping came back out. A tree that wraps inside
+ * a pane wide enough not to need it reads worse than one that does not, and it
+ * would be a rule nobody could explain later.
+ *
+ * `pre` here means a 2,000-character body line makes this pane 2,000 characters
+ * wide. That is the honest consequence of fitting the content, it is how a raw
+ * view behaves in an editor, and the wrapper's scroll is what reaches the end of
+ * it. No ceiling: a cap would have to clip or wrap, and both are the outcomes
+ * this shape was chosen to avoid.
+ *
+ * The hex dump arrives here too, and is the one shape where fitting matters
+ * most — its columns only mean anything while the line is whole.
+ */
 .traffic-body-text {
   flex: 1 1 auto;
   margin: 0;
   padding: 0 calc(var(--step) * 2) calc(var(--step) * 2);
-  overflow: auto;
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   font-size: 11px;
   line-height: 1.45;
