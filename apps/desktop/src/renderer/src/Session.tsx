@@ -1,5 +1,5 @@
 import { isAgentId, type AgentId } from '@chorus/shared'
-import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import type { Attachment } from './Attachments.js'
 import { NOTE_IMAGE_DRAG_TYPE, noteImageUrls } from './attach.js'
@@ -39,10 +39,12 @@ import {
   prependEvents,
   reduceEvents,
   reduceTranscriptRead,
+  transcriptRows,
   type PendingApproval,
   type PendingQuestion,
   type QuestionField,
   type TranscriptMessage,
+  type TranscriptRow,
   type TranscriptView,
 } from './transcript.js'
 
@@ -187,6 +189,7 @@ export interface SessionCarry {
    * nothing re-runs them; the card adopts what they already resolved.
    */
   readonly card?: OpenCard | undefined
+  readonly openActivity?: readonly string[]
 }
 
 /** The open aside card, as `Session` holds it and as a carry keeps it. */
@@ -345,6 +348,21 @@ export function Session(props: {
    * has already been asked.
    */
   const [askingAbout, setAskingAbout] = useState<OpenCard | null>(props.carry?.card ?? null)
+  const [openActivity, setOpenActivity] = useState<ReadonlySet<string>>(
+    () => new Set(props.carry?.openActivity ?? [])
+  )
+  const setActivityOpen = useCallback((keys: readonly string[], open: boolean) => {
+    setOpenActivity((current) => {
+      if (keys.some((key) => current.has(key)) === open) return current
+      const next = new Set(current)
+      for (const key of keys) {
+        if (open) next.add(key)
+        else next.delete(key)
+      }
+      return next
+    })
+  }, [])
+  const rows = useMemo(() => transcriptRows(view.messages), [view.messages])
   const explainLanguage = props.explainLanguage
   /* The cast, the folder, the profile, Restart and End all live on the
      session's card in the sidenav now, along with the state each of them needs
@@ -496,6 +514,10 @@ export function Session(props: {
   const floor = useRef<HTMLDivElement | null>(null)
   const settleFloor = useRef<(immediately: boolean) => void>(() => undefined)
   const lastTop = useRef(0)
+  const pinnedTop = useRef<number | null>(null)
+  const lastHeight = useRef(0)
+  const pointerHeld = useRef(false)
+  const pointerRelease = useRef(0)
 
   const stopFollowing = useCallback((): void => {
     following.current = false
@@ -505,6 +527,39 @@ export function Session(props: {
     if (following.current) return
     following.current = true
     settleFloor.current(false)
+  }, [])
+
+  useEffect(() => {
+    const release = (event: Event): void => {
+      const touchPan =
+        event instanceof PointerEvent &&
+        event.type === 'pointercancel' &&
+        event.pointerType === 'touch'
+      if (touchPan) return
+      cancelAnimationFrame(pointerRelease.current)
+      pointerRelease.current = requestAnimationFrame(() => {
+        pointerRelease.current = 0
+        pointerHeld.current = false
+      })
+    }
+    const blur = (event: FocusEvent): void => {
+      if (event.target !== window) return
+      cancelAnimationFrame(pointerRelease.current)
+      pointerRelease.current = 0
+      pointerHeld.current = false
+    }
+    const releases = ['pointerup', 'pointercancel', 'touchend', 'touchcancel'] as const
+    for (const type of releases) {
+      window.addEventListener(type, release, { capture: true, passive: true })
+    }
+    window.addEventListener('blur', blur)
+    return () => {
+      for (const type of releases) window.removeEventListener(type, release, { capture: true })
+      window.removeEventListener('blur', blur)
+      cancelAnimationFrame(pointerRelease.current)
+      pointerRelease.current = 0
+      pointerHeld.current = false
+    }
   }, [])
 
   /*
@@ -598,6 +653,7 @@ export function Session(props: {
         const t = Math.min(1, (now - start) / FLOOR_EASE_MS)
         setSlack(from * (1 - t) ** 3)
         el.scrollTop = el.scrollHeight
+        pinnedTop.current = el.scrollTop
         ease = t < 1 ? requestAnimationFrame(step) : 0
       }
       ease = requestAnimationFrame(step)
@@ -617,10 +673,12 @@ export function Session(props: {
       const height = content.offsetHeight
       const change = height - seen
       seen = height
+      lastHeight.current = height
       if (!following.current) return
       if (change < 0) holdSlack(-change > el.clientHeight ? 0 : slack - change)
       else if (change > 0 && slack > 0) holdSlack(slack - change)
       el.scrollTop = el.scrollHeight
+      pinnedTop.current = el.scrollTop
     })
     follow.observe(content)
     // The pane too: a window resize changes where the bottom is without
@@ -663,6 +721,7 @@ export function Session(props: {
     const watch = (): void => {
       if (following.current && el.scrollHeight - el.scrollTop - el.clientHeight > 1) {
         el.scrollTop = el.scrollHeight
+        pinnedTop.current = el.scrollTop
       }
       if (Date.now() < until) frame = requestAnimationFrame(watch)
     }
@@ -773,18 +832,18 @@ export function Session(props: {
    * for *those* would fight the reader instead of helping them. Only a page
    * landing changes how many messages the view holds.
    */
-  const lastHeight = useRef(0)
-  const lastCount = useRef(view.messages.length)
+  const lastFirstSeq = useRef(view.firstSeq)
   useLayoutEffect(() => {
     const el = score.current
     const content = transcript.current
     if (el === null || content === null) return
     const grew = content.offsetHeight - lastHeight.current
-    const prepended = view.messages.length > lastCount.current && !following.current
+    const prepended =
+      lastFirstSeq.current > 0 && view.firstSeq < lastFirstSeq.current && !following.current
     lastHeight.current = content.offsetHeight
-    lastCount.current = view.messages.length
+    lastFirstSeq.current = view.firstSeq
     if (prepended && grew > 0) el.scrollTop += grew
-  }, [view.messages.length])
+  }, [view.firstSeq])
 
   const turnKey = currentTurn?.key ?? null
 
@@ -801,7 +860,9 @@ export function Session(props: {
     const el = score.current
     if (el === null || turnKey === null) return
     settleFloor.current(true)
-    if (following.current) el.scrollTop = el.scrollHeight
+    if (!following.current) return
+    el.scrollTop = el.scrollHeight
+    pinnedTop.current = el.scrollTop
   }, [turnKey])
 
   /**
@@ -1444,6 +1505,7 @@ export function Session(props: {
     view,
     following: following.current,
     scrollTop: score.current?.scrollTop ?? latest.current.scrollTop,
+    openActivity: [...openActivity],
   }
 
   useEffect(
@@ -1732,6 +1794,61 @@ export function Session(props: {
     />
   )
 
+  const startOf = (item: TranscriptRow): number => (item.kind === 'entry' ? item.index : item.start)
+
+  const row = (item: TranscriptRow): React.JSX.Element => {
+    if (item.kind === 'entry') return entry(item.message, item.index)
+    const groupKeys = item.steps.map((step) => `activity:${step.activityKey ?? step.key}`)
+    const open = groupKeys.some((key) => openActivity.has(key))
+    return (
+      <details
+        key={item.key}
+        className={`activity entry--${item.actor}`}
+        open={open}
+        onToggle={(event) => {
+          setActivityOpen(groupKeys, event.currentTarget.open)
+        }}
+      >
+        <summary
+          className="entry activity-summary"
+          data-grouped="true"
+          data-headless="true"
+          onClick={() => {
+            if (!open) stopFollowing()
+          }}
+        >
+          <span className="entry-mark" aria-hidden="true">
+            <span className="tick" />
+          </span>
+          <span className="said">
+            <span className="command-summary">
+              <span className="command-caret" aria-hidden="true">
+                {open ? '⌄' : '›'}
+              </span>
+              <span className="activity-agent">{t(`actor.${item.actor}`)}</span>
+              <span className="activity-count">
+                {item.calls === 0
+                  ? t('tool.activity')
+                  : t('tool.activityCalls', { count: item.calls })}
+              </span>
+              {item.failed > 0 && (
+                <span className="activity-failed">
+                  {t('tool.activityFailed', { count: item.failed })}
+                </span>
+              )}
+              {item.latest !== undefined && (
+                <span className="activity-latest">
+                  {item.latest.kind === 'tool' ? item.latest.text : t('tool.shell')}
+                </span>
+              )}
+            </span>
+          </span>
+        </summary>
+        {item.steps.map((message, offset) => entry(message, item.start + offset))}
+      </details>
+    )
+  }
+
   /*
    * Who is thinking, directly under the question they were asked.
    *
@@ -1935,6 +2052,11 @@ export function Session(props: {
           aria-label={t('conversation.transcript')}
           onMouseUp={readSelection}
           onKeyUp={readSelection}
+          onPointerDownCapture={() => {
+            cancelAnimationFrame(pointerRelease.current)
+            pointerRelease.current = 0
+            pointerHeld.current = true
+          }}
           /*
            * Following stops on a *gesture*, not on a position.
            *
@@ -2003,16 +2125,15 @@ export function Session(props: {
              */
             const top = el.scrollTop
             const gap = el.scrollHeight - top - el.clientHeight
-            if (top < lastTop.current && gap > 1) stopFollowing()
+            const pinned = pinnedTop.current !== null && Math.abs(top - pinnedTop.current) <= 1
+            if (pointerHeld.current && !pinned && top < lastTop.current && gap > 1) stopFollowing()
             else if (top > lastTop.current && gap <= 1) resumeFollowing()
             lastTop.current = top
           }}
         >
           <div className="score-content" ref={transcript}>
             {/* History: everything said before the question now being answered. */}
-            {(currentTurn === undefined ? view.messages : view.messages.slice(0, turnAt)).map(
-              entry
-            )}
+            {(currentTurn === undefined ? rows : rows.filter((r) => startOf(r) < turnAt)).map(row)}
 
             {currentTurn === undefined ? (
               // Nothing has been asked yet, so there is no turn to pin — an agent
@@ -2036,7 +2157,7 @@ export function Session(props: {
                 <div className="turn-head" data-turn={currentTurn.key}>
                   {entry(currentTurn, turnAt)}
                 </div>
-                {view.messages.slice(turnAt + 1).map((m, i) => entry(m, turnAt + 1 + i))}
+                {rows.filter((r) => startOf(r) > turnAt).map(row)}
                 {/*
                   Under the newest row, not under the question.
 

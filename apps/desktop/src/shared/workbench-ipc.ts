@@ -813,6 +813,10 @@ export const WORKBENCH_SHELL_CONTRACT = {
       stills: z.array(z.object({ viewId: z.string(), dataUrl: z.string() })),
     }),
   },
+  'workbench:setCovered': {
+    request: z.object({ viewId: z.string().min(1), covered: z.boolean() }).strict(),
+    response: z.object({ still: z.string().nullable() }),
+  },
   'workbench:close': {
     request: z.object({ viewId: z.string().min(1) }),
     response: z.object({ ok: z.literal(true) }),
@@ -866,6 +870,9 @@ export interface WorkbenchShellApi {
   readonly setWorkbenchVisible: (
     request: WorkbenchShellRequest<'workbench:setVisible'>
   ) => Promise<WorkbenchShellResponse<'workbench:setVisible'>>
+  readonly setWorkbenchCovered: (
+    request: WorkbenchShellRequest<'workbench:setCovered'>
+  ) => Promise<WorkbenchShellResponse<'workbench:setCovered'>>
 }
 
 /**

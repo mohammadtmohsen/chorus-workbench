@@ -9,11 +9,14 @@ import {
   clipboard,
   dialog,
   ipcMain,
+  Notification,
   shell,
   type OpenDialogOptions,
 } from 'electron'
 import {
   ACTIVITY_PUSH_CHANNEL,
+  ATTENTION_PUSH_CHANNEL,
+  REVEAL_PUSH_CHANNEL,
   DIAGNOSTIC_PUSH_CHANNEL,
   EVENTS_PUSH_CHANNEL,
   IDE_PUSH_CHANNEL,
@@ -65,6 +68,7 @@ import { checkTypesafeKey } from './typesafe.js'
 import type { ChorusRuntime } from './runtime.js'
 import type { WorkspaceSnapshot } from '../shared/workspace-layout.js'
 import { readSettings, writeSettings, type Settings } from './settings.js'
+import { detachedWindowOf, raise } from './detached-windows.js'
 import { agentKeyIsSet, clearAgentKey, writeAgentKey } from './agent-secrets.js'
 import { invalidateCompletionCredential } from './completion-client.js'
 import { applyTheme } from './theme.js'
@@ -208,7 +212,13 @@ function withSecretState(settings: Settings): SettingsWithSecrets {
   }
 }
 
-export function buildHandlers(runtime: ChorusRuntime): Handlers {
+const MAX_SHOWN = 50
+const shown = new Set<Notification>()
+
+export function buildHandlers(
+  runtime: ChorusRuntime,
+  mainWindow: () => BrowserWindow | null
+): Handlers {
   return {
     'app:getInfo': () =>
       Promise.resolve({
@@ -280,6 +290,35 @@ export function buildHandlers(runtime: ChorusRuntime): Handlers {
       return Promise.resolve(OK)
     },
 
+    'app:notify': (request: IpcRequest<'app:notify'>) => {
+      if (!Notification.isSupported() || !readSettings(app.getPath('userData')).notifications)
+        return Promise.resolve(OK)
+      const banner = new Notification({ title: request.title, body: request.body, silent: true })
+      shown.add(banner)
+      if (shown.size > MAX_SHOWN) {
+        const oldest = shown.values().next().value
+        if (oldest !== undefined) shown.delete(oldest)
+      }
+      const forget = (): void => {
+        shown.delete(banner)
+      }
+      banner.on('click', () => {
+        forget()
+        raise(detachedWindowOf(request.projectId) ?? mainWindow())
+      })
+      banner.on('close', forget)
+      banner.show()
+      return Promise.resolve(OK)
+    },
+
+    'conversation:reveal': (request: IpcRequest<'conversation:reveal'>) => {
+      const target = detachedWindowOf(request.projectId) ?? mainWindow()
+      if (target === null || target.isDestroyed()) return Promise.resolve(OK)
+      raise(target)
+      target.webContents.send(REVEAL_PUSH_CHANNEL, request)
+      return Promise.resolve(OK)
+    },
+
     'app:copyText': (request: IpcRequest<'app:copyText'>) => {
       // `writeText`, never `write`: an HTML flavour would carry the transcript's
       // markup onto the clipboard, and what the user pointed at is the source.
@@ -346,11 +385,7 @@ export function buildHandlers(runtime: ChorusRuntime): Handlers {
         ...(request.continueFrom === undefined ? {} : { continueFrom: request.continueFrom }),
       }),
 
-    'conversation:send': async (request: {
-      conversationId: string
-      text: string
-      intent?: 'go'
-    }) => {
+    'conversation:send': async (request: IpcRequest<'conversation:send'>) => {
       const { targets } = await runtime.send(request.conversationId, request.text, request.intent)
       // Copied out of the readonly domain type; the IPC boundary is plain JSON.
       return { targets: [...targets] }
@@ -1134,8 +1169,11 @@ function toTranscript(event: {
  * out. Anything not in IPC_CONTRACT is never registered, so an unknown channel
  * fails at `invoke` rather than reaching a handler (plan §4.4).
  */
-export function registerIpcHandlers(runtime: ChorusRuntime): void {
-  const handlers = buildHandlers(runtime)
+export function registerIpcHandlers(
+  runtime: ChorusRuntime,
+  mainWindow: () => BrowserWindow | null
+): void {
+  const handlers = buildHandlers(runtime, mainWindow)
 
   for (const channel of Object.keys(IPC_CONTRACT) as IpcChannel[]) {
     ipcMain.handle(channel, async (_event, rawRequest: unknown) => {
@@ -1202,6 +1240,21 @@ export function forwardActivityToRenderer(runtime: ChorusRuntime): void {
   runtime.onActivityReported((push) => {
     for (const window of BrowserWindow.getAllWindows()) {
       if (!window.isDestroyed()) window.webContents.send(ACTIVITY_PUSH_CHANNEL, push)
+    }
+  })
+}
+
+export function forwardAttentionToRenderer(runtime: ChorusRuntime): void {
+  runtime.onAttentionReported((push) => {
+    const focused = BrowserWindow.getFocusedWindow()
+    if (focused !== null && !focused.isDestroyed()) {
+      focused.webContents.send(ATTENTION_PUSH_CHANNEL, { ...push, mode: 'toast' })
+      return
+    }
+    for (const window of BrowserWindow.getAllWindows()) {
+      if (!window.isDestroyed()) {
+        window.webContents.send(ATTENTION_PUSH_CHANNEL, { ...push, mode: 'banner' })
+      }
     }
   })
 }

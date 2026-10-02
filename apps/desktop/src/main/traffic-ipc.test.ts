@@ -30,6 +30,7 @@ const state = {
   envVar: null,
   source: { kind: 'off' as const },
   failure: null,
+  forwardedDevices: 0,
 }
 
 const row = {
@@ -192,6 +193,38 @@ describe('traffic ipc delivery', () => {
       seq: 1,
     })
     expect(pushes(sent)).toHaveLength(2)
+  })
+
+  it('gives every fragment of an oversized delivery its own high-water seq', async () => {
+    const { sent, listeners, event } = stubRegistry()
+    const attached = (await call('traffic:attach', event, { projectId: PROJECT })) as {
+      subscriptionId: string
+    }
+
+    const rows: { source: string; seq: number; line: string }[] = []
+    for (let index = 1; index <= 400; index += 1) {
+      rows.push({ source: 'logcat', seq: index, line: 'x'.repeat(200) })
+    }
+    listeners[0]?.({ kind: 'rows', projectId: PROJECT, captureId: CAPTURE, seq: 400, rows })
+
+    for (let round = 0; round < 8; round += 1) {
+      const next = pushes(sent)[round]
+      if (next === undefined) break
+      await call('traffic:ack', event, {
+        projectId: PROJECT,
+        subscriptionId: attached.subscriptionId,
+        seq: (next as { seq: number }).seq,
+      })
+    }
+
+    const fragments = pushes(sent) as { seq: number; rows: { seq: number }[] }[]
+    expect(fragments.length).toBeGreaterThan(1)
+    for (const fragment of fragments) {
+      const highest = Math.max(...fragment.rows.map((each) => each.seq))
+      expect(fragment.seq).toBe(highest)
+    }
+    const delivered = fragments.flatMap((fragment) => fragment.rows.map((each) => each.seq))
+    expect(delivered).toEqual(rows.map((each) => each.seq))
   })
 
   it('refuses a document that is not a registered shell', async () => {

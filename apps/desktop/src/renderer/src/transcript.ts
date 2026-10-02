@@ -1,6 +1,7 @@
 import { parseDiff } from '@chorus/workspace/diff'
 import { agentRecord, isAgentId, type AgentId } from '@chorus/shared'
 import { trailingSummary } from '../../shared/markdown.js'
+import { originalCollaborationText } from '../../shared/collaboration.js'
 import { questionFields, type QuestionField } from '../../shared/question-text.js'
 import { TRANSCRIPT_DISPOSITION } from '../../shared/transcript-events.js'
 import type { ChorusEventType } from '@chorus/event-store'
@@ -163,6 +164,7 @@ export interface TranscriptMessage {
    * decides whether the row is something you can click to open.
    */
   readonly path?: string
+  readonly activityKey?: string
 }
 
 export interface PendingApproval {
@@ -474,9 +476,25 @@ export function prependEvents(
     return { ...view, firstSeq: older[0]?.seq ?? view.firstSeq }
   }
 
+  const head = view.messages[0]
+  let joined = rows.length
+  if (head !== undefined && isActivityStep(head)) {
+    for (let at = rows.length - 1; at >= 0; at -= 1) {
+      const row = rows[at]
+      if (row === undefined || row.actor !== head.actor || !isActivityStep(row)) break
+      joined = at
+    }
+  }
+  const marked =
+    head === undefined || joined === rows.length
+      ? rows
+      : rows.map((row, at) =>
+          at === joined ? { ...row, activityKey: head.activityKey ?? head.key } : row
+        )
+
   return {
     ...view,
-    messages: [...rows, ...view.messages],
+    messages: [...marked, ...view.messages],
     firstSeq: older[0]?.seq ?? view.firstSeq,
   }
 }
@@ -520,7 +538,7 @@ function apply(view: Mutable, event: TranscriptEvent): void {
         at: event.createdAt,
         actor: 'user',
         kind: 'message',
-        text: str('text'),
+        text: originalCollaborationText(str('text')),
         status: 'complete',
       })
       return
@@ -638,6 +656,7 @@ function apply(view: Mutable, event: TranscriptEvent): void {
         ...(parent === '' ? {} : { parentRef: parent }),
         ...(detail === undefined || detail === '' ? {} : { detail }),
         ...(path === undefined || path === '' ? {} : { path }),
+        ...(prev?.activityKey === undefined ? {} : { activityKey: prev.activityKey }),
       }
       if (prev === undefined) view.messages.push(message)
       else view.messages[at] = message
@@ -803,6 +822,7 @@ function apply(view: Mutable, event: TranscriptEvent): void {
 
     case 'approval.decided': {
       const id = str('approvalId')
+      const asked = view.approvals.find((a) => a.approvalId === id)
       view.approvals = view.approvals.filter((a) => a.approvalId !== id)
 
       /*
@@ -818,17 +838,19 @@ function apply(view: Mutable, event: TranscriptEvent): void {
       if (str('decidedBy') !== 'user') {
         const rule = str('policyRuleId')
         const outcome = str('outcome')
+        const routineBy = outcome === 'allow' ? asked?.agentId : undefined
         view.messages.push({
           key: event.id,
           eventId: event.id,
           at: event.createdAt,
-          actor: 'system',
+          actor: routineBy ?? 'system',
           kind: 'notice',
           text:
             outcome === 'timeout'
               ? 'Denied — nobody answered in time.'
               : `${outcome === 'allow' ? 'Allowed' : 'Denied'} automatically${rule === '' ? '' : ` · ${rule}`}`,
           status: 'complete',
+          ...(routineBy === undefined ? {} : { noticeSource: 'policy', level: 'info' as const }),
         })
       }
       return
@@ -1018,6 +1040,17 @@ function apply(view: Mutable, event: TranscriptEvent): void {
       const detail = str('detail')
       const omitted = num('detailOmittedBytes')
       const code = str('code')
+      if (
+        isAgent(event.actor) &&
+        raw === 'info' &&
+        source === 'system' &&
+        str('text') === 'tool_progress' &&
+        detail === '' &&
+        code === '' &&
+        omitted === 0
+      ) {
+        return
+      }
       const line = {
         text: str('text'),
         ...(code === '' ? {} : { noticeCode: code }),
@@ -1172,6 +1205,70 @@ export function groupedWith(
   if (previous === undefined) return false
   if (current.kind === 'message' || current.kind === 'handoff') return false
   return previous.actor === current.actor
+}
+
+export type TranscriptRow =
+  | { readonly kind: 'entry'; readonly message: TranscriptMessage; readonly index: number }
+  | {
+      readonly kind: 'activity'
+      readonly key: string
+      readonly actor: TranscriptEvent['actor']
+      readonly start: number
+      readonly steps: readonly TranscriptMessage[]
+      readonly calls: number
+      readonly failed: number
+      readonly latest: TranscriptMessage | undefined
+    }
+
+function isActivityStep(message: TranscriptMessage): boolean {
+  if (message.actor === 'user' || message.actor === 'system') return false
+  if (message.kind === 'command' || message.kind === 'tool') return true
+  if (message.kind === 'reasoning') return true
+  return (
+    message.kind === 'notice' &&
+    message.level === 'info' &&
+    (message.noticeSource === 'hook' || message.noticeSource === 'policy')
+  )
+}
+
+export function transcriptRows(messages: readonly TranscriptMessage[]): TranscriptRow[] {
+  const rows: TranscriptRow[] = []
+  let index = 0
+  while (index < messages.length) {
+    const first = messages[index]
+    if (first === undefined) break
+    if (!isActivityStep(first)) {
+      rows.push({ kind: 'entry', message: first, index })
+      index += 1
+      continue
+    }
+    const steps: TranscriptMessage[] = []
+    let calls = 0
+    let failed = 0
+    let latest: TranscriptMessage | undefined
+    for (let at = index; at < messages.length; at += 1) {
+      const step = messages[at]
+      if (step === undefined || step.actor !== first.actor || !isActivityStep(step)) break
+      steps.push(step)
+      if (step.kind === 'command' || step.kind === 'tool') {
+        calls += 1
+        latest = step
+        if (step.toolStatus === 'error') failed += 1
+      }
+    }
+    rows.push({
+      kind: 'activity',
+      key: `activity:${first.activityKey ?? first.key}`,
+      actor: first.actor,
+      start: index,
+      steps,
+      calls,
+      failed,
+      latest,
+    })
+    index += steps.length
+  }
+  return rows
 }
 
 /**
@@ -1527,7 +1624,7 @@ function detailOf(payload: Record<string, unknown>): string | null {
   return null
 }
 
-function summarize(payload: Record<string, unknown>): string {
+export function summarize(payload: Record<string, unknown>): string {
   const kind = typeof payload['kind'] === 'string' ? payload['kind'] : 'approval'
   const request = payload['request']
   if (typeof request !== 'object' || request === null) return kind

@@ -152,6 +152,7 @@ export const SettingsShape = z.object({
    */
   theme: z.enum(['system', 'light', 'dark']).default('system'),
   completionProvider: z.enum(['auto', 'deepseek', 'codestral']).default('auto'),
+  notifications: z.boolean().default(true),
   trafficOrigin: z.string().default(''),
 })
 
@@ -679,7 +680,7 @@ export const IPC_CONTRACT = {
        * source event — see `aside:open`'s note on exactly this. A renderer that
        * could name any intent can only choose between the ones main knows.
        */
-      intent: z.enum(['go']).optional(),
+      intent: z.enum(['go', 'collaborate']).optional(),
     }),
     /** Which agents the mention router picked, so the UI can show it. */
     response: z.object({ targets: z.array(AgentIdSchema) }),
@@ -1036,6 +1037,11 @@ export const IPC_CONTRACT = {
     response: z.object({ ok: z.literal(true) }),
   },
 
+  'conversation:reveal': {
+    request: z.object({ projectId: z.string(), conversationId: z.string() }),
+    response: z.object({ ok: z.literal(true) }),
+  },
+
   /**
    * Writes pasted bytes down and returns the path.
    *
@@ -1104,7 +1110,10 @@ export const IPC_CONTRACT = {
     request: z.object({ count: z.number().int().min(0) }),
     response: z.object({ ok: z.literal(true) }),
   },
-  /** Brings Chorus forward — what clicking a notification has to do first. */
+  'app:notify': {
+    request: z.object({ title: z.string(), body: z.string(), projectId: z.string() }),
+    response: z.object({ ok: z.literal(true) }),
+  },
 
   /**
    * Puts text on the system clipboard, for the copy control on a code block.
@@ -2145,6 +2154,56 @@ export const ActivityPush = z.object({
 })
 export type ActivityPush = z.infer<typeof ActivityPush>
 
+export const ATTENTION_PUSH_CHANNEL = 'agents:attention'
+
+const AttentionMode = z.enum(['toast', 'banner'])
+
+const ApprovalAttention = z.object({
+  reason: z.literal('approval'),
+  conversationId: z.string(),
+  projectId: z.string(),
+  title: z.string(),
+  agentId: AgentIdSchema,
+  approvalId: z.string(),
+  kind: z.enum(['command', 'fileChange', 'permissionGrant', 'mcpToolCall', 'editorEdit']),
+  request: z.unknown(),
+})
+
+const QuestionAttention = z.object({
+  reason: z.literal('question'),
+  conversationId: z.string(),
+  projectId: z.string(),
+  title: z.string(),
+  agentId: AgentIdSchema,
+  userInputId: z.string(),
+  request: z.unknown(),
+})
+
+const IdleAttention = z.object({
+  reason: z.literal('idle'),
+  conversationId: z.string(),
+  projectId: z.string(),
+  title: z.string(),
+  agentId: AgentIdSchema,
+})
+
+export const AttentionPush = z.discriminatedUnion('reason', [
+  ApprovalAttention.extend({ mode: AttentionMode }),
+  QuestionAttention.extend({ mode: AttentionMode }),
+  IdleAttention.extend({ mode: AttentionMode }),
+])
+export type AttentionPush = z.infer<typeof AttentionPush>
+
+export type AttentionEvent =
+  | z.infer<typeof ApprovalAttention>
+  | z.infer<typeof QuestionAttention>
+  | z.infer<typeof IdleAttention>
+
+export const REVEAL_PUSH_CHANNEL = 'conversation:revealed'
+
+export const RevealPush = IPC_CONTRACT['conversation:reveal'].request
+export type RevealPush = z.infer<typeof RevealPush>
+
 /**
  * Terminal output, and the shell's exit.
  *
@@ -2208,7 +2267,12 @@ export interface ChorusApi extends WorkbenchShellApi, DetachedWindowApi, Traffic
   /** Asks; the answer arrives on `onLimits`. */
   readonly refreshLimits: () => Promise<{ ok: true }>
   readonly setBadge: (request: { count: number }) => Promise<{ ok: true }>
-  readonly focusWindow: () => Promise<{ ok: true }>
+  readonly notify: (request: {
+    title: string
+    body: string
+    projectId: string
+  }) => Promise<{ ok: true }>
+  readonly revealConversation: (request: IpcRequest<'conversation:reveal'>) => Promise<{ ok: true }>
   readonly copyText: (request: { text: string }) => Promise<{ ok: true }>
   readonly probeAgents: () => Promise<AgentProbeResult[]>
   readonly startConversation: (
@@ -2325,6 +2389,8 @@ export interface ChorusApi extends WorkbenchShellApi, DetachedWindowApi, Traffic
   readonly onContextUsage: (listener: (usage: ContextUsagePush) => void) => () => void
   readonly onTasks: (listener: (tasks: TasksPush) => void) => () => void
   readonly onActivity: (listener: (activity: ActivityPush) => void) => () => void
+  readonly onAttention: (listener: (attention: AttentionPush) => void) => () => void
+  readonly onRevealConversation: (listener: (reveal: RevealPush) => void) => () => void
 
   /**
    * Subscribe **before** attaching, not after.

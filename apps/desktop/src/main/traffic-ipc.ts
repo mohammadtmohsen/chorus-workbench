@@ -4,6 +4,7 @@ import type { TrafficSourceShape } from '../shared/ipc.js'
 import {
   TRAFFIC_CHANNELS,
   TRAFFIC_CONTRACT,
+  TRAFFIC_LIVE_PUSH_CHANNEL,
   TRAFFIC_PUSH_CHANNEL,
   type TrafficBodyReadRequest,
   type TrafficChannel,
@@ -33,8 +34,9 @@ const bytesOf = (push: TrafficPush): number => Buffer.byteLength(JSON.stringify(
 const splitDelivery = (push: TrafficPush): { head: TrafficPush; rest: TrafficPush | null } => {
   if (push.kind !== 'rows' || bytesOf(push) <= DELIVERY_BYTES) return { head: push, rest: null }
   const half = Math.max(1, Math.floor(push.rows.length / 2))
+  const head = push.rows.slice(0, half)
   return {
-    head: { ...push, rows: push.rows.slice(0, half) },
+    head: { ...push, seq: Math.max(...head.map((row) => row.seq)), rows: head },
     rest: { ...push, rows: push.rows.slice(half) },
   }
 }
@@ -63,9 +65,13 @@ interface Deps {
 }
 
 export class TrafficIpc {
-  private readonly shells = new Map<number, ShellRole>()
+  private readonly shells = new Map<
+    number,
+    { readonly webContents: WebContents; readonly role: ShellRole }
+  >()
   private readonly subscriptions = new Map<string, Subscription>()
   private readonly byDocument = new Map<number, string>()
+  private readonly live = new Set<string>()
   private readonly deps: Deps
   private readonly detach: () => void
 
@@ -74,11 +80,12 @@ export class TrafficIpc {
     for (const channel of TRAFFIC_CHANNELS) this.register(channel)
     this.detach = deps.registry.subscribe((push) => {
       this.deliver(push)
+      if (push.kind === 'state') this.track(push.projectId, push.state.capturing)
     })
   }
 
   registerShell(webContents: WebContents, role: ShellRole): void {
-    this.shells.set(webContents.id, role)
+    this.shells.set(webContents.id, { webContents, role })
   }
 
   releaseShell(webContents: WebContents): void {
@@ -127,6 +134,8 @@ export class TrafficIpc {
       case 'traffic:legacyDecide':
         this.deps.decideLegacy((request as { keep: boolean }).keep)
         return { ok: true, legacy: this.deps.legacy() }
+      case 'traffic:live':
+        return { projectIds: this.liveFor(role) }
       case 'traffic:attach':
         return this.attach(event, role, request as { projectId: string })
       case 'traffic:detach':
@@ -283,11 +292,11 @@ export class TrafficIpc {
     return detail === null ? { kind: 'not-found', key } : { kind: 'detail', detail }
   }
 
-  private readBody(
+  private async readBody(
     event: IpcMainInvokeEvent,
     role: ShellRole,
     request: TrafficBodyReadRequest
-  ): TrafficReadResult {
+  ): Promise<TrafficReadResult> {
     const key = {
       projectId: request.projectId,
       captureId: request.captureId,
@@ -297,6 +306,14 @@ export class TrafficIpc {
       throw new Error('That project is not this shell’s to inspect')
     }
     if (this.own(event, request.subscriptionId) === null) return { kind: 'not-found', key }
+    if (request.representation === 'decoded') {
+      await this.deps.registry.decodedReady(
+        request.projectId,
+        request.captureId,
+        request.requestId,
+        request.side
+      )
+    }
     return this.deps.registry.bodyPage(
       request.projectId,
       request.captureId,
@@ -332,6 +349,21 @@ export class TrafficIpc {
       subscription.pendingBytes += size
       this.flush(subscription)
     }
+  }
+
+  private track(projectId: string, capturing: boolean): void {
+    if (this.live.has(projectId) === capturing) return
+    if (capturing) this.live.add(projectId)
+    else this.live.delete(projectId)
+    for (const shell of this.shells.values()) {
+      if (shell.webContents.isDestroyed()) continue
+      shell.webContents.send(TRAFFIC_LIVE_PUSH_CHANNEL, { projectIds: this.liveFor(shell.role) })
+    }
+  }
+
+  private liveFor(role: ShellRole): string[] {
+    const all = [...this.live]
+    return role.kind === 'detached' ? all.filter((id) => id === role.projectId) : all
   }
 
   private toIpcPush(push: ProjectTrafficPush, subscriptionId: string): TrafficPush {
@@ -394,7 +426,7 @@ export class TrafficIpc {
 
   private role(event: IpcMainInvokeEvent): ShellRole | null {
     if (event.senderFrame !== event.sender.mainFrame) return null
-    return this.shells.get(event.sender.id) ?? null
+    return this.shells.get(event.sender.id)?.role ?? null
   }
 
   private mayInspect(role: ShellRole, projectId: string): boolean {

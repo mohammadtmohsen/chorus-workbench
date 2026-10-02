@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { ErrorNotice } from './ErrorNotice.js'
+import { ToastStack } from './ToastStack.js'
 import { useTranslation } from 'react-i18next'
-import type { TFunction } from 'i18next'
 import type { AgentProbeResult, IpcRequest, IpcResponse } from '../../shared/ipc.js'
 import type { WindowRole } from '../../shared/detached-window-ipc.js'
 import { ChorusLogo } from './ChorusLogo.js'
@@ -9,7 +9,8 @@ import { LogViewer } from './LogViewer.js'
 import { fail, Session, type SessionCarry, type SessionInfo } from './Session.js'
 import { trimCarry } from './carry.js'
 import { EMPTY_VIEW } from './transcript.js'
-import { noticesFrom, roomsWaiting, shouldRaise, trackPending, type Notice } from './notify.js'
+import { roomsWaiting, trackPending } from './notify.js'
+import { addToast, NOTICE_KEY, pruneToasts } from './toasts.js'
 import { HistoryPanel } from './HistoryPanel.js'
 import { RemoteProjectDialog } from './workspace/RemoteProjectDialog.js'
 import { INSTALL, Settings, type Defaults } from './Settings.js'
@@ -33,35 +34,8 @@ import {
 } from './workspace/layout.js'
 import { measureTabGeometry, resolveTarget } from './workspace/useTabDrag.js'
 import { reorderSessions } from './workspace/session-row.js'
-import { isConversationTab, NOTE_SIZE } from '../../shared/workspace-layout.js'
+import { NOTE_SIZE } from '../../shared/workspace-layout.js'
 import { setRunningPlatform } from './shortcuts.js'
-
-/**
- * Raises one banner, and makes clicking it land somewhere useful.
- *
- * Bringing the window forward is not enough on its own: a notification that
- * drops you into whichever pane you left open is a second thing to do rather
- * than the thing done, so it opens the conversation it was about.
- */
-function raise(notice: Notice, title: string, t: TFunction, projectId: string): void {
-  try {
-    const banner = new Notification(t(`notify.${notice.kind}`, { agent: notice.actor }), {
-      body: title,
-      // One banner per conversation: a room that finishes twice while you are
-      // away should replace its own notice, not stack.
-      tag: notice.conversationId,
-    })
-    banner.onclick = () => {
-      if (useWorkspaceStore.getState().detached[projectId] === undefined)
-        void window.chorus.focusWindow()
-      useWorkspaceStore.getState().openProject(projectId)
-      useWorkspaceStore.getState().clearConversationUnread(notice.conversationId)
-    }
-  } catch {
-    // Denied at the OS level, or unsupported. Silence is the only sane response
-    // to a failure whose only symptom would be another failure.
-  }
-}
 
 /**
  * How long to sit on read-watermarks before writing them down.
@@ -270,6 +244,7 @@ export function App({ role }: { readonly role: WindowRole }): React.JSX.Element 
     () =>
       window.chorus.onEvents((events) => {
         useWorkspaceStore.getState().ingestEvents(events, detachedShown())
+        pruneToasts(events)
       }),
     [detachedShown]
   )
@@ -309,12 +284,11 @@ export function App({ role }: { readonly role: WindowRole }): React.JSX.Element 
   )
 
   /*
-   * Notifications and the dock badge.
+   * The dock badge.
    *
    * Beside the other global listeners, and for the same reason: this has to work
    * for conversations whose `Session` is not mounted, which is most of them once
-   * more than four are open. The judgement about what deserves a banner lives in
-   * `notify.ts` so it can be tested; this is only the plumbing.
+   * more than four are open.
    */
   useEffect(
     () =>
@@ -326,9 +300,9 @@ export function App({ role }: { readonly role: WindowRole }): React.JSX.Element 
         /*
          * Read through the one helper rather than off `panes` — which is where
          * this went wrong. `panes[i].activeTabId` names a *project*, so the ids
-         * this collected were projects wearing a conversation's name, and both
-         * the watermark below and the notice gate were answering about a
-         * conversation id that could never appear.
+         * this collected were projects wearing a conversation's name, and the
+         * watermark below was answering about a conversation id that could
+         * never appear.
          */
         const detached = detachedShown()
         const visibleConversationIds = [
@@ -353,31 +327,37 @@ export function App({ role }: { readonly role: WindowRole }): React.JSX.Element 
           }
         }
         markSeenSoon()
-
-        // Absent in a test renderer, and not worth a failed turn.
-        if (!('Notification' in window)) return
-        for (const notice of noticesFrom(events)) {
-          if (
-            !shouldRaise(notice, {
-              /*
-               * Still the detached clause, and it is not the same question as
-               * the one below it: a detached window with focus makes the app
-               * focused for *that* project's notices, while the main window's
-               * own `hasFocus()` is false because a different window has it.
-               */
-              windowFocused: document.hasFocus() || detached.includes(notice.conversationId),
-              visibleConversationIds,
-            })
-          ) {
-            continue
-          }
-          const session = sessionsRef.current.find(
-            (s) => s.conversationId === notice.conversationId
-          )
-          raise(notice, session?.title ?? '', t, session?.projectId ?? '')
-        }
       }),
-    [t, markSeenSoon, detachedShown, role.kind]
+    [markSeenSoon, detachedShown, role.kind]
+  )
+
+  useEffect(
+    () =>
+      window.chorus.onAttention((attention) => {
+        if (attention.mode === 'banner') {
+          if (role.kind === 'detached') return
+          void window.chorus.notify({
+            title: t(NOTICE_KEY[attention.reason], { agent: attention.agentId }),
+            body: attention.title,
+            projectId: attention.projectId,
+          })
+          return
+        }
+        const showing = onScreenConversations(useWorkspaceStore.getState())
+        if (showing.has(attention.conversationId)) return
+        addToast(attention)
+      }),
+    [t, role.kind]
+  )
+
+  useEffect(
+    () =>
+      window.chorus.onRevealConversation(({ projectId, conversationId }) => {
+        if (role.kind === 'main') useWorkspaceStore.getState().openProject(projectId)
+        useWorkspaceStore.getState().adoptConversation(projectId, conversationId)
+        useWorkspaceStore.getState().showConversation(projectId, conversationId)
+      }),
+    [role.kind]
   )
 
   /*
@@ -552,7 +532,7 @@ export function App({ role }: { readonly role: WindowRole }): React.JSX.Element 
       const arrangement = useWorkspaceStore.getState().conversationGroups[projectId]
       const visibleConversationIds = Object.values(arrangement?.panes ?? {})
         .map((pane) => pane.activeTabId)
-        .filter((id): id is string => id !== null && isConversationTab(id))
+        .filter((id): id is string => id !== null)
       window.chorus
         .sendProjectVisibility({ projectId, focused: document.hasFocus(), visibleConversationIds })
         .catch(fail(setError))
@@ -1674,6 +1654,8 @@ export function App({ role }: { readonly role: WindowRole }): React.JSX.Element 
       </div>
     )
 
+  const toastStack = <ToastStack />
+
   const sheets = (
     <>
       {/*
@@ -1880,6 +1862,7 @@ export function App({ role }: { readonly role: WindowRole }): React.JSX.Element 
         />
         {sheets}
         {badge}
+        {toastStack}
       </div>
     )
   }
@@ -1993,6 +1976,7 @@ export function App({ role }: { readonly role: WindowRole }): React.JSX.Element 
 
       {sheets}
       {badge}
+      {toastStack}
     </div>
   )
 }

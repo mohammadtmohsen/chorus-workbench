@@ -3,7 +3,6 @@ import type { SessionInfo } from '../Session.js'
 import { ConversationColumn } from './ConversationColumn.js'
 import { resizeBranch } from './layout.js'
 import type { ConversationDrag } from './useConversationDrag.js'
-import type { TrafficTerminalOption } from '../TrafficPanel.js'
 import type {
   ConversationArrangement,
   WorkspaceLayoutNode,
@@ -36,7 +35,7 @@ export function ConversationTree(props: {
   readonly drag: ConversationDrag
   readonly onSizes: (path: readonly number[], sizes: readonly number[]) => void
   /**
-   * Even the groups in one branch out — a double-click on a divider.
+   * Even the boxes in one branch out — a double-click on a divider.
    *
    * Double rather than single, and that is forced rather than chosen: the
    * divider's whole job is dragging, and a drag ends in a click. A single-click
@@ -44,13 +43,10 @@ export function ConversationTree(props: {
    * had just finished. The pane divider settled this the same way.
    */
   readonly onEqualize: (path: readonly number[]) => void
-  /** Start a conversation in one group — the `+` at the end of its strip. */
-  readonly onNewConversation: (groupId: string) => void
-  /** End one conversation — the × on its tab. */
+  /** End one conversation — the × in its header. */
   readonly onEndConversation: (conversationId: string) => void
-  /** Name one conversation — a double-click on its tab. */
+  /** Name one conversation — a double-click on its header. */
   readonly onRename: (conversationId: string, title: string) => void
-  readonly trafficTerminals: readonly TrafficTerminalOption[]
   readonly renderSession: (
     session: SessionInfo,
     focused: boolean,
@@ -67,13 +63,9 @@ export function ConversationTree(props: {
         sessions={props.sessions}
         paneId={props.paneId}
         focused={props.paneFocused && props.arrangement.focusedPaneId === group.id}
-        onNewConversation={() => {
-          props.onNewConversation(group.id)
-        }}
         onEndConversation={props.onEndConversation}
         onRename={props.onRename}
         drag={props.drag}
-        trafficTerminals={props.trafficTerminals}
         renderSession={props.renderSession}
       />
     )
@@ -119,10 +111,8 @@ export function ConversationTree(props: {
               drag={props.drag}
               onSizes={props.onSizes}
               onEqualize={props.onEqualize}
-              onNewConversation={props.onNewConversation}
               onEndConversation={props.onEndConversation}
               onRename={props.onRename}
-              trafficTerminals={props.trafficTerminals}
               renderSession={props.renderSession}
             />
           </div>

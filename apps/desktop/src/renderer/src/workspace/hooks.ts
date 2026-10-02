@@ -1,18 +1,18 @@
 import type { IdeContextPush } from '../../../shared/ipc.js'
-import { useMemo } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useMemo, useState } from 'react'
 import { useShallow } from 'zustand/react/shallow'
 import { isAgentId, type AgentId } from '@chorus/shared'
 import { withBackgroundWork, type SessionRowState } from './session-row.js'
 import {
   CHORUS_WIDTH,
   CLOSED_TERMINAL_PANEL,
-  isConversationTab,
   type ConversationArrangement,
   type TerminalPanelState,
+  type TrafficPanelState,
   type WorkspaceLayoutNode,
   type WorkspacePane,
 } from '../../../shared/workspace-layout.js'
-import { leafPaneIds, tabLocation } from './layout.js'
+import { CLOSED_TRAFFIC, leafPaneIds, tabLocation } from './layout.js'
 import {
   useWorkspaceStore,
   type SessionPulse,
@@ -55,10 +55,11 @@ function selectActions(state: WorkspaceStore): WorkspaceActions {
     showConversationIn,
     focusConversationGroup,
     adoptConversation,
-    openTraffic,
-    splitConversation,
-    placeConversation,
-    closeConversationTab,
+    toggleTraffic,
+    setTrafficWidth,
+    moveConversationBox,
+    setConversationWidths,
+    resetProjectWidths,
     setConversationSizes,
     equalizeConversationBranch,
     activateTab,
@@ -108,10 +109,11 @@ function selectActions(state: WorkspaceStore): WorkspaceActions {
     showConversationIn,
     focusConversationGroup,
     adoptConversation,
-    openTraffic,
-    splitConversation,
-    placeConversation,
-    closeConversationTab,
+    toggleTraffic,
+    setTrafficWidth,
+    moveConversationBox,
+    setConversationWidths,
+    resetProjectWidths,
     setConversationSizes,
     equalizeConversationBranch,
     activateTab,
@@ -252,6 +254,47 @@ export function useChorusWidth(projectId: string | null): number {
   )
 }
 
+export function useRaisedEditor(
+  projectId: string | null,
+  covered: boolean
+): readonly [raised: boolean, raise: () => void, lower: () => void] {
+  const [raisedIn, setRaisedIn] = useState<string | null>(null)
+  useLayoutEffect(() => {
+    if (!covered || raisedIn !== projectId) setRaisedIn(null)
+  }, [covered, projectId, raisedIn])
+  const raise = useCallback(() => {
+    setRaisedIn(projectId)
+  }, [projectId])
+  const lower = useCallback(() => {
+    setRaisedIn(null)
+  }, [])
+  return [covered && raisedIn !== null && raisedIn === projectId, raise, lower]
+}
+
+export function useTrafficPanel(projectId: string | null): TrafficPanelState {
+  return useWorkspaceStore((state) =>
+    projectId === null ? CLOSED_TRAFFIC : (state.trafficPanels[projectId] ?? CLOSED_TRAFFIC)
+  )
+}
+
+export function useTrafficLive(projectId: string | null): boolean {
+  const [live, setLive] = useState<readonly string[]>([])
+  useEffect(() => {
+    let mounted = true
+    const stop = window.chorus.onTrafficLive((push) => {
+      setLive(push.projectIds)
+    })
+    void window.chorus.readTrafficLive({}).then((read) => {
+      if (mounted) setLive(read.projectIds)
+    })
+    return () => {
+      mounted = false
+      stop()
+    }
+  }, [])
+  return projectId !== null && live.includes(projectId)
+}
+
 /**
  * The **project** showing in the focused pane.
  *
@@ -286,14 +329,7 @@ export function useFocusedConversationId(): string | null {
     const arrangement = state.conversationGroups[projectId]
     const groupId = arrangement?.focusedPaneId ?? null
     if (groupId === null) return null
-    const active = arrangement?.panes[groupId]?.activeTabId ?? null
-    /*
-     * The traffic view is a tab but not a conversation, and this is the one hook
-     * every "which conversation am I in" answer walks through. Returning its id
-     * made the note panels offer to send to a conversation that does not exist,
-     * rather than drawing the no-conversation state their own comments promise.
-     */
-    return active !== null && isConversationTab(active) ? active : null
+    return arrangement?.panes[groupId]?.activeTabId ?? null
   })
 }
 

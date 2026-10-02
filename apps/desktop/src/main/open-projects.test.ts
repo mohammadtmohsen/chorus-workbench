@@ -74,6 +74,7 @@ describe('open project persistence', () => {
         chorusWidths: {},
         workbenchHidden: {},
         globalTerminal: { open: false, height: TERMINAL_HEIGHT.default, tabs: [], activeId: null },
+        trafficPanels: {},
       },
     })
   })

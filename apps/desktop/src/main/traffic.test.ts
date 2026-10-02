@@ -630,7 +630,7 @@ describe('TrafficService bounds', () => {
     expect(httpRow(service, 9).u).toBe(`http://127.0.0.1:${String(source.port)}/n/24`)
   })
 
-  it('coalesces pushes once an attached view falls behind, and drops none of the ring', async () => {
+  it('delivers every row of a burst the view has not caught up with', async () => {
     const source = await answering(JSON.stringify({ code: 'OK' }))
     const frame = manualFrame()
     const { service, port } = await proxy({ frame: frame.frame })
@@ -645,13 +645,16 @@ describe('TrafficService bounds', () => {
     }
     frame.flush()
 
-    expect(pushes).toHaveLength(1)
-    expect(pushes[0]?.rows).toHaveLength(1)
-    expect(pushes[0]?.seq).toBe(100)
-    const last = pushes[0]?.rows[0]
-    expect(last?.source === 'http' ? last.u : null).toBe(
-      `http://127.0.0.1:${String(source.port)}/n/99`
-    )
+    const lastBySeq = new Map<number, TrafficHttpRow>()
+    for (const push of pushes) {
+      for (const row of push.rows) {
+        if (row.source === 'http') lastBySeq.set(row.seq, row)
+      }
+    }
+    const settled = [...lastBySeq.values()]
+
+    expect(settled).toHaveLength(100)
+    expect(settled.filter((row) => row.status !== 200)).toEqual([])
     expect(service.snapshot()).toHaveLength(100)
   })
 
@@ -683,7 +686,7 @@ describe('TrafficService bounds', () => {
     expect(new Set(rows.map((row) => row.seq)).size).toBe(3)
   })
 
-  it('replays the ring on attach and ignores an ack carrying a superseded epoch', async () => {
+  it('replays the ring on every attach, under a rising epoch', async () => {
     const source = await answering(JSON.stringify({ code: 'OK' }))
     const { service, port } = await proxy()
     await through(port, `http://127.0.0.1:${String(source.port)}/first`)
@@ -693,9 +696,35 @@ describe('TrafficService bounds', () => {
 
     expect(second.rows).toHaveLength(1)
     expect(second.epoch).toBeGreaterThan(first.epoch)
-
-    service.ack(first.epoch, 0)
     expect(service.attach().rows).toHaveLength(1)
+  })
+
+  it('delivers every row absorbed in one frame, however far behind the view is', () => {
+    const frame = manualFrame()
+    const service = new TrafficService({ frame: frame.frame })
+    const pushes: TrafficPush[] = []
+    service.subscribe((push) => {
+      pushes.push(push)
+    })
+    service.attach()
+
+    for (let i = 0; i < 64; i += 1) service.logcatLine(`filler ${String(i)}`)
+    frame.flush()
+    pushes.length = 0
+
+    service.logcatLine('first')
+    service.logcatLine('second')
+    frame.flush()
+
+    const delivered: string[] = []
+    for (const push of pushes) {
+      for (const row of push.rows) {
+        if (row.source === 'logcat') delivered.push(row.line)
+      }
+    }
+
+    expect(delivered).toEqual(['first', 'second'])
+    expect(service.snapshot()).toHaveLength(66)
   })
 })
 
@@ -918,6 +947,30 @@ describe('capture accounting', () => {
 
     expect(await body.decode()).toBe('limit')
     expect(body.decodedPage(0, 64)).toBeNull()
+  })
+
+  it('shares one decode between readers that arrive together, and charges once', async () => {
+    const charged: string[] = []
+    const body = new CapturedBody(
+      1_000,
+      {
+        retain: (captureId) => {
+          charged.push(captureId)
+          return null
+        },
+        release: () => undefined,
+      },
+      () => 'capture-1'
+    )
+    body.contentEncoding = 'gzip'
+    body.push(gzipSync(Buffer.from('{"code":"OK"}')))
+
+    const [first, second] = await Promise.all([body.decode(), body.decode()])
+
+    expect(first).toBe('ready')
+    expect(second).toBe('ready')
+    expect(charged.filter((key) => key.endsWith(':decoded'))).toHaveLength(1)
+    expect(body.decodedPage(0, 64)?.toString('utf8')).toBe('{"code":"OK"}')
   })
 })
 

@@ -1,4 +1,5 @@
 import type { PointerEvent as ReactPointerEvent } from 'react'
+import { CHORUS_WIDTH, EDITOR_WIDTH } from '../../../shared/workspace-layout.js'
 import { useWorkspaceActions } from './hooks.js'
 
 /**
@@ -58,7 +59,10 @@ export function ChorusSash({
     sash.setPointerCapture(event.pointerId)
 
     const move = (moved: PointerEvent): void => {
-      setChorusWidth(projectId, right - moved.clientX - grab)
+      setChorusWidth(
+        projectId,
+        Math.min(pane.clientWidth - EDITOR_WIDTH.peek, right - moved.clientX - grab)
+      )
     }
     const stop = (): void => {
       sash.removeEventListener('pointermove', move)
@@ -87,11 +91,20 @@ export function ChorusSash({
         event.preventDefault()
         const pane = event.currentTarget.closest('[data-pane-content]')
         const chorus = pane?.querySelector('.workspace-pane-chorus')
-        if (chorus === null || chorus === undefined) return
+        if (pane === null || chorus === null || chorus === undefined) return
         const current = chorus.getBoundingClientRect().width
-        setChorusWidth(projectId, event.key === 'ArrowLeft' ? current + step : current - step)
+        const wanted = event.key === 'ArrowLeft' ? current + step : current - step
+        setChorusWidth(projectId, Math.min(pane.clientWidth - EDITOR_WIDTH.peek, wanted))
       }}
       onKeyUp={onCommit}
+      onDoubleClick={(event) => {
+        const pane = event.currentTarget.closest('[data-pane-content]')
+        const chorus = pane?.querySelector('.workspace-pane-chorus')
+        if (pane === null || chorus === null || chorus === undefined) return
+        const atRight = chorus.getBoundingClientRect().width <= CHORUS_WIDTH.min + 1
+        setChorusWidth(projectId, atRight ? pane.clientWidth - EDITOR_WIDTH.peek : CHORUS_WIDTH.min)
+        onCommit()
+      }}
     />
   )
 }

@@ -57,8 +57,12 @@ export const TrafficState = z.object({
   envVar: z.string().nullable(),
   source: TrafficSourceShape,
   failure: TrafficFailure.nullable(),
+  forwardedDevices: z.number().int().nonnegative(),
 })
 export type TrafficState = z.infer<typeof TrafficState>
+
+export const TrafficLive = z.object({ projectIds: z.array(z.string().min(1)) })
+export type TrafficLive = z.infer<typeof TrafficLive>
 
 export const BODY_PAGE = 65_536
 
@@ -223,6 +227,10 @@ export const TRAFFIC_CONTRACT = {
     request: z.object({ keep: z.boolean() }).strict(),
     response: z.object({ ok: z.literal(true), legacy: TrafficLegacy }),
   },
+  'traffic:live': {
+    request: z.object({}).strict(),
+    response: TrafficLive,
+  },
 } as const
 
 export type TrafficContract = typeof TRAFFIC_CONTRACT
@@ -233,6 +241,8 @@ export type TrafficResponse<C extends TrafficChannel> = z.infer<TrafficContract[
 export const TRAFFIC_CHANNELS = Object.keys(TRAFFIC_CONTRACT) as TrafficChannel[]
 
 export const TRAFFIC_PUSH_CHANNEL = 'traffic:push'
+
+export const TRAFFIC_LIVE_PUSH_CHANNEL = 'traffic:livePush'
 
 export const TrafficPush = z.discriminatedUnion('kind', [
   z.object({
@@ -305,5 +315,9 @@ export interface TrafficApi {
   readonly decideTrafficLegacy: (
     request: TrafficRequest<'traffic:legacyDecide'>
   ) => Promise<TrafficResponse<'traffic:legacyDecide'>>
+  readonly readTrafficLive: (
+    request: TrafficRequest<'traffic:live'>
+  ) => Promise<TrafficResponse<'traffic:live'>>
   readonly onTraffic: (listener: (push: TrafficPush) => void) => () => void
+  readonly onTrafficLive: (listener: (live: TrafficLive) => void) => () => void
 }

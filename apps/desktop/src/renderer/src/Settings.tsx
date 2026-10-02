@@ -272,13 +272,16 @@ function Accounts(): React.JSX.Element | null {
 function Appearance(): React.JSX.Element {
   const { t } = useTranslation()
   const [theme, setTheme] = useState<'system' | 'light' | 'dark'>('system')
+  const [notifications, setNotifications] = useState(true)
 
   useEffect(() => {
     let live = true
     window.chorus
       .readSettings()
       .then((settings) => {
-        if (live) setTheme(settings.theme)
+        if (!live) return
+        setTheme(settings.theme)
+        setNotifications(settings.notifications)
       })
       .catch(() => undefined)
     return () => {
@@ -287,24 +290,40 @@ function Appearance(): React.JSX.Element {
   }, [])
 
   return (
-    <fieldset className="settings-appearance">
-      <legend>{t('settings.appearanceHeading')}</legend>
-      <label>
-        <span>{t('settings.appearance')}</span>
-        <select
-          value={theme}
-          onChange={(e) => {
-            const next = e.target.value as 'system' | 'light' | 'dark'
-            setTheme(next)
-            void window.chorus.writeSettings({ theme: next })
-          }}
-        >
-          <option value="system">{t('settings.appearanceSystem')}</option>
-          <option value="light">{t('settings.appearanceLight')}</option>
-          <option value="dark">{t('settings.appearanceDark')}</option>
-        </select>
-      </label>
-    </fieldset>
+    <>
+      <fieldset className="settings-appearance">
+        <legend>{t('settings.appearanceHeading')}</legend>
+        <label>
+          <span>{t('settings.appearance')}</span>
+          <select
+            value={theme}
+            onChange={(e) => {
+              const next = e.target.value as 'system' | 'light' | 'dark'
+              setTheme(next)
+              void window.chorus.writeSettings({ theme: next })
+            }}
+          >
+            <option value="system">{t('settings.appearanceSystem')}</option>
+            <option value="light">{t('settings.appearanceLight')}</option>
+            <option value="dark">{t('settings.appearanceDark')}</option>
+          </select>
+        </label>
+      </fieldset>
+      <fieldset className="settings-notifications">
+        <legend>{t('settings.notificationsHeading')}</legend>
+        <label>
+          <input
+            type="checkbox"
+            checked={notifications}
+            onChange={(e) => {
+              setNotifications(e.target.checked)
+              void window.chorus.writeSettings({ notifications: e.target.checked })
+            }}
+          />
+          <span>{t('settings.notifications')}</span>
+        </label>
+      </fieldset>
+    </>
   )
 }
 

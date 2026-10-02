@@ -54,6 +54,7 @@ import {
   withCatchup,
   type CarryoverSource,
   type PermissionProfile,
+  type ReplyHandoff,
 } from '@chorus/orchestrator'
 import {
   AGENT_IDS,
@@ -68,6 +69,7 @@ import { relativeWithin } from '@chorus/workspace'
 import {
   terminalRefKey,
   type ActivityPush,
+  type AttentionEvent,
   type ContextUsagePush,
   type TasksPush,
   type TrafficSourceShape,
@@ -86,6 +88,13 @@ import { containsPassage } from '../shared/plain-text.js'
 import { questionSetText } from '../shared/question-text.js'
 import { networkInterfaces } from 'node:os'
 import { readRemembered, writeRemembered } from './remembered.js'
+import {
+  collaborationPair,
+  isExpandedCollaboration,
+  isTeamCommand,
+  originalCollaborationText,
+} from '../shared/collaboration.js'
+import { collaborationPrompt, teamIntroduction } from './collaboration-prompt.js'
 
 import { readAgentKey } from './agent-secrets.js'
 import { readSettings, type SavedTrafficConnection } from './settings.js'
@@ -102,6 +111,7 @@ import {
   type ProjectTrafficState,
 } from './project-traffic.js'
 import { LineCarries } from './log-lines.js'
+import { AdbReverse, readRememberedDevices, writeRememberedDevices } from './adb-reverse.js'
 import { LogcatService } from './logcat.js'
 import type { WorkspaceSnapshot } from '../shared/workspace-layout.js'
 import { sdkExecutablePath, spawnSpec } from './command.js'
@@ -360,6 +370,7 @@ interface ActiveConversation {
    */
   styleOn: boolean
   handoffEpoch: number
+  readonly working: Set<AgentId>
 }
 
 /**
@@ -1477,6 +1488,15 @@ export class ChorusRuntime {
    */
   private readonly trafficCarry = new LineCarries()
   private readonly logcat = new LogcatService()
+  private readonly adbReverse = new AdbReverse({
+    load: () => readRememberedDevices(this.userDataPath),
+    save: (addresses) => {
+      writeRememberedDevices(this.userDataPath, addresses)
+    },
+    warn: (message, fields) => {
+      this.log.warn(message, fields)
+    },
+  })
   /** Last renderer-owned editor arrangement, persisted beside the active sessions. */
   private workspaceSnapshot: WorkspaceSnapshot | null = null
   /** The latest windows each provider reported, for a window opened later. */
@@ -1486,6 +1506,7 @@ export class ChorusRuntime {
   private onTasks: ((push: TasksPush) => void) | undefined
   private onConversations: (() => void) | undefined
   private onActivity: ((push: ActivityPush) => void) | undefined
+  private onAttention: ((push: AttentionEvent) => void) | undefined
   /**
    * The last model list each agent reported, for the settings sheet.
    *
@@ -1563,6 +1584,12 @@ export class ChorusRuntime {
     })
     this.logcat.subscribe((line) => {
       this.traffic.routeLogcatLine(line)
+    })
+    this.traffic.subscribe((push) => {
+      if (push.kind === 'state') this.adbReverse.sync(this.traffic.capturingPorts())
+    })
+    this.adbReverse.onChange(() => {
+      this.traffic.setForwarded((port) => this.adbReverse.forwarded(port))
     })
     /*
      * The tap observes; it does not read history. A terminal running Metro holds
@@ -1703,6 +1730,10 @@ export class ChorusRuntime {
    */
   onActivityReported(listener: (push: ActivityPush) => void): void {
     this.onActivity = listener
+  }
+
+  onAttentionReported(listener: (push: AttentionEvent) => void): void {
+    this.onAttention = listener
   }
 
   /** What each provider last reported, so a new window is not born blank. */
@@ -1969,6 +2000,7 @@ export class ChorusRuntime {
       lastAddressed: undefined,
       handoffEpoch: 0, // A new room has nothing unread in it, and the log's end is what "nothing"
       // means — seeding 0 would count the whole database as news.
+      working: new Set(),
       lastSeenSeq: this.store.lastSeq(),
       draft: '',
       planning: false,
@@ -2046,7 +2078,11 @@ export class ChorusRuntime {
    * Logging inside each participant would make the transcript show the user
    * repeating themselves once per agent.
    */
-  async send(conversationId: string, text: string, intent?: 'go'): Promise<SendResult> {
+  async send(
+    conversationId: string,
+    text: string,
+    intent?: 'go' | 'collaborate'
+  ): Promise<SendResult> {
     const conversation = this.require(conversationId)
     /*
      * Addressable is the cast, not the live map, and the two differ exactly when
@@ -2074,17 +2110,28 @@ export class ChorusRuntime {
       conversation.lastAddressed === undefined && live.includes('claude')
         ? ['claude', ...live.filter((id) => id !== 'claude')]
         : live
-    const route = parseMentions(text, {
+    const task = intent === 'go' ? text : originalCollaborationText(text)
+    const team = intent !== 'go' && isTeamCommand(task)
+    const pair =
+      !team && (intent === 'collaborate' || task !== text) && !isExpandedCollaboration(task)
+        ? collaborationPair(task, AGENT_IDS)
+        : null
+    const mentioned = parseMentions(task, {
       participants: [...liveInRoutingOrder, ...AGENT_IDS.filter((id) => !live.includes(id))],
       lastAddressed: conversation.lastAddressed,
     })
+    const route = team
+      ? { targets: [...AGENT_IDS], text: task }
+      : pair === null
+        ? mentioned
+        : { ...mentioned, targets: [pair.leader] }
 
     if (route.targets.length === 0) throw new Error('No agent is available in this conversation')
 
     const stored = this.store.append({
       conversationId,
       actor: 'user',
-      payload: { type: 'user.message', text },
+      payload: { type: 'user.message', text: task },
     })
     // Null only once the store is closed, which means the app is quitting.
     // Delivering a message the log has no record of would be worse than not.
@@ -2161,12 +2208,15 @@ export class ChorusRuntime {
            * `goPrompt()`. The same split `sendUserMessage(text, delivered)` makes
            * for asides, for the reason stated there: logging the wrapper puts
            * words in the user's mouth in their own transcript.
-           *
-           * Routing is unaffected. It was decided from the *logged* text above,
-           * so the mention still picks the agent whose reply the button sat
-           * under — and `lastAddressed` is not a reliable stand-in for that.
            */
-          const body = intent === 'go' ? goPrompt() : route.text
+          const body =
+            intent === 'go'
+              ? goPrompt()
+              : team
+                ? teamIntroduction(roster, task)
+                : pair === null
+                  ? route.text
+                  : collaborationPrompt(pair, task)
           const seeded = p.seedContext === undefined ? body : `${p.seedContext}\n\n${body}`
           delete p.seedContext
           p.dispatchEpoch = conversation.handoffEpoch
@@ -2817,6 +2867,7 @@ export class ChorusRuntime {
       title: aside.excerpt.slice(0, 80),
       lastAddressed: agentId,
       handoffEpoch: 0,
+      working: new Set(),
       lastSeenSeq: 0,
       draft: '',
       planning: false,
@@ -2920,43 +2971,78 @@ export class ChorusRuntime {
   }
 
   private followHandoffs(events: readonly StoredEvent[]): void {
+    const settled = new Map<string, AgentId>()
     for (const event of events) {
+      const { payload } = event
+      if (payload.type === 'session.ended') {
+        this.active.get(event.conversationId)?.working.delete(payload.agentId)
+        continue
+      }
       const from = event.actor
       if (!isAgentId(from)) continue
       const conversation = this.active.get(event.conversationId)
       const participant = conversation?.participants.get(from)
       if (conversation === undefined || participant === undefined) continue
-      const { payload } = event
       if (payload.type === 'turn.started') {
         delete participant.lastReply
+        conversation.working.add(from)
       } else if (payload.type === 'agent.message.completed') {
         participant.lastReply = { eventId: event.id, text: payload.text }
       } else if (payload.type === 'turn.completed') {
+        conversation.working.delete(from)
         const reply = participant.lastReply
         delete participant.lastReply
-        if (reply === undefined || payload.status !== 'completed') continue
-        if (participant.dispatchEpoch !== conversation.handoffEpoch) continue
-        queueMicrotask(() => {
-          void this.handOffOnward(conversation, from, reply)
-        })
+        if (payload.status !== 'completed') continue
+        if (reply !== undefined && participant.dispatchEpoch === conversation.handoffEpoch) {
+          const handoff = findReplyHandoff(reply.text, from, AGENT_IDS)
+          if (handoff !== null) {
+            queueMicrotask(() => {
+              void this.handOffOnward(conversation, from, reply, handoff)
+            })
+            continue
+          }
+        }
+        settled.set(event.conversationId, from)
       }
     }
+
+    for (const [conversationId, agentId] of settled) {
+      const conversation = this.active.get(conversationId)
+      if (conversation === undefined) continue
+      this.announceIdle(conversation, agentId)
+    }
+  }
+
+  private announceIdle(conversation: ActiveConversation, agentId: AgentId): void {
+    if (this.active.get(conversation.conversationId) !== conversation) return
+    if (conversation.working.size > 0) return
+    if (this.asides.has(conversation.conversationId)) return
+    this.onAttention?.({
+      reason: 'idle',
+      conversationId: conversation.conversationId,
+      projectId: conversation.projectId,
+      title: conversation.title,
+      agentId,
+    })
   }
 
   private async handOffOnward(
     conversation: ActiveConversation,
     from: AgentId,
-    reply: { readonly eventId: string; readonly text: string }
+    reply: { readonly eventId: string; readonly text: string },
+    handoff: ReplyHandoff
   ): Promise<void> {
     const { conversationId } = conversation
-    const handoff = findReplyHandoff(reply.text, from, AGENT_IDS)
-    if (handoff === null) return
 
     const epoch = conversation.handoffEpoch
     try {
       await this.ensureSeated(conversation, [handoff.to])
       const target = conversation.participants.get(handoff.to)
-      if (target === undefined || conversation.handoffEpoch !== epoch) return
+      if (target === undefined) {
+        this.announceIdle(conversation, from)
+        return
+      }
+      if (conversation.handoffEpoch !== epoch) return
       if (this.active.get(conversationId) !== conversation) return
 
       const stored = this.store.append({
@@ -3004,6 +3090,7 @@ export class ChorusRuntime {
       target.seenSeq = stored.seq
       delete target.catchupBudget
     } catch (error) {
+      this.announceIdle(conversation, from)
       const message = error instanceof Error ? error.message : String(error)
       this.log.error('a hand-off could not be delivered', undefined, {
         conversationId,
@@ -3188,6 +3275,7 @@ export class ChorusRuntime {
       lastAddressed: undefined,
       lastSeenSeq: entry.lastSeenSeq,
       handoffEpoch: 0,
+      working: new Set(),
       draft: entry.draft,
       planning: false,
       styleOn: this.defaultStyleOn(),
@@ -4651,6 +4739,7 @@ export class ChorusRuntime {
      * and can never be started again to give it up.
      */
     await this.traffic.dispose(projectId)
+    this.adbReverse.sync(this.traffic.capturingPorts())
     return { forgotten: this.projects.forget(projectId) }
   }
 
@@ -5031,8 +5120,9 @@ export class ChorusRuntime {
     this.projects.dismissLegacyTraffic()
   }
 
-  disposeProjectTraffic(projectId: string): Promise<void> {
-    return this.traffic.dispose(projectId)
+  async disposeProjectTraffic(projectId: string): Promise<void> {
+    await this.traffic.dispose(projectId)
+    this.adbReverse.sync(this.traffic.capturingPorts())
   }
 
   async close(): Promise<void> {
@@ -5057,6 +5147,7 @@ export class ChorusRuntime {
      */
     this.terminals.close()
     this.logcat.close()
+    this.adbReverse.close()
     await this.traffic.shutdown()
 
     /*
@@ -5325,6 +5416,19 @@ export class ChorusRuntime {
        * swallows its own failures.
        */
       onApprovalQueued: (request) => {
+        const room = this.active.get(conversationId)
+        if (room !== undefined) {
+          this.onAttention?.({
+            reason: 'approval',
+            conversationId,
+            projectId: room.projectId,
+            title: room.title,
+            agentId,
+            approvalId: request.id,
+            kind: request.kind,
+            request,
+          })
+        }
         if (request.kind !== 'fileChange') return
         const projectRoot = this.agentDirectory(conversationId)
         void this.previews
@@ -5349,6 +5453,19 @@ export class ChorusRuntime {
             })
           })
           .catch(() => undefined)
+      },
+      onQuestionQueued: (request) => {
+        const room = this.active.get(conversationId)
+        if (room === undefined) return
+        this.onAttention?.({
+          reason: 'question',
+          conversationId,
+          projectId: room.projectId,
+          title: room.title,
+          agentId,
+          userInputId: request.id,
+          request,
+        })
       },
       /*
        * The last thing before an allowed edit is let through.

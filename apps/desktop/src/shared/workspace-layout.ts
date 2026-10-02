@@ -22,18 +22,9 @@ export const WorkspaceLayoutNode: z.ZodType<WorkspaceLayoutNode> = z.lazy(() =>
   ])
 )
 
-export const TRAFFIC_TAB_ID = 'traffic'
-
-/**
- * A tab id names a conversation, or the traffic view — one reserved id that
- * names no conversation at all. Anything reading `tabs` or `activeTabId` and
- * treating the value as a conversation has to ask this first.
- */
-export const isConversationTab = (id: string): boolean => id !== TRAFFIC_TAB_ID
-
 export const WorkspacePane = z.object({
   id: z.string(),
-  /** Tab ids, in the order their tabs appear in this pane. See `isConversationTab`. */
+  /** Tab ids, in the order their tabs appear in this pane. */
   tabs: z.array(z.string()),
   activeTabId: z.string().nullable(),
 })
@@ -60,7 +51,11 @@ export const SIDEBAR_WIDTH = { default: 248, min: 100 } as const
  * panes are a way of seeing several projects at once, and a divider that meant
  * something different in each would make the layout unreadable.
  */
-export const CHORUS_WIDTH = { default: 420, min: 100 } as const
+export const CHORUS_WIDTH = { default: 500, min: 500 } as const
+
+export const EDITOR_WIDTH = { resizeFloor: 400, peek: 61 } as const
+
+export const BOX_WIDTH = { default: 500, min: 500 } as const
 
 /**
  * How big a note is, as fractions of the window. Both notes, one set of bounds.
@@ -163,6 +158,9 @@ export const CLOSED_TERMINAL_PANEL: TerminalPanelState = Object.freeze({
   activeId: null,
 })
 
+export const TrafficPanelState = z.object({ open: z.boolean(), width: z.number() })
+export type TrafficPanelState = z.infer<typeof TrafficPanelState>
+
 /**
  * How one project arranges its conversations, and it is **the same shape as the
  * workspace's own pane tree**.
@@ -187,6 +185,7 @@ export const ConversationArrangement = z.object({
   layout: WorkspaceLayoutNode.nullable(),
   panes: z.record(z.string(), WorkspacePane),
   focusedPaneId: z.string().nullable(),
+  widths: z.record(z.string(), z.number()).optional(),
 })
 export type ConversationArrangement = z.infer<typeof ConversationArrangement>
 
@@ -282,6 +281,7 @@ export const WorkspaceSnapshot = z.object({
    * conversation, not merely an arrangement.
    */
   conversationGroups: z.record(z.string(), ConversationArrangement).default({}),
+  trafficPanels: z.record(z.string(), TrafficPanelState).default({}),
 })
 export type WorkspaceSnapshot = z.infer<typeof WorkspaceSnapshot>
 
@@ -292,5 +292,6 @@ export const ProjectLayoutSlice = z.object({
   conversationGroups: ConversationArrangement.optional(),
   chorusWidth: z.number().optional(),
   workbenchHidden: z.boolean().optional(),
+  trafficPanel: TrafficPanelState.optional(),
 })
 export type ProjectLayoutSlice = z.infer<typeof ProjectLayoutSlice>

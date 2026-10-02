@@ -1,35 +1,51 @@
 import { describe, expect, it } from 'vitest'
 import {
+  BOX_WIDTH,
+  CHORUS_WIDTH,
   CLOSED_TERMINAL_PANEL,
+  EDITOR_WIDTH,
   SIDEBAR_WIDTH,
   TERMINAL_HEIGHT,
-  TRAFFIC_TAB_ID,
+  type ConversationArrangement,
   type TerminalPanelState,
+  type WorkspaceLayoutNode,
+  type WorkspacePane,
   type WorkspaceSnapshot,
 } from '../../../shared/workspace-layout.js'
 import {
   applyDetachedEntries,
+  clampBoxWidth,
   clampSidebarWidth,
   closeTab,
+  columnsOf,
+  columnWidths,
   detachTab,
   EMPTY_WORKSPACE,
   leafPaneIds,
   MAX_PANES,
+  mergeSlice,
+  moveBox,
   moveTab,
   newTerminalId,
   normalizeTerminalPanel,
   normalizeWorkspace,
+  openBox,
   openSession,
+  paneSplit,
   placeSession,
+  pushDivider,
   reconcileConversationGroups,
   reconcileWorkspace,
   reorderTab,
+  resetBoxes,
   returnTab,
   setBranchSizes,
+  sliceOf,
   splitTab,
   splitWithSession,
   tabLocation,
   virtualIndex,
+  withColumnWidths,
   withDetachedReturned,
 } from './layout.js'
 
@@ -40,6 +56,40 @@ function onePane(...tabs: string[]): WorkspaceSnapshot {
     panes: { 'pane-1': { id: 'pane-1', tabs, activeTabId: tabs[0] ?? null } },
     focusedPaneId: 'pane-1',
     sidebarWidth: SIDEBAR_WIDTH.default,
+  }
+}
+
+const leaf = (paneId: string): WorkspaceLayoutNode => ({ kind: 'leaf', paneId })
+
+const row = (...ids: string[]): WorkspaceLayoutNode => ({
+  kind: 'branch',
+  orientation: 'row',
+  children: ids.map(leaf),
+  sizes: ids.map(() => 1),
+})
+
+const column = (...ids: string[]): WorkspaceLayoutNode => ({
+  kind: 'branch',
+  orientation: 'column',
+  children: ids.map(leaf),
+  sizes: ids.map(() => 1),
+})
+
+const box = (id: string, ...tabs: string[]): WorkspacePane => ({
+  id,
+  tabs: [...tabs],
+  activeTabId: tabs[0] ?? null,
+})
+
+function arrangement(
+  layout: WorkspaceLayoutNode | null,
+  panes: readonly WorkspacePane[],
+  focusedPaneId: string | null = panes[0]?.id ?? null
+): ConversationArrangement {
+  return {
+    layout,
+    panes: Object.fromEntries(panes.map((pane) => [pane.id, pane])),
+    focusedPaneId,
   }
 }
 
@@ -539,23 +589,212 @@ describe('reconcileConversationGroups', () => {
     focusedPaneId: 'g1',
   })
 
-  it('keeps the traffic tab when a conversation starts', () => {
-    const next = reconcileConversationGroups(arranged(['c1', TRAFFIC_TAB_ID], TRAFFIC_TAB_ID), [
-      'c1',
-      'c2',
-    ])
-    expect(next?.panes['g1']?.tabs).toEqual(['c1', TRAFFIC_TAB_ID, 'c2'])
+  it('drops a saved tab no live conversation confirms, caret included', () => {
+    const next = reconcileConversationGroups(arranged(['c1', 'gone'], 'gone'), ['c1'])
+    expect(next?.panes['g1']?.tabs).toEqual(['c1'])
+    expect(next?.panes['g1']?.activeTabId).toBe('c1')
   })
 
-  it('keeps the arrangement when every conversation has ended', () => {
-    const next = reconcileConversationGroups(arranged(['c1', TRAFFIC_TAB_ID], 'c1'), [])
-    expect(next?.panes['g1']?.tabs).toEqual([TRAFFIC_TAB_ID])
-    expect(next?.panes['g1']?.activeTabId).toBe(TRAFFIC_TAB_ID)
+  it('gives every conversation no box holds one of its own', () => {
+    const saved = arrangement(leaf('g1'), [box('g1', 'c1')])
+    const next = reconcileConversationGroups(saved, ['c1', 'c2', 'c3'])
+    const boxes = leafPaneIds(next?.layout ?? null).map((id) => next?.panes[id]?.tabs[0])
+    expect(boxes).toEqual(['c1', 'c2', 'c3'])
+  })
+
+  it('puts the caret back where it was rather than on the newest box', () => {
+    const saved = arrangement(row('g1', 'g2'), [box('g1', 'c1'), box('g2', 'c2')], 'g2')
+    const next = reconcileConversationGroups(saved, ['c1', 'c2', 'c3'])
+    expect(next?.focusedPaneId).toBe('g2')
+    expect(leafPaneIds(next?.layout ?? null)).toHaveLength(3)
+  })
+
+  it('keeps a width the saved arrangement carried', () => {
+    const saved = { ...arrangement(leaf('g1'), [box('g1', 'c1')]), widths: { g1: 720 } }
+    expect(reconcileConversationGroups(saved, ['c1', 'c2'])?.widths?.['g1']).toBe(720)
   })
 
   it('still reports nothing for a project with no arrangement to keep', () => {
     expect(reconcileConversationGroups(undefined, [])).toBeNull()
     expect(reconcileConversationGroups(arranged(['c1'], 'c1'), [])).toBeNull()
+  })
+})
+
+describe('one chat per box', () => {
+  const three = arrangement(
+    row('a', 'b', 'c'),
+    [box('a', 'c1'), box('b', 'c2'), box('c', 'c3')],
+    'a'
+  )
+
+  it('opens a new box as a column right of the focused one', () => {
+    const next = openBox(arrangement(leaf('a'), [box('a', 'c1')]), 'c2', 'b')
+    expect(leafPaneIds(next.layout)).toEqual(['a', 'b'])
+    expect(next.focusedPaneId).toBe('b')
+    expect(next.panes['b']?.tabs).toEqual(['c2'])
+  })
+
+  it('opens beside a stacked box as a new column, never inside the stack', () => {
+    const stacked = arrangement(column('a', 'b'), [box('a', 'c1'), box('b', 'c2')], 'a')
+    const columns = columnsOf(openBox(stacked, 'c3', 'c').layout)
+    expect(columns).toHaveLength(2)
+    expect(leafPaneIds(columns[1] ?? null)).toEqual(['c'])
+  })
+
+  it('focuses the box already holding the tab instead of opening a second', () => {
+    const next = openBox(three, 'c1', 'fresh')
+    expect(leafPaneIds(next.layout)).toEqual(['a', 'b', 'c'])
+    expect(next.panes['fresh']).toBeUndefined()
+    expect(next.focusedPaneId).toBe('a')
+  })
+
+  it('reorders a whole column and leaves its width alone', () => {
+    const next = moveBox(three, 'c', 'a', 'left')
+    expect(leafPaneIds(next.layout)).toEqual(['c', 'a', 'b'])
+  })
+
+  it('stacks a box below another, splitting that box in two', () => {
+    const next = moveBox(three, 'c', 'b', 'down')
+    expect(leafPaneIds(next.layout)).toEqual(['a', 'b', 'c'])
+    const columns = columnsOf(next.layout)
+    expect(columns).toHaveLength(2)
+    expect(leafPaneIds(columns[1] ?? null)).toEqual(['b', 'c'])
+  })
+
+  it('pulls a box out of a stack into its own column', () => {
+    const stacked = arrangement(column('a', 'b'), [box('a', 'c1'), box('b', 'c2')], 'a')
+    const next = moveBox(stacked, 'b', 'a', 'right')
+    expect(columnsOf(next.layout)).toHaveLength(2)
+    expect(leafPaneIds(next.layout)).toEqual(['a', 'b'])
+  })
+
+  it('ignores a drop on the box being dragged, or on one that is gone', () => {
+    expect(moveBox(three, 'a', 'a', 'up')).toBe(three)
+    expect(moveBox(three, 'gone', 'a', 'up')).toBe(three)
+  })
+})
+
+describe('box widths', () => {
+  const three = arrangement(
+    row('a', 'b', 'c'),
+    [box('a', 'c1'), box('b', 'c2'), box('c', 'c3')],
+    'a'
+  )
+  const withWidths: ConversationArrangement = { ...three, widths: { a: 700, b: 500, c: 620 } }
+
+  it('opens a new box at the floor', () => {
+    const next = openBox(arrangement(leaf('a'), [box('a', 'c1')]), 'c2', 'b')
+    expect(columnWidths(next)).toEqual([BOX_WIDTH.default, BOX_WIDTH.default])
+  })
+
+  it('keeps a box moved left or right at its own width', () => {
+    expect(columnWidths(moveBox(withWidths, 'c', 'a', 'left'))).toEqual([620, 700, 500])
+  })
+
+  it('gives a box stacked into a column that column width', () => {
+    const next = moveBox(withWidths, 'c', 'b', 'down')
+    expect(columnWidths(next)).toEqual([700, 500])
+    expect(next.widths?.['c']).toBe(500)
+  })
+
+  it('writes one width to every box in a column and drops stale entries', () => {
+    const stacked: ConversationArrangement = {
+      ...arrangement(column('a', 'b'), [box('a', 'c1'), box('b', 'c2')], 'a'),
+      widths: { a: 500, b: 500, stale: 999 },
+    }
+    expect(withColumnWidths(stacked, [820]).widths).toEqual({ a: 820, b: 820 })
+  })
+
+  it('ignores a widths list that does not match the columns', () => {
+    expect(withColumnWidths(three, [700])).toBe(three)
+  })
+
+  it('clamps a stored width up to the floor', () => {
+    const tiny: ConversationArrangement = {
+      ...arrangement(leaf('a'), [box('a', 'c1')]),
+      widths: { a: 120 },
+    }
+    expect(columnWidths(tiny)).toEqual([BOX_WIDTH.default])
+    expect(clampBoxWidth(Number.NaN)).toBe(BOX_WIDTH.default)
+  })
+})
+
+describe('pushDivider', () => {
+  const widths = [500, 500, 500]
+
+  it('dragging right widens the item on the left and nothing else', () => {
+    expect(pushDivider(widths, 1, 60)).toEqual({ widths: [560, 500, 500], scroll: 0 })
+  })
+
+  it('dragging left shrinks the item on the left first, and nothing else moves', () => {
+    expect(pushDivider([800, 500, 500], 1, -200)).toEqual({
+      widths: [600, 500, 500],
+      scroll: 0,
+    })
+  })
+
+  it('dragging left past the floor widens the item on the right by the rest and scrolls it', () => {
+    expect(pushDivider([600, 500, 500], 1, -250)).toEqual({
+      widths: [500, 650, 500],
+      scroll: 150,
+    })
+  })
+
+  it('dragging left from the floor widens the item on the right straight away', () => {
+    expect(pushDivider(widths, 1, -60)).toEqual({ widths: [500, 560, 500], scroll: 60 })
+  })
+
+  it('reversing mid-drag measures from the start, so it undoes on the way back', () => {
+    expect(pushDivider([700, 500], 1, -300).widths).toEqual([500, 600])
+    expect(pushDivider([700, 500], 1, -100).widths).toEqual([600, 500])
+    expect(pushDivider([700, 500], 1, 0).widths).toEqual([700, 500])
+  })
+
+  it('leaves every width alone for a divider that divides nothing', () => {
+    expect(pushDivider([500], 0, 40)).toEqual({ widths: [500], scroll: 0 })
+  })
+})
+
+describe('resetBoxes', () => {
+  it('clears every width and evens every stack', () => {
+    const uneven: ConversationArrangement = {
+      layout: column('a', 'b'),
+      panes: { a: box('a', 'c1'), b: box('b', 'c2') },
+      focusedPaneId: 'a',
+      widths: { a: 900, b: 900 },
+    }
+    const next = resetBoxes(uneven)
+    expect(next.widths).toEqual({})
+    expect(next.layout).toEqual({
+      kind: 'branch',
+      orientation: 'column',
+      children: [leaf('a'), leaf('b')],
+      sizes: [0.5, 0.5],
+    })
+  })
+})
+
+describe('traffic panel', () => {
+  it('clamps a stored width up to the floor', () => {
+    const repaired = normalizeWorkspace({
+      ...EMPTY_WORKSPACE,
+      trafficPanels: { p1: { open: true, width: 40 } },
+    })
+    expect(repaired.trafficPanels['p1']).toEqual({ open: true, width: BOX_WIDTH.default })
+  })
+
+  it('carries the panel through a slice and back, and drops it when absent', () => {
+    const workspace: WorkspaceSnapshot = {
+      ...EMPTY_WORKSPACE,
+      trafficPanels: { p1: { open: true, width: 640 } },
+    }
+    const slice = sliceOf(workspace, 'p1')
+    expect(slice.trafficPanel).toEqual({ open: true, width: 640 })
+    expect(mergeSlice(EMPTY_WORKSPACE, 'p1', slice).trafficPanels['p1']).toEqual({
+      open: true,
+      width: 640,
+    })
+    expect(mergeSlice(workspace, 'p1', {}).trafficPanels['p1']).toBeUndefined()
   })
 })
 
@@ -636,33 +875,114 @@ describe('detached projects', () => {
   })
 })
 
-/*
- * The reserved traffic id through the two operations a drop lands on.
- *
- * It is a tab and it is not a conversation, and the whole of the drag's
- * correctness rests on those operations treating it as a tab and nothing more —
- * the source group empties and collapses on a move, and a group holding it plus
- * one conversation can still split, which is the gesture the panel is for.
- */
-describe('the traffic tab through a place and a split', () => {
-  it('moves rather than copies when it is placed in another group', () => {
-    const workspace = splitTab(onePane('a', 'b'), 'b', 'pane-1', 'right')
-    const second = leafPaneIds(workspace.layout)[1] ?? ''
-    const placed = placeSession(workspace, TRAFFIC_TAB_ID, second, 0)
-    expect(tabLocation(placed, TRAFFIC_TAB_ID)?.paneId).toBe(second)
-    expect(placed.panes['pane-1']?.tabs).toEqual(['a'])
+describe('paneSplit', () => {
+  it('puts the editor beside a chat at its floor', () => {
+    expect(paneSplit(1000, CHORUS_WIDTH.default)).toEqual({
+      chorus: 500,
+      editor: 500,
+      raised: 500,
+      covered: false,
+    })
   })
 
-  it('splits a group holding it beside one conversation', () => {
-    const split = splitWithSession(onePane('a', TRAFFIC_TAB_ID), TRAFFIC_TAB_ID, 'pane-1', 'left')
-    const ids = leafPaneIds(split.layout)
-    expect(ids).toHaveLength(2)
-    expect(split.panes[ids[0] ?? '']?.tabs).toEqual([TRAFFIC_TAB_ID])
-    expect(split.panes['pane-1']?.tabs).toEqual(['a'])
+  it('resizes the editor live while it is at or above the resize floor', () => {
+    expect(paneSplit(1200, 700)).toEqual({
+      chorus: 700,
+      editor: 500,
+      raised: 500,
+      covered: false,
+    })
   })
 
-  it('refuses to split a group holding nothing but itself', () => {
-    const workspace = onePane(TRAFFIC_TAB_ID)
-    expect(splitWithSession(workspace, TRAFFIC_TAB_ID, 'pane-1', 'left')).toEqual(workspace)
+  it('holds the chat at its floor for a stored width below it', () => {
+    expect(paneSplit(1000, 100)).toEqual({
+      chorus: CHORUS_WIDTH.min,
+      editor: 500,
+      raised: 500,
+      covered: false,
+    })
+  })
+
+  it('keeps the editor at the floor across the jump, and flips coverage with it', () => {
+    expect(paneSplit(1000, 600)).toEqual({
+      chorus: 600,
+      editor: EDITOR_WIDTH.resizeFloor,
+      raised: EDITOR_WIDTH.resizeFloor,
+      covered: false,
+    })
+    expect(paneSplit(1000, 601)).toEqual({
+      chorus: 601,
+      editor: EDITOR_WIDTH.resizeFloor,
+      raised: 500,
+      covered: true,
+    })
+  })
+
+  it('keeps the editor at the floor across the jump where the raised width equals it', () => {
+    expect(paneSplit(900, 500)).toEqual({
+      chorus: 500,
+      editor: EDITOR_WIDTH.resizeFloor,
+      raised: EDITOR_WIDTH.resizeFloor,
+      covered: false,
+    })
+    expect(paneSplit(900, 501)).toEqual({
+      chorus: 501,
+      editor: EDITOR_WIDTH.resizeFloor,
+      raised: EDITOR_WIDTH.resizeFloor,
+      covered: true,
+    })
+  })
+
+  it('stops the chat at the peek width whatever was stored', () => {
+    expect(paneSplit(1000, 5000)).toEqual({
+      chorus: 1000 - EDITOR_WIDTH.peek,
+      editor: EDITOR_WIDTH.resizeFloor,
+      raised: 500,
+      covered: true,
+    })
+  })
+
+  it('gives the chat a peek of editor beside it in a pane under 561', () => {
+    expect(paneSplit(560, 500)).toEqual({
+      chorus: 499,
+      editor: EDITOR_WIDTH.peek,
+      raised: EDITOR_WIDTH.peek,
+      covered: false,
+    })
+    expect(paneSplit(561, 500)).toEqual({
+      chorus: 500,
+      editor: EDITOR_WIDTH.peek,
+      raised: EDITOR_WIDTH.peek,
+      covered: false,
+    })
+  })
+
+  it('pins the editor beside the chat at 899, below the floor and never resizing', () => {
+    expect(paneSplit(899, 500)).toEqual({
+      chorus: 500,
+      editor: 399,
+      raised: 399,
+      covered: false,
+    })
+    expect(paneSplit(899, 700)).toEqual({
+      chorus: 700,
+      editor: 399,
+      raised: 399,
+      covered: true,
+    })
+  })
+
+  it('begins the resize regime at 900 and not before', () => {
+    expect(paneSplit(900, 500).editor).toBe(EDITOR_WIDTH.resizeFloor)
+    expect(paneSplit(899, 500).editor).toBe(399)
+  })
+
+  it('gives the chat no width at all in a pane below the peek', () => {
+    expect(paneSplit(50, 500)).toEqual({
+      chorus: 0,
+      editor: EDITOR_WIDTH.peek,
+      raised: EDITOR_WIDTH.peek,
+      covered: false,
+    })
   })
 })

@@ -74,6 +74,7 @@ export interface ConversationServiceOptions {
   /** Told when an approved plan returned the session to ordinary permissions. */
   readonly onPlanExited?: () => void
   readonly onApprovalQueued?: (request: ApprovalRequest) => void
+  readonly onQuestionQueued?: (request: UserInputRequest) => void
   readonly onApprovalSettled?: (approvalId: string) => void
   readonly preflightApproval?: (request: ApprovalRequest) => Promise<boolean>
   /**
@@ -126,6 +127,7 @@ export class ConversationService {
   private readonly onActivity: ((activity: AgentActivity | null) => void) | undefined
   private readonly onPlanExited: (() => void) | undefined
   private readonly onApprovalQueued: ((request: ApprovalRequest) => void) | undefined
+  private readonly onQuestionQueued: ((request: UserInputRequest) => void) | undefined
   private readonly onApprovalSettled: ((approvalId: string) => void) | undefined
   private readonly preflightApproval: ((request: ApprovalRequest) => Promise<boolean>) | undefined
   /**
@@ -180,6 +182,7 @@ export class ConversationService {
     this.onActivity = options.onActivity
     this.onPlanExited = options.onPlanExited
     this.onApprovalQueued = options.onApprovalQueued
+    this.onQuestionQueued = options.onQuestionQueued
     this.onApprovalSettled = options.onApprovalSettled
     this.preflightApproval = options.preflightApproval
     this.queue = new ApprovalQueue({
@@ -921,6 +924,8 @@ export class ConversationService {
          */
         if (this.neverAsks) {
           void this.answerUserInput(event.request.id, { outcome: 'timeout' }, 'system')
+        } else {
+          this.onQuestionQueued?.(event.request)
         }
         return
       }

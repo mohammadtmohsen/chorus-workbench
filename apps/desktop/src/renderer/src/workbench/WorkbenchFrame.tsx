@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import type { WorkbenchRect } from '../../../shared/workbench-ipc.js'
 import { useWorkbenchStill } from '../workspace/overlay.js'
@@ -45,6 +45,16 @@ const parked = new Map<string, { readonly viewId: string; readonly timer: number
 
 const targetKey = (target: { readonly grant: string } | { readonly projectId: string }): string =>
   'grant' in target ? `grant:${target.grant}` : `project:${target.projectId}`
+
+const measure = (element: HTMLElement): WorkbenchRect => {
+  const rect = element.getBoundingClientRect()
+  return {
+    x: Math.round(rect.x),
+    y: Math.round(rect.y),
+    width: Math.round(rect.width),
+    height: Math.round(rect.height),
+  }
+}
 
 /*
  * A close that fails has already got what it wanted, and the refusal is
@@ -125,6 +135,7 @@ export function WorkbenchFrame({
   target,
   projectRoot,
   hidden = false,
+  covered = false,
   onFailed,
 }: {
   readonly target: { readonly grant: string } | { readonly projectId: string }
@@ -141,12 +152,16 @@ export function WorkbenchFrame({
    * rectangle and nothing inside it reflows.
    */
   readonly hidden?: boolean
+  readonly covered?: boolean
   readonly onFailed: (message: string) => void
 }): React.JSX.Element {
   const { t } = useTranslation()
   const host = useRef<HTMLDivElement>(null)
   const [viewId, setViewId] = useState<string | null>(null)
-  const still = useWorkbenchStill(viewId)
+  const [coverStill, setCoverStill] = useState<string | null>(null)
+  const [paintCover, setPaintCover] = useState(false)
+  const overlayStill = useWorkbenchStill(viewId)
+  const still = paintCover ? (coverStill ?? overlayStill) : overlayStill
 
   useEffect(() => {
     /*
@@ -241,6 +256,33 @@ export function WorkbenchFrame({
     }
   }, [viewId, hidden, onFailed])
 
+  useLayoutEffect(() => {
+    if (viewId === null || hidden) return undefined
+    let live = true
+    if (covered) setPaintCover(true)
+    const element = host.current
+    if (element !== null && !covered && paintCover) {
+      window.chorus
+        .setWorkbenchBounds({ viewId, rect: measure(element) })
+        .catch((error: unknown) => {
+          if (live) onFailed(error instanceof Error ? error.message : String(error))
+        })
+    }
+    window.chorus
+      .setWorkbenchCovered({ viewId, covered })
+      .then(({ still: captured }) => {
+        if (!live) return
+        if (!covered) setPaintCover(false)
+        else if (captured !== null) setCoverStill(captured)
+      })
+      .catch((error: unknown) => {
+        if (live) onFailed(error instanceof Error ? error.message : String(error))
+      })
+    return () => {
+      live = false
+    }
+  }, [viewId, covered, hidden, onFailed])
+
   useEffect(() => {
     const element = host.current
     /*
@@ -320,13 +362,7 @@ export function WorkbenchFrame({
     let last: WorkbenchRect | null = null
 
     const report = (): void => {
-      const rect = element.getBoundingClientRect()
-      const next: WorkbenchRect = {
-        x: Math.round(rect.x),
-        y: Math.round(rect.y),
-        width: Math.round(rect.width),
-        height: Math.round(rect.height),
-      }
+      const next = measure(element)
       if (
         last !== null &&
         last.x === next.x &&
@@ -381,7 +417,14 @@ export function WorkbenchFrame({
   return (
     <div className="workbench-surface" ref={host} data-workbench-surface={projectRoot}>
       {still !== null && (
-        <img className="workbench-still" src={still} alt="" aria-hidden="true" draggable={false} />
+        <img
+          className="workbench-still"
+          src={still}
+          alt=""
+          aria-hidden="true"
+          draggable={false}
+          data-cover={paintCover || undefined}
+        />
       )}
       {/*
         Something to look at while the surface opens, and it is not decoration.
@@ -406,6 +449,9 @@ export function WorkbenchFrame({
         <p className="workbench-pending" role="status">
           {t('workbench.opening')}
         </p>
+      )}
+      {paintCover && still === null && (
+        <p className="workbench-covered-hint">{t('workbench.coveredHint')}</p>
       )}
     </div>
   )

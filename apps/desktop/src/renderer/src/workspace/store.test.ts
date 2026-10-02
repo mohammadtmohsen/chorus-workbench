@@ -1,12 +1,12 @@
 import { describe, expect, it, vi } from 'vitest'
 import type { IdeContextPush, TranscriptEvent } from '../../../shared/ipc.js'
 import {
+  BOX_WIDTH,
   CLOSED_TERMINAL_PANEL,
-  TRAFFIC_TAB_ID,
   WorkspaceSnapshot,
   type TerminalPanelState,
 } from '../../../shared/workspace-layout.js'
-import { EMPTY_WORKSPACE, onScreenConversations } from './layout.js'
+import { columnWidths, EMPTY_WORKSPACE, onScreenConversations } from './layout.js'
 import {
   reducePulse,
   sameWorkspaceSnapshot,
@@ -205,15 +205,14 @@ describe('which conversations count as on screen', () => {
   })
 
   /*
-   * A detached window reports what it is showing, and traffic is a tab that
-   * names no conversation — so it must not enter the set however it arrives.
+   * A detached window reports what it is showing, and that report is merged
+   * rather than replaced — the window that owns the rail has to keep its own
+   * answer as well, or a conversation read over there would count as unseen.
    */
-  it('never takes the traffic tab for a conversation', () => {
-    const showing = onScreenConversations({ panes: {}, conversationGroups: {} }, [
-      TRAFFIC_TAB_ID,
-      'c9',
-    ])
-    expect([...showing]).toEqual(['c9'])
+  it('merges what another window reports, without dropping its own answer', () => {
+    seed()
+    const showing = onScreenConversations(useWorkspaceStore.getState(), ['c9'])
+    expect([...showing].sort()).toEqual(['c1', 'c9'])
   })
 })
 
@@ -490,5 +489,50 @@ describe('a detached project', () => {
       else Reflect.set(globalThis, 'window', previousWindow)
       useWorkspaceStore.setState({ detached: {} })
     }
+  })
+})
+
+describe('resetProjectWidths', () => {
+  it('puts every box and Traffic at the floor in one update, and leaves the Chorus column', () => {
+    useWorkspaceStore.setState({
+      conversationGroups: {
+        p1: {
+          layout: {
+            kind: 'branch',
+            orientation: 'row',
+            children: [
+              { kind: 'leaf', paneId: 'g1' },
+              { kind: 'leaf', paneId: 'g2' },
+            ],
+            sizes: [0.7, 0.3],
+          },
+          panes: {
+            g1: { id: 'g1', tabs: ['c1'], activeTabId: 'c1' },
+            g2: { id: 'g2', tabs: ['c2'], activeTabId: 'c2' },
+          },
+          focusedPaneId: 'g1',
+          widths: { g1: 900, g2: 760 },
+        },
+      },
+      trafficPanels: { p1: { open: true, width: 880 } },
+      chorusWidths: { p1: 1100 },
+    })
+
+    const seen: string[] = []
+    const stop = useWorkspaceStore.subscribe(() => {
+      seen.push('update')
+    })
+    useWorkspaceStore.getState().resetProjectWidths('p1')
+    stop()
+
+    const state = useWorkspaceStore.getState()
+    const arrangement = state.conversationGroups['p1']
+    expect(seen).toHaveLength(1)
+    expect(arrangement === undefined ? [] : columnWidths(arrangement)).toEqual([
+      BOX_WIDTH.default,
+      BOX_WIDTH.default,
+    ])
+    expect(state.trafficPanels['p1']?.width).toBe(BOX_WIDTH.default)
+    expect(state.chorusWidths['p1']).toBe(1100)
   })
 })

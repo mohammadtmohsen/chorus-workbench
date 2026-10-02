@@ -3,6 +3,7 @@ import type { TrafficBodyDescriptor } from '../../shared/traffic-ipc.js'
 import {
   bodyView,
   bytesFromBase64,
+  curlCommand,
   describeBody,
   formFields,
   hexDump,
@@ -260,5 +261,44 @@ describe('describeBody', () => {
     expect(describeBody(descriptor({ decoding: 'unsupported' }))).toBe('unsupported')
     expect(describeBody(descriptor({ state: 'aborted' }))).toBe('aborted')
     expect(describeBody(descriptor())).toBeNull()
+  })
+})
+
+describe('curlCommand', () => {
+  const login = {
+    method: 'POST',
+    url: 'http://88.99.104.107:30081/api/v1/auth/login',
+    headers: [
+      ['host', '192.168.1.15:30100'],
+      ['content-type', 'application/json'],
+      ['authorization', 'Bearer abc'],
+      ['content-length', '20'],
+      ['accept-encoding', 'gzip'],
+    ] as const,
+    body: '{"username":"Admin"}',
+  }
+
+  it('sends every header the app sent except the ones curl sets itself', () => {
+    expect(curlCommand(login)).toBe(
+      [
+        'curl -X POST http://88.99.104.107:30081/api/v1/auth/login',
+        "-H 'content-type: application/json'",
+        "-H 'authorization: Bearer abc'",
+        '--compressed',
+        `--data-raw '{"username":"Admin"}'`,
+      ].join(' \\\n  ')
+    )
+  })
+
+  it('quotes a single quote so bash reads the body back unchanged', () => {
+    expect(curlCommand({ ...login, headers: [], body: '{"name":"O\'Brien"}' })).toContain(
+      `--data-raw '{"name":"O'\\''Brien"}'`
+    )
+  })
+
+  it('sends no body flag when there is no body', () => {
+    expect(curlCommand({ ...login, method: 'GET', headers: [], body: '' })).toBe(
+      'curl -X GET http://88.99.104.107:30081/api/v1/auth/login'
+    )
   })
 })

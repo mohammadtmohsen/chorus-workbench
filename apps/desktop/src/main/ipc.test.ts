@@ -1,12 +1,37 @@
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import type { BrowserWindow } from 'electron'
 import type { ChorusRuntime } from './runtime.js'
 
 const showOpenDialog = vi.fn()
+
+class FakeNotification {
+  static readonly instances: FakeNotification[] = []
+  static readonly isSupported = (): boolean => true
+
+  readonly options: Record<string, unknown>
+  readonly listeners = new Map<string, () => void>()
+  shown = false
+
+  constructor(options: Record<string, unknown>) {
+    this.options = options
+    FakeNotification.instances.push(this)
+  }
+
+  on(event: string, listener: () => void): this {
+    this.listeners.set(event, listener)
+    return this
+  }
+
+  show(): void {
+    this.shown = true
+  }
+}
 vi.mock('electron', () => ({
   app: { getVersion: () => '0.0.0', getPath: () => '/tmp/chorus-test' },
   BrowserWindow: { getFocusedWindow: () => null, getAllWindows: () => [] },
   dialog: { showOpenDialog },
   ipcMain: { handle: vi.fn() },
+  Notification: FakeNotification,
   shell: { openPath: vi.fn(), showItemInFolder: vi.fn() },
   // `settings:write` applies the appearance as it writes, because
   // `themeSource` is what `prefers-color-scheme` answers from. A plain object
@@ -25,7 +50,10 @@ vi.mock('electron', () => ({
   },
 }))
 
+vi.mock('./detached-windows.js', () => ({ raise: vi.fn(), detachedWindowOf: vi.fn() }))
+
 const { buildHandlers } = await import('./ipc.js')
+const { detachedWindowOf, raise } = await import('./detached-windows.js')
 
 /**
  * Which paths a transcript row may open, decided in main.
@@ -38,7 +66,9 @@ const { buildHandlers } = await import('./ipc.js')
 describe('ide:openFile', () => {
   const open = async (cwd: string, path: string) => {
     const runtime = { agentDirectory: () => cwd } as unknown as ChorusRuntime
-    return (await (buildHandlers(runtime)['ide:openFile'] as (r: unknown) => Promise<unknown>)({
+    return (await (
+      buildHandlers(runtime, () => null)['ide:openFile'] as (r: unknown) => Promise<unknown>
+    )({
       conversationId: 'c1',
       path,
     })) as { ok: boolean; reason: string | null }
@@ -81,7 +111,7 @@ describe('ide:openFile', () => {
       },
     } as unknown as ChorusRuntime
     const result = await (
-      buildHandlers(runtime)['ide:openFile'] as (r: unknown) => Promise<unknown>
+      buildHandlers(runtime, () => null)['ide:openFile'] as (r: unknown) => Promise<unknown>
     )({ conversationId: 'c1', path: '/p/a/rate.ts' })
     expect(result).toMatchObject({ ok: false, reason: 'outside-project' })
   })
@@ -133,9 +163,9 @@ describe('conversation:start', () => {
   const startWith = async (request: unknown) => {
     const startConversation = vi.fn((_options: Record<string, unknown>) => Promise.resolve(started))
     const runtime = { startConversation } as unknown as ChorusRuntime
-    await (buildHandlers(runtime)['conversation:start'] as (r: unknown) => Promise<unknown>)(
-      request
-    )
+    await (
+      buildHandlers(runtime, () => null)['conversation:start'] as (r: unknown) => Promise<unknown>
+    )(request)
     return startConversation
   }
 
@@ -189,7 +219,10 @@ describe('the channels that could move a conversation', () => {
    * currently asks for it.
    */
   it('are not registered at all', () => {
-    const handlers = buildHandlers({} as unknown as ChorusRuntime) as Record<string, unknown>
+    const handlers = buildHandlers({} as unknown as ChorusRuntime, () => null) as Record<
+      string,
+      unknown
+    >
     expect(handlers['conversation:setCwd']).toBeUndefined()
     expect(handlers['conversation:chooseCwd']).toBeUndefined()
   })
@@ -207,7 +240,7 @@ describe('the channels that could move a conversation', () => {
 describe('the DeepSeek key', () => {
   const KEY = 'sk-do-not-echo-this-anywhere'
 
-  const handlers = () => buildHandlers({} as unknown as ChorusRuntime)
+  const handlers = () => buildHandlers({} as unknown as ChorusRuntime, () => null)
   const write = async (patch: unknown): Promise<Record<string, unknown>> =>
     (handlers()['settings:write'] as unknown as (r: unknown) => Promise<Record<string, unknown>>)(
       patch
@@ -252,9 +285,9 @@ describe('the DeepSeek key', () => {
 
 describe('settings:write and the per-agent maps', () => {
   const write = async (patch: unknown): Promise<{ models: Record<string, string> }> => {
-    const handler = buildHandlers({} as unknown as ChorusRuntime)['settings:write'] as unknown as (
-      r: unknown
-    ) => Promise<{ models: Record<string, string> }>
+    const handler = buildHandlers({} as unknown as ChorusRuntime, () => null)[
+      'settings:write'
+    ] as unknown as (r: unknown) => Promise<{ models: Record<string, string> }>
     return handler(patch)
   }
 
@@ -356,9 +389,11 @@ describe('conversation:transcript', () => {
   }
 
   const read = async (runtime: ChorusRuntime, request: unknown) =>
-    (await (buildHandlers(runtime)['conversation:transcript'] as (r: unknown) => Promise<unknown>)(
-      request
-    )) as { events: { seq: number }[]; throughSeq: number }
+    (await (
+      buildHandlers(runtime, () => null)['conversation:transcript'] as (
+        r: unknown
+      ) => Promise<unknown>
+    )(request)) as { events: { seq: number }[]; throughSeq: number }
 
   it('reports the log position from before the read, not after', async () => {
     const { runtime } = runtimeFor(42)
@@ -435,7 +470,9 @@ describe('project:adoptRemote', () => {
     showOpenDialog.mockReset()
     const adoptRemote = vi.fn(() => ({ project: adopted, created: true }))
     const runtime = { projects: { adoptRemote } } as unknown as ChorusRuntime
-    const adopt = buildHandlers(runtime)['project:adoptRemote'] as (r: unknown) => Promise<unknown>
+    const adopt = buildHandlers(runtime, () => null)['project:adoptRemote'] as (
+      r: unknown
+    ) => Promise<unknown>
     return { adoptRemote, adopt }
   }
 
@@ -478,9 +515,83 @@ describe('project:adoptRemote', () => {
 
 describe('project:checkRemoteHost', () => {
   it('refuses the host string itself before any ssh runs', async () => {
-    const handlers = buildHandlers({} as unknown as ChorusRuntime)
+    const handlers = buildHandlers({} as unknown as ChorusRuntime, () => null)
     const check = handlers['project:checkRemoteHost'] as (r: unknown) => Promise<unknown>
     await expect(check({ host: '' })).rejects.toThrow('Not a usable remote host')
     await expect(check({ host: '-oProxyCommand=x' })).rejects.toThrow('Not a usable remote host')
+  })
+})
+
+describe('app:notify', () => {
+  const fakeMain = { id: 'main' } as unknown as BrowserWindow
+  const fakeDetached = { id: 'detached' } as unknown as BrowserWindow
+
+  const write = async (patch: unknown): Promise<void> => {
+    const handler = buildHandlers({} as unknown as ChorusRuntime, () => null)[
+      'settings:write'
+    ] as unknown as (r: unknown) => Promise<unknown>
+    await handler(patch)
+  }
+
+  const notify = async (request: unknown): Promise<unknown> => {
+    const handler = buildHandlers({} as unknown as ChorusRuntime, () => fakeMain)[
+      'app:notify'
+    ] as unknown as (r: unknown) => Promise<unknown>
+    return handler(request)
+  }
+
+  const click = (): void => {
+    FakeNotification.instances[0]?.listeners.get('click')?.()
+  }
+
+  beforeEach(async () => {
+    await write({ notifications: true })
+  })
+
+  afterEach(() => {
+    FakeNotification.instances.length = 0
+    vi.mocked(raise).mockReset()
+    vi.mocked(detachedWindowOf).mockReset()
+  })
+
+  it('raises one silent notification carrying the request', async () => {
+    await notify({ title: 'claude needs a decision', body: 'Fix the leak', projectId: 'p1' })
+
+    expect(FakeNotification.instances).toHaveLength(1)
+    expect(FakeNotification.instances[0]?.options).toEqual({
+      title: 'claude needs a decision',
+      body: 'Fix the leak',
+      silent: true,
+    })
+    expect(FakeNotification.instances[0]?.shown).toBe(true)
+  })
+
+  it('raises nothing while the switch is off', async () => {
+    await write({ notifications: false })
+    try {
+      await notify({ title: 't', body: 'b', projectId: 'p1' })
+      expect(FakeNotification.instances).toHaveLength(0)
+    } finally {
+      await write({ notifications: true })
+    }
+  })
+
+  it('a click raises the detached window holding the project', async () => {
+    vi.mocked(detachedWindowOf).mockReturnValue(fakeDetached)
+    await notify({ title: 't', body: 'b', projectId: 'p1' })
+
+    click()
+
+    expect(vi.mocked(detachedWindowOf)).toHaveBeenCalledWith('p1')
+    expect(vi.mocked(raise)).toHaveBeenCalledWith(fakeDetached)
+  })
+
+  it('a click falls back to the main window when the project is not detached', async () => {
+    vi.mocked(detachedWindowOf).mockReturnValue(null)
+    await notify({ title: 't', body: 'b', projectId: 'p2' })
+
+    click()
+
+    expect(vi.mocked(raise)).toHaveBeenCalledWith(fakeMain)
   })
 })

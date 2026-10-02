@@ -45,6 +45,7 @@ export interface ProjectTrafficState {
   readonly envVar: string | null
   readonly source: TrafficSourceShape
   readonly failure: TrafficFailure | null
+  readonly forwardedDevices: number
 }
 
 export type ProjectTrafficPush =
@@ -269,7 +270,13 @@ export class ProjectTrafficRegistry {
        * already unreachable when they are given back.
        */
       this.dischargeProject(projectId)
-      return this.publish(entry, { capturing: false, port: null, address: null, failure: null })
+      return this.publish(entry, {
+        capturing: false,
+        port: null,
+        address: null,
+        failure: null,
+        forwardedDevices: 0,
+      })
     })
   }
 
@@ -311,6 +318,23 @@ export class ProjectTrafficRegistry {
     return this.logcatOwner
   }
 
+  capturingPorts(): ReadonlySet<number> {
+    const ports = new Set<number>()
+    for (const entry of this.entries.values()) {
+      if (entry.service !== null && entry.state.port !== null) ports.add(entry.state.port)
+    }
+    return ports
+  }
+
+  setForwarded(count: (port: number) => number): void {
+    for (const entry of this.entries.values()) {
+      const port = entry.service === null ? null : entry.state.port
+      const devices = port === null ? 0 : count(port)
+      if (devices === entry.state.forwardedDevices) continue
+      this.publish(entry, { forwardedDevices: devices })
+    }
+  }
+
   /** One captured exchange's headers, bodies and timing. */
   detail(projectId: string, captureId: string, requestId: string): TrafficDetail | null {
     const entry = this.entries.get(projectId)
@@ -340,6 +364,26 @@ export class ProjectTrafficRegistry {
       requestBody: captured.request.descriptor(),
       responseBody: captured.response.descriptor(),
     }
+  }
+
+  async decodedReady(
+    projectId: string,
+    captureId: string,
+    requestId: string,
+    side: 'request' | 'response'
+  ): Promise<void> {
+    const entry = this.entries.get(projectId)
+    if (entry === undefined) return
+    const service = entry.service
+    if (service === null) return
+    if (entry.captureId !== captureId) return
+    const captured = service.captured(requestId)
+    if (captured === null) return
+    const body = side === 'request' ? captured.request : captured.response
+    const settled =
+      body.state === 'complete' || body.state === 'aborted' || body.state === 'unavailable'
+    if (!settled) return
+    await body.decode()
   }
 
   /**
@@ -558,6 +602,7 @@ export class ProjectTrafficRegistry {
         envVar: this.deps.config(projectId)?.envVar ?? null,
         source: { kind: 'off' },
         failure: null,
+        forwardedDevices: 0,
       },
       queue: Promise.resolve(),
     }

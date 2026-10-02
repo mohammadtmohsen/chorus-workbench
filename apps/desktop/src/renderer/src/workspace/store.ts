@@ -16,33 +16,40 @@ import type {
 // `WorkspaceSnapshot` is imported as a value, not a type: `SNAPSHOT_KEYS` below
 // reads its keys off the schema so the list cannot drift from the shape.
 import {
+  BOX_WIDTH,
   CLOSED_TERMINAL_PANEL,
-  TRAFFIC_TAB_ID,
   WorkspaceSnapshot,
 } from '../../../shared/workspace-layout.js'
 import {
   activateTab,
+  clampBoxWidth,
   clampChorusWidth,
   clampSidebarWidth,
+  CLOSED_TRAFFIC,
   closePane,
   closeTab,
+  EMPTY_ARRANGEMENT,
   EMPTY_WORKSPACE,
   equalizeBranch,
   focusPane,
   leafPaneIds,
+  moveBox,
   moveTab,
   newGroupId,
   onScreenConversations,
+  openBox,
   openSession,
   placeSession,
   reconcileWorkspace,
   newTerminalId,
   normalizeTerminalPanel,
   reorderTab,
+  resetBoxes,
   setBranchSizes,
   splitTab,
   splitWithSession,
   tabLocation,
+  withColumnWidths,
   type SplitDirection,
 } from './layout.js'
 
@@ -315,28 +322,16 @@ export interface WorkspaceActions {
    * produce a conversation may call it without checking first.
    */
   adoptConversation: (projectId: string, conversationId: string) => void
-  openTraffic: (projectId: string, groupId?: string) => void
-  /**
-   * Move a conversation to a slot in a group — the inner `placeSession`.
-   *
-   * Delegates to the identical function the pane tree uses, so "drop on a strip"
-   * behaves the same at both levels rather than the same by coincidence.
-   */
-  placeConversation: (
+  toggleTraffic: (projectId: string) => void
+  setTrafficWidth: (projectId: string, width: number) => void
+  moveConversationBox: (
     projectId: string,
-    tabId: string,
-    targetGroupId: string,
-    slotBefore: number
-  ) => void
-  /** Split a group and put the conversation in the new one — the inner `splitWithSession`. */
-  splitConversation: (
-    projectId: string,
-    tabId: string,
-    targetGroupId: string,
+    boxId: string,
+    targetBoxId: string,
     direction: SplitDirection
   ) => void
-  /** Drop a conversation's tab from its group. Collapses a group left empty. */
-  closeConversationTab: (projectId: string, conversationId: string) => void
+  setConversationWidths: (projectId: string, widths: readonly number[]) => void
+  resetProjectWidths: (projectId: string) => void
   /** How a branch of the conversation tree divides, by path. */
   setConversationSizes: (
     projectId: string,
@@ -477,6 +472,7 @@ function snapshot(state: WorkspaceStore): WorkspaceSnapshot {
     sidebarWidth: state.sidebarWidth,
     chorusWidths: state.chorusWidths,
     conversationGroups: state.conversationGroups,
+    trafficPanels: state.trafficPanels,
     workbenchHidden: state.workbenchHidden,
     terminals: state.terminals,
     globalTerminal: state.globalTerminal,
@@ -899,71 +895,11 @@ export const useWorkspaceStore = create<WorkspaceStore>()(
       adoptConversation: (projectId, conversationId) => {
         set((state) => {
           const current = state.conversationGroups[projectId]
-          /*
-           * A project with no arrangement gets its first group here rather than
-           * being left to reconcile. It is the same one-empty-group seed, and
-           * building it now is what lets the very first conversation in a
-           * project have a tab the moment it starts.
-           */
-          if (current === undefined) {
-            const groupId = newGroupId()
-            return {
-              conversationGroups: {
-                ...state.conversationGroups,
-                [projectId]: {
-                  layout: { kind: 'leaf' as const, paneId: groupId },
-                  panes: {
-                    [groupId]: { id: groupId, tabs: [conversationId], activeTabId: conversationId },
-                  },
-                  focusedPaneId: groupId,
-                },
-              },
-            }
-          }
-          if (tabLocation(current, conversationId) !== null) return {}
-          const target = current.focusedPaneId ?? leafPaneIds(current.layout)[0]
-          const group = target === undefined ? undefined : current.panes[target]
-          if (target === undefined || group === undefined) return {}
+          if (current !== undefined && tabLocation(current, conversationId) !== null) return {}
           return {
             conversationGroups: {
               ...state.conversationGroups,
-              [projectId]: {
-                ...current,
-                panes: {
-                  ...current.panes,
-                  [target]: {
-                    ...group,
-                    tabs: [...group.tabs, conversationId],
-                    activeTabId: conversationId,
-                  },
-                },
-              },
-            },
-          }
-        })
-      },
-      openTraffic: (projectId, groupId) => {
-        set((state) => {
-          const current = state.conversationGroups[projectId]
-          if (current === undefined) {
-            const seeded = newGroupId()
-            return {
-              conversationGroups: {
-                ...state.conversationGroups,
-                [projectId]: {
-                  layout: { kind: 'leaf' as const, paneId: seeded },
-                  panes: {
-                    [seeded]: { id: seeded, tabs: [TRAFFIC_TAB_ID], activeTabId: TRAFFIC_TAB_ID },
-                  },
-                  focusedPaneId: seeded,
-                },
-              },
-            }
-          }
-          return {
-            conversationGroups: {
-              ...state.conversationGroups,
-              [projectId]: openSession(current, TRAFFIC_TAB_ID, groupId),
+              [projectId]: openBox(current ?? EMPTY_ARRANGEMENT, conversationId, newGroupId()),
             },
           }
         })
@@ -973,37 +909,6 @@ export const useWorkspaceStore = create<WorkspaceStore>()(
           conversationGroups: editArrangement(state, projectId, (arrangement) =>
             focusPane(arrangement, groupId)
           ),
-        }))
-      },
-      /*
-       * The four below are one line each, and that is the whole point of the
-       * `PaneTree` refactor. Reorder, move between groups, split in any of four
-       * directions, the four-group ceiling, collapsing a group the move emptied,
-       * repairing sizes — none of it is written twice. A fix to how a pane splits
-       * is a fix to how a conversation splits, by construction.
-       */
-      placeConversation: (projectId, tabId, targetGroupId, slotBefore) => {
-        set((state) => ({
-          conversationGroups: editArrangement(state, projectId, (arrangement) =>
-            placeSession(arrangement, tabId, targetGroupId, slotBefore)
-          ),
-        }))
-      },
-      splitConversation: (projectId, tabId, targetGroupId, direction) => {
-        set((state) => ({
-          conversationGroups: editArrangement(state, projectId, (arrangement) =>
-            splitWithSession(arrangement, tabId, targetGroupId, direction)
-          ),
-        }))
-      },
-      closeConversationTab: (projectId, conversationId) => {
-        set((state) => ({
-          conversationGroups: editArrangement(state, projectId, (arrangement) => {
-            const found = tabLocation(arrangement, conversationId)
-            return found === null
-              ? arrangement
-              : closeTab(arrangement, found.paneId, conversationId)
-          }),
         }))
       },
       setConversationSizes: (projectId, path, sizes) => {
@@ -1019,6 +924,54 @@ export const useWorkspaceStore = create<WorkspaceStore>()(
             equalizeBranch(arrangement, path)
           ),
         }))
+      },
+      toggleTraffic: (projectId) => {
+        set((state) => {
+          const current = state.trafficPanels[projectId] ?? CLOSED_TRAFFIC
+          return {
+            trafficPanels: {
+              ...state.trafficPanels,
+              [projectId]: { ...current, open: !current.open },
+            },
+          }
+        })
+      },
+      setTrafficWidth: (projectId, width) => {
+        set((state) => {
+          const current = state.trafficPanels[projectId] ?? CLOSED_TRAFFIC
+          return {
+            trafficPanels: {
+              ...state.trafficPanels,
+              [projectId]: { ...current, width: clampBoxWidth(width) },
+            },
+          }
+        })
+      },
+      moveConversationBox: (projectId, boxId, targetBoxId, direction) => {
+        set((state) => ({
+          conversationGroups: editArrangement(state, projectId, (arrangement) =>
+            moveBox(arrangement, boxId, targetBoxId, direction)
+          ),
+        }))
+      },
+      setConversationWidths: (projectId, widths) => {
+        set((state) => ({
+          conversationGroups: editArrangement(state, projectId, (arrangement) =>
+            withColumnWidths(arrangement, widths)
+          ),
+        }))
+      },
+      resetProjectWidths: (projectId) => {
+        set((state) => {
+          const traffic = state.trafficPanels[projectId] ?? CLOSED_TRAFFIC
+          return {
+            conversationGroups: editArrangement(state, projectId, resetBoxes),
+            trafficPanels: {
+              ...state.trafficPanels,
+              [projectId]: { ...traffic, width: BOX_WIDTH.default },
+            },
+          }
+        })
       },
       toggleWorkbench: (projectId) => {
         set((state) => {

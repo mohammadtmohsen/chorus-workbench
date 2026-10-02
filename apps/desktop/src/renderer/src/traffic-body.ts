@@ -1,4 +1,5 @@
 import type { TrafficBodyDescriptor } from '../../shared/traffic-ipc.js'
+import { quotePath } from './attach.js'
 
 export type BodyView = 'raw' | 'formatted' | 'hex'
 
@@ -253,6 +254,26 @@ export const maskHeaders = (
   headers.map(([name, value]): readonly [string, string] =>
     !reveal && value !== '' && MASKED.has(name.toLowerCase()) ? [name, MASK] : [name, value]
   )
+
+const SET_BY_CURL = new Set(['host', 'content-length', 'content-encoding', 'accept-encoding'])
+
+export const curlCommand = (request: {
+  readonly method: string
+  readonly url: string
+  readonly headers: readonly (readonly [string, string])[]
+  readonly body: string
+}): string => {
+  const parts = [`curl -X ${quotePath(request.method)} ${quotePath(request.url)}`]
+  for (const [name, value] of request.headers) {
+    if (SET_BY_CURL.has(name.toLowerCase())) continue
+    parts.push(`-H ${quotePath(`${name}: ${value}`)}`)
+  }
+  if (request.headers.some(([name]) => name.toLowerCase() === 'accept-encoding')) {
+    parts.push('--compressed')
+  }
+  if (request.body !== '') parts.push(`--data-raw ${quotePath(request.body)}`)
+  return parts.join(' \\\n  ')
+}
 
 export const bodyView = (
   bytes: Uint8Array,

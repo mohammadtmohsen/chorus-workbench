@@ -266,12 +266,12 @@ export function commandOptions(commands: readonly CommandInfo[], query: string):
 export function teamCommandOption(
   participants: readonly AgentId[],
   query: string,
-  text: { readonly detail: string; readonly message: string }
+  text: { readonly detail: string }
 ): MentionOption[] {
   if (participants.length < 2 || !'team'.includes(query)) return []
   return [
     {
-      insert: `${participants.map((id) => `@${id}`).join(' ')} ${text.message}`,
+      insert: '/team',
       bare: true,
       label: 'team',
       detail: text.detail,

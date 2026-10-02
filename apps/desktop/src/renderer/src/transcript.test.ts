@@ -5,7 +5,9 @@ import {
   EMPTY_VIEW,
   finalAnswerKey,
   groupedWith,
+  prependEvents,
   reduceEvents,
+  transcriptRows,
   type TranscriptMessage,
   type TranscriptView,
 } from './transcript.js'
@@ -1259,5 +1261,124 @@ describe('finalAnswerKey', () => {
 
   it('is null for an empty transcript', () => {
     expect(finalAnswerKey(view(false, []))).toBeNull()
+  })
+})
+
+describe('progress ticks logged before the adapter stopped writing them', () => {
+  const tick = (actor: TranscriptEvent['actor'], fields: Record<string, unknown> = {}) =>
+    event(
+      'notice.raised',
+      { level: 'info', source: 'system', text: 'tool_progress', detail: null, ...fields },
+      actor
+    )
+  const run = (actor: TranscriptEvent['actor'], ref: string) =>
+    event('command.started', { itemRef: ref, command: ['ls', ref] }, actor)
+  const shape = (view: TranscriptView): string[] =>
+    transcriptRows(view.messages).map((row) =>
+      row.kind === 'activity' ? `${row.actor}:${String(row.calls)}` : `entry:${row.message.text}`
+    )
+
+  it.each(['claude', 'deepseek'] as const)(
+    'keeps one %s activity row across the ticks of a hydrated page',
+    (actor) => {
+      const view = reduceEvents(EMPTY_VIEW, [
+        run(actor, 'c1'),
+        tick(actor),
+        run(actor, 'c2'),
+        tick(actor),
+        tick(actor),
+        run(actor, 'c3'),
+      ])
+      expect(view.messages.map((m) => m.kind)).toEqual(['command', 'command', 'command'])
+      expect(shape(view)).toEqual([`${actor}:3`])
+    }
+  )
+
+  it('keeps one activity row when the ticks arrive one live event at a time', () => {
+    const live = [run('claude', 'c1'), tick('claude'), run('claude', 'c2'), tick('claude')]
+    let view: TranscriptView = EMPTY_VIEW
+    for (const next of live) view = reduceEvents(view, [next])
+    expect(shape(view)).toEqual(['claude:2'])
+    expect(view.lastSeq).toBe(live.at(-1)?.seq)
+  })
+
+  it('still shows a tick that says something, is not plain info, or is not an agent’s', () => {
+    const view = reduceEvents(EMPTY_VIEW, [
+      tick('claude', { level: 'warn' }),
+      tick('claude', { level: 'debug' }),
+      tick('claude', { detail: 'still waiting on the network' }),
+      tick('claude', { code: 'editWithoutApproval' }),
+      tick('claude', { detailOmittedBytes: 10 }),
+      tick('system'),
+    ])
+    expect(view.messages).toHaveLength(6)
+  })
+
+  it('leaves every real boundary standing', () => {
+    const view = reduceEvents(EMPTY_VIEW, [
+      run('claude', 'c1'),
+      tick('claude'),
+      event(
+        'notice.raised',
+        { level: 'info', source: 'system', text: 'commands_changed', detail: null },
+        'claude'
+      ),
+      run('claude', 'c2'),
+      tick('claude'),
+      event('agent.message.completed', { itemRef: 'm1', text: 'done reading' }, 'claude'),
+      tick('claude'),
+      run('claude', 'c3'),
+      tick('claude'),
+      run('codex', 'c4'),
+      tick('claude'),
+      event(
+        'notice.raised',
+        { level: 'error', source: 'system', text: 'tool_progress', detail: null },
+        'claude'
+      ),
+      run('claude', 'c5'),
+    ])
+    expect(shape(view)).toEqual([
+      'claude:1',
+      'entry:commands_changed',
+      'claude:1',
+      'entry:done reading',
+      'claude:1',
+      'codex:1',
+      'entry:tool_progress',
+      'claude:1',
+    ])
+  })
+
+  it('joins an older page that ends in ticks to the group already shown, under its key', () => {
+    const older = [run('claude', 'c1'), tick('claude'), run('claude', 'c2'), tick('claude')]
+    const latest = reduceEvents(EMPTY_VIEW, [tick('claude'), run('claude', 'c3')])
+    const head = latest.messages[0]
+    const full = prependEvents(latest, older)
+
+    const rows = transcriptRows(full.messages)
+    expect(rows).toHaveLength(1)
+    expect(rows[0]).toMatchObject({
+      kind: 'activity',
+      calls: 3,
+      key: `activity:${head?.key ?? ''}`,
+    })
+    expect(full.firstSeq).toBe(older[0]?.seq)
+    expect(full.lastSeq).toBe(latest.lastSeq)
+  })
+
+  it('moves the boundary past a page of nothing but ticks and changes nothing else', () => {
+    const older = [tick('claude'), tick('deepseek')]
+    const latest = reduceEvents(EMPTY_VIEW, [
+      event('turn.started', { turnRef: 't1' }, 'claude'),
+      run('claude', 'c1'),
+    ])
+    const full = prependEvents(latest, older)
+
+    expect(full.messages).toEqual(latest.messages)
+    expect(full.firstSeq).toBe(older[0]?.seq)
+    expect(full.lastSeq).toBe(latest.lastSeq)
+    expect(full.working).toEqual(['claude'])
+    expect(full.busy).toBe(true)
   })
 })

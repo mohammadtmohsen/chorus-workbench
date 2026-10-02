@@ -52,6 +52,20 @@ const fromPartition = vi.fn((name: string) => {
 /** Every view constructed during a test, with the preferences it was given. */
 const constructed: { webPreferences: Record<string, unknown> }[] = []
 
+const captureStill = (): { isEmpty: () => boolean; toJPEG: (quality: number) => Buffer } => ({
+  isEmpty: () => false,
+  toJPEG: () => Buffer.from('still'),
+})
+
+let holdCaptures = false
+const heldCaptures: (() => void)[] = []
+
+const releaseCaptures = async (): Promise<void> => {
+  holdCaptures = false
+  for (const release of heldCaptures.splice(0)) release()
+  await Promise.resolve()
+}
+
 class FakeWebContents {
   readonly listeners = new Map<string, ((...args: unknown[]) => void)[]>()
   readonly sent: unknown[] = []
@@ -67,6 +81,17 @@ class FakeWebContents {
   zoomFactor: number | null = null
   setZoomFactor(next: number): void {
     this.zoomFactor = next
+  }
+
+  captureCount = 0
+  capturePage(): Promise<{ isEmpty: () => boolean; toJPEG: (quality: number) => Buffer }> {
+    this.captureCount += 1
+    if (!holdCaptures) return Promise.resolve(captureStill())
+    return new Promise((resolve) => {
+      heldCaptures.push(() => {
+        resolve(captureStill())
+      })
+    })
   }
 
   send(_channel: string, payload: unknown): void {
@@ -108,6 +133,9 @@ class FakeWebContentsView {
   visible: boolean | null = null
   setVisible(next: boolean): void {
     this.visible = next
+  }
+  getVisible(): boolean {
+    return this.visible === true
   }
 }
 
@@ -316,6 +344,8 @@ beforeEach(() => {
   surface.closeAllSurfaces()
   surface.setDetachedAccessPredicate(null)
   surface.setHandoffExpiredSink(null)
+  holdCaptures = false
+  heldCaptures.length = 0
   showOpenDialog.mockReset()
   acquireWorkbenchRuntime.mockClear()
   releaseWorkbenchRuntime.mockClear()
@@ -953,6 +983,117 @@ describe('a surface changing hands', () => {
     } finally {
       vi.useRealTimers()
     }
+  })
+})
+
+describe('a covered surface', () => {
+  const STILL = `data:image/jpeg;base64,${Buffer.from('still').toString('base64')}`
+
+  const settle = async (): Promise<void> => {
+    for (let tick = 0; tick < 10; tick += 1) await Promise.resolve()
+  }
+
+  const cover = async (viewId: string, covered: boolean): Promise<{ still: string | null }> =>
+    (await handlers.get('workbench:setCovered')?.({ sender: shell }, { viewId, covered })) as {
+      still: string | null
+    }
+
+  it('captures while the view is visible, then hides it, and hands back the still', async () => {
+    const viewId = await openAt(shell, ROOT_A)
+    const view = lastView()
+
+    await expect(cover(viewId, true)).resolves.toEqual({ still: STILL })
+
+    expect(view.webContents.captureCount).toBe(1)
+    expect(view.visible).toBe(false)
+  })
+
+  it('hands back the stored still for a second cover without capturing again', async () => {
+    const viewId = await openAt(shell, ROOT_A)
+    const view = lastView()
+    await cover(viewId, true)
+
+    await expect(cover(viewId, true)).resolves.toEqual({ still: STILL })
+
+    expect(view.webContents.captureCount).toBe(1)
+    expect(view.visible).toBe(false)
+  })
+
+  it('lets an uncover arriving during the capture win, leaving the view shown', async () => {
+    holdCaptures = true
+    const viewId = await openAt(shell, ROOT_A)
+    const view = lastView()
+
+    const covering = cover(viewId, true)
+    await settle()
+    expect(view.webContents.captureCount).toBe(1)
+
+    const uncovering = cover(viewId, false)
+    await releaseCaptures()
+
+    await expect(uncovering).resolves.toEqual({ still: null })
+    await expect(covering).resolves.toEqual({ still: null })
+    expect(view.visible).toBe(true)
+  })
+
+  it('leaves a covered view hidden when an overlay comes and goes', async () => {
+    const viewId = await openAt(shell, ROOT_A)
+    const view = lastView()
+    await cover(viewId, true)
+
+    await handlers.get('workbench:setVisible')?.({ sender: shell }, { visible: false })
+    await handlers.get('workbench:setVisible')?.({ sender: shell }, { visible: true })
+
+    expect(view.visible).toBe(false)
+  })
+
+  it('leaves an Editor-switched-off view hidden when the cover is lifted', async () => {
+    const viewId = await openAt(shell, ROOT_A)
+    const view = lastView()
+    await handlers.get('workbench:setVisible')?.({ sender: shell }, { visible: false, viewId })
+
+    await cover(viewId, false)
+
+    expect(view.visible).toBe(false)
+
+    await handlers.get('workbench:setVisible')?.({ sender: shell }, { visible: true, viewId })
+  })
+
+  it('hands back the overlay capture for a cover that cannot capture', async () => {
+    const viewId = await openAt(shell, ROOT_A)
+    const view = lastView()
+    await handlers.get('workbench:setVisible')?.({ sender: shell }, { visible: false })
+
+    await expect(cover(viewId, true)).resolves.toEqual({ still: STILL })
+
+    expect(view.webContents.captureCount).toBe(1)
+    expect(view.visible).toBe(false)
+  })
+
+  it('neither hides nor throws when the surface is destroyed during the capture', async () => {
+    holdCaptures = true
+    const viewId = await openAt(shell, ROOT_A)
+    const view = lastView()
+
+    const covering = cover(viewId, true)
+    await settle()
+    surface.closeSurface(shell as never, viewId)
+    await releaseCaptures()
+
+    await expect(covering).resolves.toEqual({ still: null })
+    expect(view.visible).toBe(true)
+  })
+
+  it('does not carry a cover onto a later surface for the same project', async () => {
+    const first = await openAt(shell, ROOT_A)
+    await cover(first, true)
+    surface.closeSurface(shell as never, first)
+
+    const second = await openAt(shell, ROOT_A)
+    const view = lastView()
+
+    expect(view.visible).toBe(true)
+    await expect(cover(second, true)).resolves.toEqual({ still: STILL })
   })
 })
 

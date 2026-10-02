@@ -10,6 +10,7 @@ import {
 import {
   bodyView,
   bytesFromBase64,
+  curlCommand,
   describeBody,
   formFields,
   isForm,
@@ -22,7 +23,7 @@ import {
   type TreeRow,
   type TreeToken,
 } from './traffic-body.js'
-import { showsForwarded, statusClassOf } from './traffic-filter.js'
+import { isPending, statusClassOf } from './traffic-filter.js'
 
 /** A capture is held to a megabyte, so this cannot be reached by an honest body. */
 const MAX_BODY_PAGES = 64
@@ -63,6 +64,7 @@ export function TrafficRequestInspector(props: {
 }): React.JSX.Element {
   const { t } = useTranslation()
   const { projectId, subscriptionId, captureId, row } = props
+  const pending = isPending(row)
 
   const [detail, setDetail] = useState<TrafficDetail | null>(null)
   const [gone, setGone] = useState<TrafficDetailResult | null>(null)
@@ -78,6 +80,7 @@ export function TrafficRequestInspector(props: {
   const [collapsed, setCollapsed] = useState<ReadonlySet<string>>(new Set())
   const [focused, setFocused] = useState<string | null>(null)
   const treeRef = useRef<HTMLDivElement | null>(null)
+  const readGeneration = useRef(0)
 
   /*
    * Reveal is for one request and one reading of it. A new selection is a new
@@ -86,12 +89,18 @@ export function TrafficRequestInspector(props: {
    */
   useEffect(() => {
     setReveal(false)
+  }, [row.requestId])
+
+  useEffect(() => {
+    readGeneration.current += 1
     setChunks({ request: [], response: [] })
     setLoaded({ request: false, response: false })
+    setRepresentation({ request: 'decoded', response: 'decoded' })
+    setLoading(null)
     setDetail(null)
     setGone(null)
     setFailure(false)
-  }, [row.requestId])
+  }, [row.requestId, pending])
 
   useEffect(() => {
     setCollapsed(new Set())
@@ -115,7 +124,7 @@ export function TrafficRequestInspector(props: {
     return () => {
       cancelled = true
     }
-  }, [projectId, captureId, subscriptionId, row.requestId])
+  }, [projectId, captureId, subscriptionId, row.requestId, pending])
 
   /*
    * The whole body, in one go, with no control to ask for more.
@@ -128,6 +137,8 @@ export function TrafficRequestInspector(props: {
    */
   const loadWhole = useCallback(
     (side: Side): void => {
+      const generation = readGeneration.current
+      const current = (): boolean => generation === readGeneration.current
       const run = async (): Promise<void> => {
         const parts: Uint8Array[] = []
         let wants: 'encoded' | 'decoded' = representation[side]
@@ -145,6 +156,7 @@ export function TrafficRequestInspector(props: {
             offset,
             length: BODY_PAGE,
           })
+          if (!current()) return
           /*
            * Decoded first, because the encoded bytes of a compressed response
            * are not what anybody opened this tab to read. A body main cannot
@@ -174,6 +186,7 @@ export function TrafficRequestInspector(props: {
       }
 
       void run().catch(() => {
+        if (!current()) return
         setLoading(null)
         setFailure(true)
       })
@@ -210,6 +223,11 @@ export function TrafficRequestInspector(props: {
 
   const goneReason = gone !== null && gone.kind !== 'detail' ? gone.kind : failure ? 'failed' : null
 
+  const awaitingResponse =
+    pending ||
+    detail?.responseBody.state === 'pending' ||
+    detail?.responseBody.state === 'streaming'
+
   /*
    * **No early return, because the header no longer needs the detail.**
    *
@@ -225,7 +243,20 @@ export function TrafficRequestInspector(props: {
    * the request changes on the keystroke, and only the panes wait.
    */
 
+  const curlOf = (): string =>
+    detail === null
+      ? ''
+      : curlCommand({
+          method: detail.method,
+          url: detail.forwardedUrl === '' ? detail.url : detail.forwardedUrl,
+          headers: detail.forwardedHeaders,
+          body: textOf(bytes.request),
+        })
+
   const renderBody = (side: Side): React.JSX.Element => {
+    if (side === 'response' && awaitingResponse) {
+      return <p className="traffic-stopped">{t('traffic.waitingForResponse')}</p>
+    }
     const body = bodyOf(side)
     if (body === null) return <p className="traffic-stopped">{t('traffic.detailLoading')}</p>
     const note = describeBody(body.descriptor)
@@ -238,10 +269,10 @@ export function TrafficRequestInspector(props: {
             type="button"
             className="traffic-tab"
             onClick={() => {
-              copy(body.text)
+              copy(side === 'request' ? curlOf() : body.text)
             }}
           >
-            {t('traffic.copy')}
+            {side === 'request' ? t('traffic.copyCurl') : t('traffic.copy')}
           </button>
         </div>
 
@@ -447,7 +478,13 @@ export function TrafficRequestInspector(props: {
         <span className="traffic-method" data-method={row.m.toUpperCase()}>
           {row.m}
         </span>{' '}
-        <span className="traffic-status">{row.status ?? '—'}</span>{' '}
+        <span className="traffic-status">
+          {pending ? (
+            <span className="traffic-pending" role="img" aria-label={t('traffic.pending')} />
+          ) : (
+            (row.status ?? '—')
+          )}
+        </span>{' '}
         <span className="traffic-url" title={row.u}>
           {row.u}
         </span>
@@ -461,20 +498,6 @@ export function TrafficRequestInspector(props: {
         <div className="traffic-panes">
           <div className="traffic-pane" data-side="request">
             <h3 className="traffic-label">{t('traffic.tab.request')}</h3>
-            {/*
-              Present only when it says something the header does not. `record`
-              passes the forward target as the row's `u`, so for a settled row
-              these are the same string and the line was pure duplication — see
-              `showsForwarded` for the cases where they part company.
-            */}
-            {showsForwarded(detail.forwardedUrl, row.u) && (
-              <div className="traffic-general">
-                <p>
-                  <span className="traffic-label">{t('traffic.forwardedUrl')}</span>
-                  <span className="traffic-value">{detail.forwardedUrl}</span>
-                </p>
-              </div>
-            )}
 
             {isForm(detail.requestBody.contentType) && bytes.request.length > 0 ? (
               <div className="traffic-fields">

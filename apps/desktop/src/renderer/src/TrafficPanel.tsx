@@ -18,6 +18,7 @@ import { TrafficRequestInspector } from './TrafficRequestInspector.js'
 import {
   filterRows,
   followsRows,
+  isPending,
   outcomeOf,
   pageOf,
   pathOf,
@@ -52,6 +53,7 @@ const idle: TrafficState = {
   envVar: null,
   source: { kind: 'off' },
   failure: null,
+  forwardedDevices: 0,
 }
 
 const FAILURE_KEYS: Record<TrafficFailure, string> = {
@@ -130,9 +132,7 @@ export function TrafficPanel(props: {
    *
    * **Once, and against the project rather than against "nothing is selected".**
    * A guard that re-fired whenever the selection was empty would walk the
-   * inspector through every arriving call, firing a detail read for each, and
-   * would undo a deliberate deselect the instant it happened — clicking the
-   * selected row closes it, and it would reopen behind the person.
+   * inspector through every arriving call, firing a detail read for each.
    *
    * Holding the project id also answers the other two transitions without a
    * second rule: an emptied list clears it, so the next call after a clear is
@@ -526,6 +526,7 @@ export function TrafficPanel(props: {
     backend: 'traffic.outcomeBackend',
     unreadable: 'traffic.outcomeUnreadable',
     aborted: 'traffic.outcomeAborted',
+    pending: 'traffic.outcomePending',
   }
 
   /*
@@ -545,10 +546,7 @@ export function TrafficPanel(props: {
    * so walking the list left the inspector describing whatever had last been
    * clicked — the highlight moved past it and the panes did not.
    *
-   * This is the same `setSelectedSeq` the click calls, minus the toggle: a click
-   * on the selected row closes the pane, and an arrow that closed the pane on the
-   * row it had just opened would make the walk unusable. The two paths share the
-   * setter and not the handler, deliberately.
+   * This is the same `setSelectedSeq` the click calls.
    *
    * Nothing here waits. The selection lands on the keystroke, so the highlight
    * and the inspector's header — both drawn from the row — change with it, and
@@ -621,7 +619,13 @@ export function TrafficPanel(props: {
         <span className="traffic-url" title={row.u}>
           {pathOf(row.u)}
         </span>
-        <span className="traffic-status">{row.status ?? '—'}</span>
+        <span className="traffic-status">
+          {isPending(row) ? (
+            <span className="traffic-pending" role="img" aria-label={t('traffic.pending')} />
+          ) : (
+            (row.status ?? '—')
+          )}
+        </span>
         {outcomeBadge(row)}
         <span className="traffic-note">
           {row.transport !== null && <span className="traffic-transport">{row.transport}</span>}
@@ -688,6 +692,11 @@ export function TrafficPanel(props: {
             ? t('traffic.notListening')
             : t('traffic.listeningOn', { host: capture.address })}
         </span>
+        {capture.capturing && capture.forwardedDevices > 0 && (
+          <span className="traffic-forwarded">
+            {t('traffic.androidForwarded', { count: capture.forwardedDevices })}
+          </span>
+        )}
         <button
           type="button"
           className="traffic-action"
@@ -1101,7 +1110,7 @@ export function TrafficPanel(props: {
                        */
                       data-class={statusClassOf(row)}
                       onClick={() => {
-                        setSelectedSeq((current) => (current === row.seq ? null : row.seq))
+                        setSelectedSeq(row.seq)
                       }}
                     >
                       {bodyOf(row)}

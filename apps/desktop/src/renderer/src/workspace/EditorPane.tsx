@@ -1,19 +1,25 @@
-import { createPortal } from 'react-dom'
+import { Fragment, useEffect, useLayoutEffect, useRef, useState } from 'react'
+import { createPortal, flushSync } from 'react-dom'
 import type { PointerEvent as ReactPointerEvent } from 'react'
 import { useTranslation } from 'react-i18next'
-import type { WorkspaceLayoutNode } from '../../../shared/workspace-layout.js'
+import { BOX_WIDTH, type WorkspaceLayoutNode } from '../../../shared/workspace-layout.js'
 import type { SessionInfo } from '../Session.js'
-import type { TrafficTerminalOption } from '../TrafficPanel.js'
+import { primaryShift } from '../shortcuts.js'
+import { TrafficPanel, type TrafficTerminalOption } from '../TrafficPanel.js'
 import { ConversationTree } from './ConversationTree.js'
 import { ProjectNotes } from './ProjectNotes.js'
 import type { NoteSize } from '../noteSize.js'
 import { useConversationDrag } from './useConversationDrag.js'
 import type { ProjectInfo } from './session-row.js'
 import type { ActiveTabDrag } from './useTabDrag.js'
+import { columnWidths, columnsOf, paneSplit, pushDivider } from './layout.js'
 import {
   useConversationGroups,
   useChorusWidth,
   usePane,
+  useRaisedEditor,
+  useTrafficLive,
+  useTrafficPanel,
   useWorkbenchShown,
   useWorkspaceActions,
 } from './hooks.js'
@@ -95,40 +101,87 @@ export function EditorPane(
   const note = props.projects.find((project) => project.id === projectId)
   const chorusWidth = useChorusWidth(projectId)
   const workbenchShown = useWorkbenchShown(projectId)
+  const content = useRef<HTMLDivElement>(null)
+  const [paneWidth, setPaneWidth] = useState(0)
+  const hasPane = pane !== undefined
+  useLayoutEffect(() => {
+    const element = content.current
+    if (element === null) return undefined
+    setPaneWidth(element.clientWidth)
+    const observer = new ResizeObserver(() => {
+      setPaneWidth(element.clientWidth)
+    })
+    observer.observe(element)
+    return () => {
+      observer.disconnect()
+    }
+  }, [hasPane])
+  const split = workbenchShown && paneWidth > 0 ? paneSplit(paneWidth, chorusWidth) : null
+  const [raised, raiseEditor, lowerEditor] = useRaisedEditor(projectId, split?.covered === true)
+  const covered = split?.covered === true && !raised
+  const canToggleEditor = split?.covered === true
+  const paneFocused = props.focusedPaneId === props.paneId
+  useEffect(() => {
+    if (!paneFocused || !canToggleEditor) return undefined
+    const onKeyDown = (event: KeyboardEvent): void => {
+      if (!primaryShift(event) || event.code !== 'Slash') return
+      event.preventDefault()
+      if (raised) lowerEditor()
+      else raiseEditor()
+    }
+    document.addEventListener('keydown', onKeyDown)
+    return () => {
+      document.removeEventListener('keydown', onKeyDown)
+    }
+  }, [paneFocused, canToggleEditor, raised, raiseEditor, lowerEditor])
   const arrangement = useConversationGroups(projectId)
+  const traffic = useTrafficPanel(projectId)
+  const trafficLive = useTrafficLive(projectId)
+  const widths = arrangement === undefined ? [] : columnWidths(arrangement)
   const focusedConversationGroupId = arrangement?.focusedPaneId ?? null
   const activeConversationId =
     focusedConversationGroupId === null
       ? null
       : (arrangement?.panes[focusedConversationGroupId]?.activeTabId ?? null)
   const {
-    splitConversation,
-    placeConversation,
     setConversationSizes,
     equalizeConversationBranch,
-    focusConversationGroup,
-    openTraffic,
+    moveConversationBox,
+    setConversationWidths,
+    resetProjectWidths,
+    toggleTraffic,
+    setTrafficWidth,
   } = useWorkspaceActions()
   const commitLayout = props.onCommitLayout
   /*
    * One drag per pane, not one per app. A conversation cannot leave its project
-   * and a project's column lives in exactly one pane, so there is nothing for a
+   * and a project's boxes live in exactly one pane, so there is nothing for a
    * shared instance to coordinate — and per-pane state means dragging in one
    * pane re-renders only that pane.
    */
   const conversationDrag = useConversationDrag({
-    groupCount: arrangement === undefined ? 0 : Object.keys(arrangement.panes).length,
-    onPlace: (conversationId, targetGroupId, slot) => {
+    onMove: (boxId, targetGroupId, direction) => {
       if (projectId === null) return
-      placeConversation(projectId, conversationId, targetGroupId, slot)
-      commitLayout()
-    },
-    onSplit: (conversationId, targetGroupId, direction) => {
-      if (projectId === null) return
-      splitConversation(projectId, conversationId, targetGroupId, direction)
+      moveConversationBox(projectId, boxId, targetGroupId, direction)
       commitLayout()
     },
   })
+  const pushRow = (event: ReactPointerEvent<HTMLDivElement>): void => {
+    if (projectId === null) return
+    startRowPush(
+      event,
+      (boxWidths, trafficWidth) => {
+        setConversationWidths(projectId, boxWidths)
+        if (trafficWidth !== null) setTrafficWidth(projectId, trafficWidth)
+      },
+      commitLayout
+    )
+  }
+  const resetWidths = (): void => {
+    if (projectId === null) return
+    resetProjectWidths(projectId)
+    commitLayout()
+  }
 
   /*
    * Every hook above the early return, which it was not.
@@ -160,6 +213,7 @@ export function EditorPane(
       <div
         className="workspace-pane-content"
         data-pane-content
+        ref={content}
         /*
          * Keyed by the project, matching the tab's `aria-controls`. It used to
          * be the conversation id on both sides; only the tab moved to the
@@ -196,6 +250,17 @@ export function EditorPane(
           The region and the sash are what actually leave the layout, so Chorus
           takes the pane.
         */}
+        {projectId !== null && workbenchShown && (
+          <button
+            type="button"
+            className="editor-toggle-bar"
+            disabled={split?.covered !== true}
+            aria-pressed={raised}
+            aria-label={t('workbench.toggleEditor')}
+            title={t('workbench.toggleEditor')}
+            onClick={raised ? lowerEditor : raiseEditor}
+          />
+        )}
         {projectId !== null && (
           /*
             One slot per project open in this pane, keyed by project so a tab
@@ -204,7 +269,17 @@ export function EditorPane(
             the *active* project's Editor switch is off, which is what the
             `hidden` here is for.
           */
-          <div className="workspace-pane-workbench" hidden={!workbenchShown}>
+          <div
+            className="workspace-pane-workbench"
+            hidden={!workbenchShown}
+            data-covered={covered}
+            style={
+              split === null
+                ? undefined
+                : { flex: `0 0 ${String(raised ? split.raised : split.editor)}px` }
+            }
+            onClick={covered ? raiseEditor : undefined}
+          >
             {/* `pane` is non-null here: `projectId` is read off it, and the
                 guard above is what narrows both. */}
             {pane.tabs.map((id) => (
@@ -212,6 +287,7 @@ export function EditorPane(
                 key={id}
                 projectId={id}
                 active={id === projectId}
+                covered={covered}
                 projectRoot={
                   [...props.sessions.values()].find((session) => session.projectId === id)?.cwd ??
                   ''
@@ -220,16 +296,19 @@ export function EditorPane(
             ))}
           </div>
         )}
-        {projectId !== null && workbenchShown && (
-          <ChorusSash projectId={projectId} onCommit={props.onCommitLayout} />
-        )}
         <div
           className="workspace-pane-chorus"
           /* Full width with the editor off: the sash is gone, so there is nothing
              left for the remembered width to divide. */
-          style={workbenchShown ? { width: `${String(chorusWidth)}px` } : undefined}
+          style={
+            workbenchShown ? { width: `${String(split?.chorus ?? chorusWidth)}px` } : undefined
+          }
           data-full={!workbenchShown}
+          onPointerDown={raised ? lowerEditor : undefined}
         >
+          {projectId !== null && workbenchShown && (
+            <ChorusSash projectId={projectId} onCommit={props.onCommitLayout} />
+          )}
           {/*
             The project's scratchpad, above its conversations.
 
@@ -245,117 +324,243 @@ export function EditorPane(
             overlap. Everything Chorus draws stays on Chorus's side.
           */}
           {projectId !== null && (
-            <ProjectNotes
-              key={projectId}
-              projectId={projectId}
-              /* Only the focused pane's pad answers ⌘⇧N — see the effect that
-                 reads this. Four panes are four mounted pads. */
-              active={focused}
-              conversationId={activeConversationId}
-              notes={note?.notes ?? null}
-              size={{ width: note?.noteWidth ?? null, height: note?.noteHeight ?? null }}
-              onSave={props.onSetProjectNotes}
-              onSaveSize={props.onSetProjectNoteSize}
-              onSendSelection={props.onSendProjectNoteSelection}
-            />
-          )}
-          {/*
-            The project's conversation tree, which is usually one group.
-            
-            Rendered the way the workspace renders its panes, one level in —
-            same node type, same split and move functions, same drop zones. The
-            arrangement is absent for a project with no conversations, and then
-            there is nothing to draw.
-          */}
-          {/*
-            A project whose conversations have all ended.
-            
-            The column rendered nothing at all here, which reads as a pane that
-            failed rather than one with nothing in it — and there was no way
-            back, because the only `+` was in the rail and meant "the most recent
-            project", not this one.
-          */}
-          {projectId !== null && arrangement?.layout == null && (
-            <div className="conversation-empty">
-              <p>{t('project.noConversations')}</p>
+            <div className="project-header">
+              <ProjectNotes
+                key={projectId}
+                projectId={projectId}
+                /* Only the focused pane's pad answers ⌘⇧N — see the effect that
+                   reads this. Four panes are four mounted pads. */
+                active={focused}
+                conversationId={activeConversationId}
+                notes={note?.notes ?? null}
+                size={{ width: note?.noteWidth ?? null, height: note?.noteHeight ?? null }}
+                onSave={props.onSetProjectNotes}
+                onSaveSize={props.onSetProjectNoteSize}
+                onSendSelection={props.onSendProjectNoteSelection}
+              />
               <button
                 type="button"
+                className="conversation-dock-add"
+                data-traffic-open="true"
+                data-live={trafficLive}
+                aria-pressed={traffic.open}
+                aria-label={trafficLive ? t('traffic.tabTitleLive') : t('traffic.tabTitle')}
+                title={trafficLive ? t('traffic.tabTitleLive') : t('traffic.tabTitle')}
+                onClick={() => {
+                  toggleTraffic(projectId)
+                  commitLayout()
+                }}
+              >
+                <span aria-hidden="true">⇄</span>
+                {trafficLive && <span className="traffic-live-dot" aria-hidden="true" />}
+              </button>
+              <button
+                type="button"
+                className="conversation-dock-add"
+                aria-label={t('conversation.newInGroup')}
+                title={t('conversation.newInGroup')}
                 onClick={() => {
                   props.onStartInProject(projectId)
                 }}
               >
-                {t('conversation.newInGroup')}
-              </button>
-              <button
-                type="button"
-                data-traffic-open="true"
-                onClick={() => {
-                  openTraffic(projectId)
-                }}
-              >
-                {t('traffic.open')}
+                +
               </button>
             </div>
           )}
-          {projectId !== null && arrangement?.layout != null && (
-            <ConversationTree
-              node={arrangement.layout}
-              path={[]}
-              projectId={projectId}
-              arrangement={arrangement}
-              sessions={conversations}
-              paneId={props.paneId}
-              paneFocused={focused}
-              drag={conversationDrag}
-              onSizes={(path, sizes) => {
-                setConversationSizes(projectId, path, sizes)
-                props.onCommitLayout()
-              }}
-              /* Wired exactly as `onSizes` is, commit included: an arrangement
-                 that evened out and came back uneven on relaunch would be the
-                 same gesture failing silently. */
-              onEqualize={(path) => {
-                equalizeConversationBranch(projectId, path)
-                props.onCommitLayout()
-              }}
-              /*
-               * Focus first, start second. A new conversation joins the focused
-               * group — that is the one rule `adoptConversation` follows — so
-               * pressing `+` in a group is expressed as making that group the
-               * focused one and then starting. No second placement path.
-               */
-              onNewConversation={(groupId) => {
-                focusConversationGroup(projectId, groupId)
-                props.onStartInProject(projectId)
-              }}
-              onEndConversation={props.onEndConversation}
-              onRename={props.onRename}
-              trafficTerminals={props.trafficTerminals}
-              renderSession={props.renderSession}
-            />
-          )}
-          {/*
-            The ghost, portalled to the body so no column's overflow clips it.
+          <div className="conversation-scroller">
+            {/*
+              A project whose conversations have all ended.
 
-            Without something following the pointer a drag reads as a tab that
-            has stopped responding — the source dims and a target tints, but
-            neither is under your hand. `pointer-events: none` in the stylesheet
-            is load-bearing rather than cosmetic: the drop target is resolved
-            with `elementFromPoint`, and a ghost that could be hit would be the
-            element found on every single move.
-          */}
-          {conversationDrag.drag !== null &&
-            createPortal(
-              <div
-                className="conversation-drag-ghost"
-                style={{ left: conversationDrag.drag.x, top: conversationDrag.drag.y }}
-              >
-                {conversationDrag.drag.title}
-              </div>,
-              document.body
+              The column rendered nothing at all here, which reads as a pane that
+              failed rather than one with nothing in it — and there was no way
+              back, because the only `+` was in the rail and meant "the most recent
+              project", not this one.
+            */}
+            {projectId !== null && arrangement?.layout == null && (
+              <div className="conversation-empty">
+                <p>{t('project.noConversations')}</p>
+                <button
+                  type="button"
+                  onClick={() => {
+                    props.onStartInProject(projectId)
+                  }}
+                >
+                  {t('conversation.newInGroup')}
+                </button>
+              </div>
             )}
+            {projectId !== null &&
+              arrangement?.layout != null &&
+              columnsOf(arrangement.layout).map((column, index, columns) => (
+                <Fragment key={index}>
+                  {index > 0 && (
+                    <div
+                      className="conversation-sash"
+                      role="separator"
+                      aria-orientation="vertical"
+                      tabIndex={0}
+                      onPointerDown={pushRow}
+                      onDoubleClick={resetWidths}
+                    />
+                  )}
+                  <div
+                    className="conversation-slot"
+                    style={{
+                      flex: `${index === columns.length - 1 && !traffic.open ? '1' : '0'} 0 ${String(widths[index] ?? BOX_WIDTH.default)}px`,
+                    }}
+                  >
+                    {/*
+                      Rendered the way the workspace renders its panes, one level
+                      in — same node type, same split and move functions, same
+                      drop zones. The arrangement is absent for a project with no
+                      conversations, and then there is nothing to draw.
+                    */}
+                    <ConversationTree
+                      node={column}
+                      path={columns.length > 1 ? [index] : []}
+                      projectId={projectId}
+                      arrangement={arrangement}
+                      sessions={conversations}
+                      paneId={props.paneId}
+                      paneFocused={focused}
+                      drag={conversationDrag}
+                      onSizes={(path, sizes) => {
+                        setConversationSizes(projectId, path, sizes)
+                        commitLayout()
+                      }}
+                      /* Wired exactly as `onSizes` is, commit included: an
+                         arrangement that evened out and came back uneven on
+                         relaunch would be the same gesture failing silently. */
+                      onEqualize={(path) => {
+                        equalizeConversationBranch(projectId, path)
+                        commitLayout()
+                      }}
+                      onEndConversation={props.onEndConversation}
+                      onRename={props.onRename}
+                      renderSession={props.renderSession}
+                    />
+                  </div>
+                </Fragment>
+              ))}
+            {projectId !== null && traffic.open && (
+              <>
+                <div
+                  className="conversation-sash"
+                  role="separator"
+                  aria-orientation="vertical"
+                  tabIndex={0}
+                  onPointerDown={pushRow}
+                  onDoubleClick={resetWidths}
+                />
+                <section className="traffic-box" style={{ flex: `1 0 ${String(traffic.width)}px` }}>
+                  <div className="conversation-dock">
+                    <div className="conversation-dock-tabs">
+                      <div
+                        className="conversation-dock-tab"
+                        data-traffic-tab="true"
+                        data-active="true"
+                      >
+                        <span className="conversation-dock-tab-main">
+                          <span className="conversation-dock-tab-title">
+                            {t('traffic.tabTitle')}
+                          </span>
+                          {trafficLive && (
+                            <span className="traffic-live">
+                              <span className="traffic-live-dot" aria-hidden="true" />
+                              {t('traffic.live')}
+                            </span>
+                          )}
+                        </span>
+                        <button
+                          type="button"
+                          className="conversation-dock-tab-close"
+                          aria-label={t('traffic.close')}
+                          title={t('traffic.close')}
+                          onClick={() => {
+                            toggleTraffic(projectId)
+                            commitLayout()
+                          }}
+                        >
+                          <span aria-hidden="true">×</span>
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                  <div className="conversation-body">
+                    <TrafficPanel projectId={projectId} terminals={props.trafficTerminals} />
+                  </div>
+                </section>
+              </>
+            )}
+            {/*
+              The ghost, portalled to the body so no column's overflow clips it.
+
+              Without something following the pointer a drag reads as a tab that
+              has stopped responding — the source dims and a target tints, but
+              neither is under your hand. `pointer-events: none` in the stylesheet
+              is load-bearing rather than cosmetic: the drop target is resolved
+              with `elementFromPoint`, and a ghost that could be hit would be the
+              element found on every single move.
+            */}
+            {conversationDrag.drag !== null &&
+              createPortal(
+                <div
+                  className="conversation-drag-ghost"
+                  style={{ left: conversationDrag.drag.x, top: conversationDrag.drag.y }}
+                >
+                  {conversationDrag.drag.title}
+                </div>,
+                document.body
+              )}
+          </div>
         </div>
       </div>
     </section>
   )
+}
+
+function startRowPush(
+  event: ReactPointerEvent<HTMLDivElement>,
+  apply: (boxWidths: number[], trafficWidth: number | null) => void,
+  commit: () => void
+): void {
+  if (event.button !== 0) return
+  const sash = event.currentTarget
+  const scroller = sash.parentElement
+  if (scroller === null) return
+  const children = [...scroller.children]
+  const isItem = (child: Element): boolean => !child.classList.contains('conversation-sash')
+  const items = children.filter(isItem)
+  const index = children.slice(0, children.indexOf(sash)).filter(isItem).length
+  const boxAt = items.map((item) => item.classList.contains('conversation-slot'))
+  const trafficAt = items.findIndex((item) => item.classList.contains('traffic-box'))
+  const frozen = items.map((item, at) =>
+    boxAt[at] === true || at === trafficAt ? item.getBoundingClientRect().width : BOX_WIDTH.min
+  )
+  const originX = event.clientX
+  const originScroll = scroller.scrollLeft
+  let dragged = false
+  sash.setPointerCapture(event.pointerId)
+  const move = (moved: PointerEvent): void => {
+    if (moved.clientX === originX && !dragged) return
+    dragged = true
+    const pushed = pushDivider(frozen, index, moved.clientX - originX)
+    flushSync(() => {
+      apply(
+        pushed.widths.filter((_, at) => boxAt[at] === true),
+        trafficAt < 0 ? null : (pushed.widths[trafficAt] ?? null)
+      )
+    })
+    scroller.scrollLeft = originScroll + pushed.scroll
+  }
+  const stop = (): void => {
+    sash.removeEventListener('pointermove', move)
+    sash.removeEventListener('pointerup', stop)
+    sash.removeEventListener('pointercancel', stop)
+    sash.releasePointerCapture(event.pointerId)
+    if (dragged) commit()
+  }
+  sash.addEventListener('pointermove', move)
+  sash.addEventListener('pointerup', stop)
+  sash.addEventListener('pointercancel', stop)
 }

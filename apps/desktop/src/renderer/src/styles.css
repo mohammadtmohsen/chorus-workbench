@@ -2340,6 +2340,56 @@ body {
   padding-top: calc(var(--step) * 3);
 }
 
+.turn-head:has(+ .activity) {
+  border-bottom: 1px solid var(--line);
+}
+
+.entry + .activity > .activity-summary,
+.activity + .activity > .activity-summary,
+.activity + .entry:not([data-kind='message']):not([data-kind='changes']) {
+  border-top: 1px solid color-mix(in srgb, var(--border-default) 60%, transparent);
+}
+
+.activity > summary {
+  list-style: none;
+  cursor: pointer;
+}
+
+.activity > summary::-webkit-details-marker {
+  display: none;
+}
+
+.activity-summary:hover .command-summary,
+.activity-summary:focus-visible .command-summary {
+  color: var(--bone);
+}
+
+.activity-summary:focus-visible {
+  outline: none;
+}
+
+.activity-agent,
+.activity-count,
+.activity-failed {
+  flex: none;
+  white-space: nowrap;
+}
+
+.activity-agent {
+  color: var(--voice);
+}
+
+.activity-failed {
+  color: var(--danger);
+}
+
+.activity-latest {
+  overflow: hidden;
+  min-width: 0;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .said {
   grid-area: said;
   min-width: 0;
@@ -3914,6 +3964,13 @@ body {
   flex-direction: column;
   align-items: stretch;
   min-width: 0;
+}
+
+.composer-collaboration {
+  padding: calc(var(--step) * 2) 0;
+  color: var(--text-muted);
+  font-size: 11px;
+  overflow-wrap: anywhere;
 }
 
 /*
@@ -7094,16 +7151,6 @@ input::placeholder {
   cursor: default;
 }
 
-.composer-pair {
-  position: absolute;
-  top: 0;
-  right: 0;
-}
-
-.composer-line > textarea {
-  padding-right: calc(var(--step) * 11);
-}
-
 /* Anything that is not `ready` is an explanation, not a reference. */
 .ide-pill:not([data-status='ready']) .ide-pill-what {
   font-family: inherit;
@@ -7250,6 +7297,20 @@ input::placeholder {
   font-family: var(--mono);
   font-size: 11px;
   text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.traffic-panel > .traffic-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: calc(var(--step) * 2);
+}
+
+.traffic-forwarded {
+  flex: 0 0 auto;
+  color: var(--text-muted);
+  font-size: 11px;
   white-space: nowrap;
 }
 
@@ -7932,6 +7993,31 @@ input::placeholder {
 
 .traffic-outcome[data-outcome='unreadable'] {
   color: var(--tok-number);
+}
+
+.traffic-pending {
+  display: inline-block;
+  width: 9px;
+  height: 9px;
+  border: 1.5px solid var(--text-muted);
+  border-right-color: transparent;
+  border-radius: 50%;
+  vertical-align: middle;
+  animation: traffic-pending-spin 0.8s linear infinite;
+}
+
+@keyframes traffic-pending-spin {
+  to {
+    transform: rotate(1turn);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .traffic-pending {
+    animation: none;
+    border-right-color: var(--text-muted);
+    opacity: 0.55;
+  }
 }
 
 /*
@@ -10967,6 +11053,12 @@ input::placeholder {
   user-select: none;
 }
 
+.workbench-still[data-cover] {
+  width: auto;
+  right: auto;
+  object-fit: fill;
+}
+
 /*
  * What the region says while the surface is opening.
  *
@@ -10983,6 +11075,22 @@ input::placeholder {
   justify-content: center;
   margin: 0;
   padding-inline: calc(var(--step) * 6);
+  color: var(--text-muted);
+  font-size: 12px;
+  text-align: center;
+  text-wrap: balance;
+  pointer-events: none;
+}
+
+.workbench-covered-hint {
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 48px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin: 0;
+  padding-inline: var(--step);
   color: var(--text-muted);
   font-size: 12px;
   text-align: center;
@@ -11112,18 +11220,13 @@ input::placeholder {
  */
 .conversation-dock-tab {
   position: relative;
-  flex: 0 1 auto;
-  /*
-   * The project tab's own numbers, and it keeps following them: a floor and no
-   * ceiling, so the tab is as wide as the conversation's name and 160px is only
-   * how far crowding may squeeze it before the strip scrolls instead.
-   */
-  min-width: 160px;
+  flex: 1 1 auto;
+  min-width: 0;
   height: 34px;
   display: flex;
   align-items: center;
   margin-bottom: -1px;
-  margin-right: calc(var(--step) * 1.5);
+  margin-right: 0;
   border: 1px solid transparent;
   border-radius: 9px 9px 0 0;
   background: transparent;
@@ -11132,7 +11235,7 @@ input::placeholder {
   white-space: nowrap;
   text-align: left;
   text-overflow: ellipsis;
-  cursor: default;
+  cursor: grab;
   outline: none;
   touch-action: none;
 }
@@ -12282,30 +12385,6 @@ input::placeholder {
   transform: translate(-50%, 6px);
 }
 
-.conversation-dock-hint {
-  position: absolute;
-  top: 100%;
-  z-index: 2;
-  /*
-   * A ceiling and a wrap. Ellipsing here would reproduce the very problem this
-   * exists to solve one layer down, and an unbounded box on a long name would
-   * be the thing that reaches the editor.
-   */
-  max-width: min(360px, 100%);
-  margin-top: 4px;
-  padding: var(--step) calc(var(--step) * 2);
-  border: 1px solid var(--muted);
-  border-radius: 6px;
-  background: var(--bg-control);
-  color: var(--text-primary);
-  font: 12px var(--ui-font);
-  line-height: 1.45;
-  white-space: normal;
-  overflow-wrap: anywhere;
-  /* It must never take the hover it exists because of. */
-  pointer-events: none;
-}
-
 /*
  * The name ellipses; the mark beside it does not shrink.
  *
@@ -12428,6 +12507,7 @@ input::placeholder {
  */
 .workspace-pane-content {
   flex-direction: row;
+  position: relative;
 }
 
 /*
@@ -12446,8 +12526,8 @@ input::placeholder {
  */
 .workspace-pane-workbench {
   position: relative;
-  flex: 1 1 auto;
-  min-width: 59px;
+  flex: 0 0 calc(100% - 500px);
+  min-width: 0;
   min-height: 0;
   /*
    * Inset from the pane's own edges as well as from the divider, and this half
@@ -12465,7 +12545,34 @@ input::placeholder {
    * an unbroken rounded pane, which is what it looks like in every editor that
    * has both.
    */
-  padding: 3px 8px 3px 3px;
+  padding: 3px 8px 3px 13px;
+}
+
+.workspace-pane-workbench[data-covered='true'] {
+  cursor: pointer;
+}
+
+.editor-toggle-bar {
+  position: absolute;
+  inset: 0 auto 0 0;
+  z-index: 1;
+  width: 10px;
+  padding: 0;
+  border: 0;
+  border-right: 1px solid var(--border-default);
+  background: var(--bg-canvas);
+  cursor: pointer;
+  -webkit-app-region: no-drag;
+}
+
+.editor-toggle-bar:disabled {
+  cursor: default;
+}
+
+.editor-toggle-bar:not(:disabled):hover,
+.editor-toggle-bar:not(:disabled):focus-visible {
+  background: color-mix(in srgb, var(--accent-text) 30%, var(--bg-canvas));
+  outline: none;
 }
 
 /*
@@ -12576,9 +12683,73 @@ input::placeholder {
   flex-shrink: 1;
   flex-basis: auto;
   width: clamp(340px, 30%, 520px);
-  min-width: 0;
+  min-width: 500px;
   min-height: 0;
   border-left: 1px solid var(--border-default);
+}
+
+.workspace-pane-chorus:not([data-full='true']) {
+  position: absolute;
+  inset: 0 0 0 auto;
+  min-width: 0;
+  background: var(--bg-canvas);
+}
+
+.project-header {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: flex-start;
+  gap: var(--step);
+  padding-right: calc(var(--step) * 2);
+}
+
+.project-header > .project-notes {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.project-header > .conversation-dock-add {
+  margin-top: calc(var(--step) * 1.5);
+}
+
+.conversation-scroller {
+  display: flex;
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: thin;
+}
+
+.conversation-scroller > .conversation-sash {
+  flex: 0 0 9px;
+  cursor: col-resize;
+  touch-action: none;
+  border-left: 1px solid var(--border-default);
+}
+
+.conversation-slot {
+  display: flex;
+  min-width: 500px;
+  min-height: 0;
+}
+
+.conversation-scroller > .conversation-empty {
+  flex: 1 1 0;
+  min-width: 500px;
+}
+
+.traffic-box {
+  flex: 0 0 auto;
+  min-width: 500px;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.traffic-box .conversation-dock-tab {
+  cursor: default;
 }
 
 /*
@@ -12689,7 +12860,7 @@ input::placeholder {
  * of pixels.
  */
 .conversation-branch[data-orientation='row'] > .conversation-branch-child {
-  min-width: 320px;
+  min-width: 500px;
 }
 
 .conversation-column {
@@ -12816,16 +12987,6 @@ input::placeholder {
   background: var(--bg-canvas);
 }
 
-/*
- * Where a dragged conversation would land.
- *
- * Two shapes rather than one colour, because the two answers are different in
- * kind: **`group`** means it joins this column's strip, so the whole column is
- * tinted; **`split`** means a new column is about to appear beside this one, so
- * the edge it would appear on is drawn as a bar. A single highlight for both
- * would leave "will this split or not" to be guessed from pointer position,
- * which is the question the feedback exists to answer.
- */
 .conversation-column[data-drop] {
   position: relative;
 }
@@ -12838,33 +12999,34 @@ input::placeholder {
   border-radius: 6px;
 }
 
-.conversation-column[data-drop='group']::after {
-  background: color-mix(in srgb, var(--accent-text) 12%, transparent);
-  outline: 1px solid var(--accent-text);
-  outline-offset: -1px;
+.conversation-column[data-drop='reorder']::after {
+  background: var(--accent-text);
+  border-radius: 2px;
+}
+
+.conversation-column[data-drop='reorder'][data-drop-direction='left']::after {
+  right: auto;
+  width: 3px;
+}
+
+.conversation-column[data-drop='reorder'][data-drop-direction='right']::after {
+  left: auto;
+  width: 3px;
 }
 
 /*
- * The half that is about to become a new group, on the side the drop names.
+ * The half that is about to become a new box, on the side the drop names.
  *
- * Four directions, drawn as the actual rectangle the split would occupy —
- * half the group, on that edge. It was a fixed bar on the right while the drag
- * only offered one direction, and the bar pointed the wrong way whenever the
- * action did not. Directional preview means the shading cannot disagree with the
- * result: both come from the same `direction` on the same target.
+ * Drawn as the actual rectangle the split would occupy — half the box, on that
+ * edge. It was a fixed bar on the right while the drag only offered one
+ * direction, and the bar pointed the wrong way whenever the action did not.
+ * Directional preview means the shading cannot disagree with the result: both
+ * come from the same `direction` on the same target.
  */
 .conversation-column[data-drop='split']::after {
   background: color-mix(in srgb, var(--accent-text) 20%, transparent);
   outline: 1px solid var(--accent-text);
   outline-offset: -1px;
-}
-
-.conversation-column[data-drop='split'][data-drop-direction='left']::after {
-  right: 50%;
-}
-
-.conversation-column[data-drop='split'][data-drop-direction='right']::after {
-  left: 50%;
 }
 
 .conversation-column[data-drop='split'][data-drop-direction='up']::after {
@@ -12931,6 +13093,51 @@ input::placeholder {
 .conversation-dock-add:focus-visible {
   border-color: var(--border-default);
   color: var(--text-primary);
+}
+
+.conversation-dock-add[data-live='true'] {
+  position: relative;
+}
+
+.conversation-dock-add > .traffic-live-dot {
+  position: absolute;
+  top: 3px;
+  right: 3px;
+}
+
+.traffic-live {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  gap: var(--step);
+  color: var(--danger);
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.traffic-live-dot {
+  flex: none;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--danger);
+  animation: traffic-live-pulse 1.6s ease-in-out infinite;
+}
+
+@keyframes traffic-live-pulse {
+  0%,
+  100% {
+    box-shadow: 0 0 0 0 color-mix(in srgb, var(--danger) 55%, transparent);
+  }
+  50% {
+    box-shadow: 0 0 0 4px color-mix(in srgb, var(--danger) 0%, transparent);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .traffic-live-dot {
+    animation: none;
+  }
 }
 
 /*
@@ -13002,8 +13209,9 @@ input::placeholder {
 /* No negative margin on the left: that would put the grab area back over the
    view the padding above just cleared. It may overlap Chorus, which is ours. */
 .chorus-sash {
-  flex: 0 0 9px;
-  margin: 0 -4px 0 0;
+  position: absolute;
+  inset: 0 auto 0 -5px;
+  width: 9px;
   z-index: 2;
   cursor: col-resize;
   background: transparent;
@@ -13446,4 +13654,115 @@ input::placeholder {
     var(--accent-text) 5px,
     transparent 5px
   );
+}
+
+.toast-stack {
+  position: fixed;
+  z-index: 80;
+  top: calc(var(--step) * 13);
+  right: calc(var(--step) * 5);
+  display: flex;
+  flex-direction: column;
+  gap: calc(var(--step) * 3);
+  width: min(400px, calc(100% - var(--step) * 10));
+  max-height: calc(100vh - var(--step) * 18);
+  overflow-y: auto;
+}
+
+.toast {
+  pointer-events: auto;
+  display: flex;
+  flex-direction: column;
+  gap: calc(var(--step) * 3);
+  padding: calc(var(--step) * 5);
+  border: 1px solid var(--border-strong);
+  border-radius: 9px;
+  background: var(--bg-surface);
+  box-shadow: 0 10px 30px color-mix(in srgb, var(--bg-canvas) 70%, transparent);
+  color: var(--text-primary);
+  font-size: 14px;
+}
+
+.toast--approval {
+  border-color: var(--alert);
+  background: color-mix(in srgb, var(--alert) 7%, var(--bg-surface));
+}
+
+.toast--question {
+  border-color: color-mix(in srgb, var(--voice, var(--bone)) 55%, var(--border-strong));
+  background: color-mix(in srgb, var(--voice, var(--bone)) 9%, var(--bg-surface));
+}
+
+.toast .btn {
+  font-size: 13px;
+}
+
+.toast-head {
+  display: flex;
+  align-items: center;
+  gap: calc(var(--step) * 2);
+}
+
+.toast-title {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  font-size: 15px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.toast-close {
+  flex: 0 0 auto;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius);
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 18px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.toast-close:hover {
+  color: var(--text-primary);
+}
+
+.toast-room,
+.toast-subject {
+  overflow-wrap: anywhere;
+}
+
+.toast-room {
+  color: var(--text-secondary);
+}
+
+.toast-subject {
+  color: var(--text-primary);
+  font-family: var(--mono);
+}
+
+.toast-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: calc(var(--step) * 2);
+}
+
+.toast-reply {
+  flex: 1 1 120px;
+  min-width: 0;
+  padding: calc(var(--step) * 2) calc(var(--step) * 3);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius);
+  background: var(--bg-control);
+  color: var(--text-primary);
+  font: inherit;
+}
+
+.toast-reply::placeholder {
+  color: var(--text-placeholder);
 }

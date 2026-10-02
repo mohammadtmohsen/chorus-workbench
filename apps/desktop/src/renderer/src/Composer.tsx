@@ -12,7 +12,12 @@ import { useTranslation } from 'react-i18next'
 import { isAgentId } from '@chorus/shared'
 import type { IdeContextPush } from '../../shared/ipc.js'
 import { quotePath } from './attach.js'
-import { appendPrompt, collaborationPair } from './collaborate.js'
+import {
+  collaborationPair,
+  isExpandedCollaboration,
+  isTeamCommand,
+  originalCollaborationText,
+} from '../../shared/collaboration.js'
 import { ComposerMenu, type MenuItem } from './ComposerMenu.js'
 import { Attachments, type Attachment } from './Attachments.js'
 import { formatContextBlock, versionFor, withEditorContext } from './editor-context.js'
@@ -183,7 +188,13 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(
     const { t } = useTranslation()
     const { conversationId, participants } = props
 
-    const [draft, setDraftState] = useState(props.initial?.draft ?? '')
+    const [draft, setDraftState] = useState(() =>
+      originalCollaborationText(props.initial?.draft ?? '')
+    )
+    const task = originalCollaborationText(draft).trim()
+    const team = isTeamCommand(task)
+    const pair =
+      team || isExpandedCollaboration(task) ? null : collaborationPair(task, participants)
     /**
      * Whether the restart is waiting to be confirmed.
      *
@@ -380,7 +391,6 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(
     const active = liveStamp?.query ?? null
 
     const hasDraft = draft.trim() !== '' || attached.length > 0
-    const pair = collaborationPair(draft, participants)
     props.report.current = { draft, attached }
 
     useEffect(() => {
@@ -718,7 +728,6 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(
           ? [
               ...teamCommandOption(participants.filter(isAgentId), active.query, {
                 detail: t('conversation.teamDetail'),
-                message: t('conversation.teamMessage', { agents: participants.join(', ') }),
               }),
               ...commandOptions(commands, active.query),
             ]
@@ -945,7 +954,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(
         : `${String(file.startLine)}-${String(file.endLine)}`
     const { onError, onSending, onSendFailed } = props
 
-    const send = useCallback((override?: string) => {
+    const send = useCallback(() => {
       /*
        * The paths join the message on the way out, not while you are writing it.
        *
@@ -954,8 +963,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(
        * characters of noise.
        */
       const paths = attached.map((item) => quotePath(item.path)).join(' ')
-      const text = (override ?? draft).trim()
-      if (text === '' && paths === '') return
+      if (task === '' && paths === '') return
 
       /*
        * The editor context is captured now, not when the pill was drawn.
@@ -966,7 +974,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(
        * attaching none.
        */
       const compose = async (): Promise<string> => {
-        if (!ideAttached) return text
+        if (!ideAttached) return task
         const snapshot = await window.chorus.ideSnapshot({ conversationId })
         if (snapshot.outcome !== 'ok') {
           // The draft is never lost to this. The user is told what happened and
@@ -993,7 +1001,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(
             version: version === null ? '' : t(version.key, version.params),
           }
         )
-        return withEditorContext(text, block)
+        return withEditorContext(task, block)
       }
 
       /*
@@ -1025,7 +1033,11 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(
           // the draft and its attachments exactly as they were.
           writeDraft('')
           setAttached([])
-          await window.chorus.sendMessage({ conversationId, text: withAttachments(body) })
+          await window.chorus.sendMessage({
+            conversationId,
+            text: withAttachments(body),
+            ...(pair === null ? {} : { intent: 'collaborate' as const }),
+          })
         })
         .catch((error: unknown) => {
           // Nothing is coming: the message never left, so the row would be
@@ -1033,7 +1045,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(
           onSendFailed()
           onError(error)
         })
-    }, [conversationId, draft, attached, ideAttached, t, onError, onSending, onSendFailed])
+    }, [conversationId, task, pair, attached, ideAttached, t, onError, onSending, onSendFailed])
 
     useImperativeHandle(
       ref,
@@ -1414,36 +1426,18 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(
               send()
             }}
           />
-          <button
-            type="button"
-            className="composer-more composer-pair"
-            disabled={pair === null}
-            aria-label={
-              pair === null
-                ? t('conversation.collaborateDisabled')
-                : t('conversation.collaborate', { leader: pair.leader, partner: pair.partner })
-            }
-            title={
-              pair === null
-                ? t('conversation.collaborateDisabled')
-                : t('conversation.collaborate', { leader: pair.leader, partner: pair.partner })
-            }
-            onClick={() => {
-              if (pair === null) return
-              const prompt = t('conversation.collaboratePrompt', {
-                leader: pair.leader,
-                partner: pair.partner,
-              })
-              send(appendPrompt(draft, prompt))
-            }}
-          >
-            <svg viewBox="0 0 24 24" aria-hidden="true">
-              <path d="M9 11.5a3 3 0 1 0 0-6 3 3 0 0 0 0 6Z" />
-              <path d="M3.5 19.5a5.5 5.5 0 0 1 11 0" />
-              <path d="M16 11.2a3 3 0 0 0 0-5.9" />
-              <path d="M20.5 19.5a5.5 5.5 0 0 0-3.4-5.1" />
-            </svg>
-          </button>
+          {team || pair !== null ? (
+            <div className="composer-collaboration" role="status">
+              {team
+                ? t('conversation.teamPreview')
+                : pair !== null
+                  ? t('conversation.collaborationPreview', {
+                      leader: t(`actor.${pair.leader}`),
+                      partner: t(`actor.${pair.partner}`),
+                    })
+                  : null}
+            </div>
+          ) : null}
           {/*
           Everything about the session sits in the composer's own row.
 

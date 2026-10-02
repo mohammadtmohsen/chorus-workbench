@@ -295,7 +295,7 @@ describe('message mapping', () => {
      * that Chorus is the only window on the agent. See the `system notices`
      * suite below for the per-subtype behaviour.
      */
-    for (const type of ['tool_progress', 'auth_status', 'conversation_reset']) {
+    for (const type of ['auth_status', 'conversation_reset']) {
       expect(mapSdkMessage({ type }, CTX)).toMatchObject([{ type: 'notice', text: type }])
     }
   })
@@ -671,9 +671,37 @@ describe('system notices', () => {
   })
 
   it('degrades an unmapped top-level type to a notice', () => {
-    expect(sys({ type: 'tool_progress' })).toMatchObject([
-      { type: 'notice', source: 'system', text: 'tool_progress' },
+    expect(sys({ type: 'auth_status' })).toMatchObject([
+      { type: 'notice', source: 'system', text: 'auth_status' },
     ])
+  })
+
+  it('logs nothing for a tool progress tick, which arrives on a timer', () => {
+    expect(
+      sys({
+        type: 'tool_progress',
+        tool_use_id: 'toolu_1',
+        tool_name: 'Bash',
+        parent_tool_use_id: null,
+        elapsed_time_seconds: 12,
+        uuid: 'u1',
+        session_id: 's1',
+      })
+    ).toEqual([])
+    expect(
+      sys({
+        type: 'tool_progress',
+        tool_use_id: 'toolu_2',
+        tool_name: 'Read',
+        parent_tool_use_id: 'toolu_agent',
+        elapsed_time_seconds: 3,
+        task_id: 'task_1',
+        heartbeat: true,
+        subagent_type: 'Explore',
+        uuid: 'u2',
+        session_id: 's1',
+      })
+    ).toEqual([])
   })
 })
 

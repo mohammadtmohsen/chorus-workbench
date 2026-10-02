@@ -98,11 +98,16 @@ function inside(point: Point, rect: Rectangle): boolean {
   )
 }
 
-function raise(window: BrowserWindow | null | undefined): void {
+export function raise(window: BrowserWindow | null | undefined): void {
   if (window === null || window === undefined || window.isDestroyed()) return
   if (window.isMinimized()) window.restore()
   window.show()
   window.focus()
+}
+
+export function detachedWindowOf(projectId: string): BrowserWindow | null {
+  const entry = entries.get(projectId)
+  return entry?.state === 'detached' ? entry.window : null
 }
 
 function sendToMain(deps: DetachedWindowDeps, channel: string, payload: unknown): void {
@@ -246,10 +251,6 @@ export function attachDetachedWindowListeners(
 
 export function registerDetachedWindowHandlers(deps: DetachedWindowDeps): void {
   const handlers: Handlers = {
-    'window:focus': (event) => {
-      raise(BrowserWindow.fromWebContents(event.sender))
-      return OK
-    },
     'project:focusWindow': (_event, request) => {
       raise(entries.get(request.projectId)?.window)
       return OK

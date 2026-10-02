@@ -157,6 +157,9 @@ export function mapSdkMessage(msg: SdkMessageLike, ctx: MapContext): AgentEvent[
     case 'result':
       return mapResult(msg, ctx)
 
+    case 'tool_progress':
+      return []
+
     default:
       /*
        * Anything the SDK grows that we have not mapped becomes a notice rather

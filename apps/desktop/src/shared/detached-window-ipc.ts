@@ -10,7 +10,6 @@ const Empty = z.object({}).strict()
 const ProjectId = z.string().min(1)
 
 export const DETACHED_WINDOW_CONTRACT = {
-  'window:focus': { request: Empty, response: Ok },
   'project:focusWindow': {
     request: z.object({ projectId: ProjectId }).strict(),
     response: Ok,

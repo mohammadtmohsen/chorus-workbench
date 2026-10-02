@@ -91,8 +91,6 @@ export interface TrafficServiceOptions {
   readonly bodyLimit?: number
 }
 
-const PENDING_HIGH = 64
-const PENDING_LOW = 16
 const TAP = 8_192
 const UPSTREAM_TIMEOUT_MS = 30_000
 const UPSTREAM_TIMEOUT = 'upstream timeout'
@@ -263,6 +261,7 @@ export class CapturedBody {
   private readonly budget: CaptureBudget | null
   private readonly captureId: () => string
   private decoded: Buffer | null = null
+  private decodeRun: Promise<BodyDecoding> | null = null
 
   /*
    * Declared rather than initialised in place, deliberately. A field written
@@ -331,7 +330,8 @@ export class CapturedBody {
    */
   async decode(): Promise<BodyDecoding> {
     if (this.decoding === 'ready') return this.decoding
-    return withDecodeSlot(async () => await this.decodeWithinSlot())
+    this.decodeRun ??= withDecodeSlot(async () => await this.decodeWithinSlot())
+    return this.decodeRun
   }
 
   private async decodeWithinSlot(): Promise<BodyDecoding> {
@@ -648,10 +648,8 @@ export class TrafficService {
 
   private server: Server | null = null
   private seq = 0
-  private ackedSeq = 0
   private epoch = 0
   private attached = false
-  private paused = false
   private flush: (() => void) | null = null
 
   private readonly captures: CaptureStore
@@ -769,8 +767,6 @@ export class TrafficService {
   attach(): TrafficAttachment {
     this.epoch += 1
     this.attached = true
-    this.ackedSeq = this.seq
-    this.paused = false
     this.outbox.length = 0
     if (this.flush !== null) {
       this.flush()
@@ -782,14 +778,7 @@ export class TrafficService {
   detach(epoch: number): void {
     if (epoch !== this.epoch) return
     this.attached = false
-    this.paused = false
     this.outbox.length = 0
-  }
-
-  ack(epoch: number, seq: number): void {
-    if (epoch !== this.epoch) return
-    this.ackedSeq = Math.min(Math.max(seq, this.ackedSeq), this.seq)
-    this.pace()
   }
 
   snapshot(): readonly TrafficRow[] {
@@ -829,6 +818,8 @@ export class TrafficService {
       },
       started
     )
+    capture.request.contentType = req.headers['content-type'] ?? null
+    capture.request.contentEncoding = req.headers['content-encoding'] ?? null
     /*
      * The row goes up before the exchange happens, not after it.
      *
@@ -1107,18 +1098,10 @@ export class TrafficService {
     const overflow = this.rows.length - this.capture
     if (overflow > 0) this.rows.splice(0, overflow)
 
-    this.pace()
     if (!this.attached) return seq
-    if (this.paused) this.outbox.length = 0
     this.outbox.push(row)
     this.schedule()
     return seq
-  }
-
-  private pace(): void {
-    const behind = this.attached ? this.seq - this.ackedSeq : 0
-    if (!this.paused && behind >= PENDING_HIGH) this.paused = true
-    else if (this.paused && behind <= PENDING_LOW) this.paused = false
   }
 
   private schedule(): void {

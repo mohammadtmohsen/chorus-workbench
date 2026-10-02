@@ -35,6 +35,7 @@ export function PaneWorkbench(props: {
   readonly projectId: string
   readonly active: boolean
   readonly projectRoot: string
+  readonly covered: boolean
 }): React.JSX.Element {
   const shown = useWorkbenchShown(props.projectId)
   const [failure, setFailure] = useState<string | null>(null)
@@ -52,6 +53,7 @@ export function PaneWorkbench(props: {
            they all share one root, which is what a project is. */
         projectRoot={props.projectRoot}
         hidden={!props.active || !shown}
+        covered={props.active && props.covered}
         onFailed={setFailure}
       />
       {failure !== null && <p className="workspace-pane-workbench-error">{failure}</p>}

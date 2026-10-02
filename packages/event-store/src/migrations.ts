@@ -672,6 +672,24 @@ export const MIGRATIONS: readonly Migration[] = [
         WHERE traffic_port IS NOT NULL;
     `,
   },
+  {
+    version: 19,
+    name: 'the-name-a-conversation-goes-by',
+    up: `
+      UPDATE conversations
+         SET title = latest.title
+        FROM (
+          SELECT conversation_id, json_extract(payload, '$.title') AS title
+            FROM events
+           WHERE seq IN (
+             SELECT MAX(seq) FROM events
+              WHERE type = 'conversation.renamed'
+              GROUP BY conversation_id
+           )
+        ) AS latest
+       WHERE conversations.id = latest.conversation_id;
+    `,
+  },
 ]
 
 export interface MigrationResult {

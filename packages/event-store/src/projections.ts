@@ -288,6 +288,12 @@ export function applyToProjections(db: Database, event: StoredEvent): void {
     }
 
     case 'conversation.renamed':
+      db.prepare('UPDATE conversations SET title = @title WHERE id = @id').run({
+        id: base.conversationId,
+        title: payload.title,
+      })
+      break
+
     case 'project.changed':
     case 'policy.changed':
     case 'context.compacted':

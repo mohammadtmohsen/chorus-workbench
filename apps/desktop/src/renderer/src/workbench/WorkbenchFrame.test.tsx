@@ -128,6 +128,7 @@ interface Bridge {
   readonly closeWorkbench: WorkbenchShellApi['closeWorkbench']
   readonly setWorkbenchBounds: WorkbenchShellApi['setWorkbenchBounds']
   readonly setWorkbenchVisible: WorkbenchShellApi['setWorkbenchVisible']
+  readonly setWorkbenchCovered: WorkbenchShellApi['setWorkbenchCovered']
 }
 
 function install(bridge: Bridge): void {
@@ -219,6 +220,7 @@ describe('WorkbenchFrame bounds reporting', () => {
       // region does not go black. Nothing here reads them, and returning none
       // is the honest answer for a bridge that never hides anything.
       setWorkbenchVisible: () => Promise.resolve({ ok: true, stills: [] }),
+      setWorkbenchCovered: () => Promise.resolve({ still: null }),
     })
 
     render(
@@ -254,6 +256,7 @@ describe('WorkbenchFrame bounds reporting', () => {
       // region does not go black. Nothing here reads them, and returning none
       // is the honest answer for a bridge that never hides anything.
       setWorkbenchVisible: () => Promise.resolve({ ok: true, stills: [] }),
+      setWorkbenchCovered: () => Promise.resolve({ still: null }),
     })
 
     const { unmount } = render(
@@ -304,6 +307,7 @@ describe('WorkbenchFrame bounds tracking', () => {
       // region does not go black. Nothing here reads them, and returning none
       // is the honest answer for a bridge that never hides anything.
       setWorkbenchVisible: () => Promise.resolve({ ok: true, stills: [] }),
+      setWorkbenchCovered: () => Promise.resolve({ still: null }),
     }
   }
 
@@ -392,5 +396,264 @@ describe('WorkbenchFrame bounds tracking', () => {
 
     expect(sent).toHaveLength(1)
     expect(failures).toEqual([])
+  })
+})
+
+describe('WorkbenchFrame coverage', () => {
+  function deferred<T>(): { readonly promise: Promise<T>; readonly settle: (value: T) => void } {
+    let settle: (value: T) => void = () => {
+      throw new Error('the promise executor did not run')
+    }
+    const promise = new Promise<T>((resolve) => {
+      settle = resolve
+    })
+    return { promise, settle }
+  }
+
+  const STILL = 'data:image/jpeg;base64,covered'
+
+  it('asks main to cover the surface and paints the still it gets back', async () => {
+    const calls: { viewId: string; covered: boolean }[] = []
+    const target = { grant: freshGrant() }
+    const onFailed = (): void => undefined
+
+    install({
+      openWorkbench: () => Promise.resolve({ viewId: VIEW }),
+      closeWorkbench: () => Promise.resolve({ ok: true }),
+      setWorkbenchBounds: () => Promise.resolve({ ok: true }),
+      setWorkbenchVisible: () => Promise.resolve({ ok: true, stills: [] }),
+      setWorkbenchCovered: (request) => {
+        calls.push(request)
+        return Promise.resolve({ still: STILL })
+      },
+    })
+
+    const { container } = render(
+      <WorkbenchFrame target={target} projectRoot="/tmp/project" covered onFailed={onFailed} />
+    )
+    await settle()
+
+    expect(calls).toEqual([{ viewId: VIEW, covered: true }])
+    const image = container.querySelector('.workbench-still')
+    expect(image?.getAttribute('src')).toBe(STILL)
+    expect(image?.getAttribute('data-cover')).toBe('true')
+  })
+
+  it('keeps painting the still until the uncover resolves, then drops it', async () => {
+    const calls: { viewId: string; covered: boolean }[] = []
+    const uncover = deferred<{ still: string | null }>()
+    const target = { grant: freshGrant() }
+    const onFailed = (): void => undefined
+
+    install({
+      openWorkbench: () => Promise.resolve({ viewId: VIEW }),
+      closeWorkbench: () => Promise.resolve({ ok: true }),
+      setWorkbenchBounds: () => Promise.resolve({ ok: true }),
+      setWorkbenchVisible: () => Promise.resolve({ ok: true, stills: [] }),
+      setWorkbenchCovered: (request) => {
+        calls.push(request)
+        return request.covered ? Promise.resolve({ still: STILL }) : uncover.promise
+      },
+    })
+
+    const { container, rerender } = render(
+      <WorkbenchFrame target={target} projectRoot="/tmp/project" covered onFailed={onFailed} />
+    )
+    await settle()
+    expect(container.querySelector('.workbench-still')?.getAttribute('data-cover')).toBe('true')
+
+    rerender(
+      <WorkbenchFrame
+        target={target}
+        projectRoot="/tmp/project"
+        covered={false}
+        onFailed={onFailed}
+      />
+    )
+    await settle()
+
+    expect(calls).toEqual([
+      { viewId: VIEW, covered: true },
+      { viewId: VIEW, covered: false },
+    ])
+    expect(container.querySelector('.workbench-still')?.getAttribute('data-cover')).toBe('true')
+
+    await act(async () => {
+      uncover.settle({ still: null })
+      await Promise.resolve()
+    })
+    await settle()
+
+    expect(container.querySelector('.workbench-still')).toBeNull()
+  })
+
+  it('says nothing about coverage while the frame is hidden', async () => {
+    const calls: { viewId: string; covered: boolean }[] = []
+
+    install({
+      openWorkbench: () => Promise.resolve({ viewId: VIEW }),
+      closeWorkbench: () => Promise.resolve({ ok: true }),
+      setWorkbenchBounds: () => Promise.resolve({ ok: true }),
+      setWorkbenchVisible: () => Promise.resolve({ ok: true, stills: [] }),
+      setWorkbenchCovered: (request) => {
+        calls.push(request)
+        return Promise.resolve({ still: null })
+      },
+    })
+
+    render(
+      <WorkbenchFrame
+        target={{ grant: freshGrant() }}
+        projectRoot="/tmp/project"
+        hidden
+        covered
+        onFailed={(): void => undefined}
+      />
+    )
+    await settle()
+
+    expect(calls).toEqual([])
+  })
+
+  it('reports the rectangle before it raises the editor back into view', async () => {
+    const log: string[] = []
+    const target = { grant: freshGrant() }
+    const onFailed = (): void => undefined
+
+    install({
+      openWorkbench: () => Promise.resolve({ viewId: VIEW }),
+      closeWorkbench: () => Promise.resolve({ ok: true }),
+      setWorkbenchBounds: () => {
+        log.push('bounds')
+        return Promise.resolve({ ok: true })
+      },
+      setWorkbenchVisible: () => Promise.resolve({ ok: true, stills: [] }),
+      setWorkbenchCovered: () => {
+        log.push('covered')
+        return Promise.resolve({ still: null })
+      },
+    })
+
+    const { rerender } = render(
+      <WorkbenchFrame target={target} projectRoot="/tmp/project" covered onFailed={onFailed} />
+    )
+    await settle()
+
+    const before = log.length
+    rerender(
+      <WorkbenchFrame
+        target={target}
+        projectRoot="/tmp/project"
+        covered={false}
+        onFailed={onFailed}
+      />
+    )
+    await settle()
+
+    expect(log.slice(before, before + 2)).toEqual(['bounds', 'covered'])
+  })
+
+  it('asks for the cover on a fresh mount without reporting a rectangle first', async () => {
+    const log: string[] = []
+
+    install({
+      openWorkbench: () => Promise.resolve({ viewId: VIEW }),
+      closeWorkbench: () => Promise.resolve({ ok: true }),
+      setWorkbenchBounds: () => {
+        log.push('bounds')
+        return Promise.resolve({ ok: true })
+      },
+      setWorkbenchVisible: () => Promise.resolve({ ok: true, stills: [] }),
+      setWorkbenchCovered: () => {
+        log.push('covered')
+        return Promise.resolve({ still: null })
+      },
+    })
+
+    render(
+      <WorkbenchFrame
+        target={{ grant: freshGrant() }}
+        projectRoot="/tmp/project"
+        covered
+        onFailed={(): void => undefined}
+      />
+    )
+    await settle()
+
+    expect(log[0]).toBe('covered')
+    expect(log).toContain('bounds')
+  })
+
+  it('keeps reporting the rectangle while the surface is covered', async () => {
+    const sent: WorkbenchRect[] = []
+
+    install({
+      openWorkbench: () => Promise.resolve({ viewId: VIEW }),
+      closeWorkbench: () => Promise.resolve({ ok: true }),
+      setWorkbenchBounds: ({ rect }) => {
+        sent.push(rect)
+        return Promise.resolve({ ok: true })
+      },
+      setWorkbenchVisible: () => Promise.resolve({ ok: true, stills: [] }),
+      setWorkbenchCovered: () => Promise.resolve({ still: null }),
+    })
+
+    const { container } = render(
+      <WorkbenchFrame
+        target={{ grant: freshGrant() }}
+        projectRoot="/tmp/project"
+        covered
+        onFailed={(): void => undefined}
+      />
+    )
+    const surface = surfaceOf(container)
+    let rect: WorkbenchRect = { x: 0, y: 0, width: 400, height: 600 }
+    measures(surface, () => rect)
+    await settle()
+
+    rect = { x: 0, y: 0, width: 100, height: 600 }
+    drawFrame()
+
+    expect(sent.at(-1)).toEqual(measured(surface))
+  })
+
+  it('shows the hint while covered with no picture, and drops it once there is one', async () => {
+    let answer: { still: string | null } = { still: null }
+    const target = { grant: freshGrant() }
+    const onFailed = (): void => undefined
+
+    install({
+      openWorkbench: () => Promise.resolve({ viewId: VIEW }),
+      closeWorkbench: () => Promise.resolve({ ok: true }),
+      setWorkbenchBounds: () => Promise.resolve({ ok: true }),
+      setWorkbenchVisible: () => Promise.resolve({ ok: true, stills: [] }),
+      setWorkbenchCovered: () => Promise.resolve(answer),
+    })
+
+    const { container, rerender } = render(
+      <WorkbenchFrame target={target} projectRoot="/tmp/project" covered onFailed={onFailed} />
+    )
+    await settle()
+    expect(container.querySelector('.workbench-covered-hint')).not.toBeNull()
+
+    rerender(
+      <WorkbenchFrame
+        target={target}
+        projectRoot="/tmp/project"
+        covered={false}
+        onFailed={onFailed}
+      />
+    )
+    await settle()
+    expect(container.querySelector('.workbench-covered-hint')).toBeNull()
+
+    answer = { still: STILL }
+    rerender(
+      <WorkbenchFrame target={target} projectRoot="/tmp/project" covered onFailed={onFailed} />
+    )
+    await settle()
+
+    expect(container.querySelector('.workbench-covered-hint')).toBeNull()
+    expect(container.querySelector('.workbench-still')?.getAttribute('data-cover')).toBe('true')
   })
 })

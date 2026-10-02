@@ -27,7 +27,7 @@ const run = promisify(execFile)
  * by hand.
  */
 
-const CHILD_PATTERNS = ['codex app-server', 'claude --', 'adb logcat'] as const
+const CHILD_PATTERNS = ['codex app-server', 'claude --', 'adb logcat', 'adb track-devices'] as const
 
 export interface ReapResult {
   readonly killed: number

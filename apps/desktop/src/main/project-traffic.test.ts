@@ -1,4 +1,5 @@
 import { createServer, type Server } from 'node:http'
+import { gzipSync } from 'node:zlib'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { ProjectTrafficRegistry } from './project-traffic.js'
 import { BODY_LIMIT, type TrafficHttpRow } from './traffic.js'
@@ -57,6 +58,32 @@ const slowFirst = (): Promise<{ port: number; release: () => void }> =>
       }
       response.writeHead(200, { 'content-type': 'text/plain' })
       response.end('ok')
+    })
+    servers.push(server)
+    server.listen(0, '127.0.0.1', () => {
+      const address = server.address()
+      resolve({
+        port: address !== null && typeof address === 'object' ? address.port : 0,
+        release: () => {
+          pending?.()
+        },
+      })
+    })
+  })
+
+const heldGzip = (text: string): Promise<{ port: number; release: () => void }> =>
+  new Promise((resolve) => {
+    let pending: (() => void) | null = null
+    const server = createServer((_request, response) => {
+      const gzipped = gzipSync(Buffer.from(text))
+      response.writeHead(200, {
+        'content-type': 'application/json',
+        'content-encoding': 'gzip',
+      })
+      response.flushHeaders()
+      pending = () => {
+        response.end(gzipped)
+      }
     })
     servers.push(server)
     server.listen(0, '127.0.0.1', () => {
@@ -233,5 +260,116 @@ describe('the access setting while capturing', () => {
     const taken = registry.configure(PROJECT, { access: 'lan' })
     expect(taken.failure).toBeNull()
     expect(taken.access).toBe('lan')
+  })
+})
+
+describe('a compressed request body', () => {
+  it('is recorded with its encoding and read back decoded', async () => {
+    const text = '{"username":"Admin"}'
+    const origin = await serving(Buffer.from('{"code":"OK"}'))
+    const registry = registryFor(origin, 8)
+    registry.configure(PROJECT, {})
+    await registry.start(PROJECT)
+    const port = registry.state(PROJECT)?.port ?? 0
+
+    const answer = await fetch(`http://127.0.0.1:${String(port)}/login`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'content-encoding': 'gzip' },
+      body: gzipSync(Buffer.from(text)),
+    })
+    await answer.arrayBuffer()
+    await vi.waitFor(() => {
+      expect(lastHttpRow(registry).status).toBe(200)
+    })
+
+    const row = lastHttpRow(registry)
+    const captureId = registry.journal(PROJECT)?.captureId ?? ''
+    const detail = registry.detail(PROJECT, captureId, row.requestId)
+    expect(detail?.requestBody.contentEncoding).toBe('gzip')
+    expect(detail?.requestBody.contentType).toBe('application/json')
+
+    await registry.decodedReady(PROJECT, captureId, row.requestId, 'request')
+    const page = registry.bodyPage(PROJECT, captureId, row.requestId, 'request', 'decoded', 0, 4096)
+    if (page.kind !== 'page') throw new Error('the decoded request was answered without a page')
+    expect(Buffer.from(page.dataBase64, 'base64').toString('utf8')).toBe(text)
+  })
+})
+
+describe('a decoded read behind a decode that has not finished', () => {
+  it('answers with the decoded bytes rather than the transient refusal', async () => {
+    const text = '{"code":"OK","data":{"nextAction":"done"}}'
+    const held = await heldGzip(text)
+    const registry = registryFor(held.port, 8)
+    registry.configure(PROJECT, {})
+    await registry.start(PROJECT)
+    const port = registry.state(PROJECT)?.port ?? 0
+
+    const answer = fetch(`http://127.0.0.1:${String(port)}/held`).catch(() => undefined)
+    await vi.waitFor(() => {
+      expect(registry.journal(PROJECT)?.rows.length).toBe(1)
+    })
+
+    const row = lastHttpRow(registry)
+    const captureId = registry.journal(PROJECT)?.captureId ?? ''
+    await vi.waitFor(() => {
+      expect(registry.detail(PROJECT, captureId, row.requestId)?.responseBody.contentEncoding).toBe(
+        'gzip'
+      )
+    })
+
+    expect(
+      registry.bodyPage(PROJECT, captureId, row.requestId, 'response', 'decoded', 0, 64).kind
+    ).toBe('unsupported')
+
+    await registry.decodedReady(PROJECT, captureId, row.requestId, 'response')
+    expect(registry.detail(PROJECT, captureId, row.requestId)?.responseBody.decoding).toBe(
+      'not-requested'
+    )
+
+    held.release()
+    const delivered = await answer
+    await delivered?.arrayBuffer()
+    await vi.waitFor(() => {
+      expect(registry.detail(PROJECT, captureId, row.requestId)?.responseBody.state).toBe(
+        'complete'
+      )
+    })
+
+    await registry.decodedReady(PROJECT, captureId, row.requestId, 'response')
+    const page = registry.bodyPage(
+      PROJECT,
+      captureId,
+      row.requestId,
+      'response',
+      'decoded',
+      0,
+      4096
+    )
+    if (page.kind !== 'page') throw new Error('the decoded read was answered without a page')
+    expect(Buffer.from(page.dataBase64, 'base64').toString('utf8')).toBe(text)
+  })
+})
+
+describe('a burst absorbed in one tick', () => {
+  it('reaches the journal whole, however many arrived at once', async () => {
+    const origin = await serving(Buffer.from('ok'))
+    const registry = registryFor(origin, 100)
+    registry.configure(PROJECT, {})
+    await registry.start(PROJECT)
+    registry.selectSource(PROJECT, { kind: 'logcat', filters: 'ReactNativeJS:V' })
+
+    for (let i = 0; i < 70; i += 1) registry.logcatLine(PROJECT, `line ${String(i)}`)
+
+    await vi.waitFor(() => {
+      expect(registry.journal(PROJECT)?.rows.length).toBeGreaterThan(0)
+    })
+
+    const lines: string[] = []
+    for (const row of registry.journal(PROJECT)?.rows ?? []) {
+      if (row.source === 'logcat') lines.push(row.line)
+    }
+    expect(lines).toHaveLength(70)
+
+    await registry.stop(PROJECT)
   })
 })

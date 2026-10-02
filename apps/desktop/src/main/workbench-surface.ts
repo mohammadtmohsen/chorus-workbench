@@ -459,6 +459,9 @@ async function mintProjectGrant(
  */
 const editorHidden = new Set<string>()
 const overlayHidden = new Set<WebContents>()
+const coveredHidden = new Set<string>()
+const coverWanted = new Set<string>()
+const lastStills = new Map<string, string>()
 
 /**
  * An overlay hide expires unless the shell keeps saying it is still up.
@@ -515,7 +518,9 @@ function clearOverlayExpiry(caller: WebContents): void {
 
 function applyVisibility(surface: Surface): void {
   surface.view.setVisible(
-    !editorHidden.has(surface.projectRoot) && !overlayHidden.has(surface.owner)
+    !editorHidden.has(surface.projectRoot) &&
+      !overlayHidden.has(surface.owner) &&
+      !coveredHidden.has(surface.id)
   )
 }
 
@@ -631,7 +636,13 @@ async function setSurfacesVisible(
   if (only === undefined) {
     for (const id of ids) {
       const surface = byId.get(id)
-      if (surface === undefined || editorHidden.has(surface.projectRoot)) continue
+      if (
+        surface === undefined ||
+        editorHidden.has(surface.projectRoot) ||
+        coveredHidden.has(surface.id)
+      ) {
+        continue
+      }
       try {
         const image = await surface.view.webContents.capturePage()
         if (!image.isEmpty()) {
@@ -645,6 +656,7 @@ async function setSurfacesVisible(
       }
     }
   }
+  for (const shot of stills) lastStills.set(shot.viewId, shot.dataUrl)
 
   /*
    * Marked and applied after the await. Captures take tens of milliseconds and a
@@ -658,6 +670,31 @@ async function setSurfacesVisible(
     if (surface !== undefined) applyVisibility(surface)
   }
   return stills
+}
+
+export async function setSurfaceCovered(
+  caller: WebContents,
+  viewId: string,
+  covered: boolean
+): Promise<string | null> {
+  const surface = ownedSurface(caller, viewId)
+  if (!covered) {
+    coverWanted.delete(viewId)
+    coveredHidden.delete(viewId)
+    applyVisibility(surface)
+    return null
+  }
+  coverWanted.add(viewId)
+  if (surface.view.getVisible()) {
+    const image = await surface.view.webContents.capturePage().catch(() => null)
+    if (image !== null && !image.isEmpty()) {
+      lastStills.set(viewId, `data:image/jpeg;base64,${image.toJPEG(85).toString('base64')}`)
+    }
+  }
+  if (!coverWanted.has(viewId) || byId.get(viewId) !== surface) return null
+  coveredHidden.add(viewId)
+  applyVisibility(surface)
+  return lastStills.get(viewId) ?? null
 }
 
 /**
@@ -1177,6 +1214,9 @@ function destroySurface(viewId: string): void {
   byContents.delete(surface.view.webContents)
   byOwner.get(surface.owner)?.delete(viewId)
   stopWatchingFocus(viewId)
+  coveredHidden.delete(viewId)
+  coverWanted.delete(viewId)
+  lastStills.delete(viewId)
   /*
    * Only when this was the project's *last* surface. Two panes on one project
    * share a root, and telling the shell the editor is gone while another is
@@ -1342,6 +1382,13 @@ export function registerWorkbenchHandlers(
             const { viewId, rect } = parsedRequest.data as { viewId: string; rect: WorkbenchRect }
             setSurfaceBounds(event.sender, viewId, rect)
             return { ok: true }
+          }
+          case 'workbench:setCovered': {
+            const { viewId, covered } = parsedRequest.data as {
+              viewId: string
+              covered: boolean
+            }
+            return { still: await setSurfaceCovered(event.sender, viewId, covered) }
           }
           case 'workbench:close': {
             const { viewId } = parsedRequest.data as { viewId: string }

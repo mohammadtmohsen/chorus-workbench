@@ -115,6 +115,7 @@ export const Settings = z
      */
     theme: z.enum(['system', 'light', 'dark']).default('system'),
     completionProvider: z.enum(['auto', 'deepseek', 'codestral']).default('auto'),
+    notifications: z.boolean().default(true),
     trafficOrigin: z.string().default(''),
     trafficPort: z.number().int().min(0).max(65535).default(DEFAULT_TRAFFIC_PORT),
   })
@@ -156,6 +157,7 @@ export const DEFAULT_SETTINGS: Settings = {
   theme: 'system',
   // Off: a first launch answers exactly as every launch before this existed.
   completionProvider: 'auto',
+  notifications: true,
   trafficOrigin: '',
   trafficPort: DEFAULT_TRAFFIC_PORT,
 }

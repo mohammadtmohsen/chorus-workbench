@@ -2,6 +2,10 @@ import { contextBridge, ipcRenderer, webUtils } from 'electron'
 import {
   ACTIVITY_PUSH_CHANNEL,
   ActivityPush,
+  ATTENTION_PUSH_CHANNEL,
+  AttentionPush,
+  REVEAL_PUSH_CHANNEL,
+  RevealPush,
   DIAGNOSTIC_PUSH_CHANNEL,
   DiagnosticPush,
   EVENTS_PUSH_CHANNEL,
@@ -25,7 +29,9 @@ import {
 } from '../shared/ipc.js'
 import {
   TRAFFIC_CONTRACT,
+  TRAFFIC_LIVE_PUSH_CHANNEL,
   TRAFFIC_PUSH_CHANNEL,
+  TrafficLive,
   TrafficPush,
   type TrafficChannel,
   type TrafficResponse,
@@ -128,6 +134,7 @@ const api: ChorusApi = {
   setWorkbenchBounds: invokeWorkbench('workbench:setBounds'),
   closeWorkbench: invokeWorkbench('workbench:close'),
   setWorkbenchVisible: invokeWorkbench('workbench:setVisible'),
+  setWorkbenchCovered: invokeWorkbench('workbench:setCovered'),
   probeAgents: invoke('agents:probe'),
   startConversation: invoke('conversation:start'),
   sendMessage: invoke('conversation:send'),
@@ -180,8 +187,10 @@ const api: ChorusApi = {
   readTrafficBody: invokeTraffic('traffic:readBody'),
   readTrafficLegacy: invokeTraffic('traffic:legacy'),
   decideTrafficLegacy: invokeTraffic('traffic:legacyDecide'),
+  readTrafficLive: invokeTraffic('traffic:live'),
   setBadge: invoke('app:setBadge'),
-  focusWindow: () => invokeDetached('window:focus')({}),
+  notify: invoke('app:notify'),
+  revealConversation: invoke('conversation:reveal'),
   focusProjectWindow: invokeDetached('project:focusWindow'),
   prepareDetach: invokeDetached('project:prepareDetach'),
   commitDetach: invokeDetached('project:commitDetach'),
@@ -305,6 +314,26 @@ const api: ChorusApi = {
       ipcRenderer.removeListener(ACTIVITY_PUSH_CHANNEL, wrapped)
     }
   },
+  onAttention: (listener) => {
+    const wrapped = (_event: unknown, payload: unknown): void => {
+      const parsed = AttentionPush.safeParse(payload)
+      if (parsed.success) listener(parsed.data)
+    }
+    ipcRenderer.on(ATTENTION_PUSH_CHANNEL, wrapped)
+    return () => {
+      ipcRenderer.removeListener(ATTENTION_PUSH_CHANNEL, wrapped)
+    }
+  },
+  onRevealConversation: (listener) => {
+    const wrapped = (_event: unknown, payload: unknown): void => {
+      const parsed = RevealPush.safeParse(payload)
+      if (parsed.success) listener(parsed.data)
+    }
+    ipcRenderer.on(REVEAL_PUSH_CHANNEL, wrapped)
+    return () => {
+      ipcRenderer.removeListener(REVEAL_PUSH_CHANNEL, wrapped)
+    }
+  },
   onTerminalOutput: (listener) => {
     const wrapped = (_event: unknown, payload: unknown): void => {
       const parsed = TerminalPush.safeParse(payload)
@@ -323,6 +352,16 @@ const api: ChorusApi = {
     ipcRenderer.on(TRAFFIC_PUSH_CHANNEL, wrapped)
     return () => {
       ipcRenderer.removeListener(TRAFFIC_PUSH_CHANNEL, wrapped)
+    }
+  },
+  onTrafficLive: (listener) => {
+    const wrapped = (_event: unknown, payload: unknown): void => {
+      const parsed = TrafficLive.safeParse(payload)
+      if (parsed.success) listener(parsed.data)
+    }
+    ipcRenderer.on(TRAFFIC_LIVE_PUSH_CHANNEL, wrapped)
+    return () => {
+      ipcRenderer.removeListener(TRAFFIC_LIVE_PUSH_CHANNEL, wrapped)
     }
   },
   onDiagnostic: (listener) => {

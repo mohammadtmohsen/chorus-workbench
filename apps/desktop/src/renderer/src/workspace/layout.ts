@@ -1,13 +1,14 @@
 import {
+  BOX_WIDTH,
   CHORUS_WIDTH,
+  EDITOR_WIDTH,
   SIDEBAR_WIDTH,
   TERMINAL_HEIGHT,
-  TRAFFIC_TAB_ID,
-  isConversationTab,
   type ConversationArrangement,
   type ProjectLayoutSlice,
   type ReturnSlot,
   type TerminalPanelState,
+  type TrafficPanelState,
   type WorkspaceLayoutNode,
   type WorkspacePane,
   type WorkspaceSnapshot,
@@ -30,6 +31,29 @@ export function clampSidebarWidth(width: number): number {
 export function clampChorusWidth(width: number): number {
   if (!Number.isFinite(width)) return CHORUS_WIDTH.default
   return Math.round(Math.max(CHORUS_WIDTH.min, width))
+}
+
+export interface PaneSplit {
+  readonly chorus: number
+  readonly editor: number
+  readonly raised: number
+  readonly covered: boolean
+}
+
+export function paneSplit(pane: number, stored: number): PaneSplit {
+  const chorus = Math.max(0, Math.min(Math.max(stored, CHORUS_WIDTH.min), pane - EDITOR_WIDTH.peek))
+  const beside = pane - chorus
+  if (beside >= EDITOR_WIDTH.resizeFloor) {
+    return { chorus, editor: beside, raised: beside, covered: false }
+  }
+  const raised = Math.max(pane - CHORUS_WIDTH.min, EDITOR_WIDTH.peek)
+  const covered = chorus > 0 && beside < raised
+  return {
+    chorus,
+    editor: covered ? Math.min(EDITOR_WIDTH.resizeFloor, raised) : raised,
+    raised,
+    covered,
+  }
 }
 
 /**
@@ -112,6 +136,7 @@ export const EMPTY_WORKSPACE: WorkspaceSnapshot = {
   chorusWidths: {},
   terminals: {},
   globalTerminal: { open: false, height: TERMINAL_HEIGHT.default, tabs: [], activeId: null },
+  trafficPanels: {},
 }
 
 export const DETACHED_PANE_ID = 'detached'
@@ -130,6 +155,7 @@ export function sliceOf(workspace: WorkspaceSnapshot, projectId: string): Projec
     conversationGroups: workspace.conversationGroups[projectId],
     chorusWidth: workspace.chorusWidths[projectId],
     workbenchHidden: workspace.workbenchHidden[projectId],
+    trafficPanel: workspace.trafficPanels[projectId],
   }
 }
 
@@ -147,6 +173,7 @@ export function mergeSlice(
     ),
     chorusWidths: withEntry(workspace.chorusWidths, projectId, slice.chorusWidth),
     workbenchHidden: withEntry(workspace.workbenchHidden, projectId, slice.workbenchHidden),
+    trafficPanels: withEntry(workspace.trafficPanels, projectId, slice.trafficPanel),
   }
 }
 
@@ -350,6 +377,12 @@ export function normalizeWorkspace(workspace: WorkspaceSnapshot): WorkspaceSnaps
      */
     chorusWidths: Object.fromEntries(
       Object.entries(workspace.chorusWidths).map(([id, width]) => [id, clampChorusWidth(width)])
+    ),
+    trafficPanels: Object.fromEntries(
+      Object.entries(workspace.trafficPanels).map(([projectId, panel]) => [
+        projectId,
+        { ...panel, width: clampBoxWidth(panel.width) },
+      ])
     ),
     /*
      * Every panel's roster repaired, both scopes, on the way through.
@@ -752,9 +785,10 @@ export function replaceSession(
  *  1. **Drop what is gone**, then let `normalizeTree` do the rest — it already
  *     prunes leaves whose pane vanished, collapses single-child branches and
  *     repairs sizes, at both levels, because it is the same function.
- *  2. **Adopt what is new.** Anything running that no group holds joins the
- *     focused group — otherwise a conversation would exist with no way to reach
- *     it, which is the silent-loss failure the outer reconcile also guards.
+ *  2. **Adopt what is new.** Anything running that no box holds gets a box of
+ *     its own, beside the one with the caret — otherwise a conversation would
+ *     exist with no way to reach it, which is the silent-loss failure the outer
+ *     reconcile also guards.
  *
  * Returns `null` when the project has no conversations at all, so the caller can
  * omit the entry rather than persist an empty arrangement — absent means "never
@@ -764,9 +798,7 @@ export function reconcileConversationGroups(
   saved: ConversationArrangement | undefined,
   conversationIds: readonly string[]
 ): ConversationArrangement | null {
-  const savedTabs = new Set(Object.values(saved?.panes ?? {}).flatMap((pane) => pane.tabs))
-  const keepsTraffic = savedTabs.has(TRAFFIC_TAB_ID)
-  if (conversationIds.length === 0 && !keepsTraffic) return null
+  if (conversationIds.length === 0) return null
   const live = new Set(conversationIds)
 
   /*
@@ -778,50 +810,33 @@ export function reconcileConversationGroups(
    */
   const seed: ConversationArrangement =
     saved?.layout == null
-      ? emptyArrangement()
+      ? EMPTY_ARRANGEMENT
       : {
-          layout: saved.layout,
+          ...saved,
           panes: Object.fromEntries(
             Object.entries(saved.panes).map(([paneId, pane]) => [
               paneId,
-              {
-                ...pane,
-                tabs: pane.tabs.filter((id) => id === TRAFFIC_TAB_ID || live.has(id)),
-              },
+              { ...pane, tabs: pane.tabs.filter((id) => live.has(id)) },
             ])
           ),
-          focusedPaneId: saved.focusedPaneId,
         }
 
   /*
    * Normalised *before* adoption, not after. Normalising drops panes whose tabs
-   * have all gone, so doing it second would adopt new conversations into a group
+   * have all gone, so doing it second would adopt new conversations into a box
    * that is about to be deleted and lose them — the arrangement would come back
    * with a conversation running and no tab anywhere.
    */
   let arrangement = normalizeTree(seed)
-  if (arrangement.layout === null) arrangement = emptyArrangement()
-
+  const focus = arrangement.focusedPaneId
   const held = new Set(Object.values(arrangement.panes).flatMap((pane) => pane.tabs))
-  const missing = conversationIds.filter((id) => !held.has(id))
-  if (missing.length > 0) {
-    const target = arrangement.focusedPaneId ?? leafPaneIds(arrangement.layout)[0] ?? FIRST_GROUP_ID
-    const pane = arrangement.panes[target] ?? { id: target, tabs: [], activeTabId: null }
-    arrangement = normalizeTree({
-      ...arrangement,
-      panes: {
-        ...arrangement.panes,
-        /*
-         * Appended in live-list order, which arrives newest-last — so a
-         * conversation started while the app was closed lands at the end of the
-         * strip rather than wherever a set iteration put it.
-         */
-        [target]: { ...pane, tabs: [...pane.tabs, ...missing] },
-      },
-    })
+  for (const id of conversationIds) {
+    if (held.has(id)) continue
+    arrangement = openBox(arrangement, id, newGroupId())
+    held.add(id)
   }
 
-  return arrangement
+  return focus === null ? arrangement : normalizeTree({ ...arrangement, focusedPaneId: focus })
 }
 
 /**
@@ -843,8 +858,7 @@ export function reconcileConversationGroups(
  * can be showing while its group is on a different conversation.
  *
  * Every pane counts rather than only the focused one, because every pane is
- * drawn. Traffic is excluded by `isConversationTab` — it is a tab, and it names
- * no conversation for anything downstream to act on.
+ * drawn.
  *
  * `reported` is what *another* window says it is showing. A detached window
  * renders one project in its own process and its own store answers for itself by
@@ -859,7 +873,7 @@ export function onScreenConversations(
   },
   reported: readonly string[] = []
 ): ReadonlySet<string> {
-  const showing = new Set(reported.filter((id) => isConversationTab(id)))
+  const showing = new Set(reported)
   for (const pane of Object.values(state.panes)) {
     const projectId = pane.activeTabId
     if (projectId === null) continue
@@ -867,28 +881,175 @@ export function onScreenConversations(
     if (arrangement === undefined) continue
     for (const group of Object.values(arrangement.panes)) {
       const active = group.activeTabId
-      if (active !== null && isConversationTab(active)) showing.add(active)
+      if (active !== null) showing.add(active)
     }
   }
   return showing
 }
 
-/** One empty group, which is what a project with no stored arrangement starts as. */
-function emptyArrangement(): ConversationArrangement {
-  const id = newGroupId()
+export const EMPTY_ARRANGEMENT: ConversationArrangement = {
+  layout: null,
+  panes: {},
+  focusedPaneId: null,
+}
+
+export const CLOSED_TRAFFIC: TrafficPanelState = { open: false, width: BOX_WIDTH.default }
+
+export function clampBoxWidth(width: number): number {
+  if (!Number.isFinite(width)) return BOX_WIDTH.default
+  return Math.round(Math.max(BOX_WIDTH.min, width))
+}
+
+export function columnsOf(layout: WorkspaceLayoutNode | null): WorkspaceLayoutNode[] {
+  if (layout === null) return []
+  return layout.kind === 'branch' && layout.orientation === 'row' ? layout.children : [layout]
+}
+
+function columnIndexOf(layout: WorkspaceLayoutNode, paneId: string): number {
+  return columnsOf(layout).findIndex((column) => leafPaneIds(column).includes(paneId))
+}
+
+function withColumn(
+  layout: WorkspaceLayoutNode,
+  column: WorkspaceLayoutNode,
+  at: number
+): WorkspaceLayoutNode {
+  const children = [...columnsOf(layout)]
+  children.splice(at, 0, column)
+  return { kind: 'branch', orientation: 'row', children, sizes: children.map(() => 1) }
+}
+
+function placeBox<T extends PaneTree>(
+  tree: T,
+  box: WorkspacePane,
+  targetPaneId: string,
+  direction: SplitDirection
+): T {
+  if (tree.layout === null) return tree
+  const panes = { ...tree.panes, [box.id]: box }
+  if (direction === 'up' || direction === 'down') {
+    return normalizeTree({
+      ...tree,
+      layout: insertSplit(tree.layout, targetPaneId, box.id, direction),
+      panes,
+      focusedPaneId: box.id,
+    })
+  }
+  const at = columnIndexOf(tree.layout, targetPaneId)
+  if (at < 0) return tree
+  return normalizeTree({
+    ...tree,
+    layout: withColumn(
+      tree.layout,
+      { kind: 'leaf', paneId: box.id },
+      direction === 'left' ? at : at + 1
+    ),
+    panes,
+    focusedPaneId: box.id,
+  })
+}
+
+export function openBox<T extends PaneTree>(tree: T, tabId: string, boxId: string): T {
+  const existing = tabLocation(tree, tabId)
+  if (existing !== null) return focusPane(tree, existing.paneId)
+  const box: WorkspacePane = { id: boxId, tabs: [tabId], activeTabId: tabId }
+  const leaves = leafPaneIds(tree.layout)
+  const beside = leaves.find((id) => id === tree.focusedPaneId) ?? leaves.at(-1)
+  if (tree.layout === null || beside === undefined) {
+    return {
+      ...tree,
+      layout: { kind: 'leaf', paneId: boxId },
+      panes: { [boxId]: box },
+      focusedPaneId: boxId,
+    }
+  }
+  return placeBox(tree, box, beside, 'right')
+}
+
+export function moveBox(
+  arrangement: ConversationArrangement,
+  boxId: string,
+  targetPaneId: string,
+  direction: SplitDirection
+): ConversationArrangement {
+  const box = arrangement.panes[boxId]
+  if (box === undefined || boxId === targetPaneId || arrangement.layout === null) return arrangement
+  const lifted = normalizeTree({
+    ...arrangement,
+    panes: { ...arrangement.panes, [boxId]: { ...box, tabs: [] } },
+  })
+  if (lifted.layout === null) return arrangement
+  if (direction === 'left' || direction === 'right') {
+    return placeBox(lifted, box, targetPaneId, direction)
+  }
+  return placeBox(
+    { ...lifted, widths: withEntry(lifted.widths ?? {}, boxId, lifted.widths?.[targetPaneId]) },
+    box,
+    targetPaneId,
+    direction
+  )
+}
+
+export function columnWidths(arrangement: ConversationArrangement): number[] {
+  return columnsOf(arrangement.layout).map((column) => {
+    const first = leafPaneIds(column)[0]
+    const stored = first === undefined ? undefined : arrangement.widths?.[first]
+    return clampBoxWidth(stored ?? BOX_WIDTH.default)
+  })
+}
+
+export function withColumnWidths(
+  arrangement: ConversationArrangement,
+  widths: readonly number[]
+): ConversationArrangement {
+  const columns = columnsOf(arrangement.layout)
+  if (widths.length !== columns.length) return arrangement
   return {
-    layout: { kind: 'leaf', paneId: id },
-    panes: { [id]: { id, tabs: [], activeTabId: null } },
-    focusedPaneId: id,
+    ...arrangement,
+    widths: Object.fromEntries(
+      columns.flatMap((column, index) =>
+        leafPaneIds(column).map((id) => [id, clampBoxWidth(widths[index] ?? BOX_WIDTH.default)])
+      )
+    ),
   }
 }
 
-/*
- * Only reachable when a stored arrangement has a focused id naming nothing and
- * an empty layout, which `normalizeTree` has already ruled out — kept so the
- * adoption path has no `undefined` branch rather than because it can happen.
- */
-const FIRST_GROUP_ID = 'group-1'
+export function pushDivider(
+  widths: readonly number[],
+  index: number,
+  delta: number
+): { widths: number[]; scroll: number } {
+  const left = widths[index - 1]
+  const right = widths[index]
+  const next = [...widths]
+  if (left === undefined || right === undefined) return { widths: next, scroll: 0 }
+  if (delta >= 0) {
+    next[index - 1] = left + delta
+    return { widths: next, scroll: 0 }
+  }
+  const shrunk = Math.min(-delta, Math.max(0, left - BOX_WIDTH.min))
+  const grown = -delta - shrunk
+  next[index - 1] = left - shrunk
+  next[index] = right + grown
+  return { widths: next, scroll: grown }
+}
+
+function evened(node: WorkspaceLayoutNode): WorkspaceLayoutNode {
+  if (node.kind === 'leaf') return node
+  return {
+    ...node,
+    children: node.children.map(evened),
+    sizes: node.children.map(() => 1 / node.children.length),
+  }
+}
+
+export function resetBoxes(arrangement: ConversationArrangement): ConversationArrangement {
+  return {
+    ...arrangement,
+    layout: arrangement.layout === null ? null : evened(arrangement.layout),
+    widths: {},
+  }
+}
 
 /**
  * A fresh group id. A UUID rather than a counter, for the reason `newTerminalId`

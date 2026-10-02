@@ -43,6 +43,7 @@ const state = (over: Partial<TrafficState> = {}): TrafficState => ({
   envVar: null,
   source: { kind: 'off' },
   failure: null,
+  forwardedDevices: 0,
   ...over,
 })
 

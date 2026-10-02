@@ -19,6 +19,7 @@ import {
   forwardContextUsageToRenderer,
   forwardTasksToRenderer,
   forwardActivityToRenderer,
+  forwardAttentionToRenderer,
   forwardDiagnosticsToRenderer,
   forwardTerminalToRenderer,
   forwardLimitsToRenderer,
@@ -191,6 +192,8 @@ let mainLog: ReturnType<typeof createLogger> | null = null
  */
 registerNoteImageScheme()
 
+if (process.platform === 'win32') app.setAppUserModelId('dev.chorus.desktop')
+
 void app.whenReady().then(async () => {
   applyContentSecurityPolicy(session.defaultSession, devServerUrl !== undefined)
   serveNoteImages(app.getPath('userData'))
@@ -341,7 +344,7 @@ void app.whenReady().then(async () => {
   // so narrowing it here would not survive into the callback.
   const opened = ChorusRuntime.open(app.getPath('userData'), log)
   runtime = opened
-  registerIpcHandlers(runtime)
+  registerIpcHandlers(runtime, () => mainWindow)
   /*
    * Separate from `registerIpcHandlers` because these handlers need `event`.
    * Registered even though no surface exists yet: opening one is a renderer
@@ -381,6 +384,7 @@ void app.whenReady().then(async () => {
   forwardContextUsageToRenderer(runtime)
   forwardTasksToRenderer(runtime)
   forwardActivityToRenderer(runtime)
+  forwardAttentionToRenderer(runtime)
   forwardTerminalToRenderer(runtime)
   /*
    * The shell's own connection to its own saved state, resolved before anything

@@ -1,6 +1,6 @@
 import { useRef, useState } from 'react'
 import type { PointerEvent as ReactPointerEvent } from 'react'
-import { MAX_PANES, type SplitDirection } from './layout.js'
+import type { SplitDirection } from './layout.js'
 
 /**
  * Dragging a conversation inside its project's column.
@@ -14,9 +14,7 @@ import { MAX_PANES, type SplitDirection } from './layout.js'
  * neither can be handed the other's id.
  *
  * It is also much smaller, because it has less to do: no pane tree, no
- * four-way ceiling, no cross-window ghost. A conversation can go to a slot in a
- * group, or to a new group beside it, and there is nowhere else in the app for
- * it to land.
+ * four-way ceiling, no cross-window ghost.
  *
  * No `useShellOverlay` here, and that is a judgement rather than an oversight.
  * Every drop target is inside the Chorus column, which never overlaps the
@@ -24,25 +22,13 @@ import { MAX_PANES, type SplitDirection } from './layout.js'
  * every tab drag would cost more than it bought.
  */
 
-/**
- * Where a drop would land, and it is the outer drag's shape one level in.
- *
- * `group` joins that group's strip at a slot; `split` makes a new group on the
- * named side. `preview` is the rectangle to shade — computed here rather than in
- * the view so the highlight and the action can never disagree about which half
- * of a group is about to become a new one.
- */
-export type ConversationDropTarget =
-  | { readonly kind: 'group'; readonly groupId: string; readonly slot: number }
-  | {
-      readonly kind: 'split'
-      readonly groupId: string
-      readonly direction: SplitDirection
-    }
+export interface ConversationDropTarget {
+  readonly groupId: string
+  readonly direction: SplitDirection
+}
 
 export interface ConversationDragState {
   readonly tabId: string
-  /** The group it started in, so a drop back into it is a reorder. */
   readonly fromGroupId: string
   /** For the ghost — a drag with nothing following the pointer reads as a stuck tab. */
   readonly title: string
@@ -60,18 +46,6 @@ export interface ConversationDragState {
  */
 const THRESHOLD_PX = 5
 
-/**
- * The same bands the pane drag uses: a quarter of the side, never more than
- * 120px.
- *
- * Copied deliberately rather than invented. "Exactly the same as project level"
- * is a claim about where the zones *are* as much as about what they do, and a
- * conversation column that split at a third when a pane split at a quarter would
- * feel like a different gesture wearing the same clothes.
- */
-const BAND_FRACTION = 0.25
-const BAND_MAX_PX = 120
-
 export interface ConversationDrag {
   readonly drag: ConversationDragState | null
   readonly onPointerDown: (
@@ -85,9 +59,7 @@ export interface ConversationDrag {
 }
 
 export function useConversationDrag(options: {
-  readonly groupCount: number
-  readonly onPlace: (tabId: string, targetGroupId: string, slot: number) => void
-  readonly onSplit: (tabId: string, targetGroupId: string, direction: SplitDirection) => void
+  readonly onMove: (boxId: string, targetGroupId: string, direction: SplitDirection) => void
 }): ConversationDrag {
   const [drag, setDrag] = useState<ConversationDragState | null>(null)
   /*
@@ -144,11 +116,7 @@ export function useConversationDrag(options: {
         if (!far) return
         started = true
       }
-      const target = targetAt(moved.clientX, moved.clientY, {
-        tabId,
-        fromGroupId: groupId,
-        groupCount: latest.current.groupCount,
-      })
+      const target = targetAt(moved.clientX, moved.clientY, groupId)
       const next = {
         tabId,
         fromGroupId: groupId,
@@ -179,9 +147,7 @@ export function useConversationDrag(options: {
        */
       suppressClick.current = true
       if (finished?.target == null) return
-      if (finished.target.kind === 'split') {
-        latest.current.onSplit(tabId, finished.target.groupId, finished.target.direction)
-      } else latest.current.onPlace(tabId, finished.target.groupId, finished.target.slot)
+      latest.current.onMove(groupId, finished.target.groupId, finished.target.direction)
     }
 
     tab.addEventListener('pointermove', move)
@@ -210,82 +176,22 @@ export function useConversationDrag(options: {
  * to be. `elementFromPoint` cannot go stale, and at pointer-move rates the cost
  * is not measurable against the layout the browser is doing anyway.
  */
-function targetAt(
-  x: number,
-  y: number,
-  context: {
-    readonly tabId: string
-    readonly fromGroupId: string
-    readonly groupCount: number
-  }
-): ConversationDropTarget | null {
+function targetAt(x: number, y: number, fromGroupId: string): ConversationDropTarget | null {
   const under = document.elementFromPoint(x, y)
   const column = under?.closest<HTMLElement>('.conversation-column')
   const groupId = column?.dataset['group']
   if (column === null || column === undefined || groupId === undefined) return null
 
+  if (groupId === fromGroupId) return null
+
   const rect = column.getBoundingClientRect()
 
-  /*
-   * The four edges first, and the deepest one wins — the same resolution the
-   * pane drag uses, and the reason a corner is not ambiguous: two bands overlap
-   * there, and whichever the pointer is further into is the one meant.
-   */
-  const room =
-    context.groupCount < MAX_PANES ||
-    /*
-     * A group about to be emptied by the move frees its own slot, so the
-     * ceiling does not stop it. Same arithmetic `splitTab` does with
-     * `sourceDisappears`, and without it the last split into a full tree would
-     * be refused for making room it was also about to create.
-     */
-    sourceWouldVanish(context.fromGroupId)
-  if (room) {
-    const horizontal = Math.min(rect.width * BAND_FRACTION, BAND_MAX_PX)
-    const vertical = Math.min(rect.height * BAND_FRACTION, BAND_MAX_PX)
-    const candidates: { direction: SplitDirection; penetration: number }[] = [
-      { direction: 'left', penetration: (horizontal - (x - rect.left)) / horizontal },
-      { direction: 'right', penetration: (horizontal - (rect.right - x)) / horizontal },
-      { direction: 'up', penetration: (vertical - (y - rect.top)) / vertical },
-      { direction: 'down', penetration: (vertical - (rect.bottom - y)) / vertical },
-    ]
-    const winner = candidates
-      .filter(({ penetration }) => penetration > 0)
-      .sort((a, b) => b.penetration - a.penetration)[0]
-    if (winner !== undefined) {
-      /*
-       * A group with one tab cannot split *itself* — the move would empty it and
-       * it would collapse straight back, so the gesture is a no-op with a
-       * re-render. Refused here as well as in the store, because a highlighted
-       * zone that does nothing is worse than no zone.
-       */
-      if (groupId !== context.fromGroupId || !sourceWouldVanish(context.fromGroupId)) {
-        return { kind: 'split', groupId, direction: winner.direction }
-      }
-    }
-  }
-
-  /*
-   * Otherwise a slot in this group's strip, from the midpoint of each tab. A
-   * group with no strip — one conversation, one group — still accepts a drop; it
-   * lands at the end, which is the only slot it has.
-   */
-  const tabs = [...column.querySelectorAll<HTMLElement>('[data-tab-id]')]
-  let slot = tabs.length
-  for (const [index, tab] of tabs.entries()) {
-    const box = tab.getBoundingClientRect()
-    if (x < box.left + box.width / 2) {
-      slot = index
-      break
-    }
-  }
-  return { kind: 'group', groupId, slot }
-}
-
-/** Whether the group the drag started in would be left with nothing. */
-function sourceWouldVanish(fromGroupId: string): boolean {
-  return (
-    document.querySelectorAll(`.conversation-column[data-group="${fromGroupId}"] [data-tab-id]`)
-      .length <= 1
-  )
+  const edges: { direction: SplitDirection; distance: number }[] = [
+    { direction: 'left', distance: (x - rect.left) / rect.width },
+    { direction: 'right', distance: (rect.right - x) / rect.width },
+    { direction: 'up', distance: (y - rect.top) / rect.height },
+    { direction: 'down', distance: (rect.bottom - y) / rect.height },
+  ]
+  const nearest = edges.reduce((best, edge) => (edge.distance < best.distance ? edge : best))
+  return { groupId, direction: nearest.direction }
 }
