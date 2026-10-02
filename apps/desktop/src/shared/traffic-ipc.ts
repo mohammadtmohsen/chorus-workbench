@@ -38,12 +38,14 @@ export const TrafficLegacy = z.object({
 })
 export type TrafficLegacy = z.infer<typeof TrafficLegacy>
 
+export const TRAFFIC_ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/
+
 export const TrafficConfig = z
   .object({
     origin: z.string().nullable().optional(),
     port: z.number().int().min(0).max(65_535).nullable().optional(),
     access: TrafficAccesses.optional(),
-    envVar: z.string().max(64).nullable().optional(),
+    envVar: z.string().max(64).regex(TRAFFIC_ENV_NAME).nullable().optional(),
   })
   .strict()
 

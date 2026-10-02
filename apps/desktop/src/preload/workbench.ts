@@ -4,6 +4,7 @@ import type {
   EditorReport,
   CompletionPayload,
   WorkbenchConnection,
+  WorkbenchTerminalEnv,
 } from '../shared/workbench-ipc.js'
 
 /**
@@ -50,6 +51,7 @@ import type {
 export const CONNECTION_CHANNEL = 'workbench:connection'
 /* The window-focus pair, push and pull on one name, under the same test. */
 export const FOCUS_CHANNEL = 'workbench:focus'
+export const TERMINAL_ENV_CHANNEL = 'workbench:terminalEnv'
 /*
  * Persistence channels are spelled out for the same reason and carry the same
  * risk. A test asserts them against the shared constants, because a channel name
@@ -134,6 +136,13 @@ export function asConnection(value: unknown): WorkbenchConnection | null {
   }
 }
 
+export function asTerminalEnv(value: unknown): WorkbenchTerminalEnv | null {
+  if (typeof value !== 'object' || value === null) return null
+  const { name, value: url } = value as { name?: unknown; value?: unknown }
+  if (typeof name !== 'string' || name === '' || typeof url !== 'string' || url === '') return null
+  return { name, value: url }
+}
+
 /**
  * The earliest possible receiver.
  *
@@ -200,6 +209,14 @@ const api: ChorusWorkbenchApi = {
   onWindowFocusChanged: (handler: (hasFocus: boolean) => void) => {
     ipcRenderer.on(FOCUS_CHANNEL, (_event, hasFocus: unknown) => {
       if (typeof hasFocus === 'boolean') handler(hasFocus)
+    })
+  },
+
+  terminalEnv: async () => asTerminalEnv(await ipcRenderer.invoke(TERMINAL_ENV_CHANNEL)),
+
+  onTerminalEnvChanged: (handler: (env: WorkbenchTerminalEnv | null) => void) => {
+    ipcRenderer.on(TERMINAL_ENV_CHANNEL, (_event, env: unknown) => {
+      handler(asTerminalEnv(env))
     })
   },
 

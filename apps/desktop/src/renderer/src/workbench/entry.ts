@@ -1,4 +1,5 @@
-import { getService, initialize } from '@codingame/monaco-vscode-api'
+import { getService, IConfigurationService, initialize } from '@codingame/monaco-vscode-api'
+import { ConfigurationTarget } from '@codingame/monaco-vscode-api/vscode/vs/platform/configuration/common/configuration'
 import { IURLService } from '@codingame/monaco-vscode-api/vscode/vs/platform/url/common/url.service'
 import { ILogService } from '@codingame/monaco-vscode-api/vscode/vs/platform/log/common/log.service'
 import { URI } from '@codingame/monaco-vscode-api/vscode/vs/base/common/uri'
@@ -13,6 +14,7 @@ import { registerWorkbenchWorkers } from './workers.js'
 import { persistUserSettings, restoreUserSettings } from './user-settings.js'
 import { restoreBrowserExtensions, synchronizeBrowserExtensions } from './browser-extensions.js'
 import { seedWindowFocus } from './window-focus.js'
+import { bindTerminalEnv, seedTerminalEnv, type TerminalEnvMemory } from './terminal-env.js'
 
 /**
  * One workbench, in one document, in one process.
@@ -74,6 +76,7 @@ async function main(): Promise<void> {
    * focus read must not be able to stop a workbench from opening.
    */
   await seedWindowFocus()
+  await seedTerminalEnv()
 
   const container = document.createElement('div')
   container.className = 'workbench-root'
@@ -88,6 +91,22 @@ async function main(): Promise<void> {
 
   const { services, options, env } = prepareWorkbench(connection)
   await initialize(services, container, options, env)
+
+  const configuration = await getService(IConfigurationService)
+  const terminalLogs = await getService(ILogService)
+  bindTerminalEnv({
+    read: (key) => configuration.inspect<TerminalEnvMemory>(key).memoryValue,
+    write: (key, memory) => configuration.updateValue(key, memory, ConfigurationTarget.MEMORY),
+    watch: (listener) => {
+      configuration.onDidChangeConfiguration((event) => {
+        listener((key) => event.affectsConfiguration(key))
+      })
+    },
+    fail: (error) => {
+      const detail = error instanceof Error ? (error.stack ?? error.message) : String(error)
+      terminalLogs.error(`Chorus: capture terminal environment could not be applied — ${detail}`)
+    },
+  })
 
   /*
    * After `initialize`, because the file service does not exist before it. Not

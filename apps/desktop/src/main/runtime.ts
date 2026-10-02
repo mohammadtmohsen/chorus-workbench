@@ -19,6 +19,7 @@ import type {
 } from '@chorus/agent-protocol'
 import { mergeUsageWindows } from '@chorus/agent-protocol'
 import {
+  refreshWorkbenchTerminalEnv,
   requestWorkbenchAskDiff,
   requestWorkbenchEdit,
   requestWorkbenchSnapshot,
@@ -75,6 +76,7 @@ import {
   type TrafficSourceShape,
 } from '../shared/ipc.js'
 import type { TrafficLegacy } from '../shared/traffic-ipc.js'
+import type { WorkbenchTerminalEnv } from '../shared/workbench-ipc.js'
 import { UNREAD_EVENT_TYPES } from '../shared/unread.js'
 import {
   openConversations,
@@ -107,6 +109,7 @@ import {
 } from './terminal.js'
 import {
   ProjectTrafficRegistry,
+  terminalEnvOf,
   type ProjectTrafficConfig,
   type ProjectTrafficState,
 } from './project-traffic.js'
@@ -1586,7 +1589,9 @@ export class ChorusRuntime {
       this.traffic.routeLogcatLine(line)
     })
     this.traffic.subscribe((push) => {
-      if (push.kind === 'state') this.adbReverse.sync(this.traffic.capturingPorts())
+      if (push.kind !== 'state') return
+      this.adbReverse.sync(this.traffic.capturingPorts())
+      refreshWorkbenchTerminalEnv()
     })
     this.adbReverse.onChange(() => {
       this.traffic.setForwarded((port) => this.adbReverse.forwarded(port))
@@ -1621,6 +1626,13 @@ export class ChorusRuntime {
       access: project.trafficAccess,
       envVar: project.trafficEnvVar,
     }
+  }
+
+  terminalEnvFor(place: WorkbenchPlace): WorkbenchTerminalEnv | null {
+    if (place.host !== LOCAL_HOST) return null
+    const project = this.projects.findByPlace(place)
+    if (project === null) return null
+    return terminalEnvOf(this.traffic.state(project.id))
   }
 
   static open(
@@ -4740,6 +4752,7 @@ export class ChorusRuntime {
      */
     await this.traffic.dispose(projectId)
     this.adbReverse.sync(this.traffic.capturingPorts())
+    refreshWorkbenchTerminalEnv()
     return { forgotten: this.projects.forget(projectId) }
   }
 
@@ -5123,6 +5136,7 @@ export class ChorusRuntime {
   async disposeProjectTraffic(projectId: string): Promise<void> {
     await this.traffic.dispose(projectId)
     this.adbReverse.sync(this.traffic.capturingPorts())
+    refreshWorkbenchTerminalEnv()
   }
 
   async close(): Promise<void> {

@@ -152,6 +152,13 @@ export const WORKBENCH_CONNECTION_CHANNEL = 'workbench:connection'
  */
 export const WORKBENCH_FOCUS_CHANNEL = 'workbench:focus'
 
+export const WORKBENCH_TERMINAL_ENV_CHANNEL = 'workbench:terminalEnv'
+
+export interface WorkbenchTerminalEnv {
+  readonly name: string
+  readonly value: string
+}
+
 /**
  * The two channels that make a preference outlive the app — E5.
  *
@@ -904,6 +911,8 @@ export interface ChorusWorkbenchApi {
    * boolean" are different facts and only one of them is safe to guess.
    */
   readonly onWindowFocusChanged: (handler: (hasFocus: boolean) => void) => void
+  readonly terminalEnv: () => Promise<WorkbenchTerminalEnv | null>
+  readonly onTerminalEnvChanged: (handler: (env: WorkbenchTerminalEnv | null) => void) => void
   /**
    * The user's own `settings.json` as main last stored it, or `null` when this
    * profile has never had one — which is how a clean profile keeps Code-OSS's

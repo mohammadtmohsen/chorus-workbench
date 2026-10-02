@@ -2,11 +2,13 @@ import { randomUUID } from 'node:crypto'
 import type { TrafficSourceShape } from '../shared/ipc.js'
 import {
   BODY_PAGE,
+  TRAFFIC_ENV_NAME,
   type TrafficAccess,
   type TrafficDetail,
   type TrafficFailure,
   type TrafficReadResult,
 } from '../shared/traffic-ipc.js'
+import type { WorkbenchTerminalEnv } from '../shared/workbench-ipc.js'
 import {
   TrafficService,
   type CaptureBudget,
@@ -87,6 +89,12 @@ interface Entry {
 
 const isAddressInUse = (error: unknown): boolean =>
   typeof error === 'object' && error !== null && (error as { code?: string }).code === 'EADDRINUSE'
+
+export function terminalEnvOf(state: ProjectTrafficState | null): WorkbenchTerminalEnv | null {
+  if (state === null || !state.capturing || state.port === null) return null
+  if (state.envVar === null || !TRAFFIC_ENV_NAME.test(state.envVar)) return null
+  return { name: state.envVar, value: `http://${LOOPBACK}:${String(state.port)}` }
+}
 
 export class ProjectTrafficRegistry {
   private readonly entries = new Map<string, Entry>()

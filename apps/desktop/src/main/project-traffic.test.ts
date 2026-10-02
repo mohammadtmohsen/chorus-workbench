@@ -1,7 +1,11 @@
 import { createServer, type Server } from 'node:http'
 import { gzipSync } from 'node:zlib'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { ProjectTrafficRegistry } from './project-traffic.js'
+import {
+  ProjectTrafficRegistry,
+  terminalEnvOf,
+  type ProjectTrafficConfig,
+} from './project-traffic.js'
 import { BODY_LIMIT, type TrafficHttpRow } from './traffic.js'
 
 const PROJECT = 'p1'
@@ -371,5 +375,63 @@ describe('a burst absorbed in one tick', () => {
     expect(lines).toHaveLength(70)
 
     await registry.stop(PROJECT)
+  })
+})
+
+const remembering = (origin: number): ProjectTrafficRegistry => {
+  let saved: ProjectTrafficConfig = {
+    origin: `http://127.0.0.1:${String(origin)}`,
+    port: null,
+    access: 'loopback',
+    envVar: null,
+  }
+  return new ProjectTrafficRegistry({
+    config: () => saved,
+    nextPort: () => 0,
+    remember: (_projectId, config) => {
+      saved = config
+    },
+    address: () => '127.0.0.1',
+  })
+}
+
+describe('the terminal env a capture hands the editor', () => {
+  it('names the loopback listener only while capturing, and follows a rename', async () => {
+    const registry = remembering(await serving(Buffer.from('ok')))
+    registry.configure(PROJECT, { envVar: 'EXPO_PUBLIC_API_BASE_URL' })
+    expect(terminalEnvOf(registry.state(PROJECT))).toBeNull()
+
+    await registry.start(PROJECT)
+    const port = registry.state(PROJECT)?.port ?? null
+    expect(port).not.toBeNull()
+    expect(terminalEnvOf(registry.state(PROJECT))).toEqual({
+      name: 'EXPO_PUBLIC_API_BASE_URL',
+      value: `http://127.0.0.1:${String(port)}`,
+    })
+
+    registry.configure(PROJECT, { envVar: 'JAVA_API_BASE_URL' })
+    expect(terminalEnvOf(registry.state(PROJECT))).toEqual({
+      name: 'JAVA_API_BASE_URL',
+      value: `http://127.0.0.1:${String(port)}`,
+    })
+
+    await registry.stop(PROJECT)
+    expect(terminalEnvOf(registry.state(PROJECT))).toBeNull()
+  })
+
+  it('hands over nothing for a name saved before names were checked, or with no name', async () => {
+    const registry = remembering(await serving(Buffer.from('ok')))
+    registry.configure(PROJECT, { envVar: 'MY VAR' })
+    await registry.start(PROJECT)
+    expect(registry.state(PROJECT)?.capturing).toBe(true)
+    expect(terminalEnvOf(registry.state(PROJECT))).toBeNull()
+
+    registry.configure(PROJECT, { envVar: null })
+    expect(terminalEnvOf(registry.state(PROJECT))).toBeNull()
+    await registry.stop(PROJECT)
+  })
+
+  it('hands over nothing for a project the registry has never seen', () => {
+    expect(terminalEnvOf(null)).toBeNull()
   })
 })

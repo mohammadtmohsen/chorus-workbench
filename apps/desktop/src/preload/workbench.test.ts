@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import {
   WORKBENCH_CONNECTION_CHANNEL,
   WORKBENCH_FOCUS_CHANNEL,
+  WORKBENCH_TERMINAL_ENV_CHANNEL,
   WORKBENCH_BROWSER_EXTENSIONS_CHANGED_CHANNEL,
   WORKBENCH_BROWSER_EXTENSIONS_READ_CHANNEL,
   WORKBENCH_BROWSER_EXTENSIONS_WRITE_CHANNEL,
@@ -41,6 +42,7 @@ interface Exposed {
   readBrowserExtensions: () => Promise<string | null>
   writeBrowserExtensions: (text: string) => Promise<void>
   onBrowserExtensionsChanged: (handler: (text: string) => void) => void
+  onTerminalEnvChanged: (handler: (env: unknown) => void) => void
 }
 let exposed: Exposed | null = null
 
@@ -70,6 +72,7 @@ vi.mock('electron', () => ({
 const {
   CONNECTION_CHANNEL,
   FOCUS_CHANNEL,
+  TERMINAL_ENV_CHANNEL,
   USER_SETTINGS_READ_CHANNEL,
   USER_SETTINGS_WRITE_CHANNEL,
   BROWSER_EXTENSIONS_READ_CHANNEL,
@@ -90,12 +93,14 @@ const {
   EDITOR_REPORT_CHANNEL,
   COMPLETION_PROBE_CHANNEL,
   asConnection,
+  asTerminalEnv,
 } = await import('./workbench.js')
 
 describe('the workbench preload', () => {
   it('names the same channels the shared contract does', () => {
     expect(CONNECTION_CHANNEL).toBe(WORKBENCH_CONNECTION_CHANNEL)
     expect(FOCUS_CHANNEL).toBe(WORKBENCH_FOCUS_CHANNEL)
+    expect(TERMINAL_ENV_CHANNEL).toBe(WORKBENCH_TERMINAL_ENV_CHANNEL)
     expect(USER_SETTINGS_READ_CHANNEL).toBe(WORKBENCH_USER_SETTINGS_READ_CHANNEL)
     expect(USER_SETTINGS_WRITE_CHANNEL).toBe(WORKBENCH_USER_SETTINGS_WRITE_CHANNEL)
     expect(BROWSER_EXTENSIONS_READ_CHANNEL).toBe(WORKBENCH_BROWSER_EXTENSIONS_READ_CHANNEL)
@@ -117,7 +122,7 @@ describe('the workbench preload', () => {
     expect(COMPLETION_PROBE_CHANNEL).toBe(WORKBENCH_COMPLETION_PROBE_CHANNEL)
   })
 
-  it('exposes exactly twenty-five methods, and no twenty-sixth', () => {
+  it('exposes exactly twenty-seven methods, and no twenty-eighth', () => {
     // The list, not the count: a method named here is a capability a document
     // running extension code is handed, so which ones they are is the assertion.
     expect(Object.keys(exposed ?? {})).toEqual([
@@ -134,6 +139,8 @@ describe('the workbench preload', () => {
        */
       'windowHasFocus',
       'onWindowFocusChanged',
+      'terminalEnv',
+      'onTerminalEnvChanged',
       'readUserSettings',
       'writeUserSettings',
       'readBrowserExtensions',
@@ -250,6 +257,27 @@ describe('the workbench preload', () => {
     expect(asConnection({ ...DESCRIPTOR, projectRoot: 7 })).toBeNull()
     expect(asConnection(null)).toBeNull()
     expect(asConnection(DESCRIPTOR)).toEqual(DESCRIPTOR)
+  })
+
+  it('turns a malformed capture terminal env into no override, never a partial one', () => {
+    const env = { name: 'EXPO_PUBLIC_API_BASE_URL', value: 'http://127.0.0.1:30100' }
+    expect(asTerminalEnv(env)).toEqual(env)
+    expect(asTerminalEnv({ ...env, extra: 'dropped' })).toEqual(env)
+    expect(asTerminalEnv({ ...env, name: '' })).toBeNull()
+    expect(asTerminalEnv({ ...env, value: 7 })).toBeNull()
+    expect(asTerminalEnv({ name: env.name })).toBeNull()
+    expect(asTerminalEnv('EXPO_PUBLIC_API_BASE_URL=http://127.0.0.1:30100')).toBeNull()
+    expect(asTerminalEnv(null)).toBeNull()
+  })
+
+  it('hands a pushed capture terminal env to the subscriber, checked', () => {
+    const received: unknown[] = []
+    exposed?.onTerminalEnvChanged((env) => {
+      received.push(env)
+    })
+    listeners.get(TERMINAL_ENV_CHANNEL)?.(null, { name: 'API_URL', value: 'http://127.0.0.1:1' })
+    listeners.get(TERMINAL_ENV_CHANNEL)?.(null, { name: 'API_URL' })
+    expect(received).toEqual([{ name: 'API_URL', value: 'http://127.0.0.1:1' }, null])
   })
 
   it('refuses a descriptor missing any one field, and the token most of all', () => {

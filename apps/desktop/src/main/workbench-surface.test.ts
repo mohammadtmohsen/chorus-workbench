@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto'
 import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -6,6 +7,7 @@ import { afterAll, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
   WORKBENCH_EDIT_RESULT_CHANNEL,
   WORKBENCH_FOCUS_CHANNEL,
+  WORKBENCH_TERMINAL_ENV_CHANNEL,
   WorkbenchConnection,
 } from '../shared/workbench-ipc.js'
 
@@ -69,6 +71,7 @@ const releaseCaptures = async (): Promise<void> => {
 class FakeWebContents {
   readonly listeners = new Map<string, ((...args: unknown[]) => void)[]>()
   readonly sent: unknown[] = []
+  readonly mainFrame = { processId: 1, frameToken: randomUUID() }
   on(event: string, listener: (...args: unknown[]) => void): this {
     this.listeners.set(event, [...(this.listeners.get(event) ?? []), listener])
     return this
@@ -344,6 +347,7 @@ beforeEach(() => {
   surface.closeAllSurfaces()
   surface.setDetachedAccessPredicate(null)
   surface.setHandoffExpiredSink(null)
+  surface.setWorkbenchTerminalEnvSource(null)
   holdCaptures = false
   heldCaptures.length = 0
   showOpenDialog.mockReset()
@@ -1448,5 +1452,70 @@ describe('a zoomed shell and a surface rectangle', () => {
     } finally {
       scale.stepScale(0)
     }
+  })
+})
+
+describe('the capture terminal env a surface is told', () => {
+  const ENV = { name: 'EXPO_PUBLIC_API_BASE_URL', value: 'http://127.0.0.1:30100' }
+  const pull = (sender: FakeWebContents, frame: unknown = sender.mainFrame): unknown =>
+    handlers.get(WORKBENCH_TERMINAL_ENV_CHANNEL)?.({ sender, senderFrame: frame })
+
+  it('answers each surface about its own project, decided by the sender', async () => {
+    const asked: unknown[] = []
+    surface.setWorkbenchTerminalEnvSource((place) => {
+      asked.push(place)
+      return place.root === ROOT_A ? ENV : null
+    })
+    await openAt(shell, ROOT_A)
+    const a = lastView()
+    await openAt(shell, ROOT_B)
+    const b = lastView()
+
+    expect(pull(a.webContents)).toEqual(ENV)
+    expect(pull(b.webContents)).toBeNull()
+    expect(asked).toEqual([
+      { host: LOCAL_HOST, root: ROOT_A },
+      { host: LOCAL_HOST, root: ROOT_B },
+    ])
+  })
+
+  it('refuses the shell, and any frame of a surface other than its main frame', async () => {
+    surface.setWorkbenchTerminalEnvSource(() => ENV)
+    await openAt(shell, ROOT_A)
+    const view = lastView()
+
+    expect(() => pull(shell)).toThrow(/unknown workbench surface/)
+    expect(() => pull(view.webContents, { processId: 1, frameToken: randomUUID() })).toThrow(
+      /unknown workbench surface/
+    )
+    expect(() => pull(view.webContents, null)).toThrow(/unknown workbench surface/)
+  })
+
+  it('pushes every open surface its own answer when capture changes', async () => {
+    let capturing = false
+    surface.setWorkbenchTerminalEnvSource((place) =>
+      capturing && place.root === ROOT_A ? ENV : null
+    )
+    await openAt(shell, ROOT_A)
+    const a = lastView()
+    await openAt(shell, ROOT_B)
+    const b = lastView()
+
+    capturing = true
+    surface.refreshWorkbenchTerminalEnv()
+    capturing = false
+    surface.refreshWorkbenchTerminalEnv()
+
+    expect(a.webContents.sent).toEqual([ENV, null])
+    expect(b.webContents.sent).toEqual([null, null])
+  })
+
+  it('answers null, never a stale value, when no source is installed', async () => {
+    await openAt(shell, ROOT_A)
+    const view = lastView()
+
+    surface.refreshWorkbenchTerminalEnv()
+    expect(view.webContents.sent).toEqual([null])
+    expect(pull(view.webContents)).toBeNull()
   })
 })

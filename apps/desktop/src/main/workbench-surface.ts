@@ -11,6 +11,7 @@ import {
   dialog,
   ipcMain,
   session,
+  type IpcMainInvokeEvent,
   type OpenDialogOptions,
   type Session,
   type WebContents,
@@ -18,6 +19,7 @@ import {
 import {
   WORKBENCH_CONNECTION_CHANNEL,
   WORKBENCH_FOCUS_CHANNEL,
+  WORKBENCH_TERMINAL_ENV_CHANNEL,
   WORKBENCH_SHELL_CHANNELS,
   WORKBENCH_SHELL_CONTRACT,
   WORKBENCH_CONTEXT_CHANNEL,
@@ -58,6 +60,7 @@ import {
   type WorkbenchRect,
   type WorkbenchShellResponse,
   type WorkbenchTarget,
+  type WorkbenchTerminalEnv,
   type CompletionReply,
 } from '../shared/workbench-ipc.js'
 import { acquireRemoteWorkbenchRuntime, releaseRemoteWorkbenchRuntime } from './remote-workbench.js'
@@ -1330,6 +1333,33 @@ export function setDetachedAccessPredicate(
   detachedAccess = predicate
 }
 
+let terminalEnvSource: ((place: WorkbenchPlace) => WorkbenchTerminalEnv | null) | null = null
+
+export function setWorkbenchTerminalEnvSource(
+  source: ((place: WorkbenchPlace) => WorkbenchTerminalEnv | null) | null
+): void {
+  terminalEnvSource = source
+}
+
+function terminalEnvForSurface(surface: Surface): WorkbenchTerminalEnv | null {
+  return terminalEnvSource?.({ host: surface.host, root: surface.projectRoot }) ?? null
+}
+
+export function refreshWorkbenchTerminalEnv(): void {
+  for (const surface of byId.values()) {
+    if (surface.view.webContents.isDestroyed()) continue
+    surface.view.webContents.send(WORKBENCH_TERMINAL_ENV_CHANNEL, terminalEnvForSurface(surface))
+  }
+}
+
+function fromMainFrame(event: IpcMainInvokeEvent): boolean {
+  const frame = event.senderFrame
+  const main = event.sender.mainFrame
+  return (
+    frame !== null && frame.processId === main.processId && frame.frameToken === main.frameToken
+  )
+}
+
 export function registerWorkbenchHandlers(
   devServerUrl: string | undefined,
   resolvePlace?: (projectId: string) => WorkbenchPlace
@@ -1440,6 +1470,12 @@ export function registerWorkbenchHandlers(
     const surface = byContents.get(event.sender)
     if (surface === undefined) throw new Error('unknown workbench surface')
     return windowHasFocus(surface)
+  })
+
+  ipcMain.handle(WORKBENCH_TERMINAL_ENV_CHANNEL, (event) => {
+    const surface = byContents.get(event.sender)
+    if (surface === undefined || !fromMainFrame(event)) throw new Error('unknown workbench surface')
+    return terminalEnvForSurface(surface)
   })
 
   /*

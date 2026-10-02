@@ -46,6 +46,7 @@ import {
   registerWorkbenchHandlers,
   setDetachedAccessPredicate,
   setHandoffExpiredSink,
+  setWorkbenchTerminalEnvSource,
 } from './workbench-surface.js'
 import { adoptShellPath } from './which.js'
 
@@ -352,6 +353,7 @@ void app.whenReady().then(async () => {
    * message about the channel rather than about the workbench.
    */
   registerWorkbenchHandlers(devServerUrl, (projectId) => opened.projects.workbenchTarget(projectId))
+  setWorkbenchTerminalEnvSource((place) => opened.terminalEnvFor(place))
   const detachedDeps: DetachedWindowDeps = {
     mainWindow: () => mainWindow,
     createDetachedWindow: (projectId, title, x, y) => {
