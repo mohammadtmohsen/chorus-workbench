@@ -4,6 +4,7 @@ import { NoteEditor, type NoteEditorHandle } from '../NoteEditor.js'
 import { NoteGrips } from '../NoteGrips.js'
 import { useNoteSize, type NoteSize } from '../noteSize.js'
 import { primaryShift } from '../shortcuts.js'
+import { useShellOverlay } from './overlay.js'
 
 /**
  * A project's scratchpad — the row, not the editor.
@@ -16,14 +17,6 @@ import { primaryShift } from '../shortcuts.js'
  * opened. Closed, the box began after the icon — the column's padding, plus the
  * icon, plus the gap between them — while open it was positioned at a number
  * that matched neither. With nothing to leave room for, both are the padding.
- *
- * **Docked in the Chorus column, never floating over the editor.** A floating
- * card was the first idea and it cannot work here: each project's editor is a
- * `WebContentsView` composited over the window, so anything the renderer draws
- * across that boundary is painted underneath and disappears rather than
- * overlapping. Everything Chorus draws stays on Chorus's side — which is also
- * why this shell, unlike the global note's, calls no overlay hook. It never
- * crosses that edge.
  *
  * **One line at rest, and that is the feature rather than the compromise.** A
  * note you have to open is a note you forget you wrote, so the first line is
@@ -83,6 +76,7 @@ export function ProjectNotes(props: ProjectNotesProps): React.JSX.Element {
   /* A handle with the keyboard keeps the box open, or the gesture would take its
      own target off screen. See `NoteResize.holding`. */
   const open = focused || resize.holding
+  useShellOverlay(open)
 
   /*
    * The project note's chord — ⌘⇧N to the global note's ⌘N, and it moves the

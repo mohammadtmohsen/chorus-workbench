@@ -7,6 +7,7 @@ import {
   type TrafficDetail,
   type TrafficDetailResult,
 } from '../../shared/traffic-ipc.js'
+import { maskHeaders } from '../../shared/traffic-mask.js'
 import {
   bodyView,
   bytesFromBase64,
@@ -15,7 +16,6 @@ import {
   formFields,
   isForm,
   jsonTree,
-  maskHeaders,
   previewTokens,
   textOf,
   treeRows,

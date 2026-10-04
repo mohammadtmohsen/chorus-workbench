@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { clockTime, compactTokens, money, untilReset } from './format.js'
 
 describe('compactTokens', () => {
@@ -78,5 +78,66 @@ describe('clockTime', () => {
 
   it('pads the minute, which is the whole reason for 2-digit', () => {
     expect(clockTime(new Date(2026, 7, 13, 9, 4).getTime(), 'en-GB')).toBe('9:04')
+  })
+})
+
+describe('clockTime formatter reuse', () => {
+  const NativeDateTimeFormat = Intl.DateTimeFormat
+  const spyOnConstruction = () =>
+    vi.spyOn(Intl, 'DateTimeFormat').mockImplementation(function (...args) {
+      return new NativeDateTimeFormat(...args)
+    })
+  const options: Intl.DateTimeFormatOptions = { hour: 'numeric', minute: '2-digit' }
+  const at = new Date(2026, 7, 13, 9, 14).getTime()
+  const times = [at, at + 60_000, at + 3_600_000, at + 7_260_000]
+  const native = (locale: string | undefined, time: number): string =>
+    new Intl.DateTimeFormat(locale, options).format(new Date(time))
+  const settle = (): Promise<void> =>
+    new Promise((resolve) => {
+      setTimeout(resolve, 0)
+    })
+
+  afterEach(() => {
+    vi.restoreAllMocks()
+  })
+
+  it('builds one formatter for a run of timestamps, matching a fresh one', async () => {
+    const expected = times.map((time) => native('en-US', time))
+    await settle()
+    const construct = spyOnConstruction()
+    expect(times.map((time) => clockTime(time, 'en-US'))).toEqual(expected)
+    expect(construct).toHaveBeenCalledTimes(1)
+  })
+
+  it('keeps each locale, and the default locale, apart', async () => {
+    const expected = [native('en-US', at), native('en-GB', at), native(undefined, at)]
+    await settle()
+    const construct = spyOnConstruction()
+    const first = [clockTime(at, 'en-US'), clockTime(at, 'en-GB'), clockTime(at)]
+    const again = [clockTime(at, 'en-US'), clockTime(at, 'en-GB'), clockTime(at)]
+    expect(first).toEqual(expected)
+    expect(again).toEqual(expected)
+    expect(construct.mock.calls.map(([locale]) => locale)).toEqual(['en-US', 'en-GB', undefined])
+  })
+
+  it('builds a fresh formatter once the batch has ended', async () => {
+    await settle()
+    const construct = spyOnConstruction()
+    clockTime(at, 'en-GB')
+    clockTime(at, 'en-GB')
+    expect(construct).toHaveBeenCalledTimes(1)
+    await settle()
+    expect(clockTime(at, 'en-GB')).toBe('9:14')
+    expect(construct).toHaveBeenCalledTimes(2)
+  })
+
+  it('still refuses an invalid locale, without keeping anything for it', async () => {
+    await settle()
+    const construct = spyOnConstruction()
+    expect(() => clockTime(at, '')).toThrow(RangeError)
+    expect(() => clockTime(at, '')).toThrow(RangeError)
+    expect(construct).toHaveBeenCalledTimes(2)
+    expect(clockTime(at, 'en-GB')).toBe('9:14')
+    expect(construct).toHaveBeenCalledTimes(3)
   })
 })

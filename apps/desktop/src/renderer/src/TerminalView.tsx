@@ -1,10 +1,19 @@
 import { FitAddon } from '@xterm/addon-fit'
+import { WebLinksAddon } from '@xterm/addon-web-links'
 import { Terminal, type ITheme } from '@xterm/xterm'
 import { useEffect, useRef } from 'react'
 import { useTranslation } from 'react-i18next'
 import type { TerminalPush, TerminalRefShape } from '../../shared/ipc.js'
+import { isSafeHref } from '../../shared/markdown.js'
 import { primaryOnly } from './shortcuts.js'
-import { pendingUntilAttached, shouldApply, type Attachment } from './terminal-stream.js'
+import {
+  pendingUntilAttached,
+  sameTerminal,
+  shouldApply,
+  terminalOwner,
+  terminalRefFrom,
+  type Attachment,
+} from './terminal-stream.js'
 
 /**
  * One terminal on screen.
@@ -30,8 +39,8 @@ function readTheme(): ITheme {
   const token = (name: string): string => style.getPropertyValue(name).trim()
   return {
     background: token('--sunken'),
-    foreground: token('--bone'),
-    cursor: token('--bone'),
+    foreground: token('--terminal-foreground'),
+    cursor: token('--terminal-foreground'),
     cursorAccent: token('--sunken'),
     selectionBackground: token('--line'),
     black: token('--ansi-black'),
@@ -53,12 +62,20 @@ function readTheme(): ITheme {
   }
 }
 
+function openLink(_: MouseEvent, uri: string): void {
+  if (!isSafeHref(uri)) return
+  window.open(uri, '_blank', 'noopener,noreferrer')
+}
+
+const FULL_RESET = '\x1bc'
+
 export interface TerminalViewProps {
   readonly terminal: TerminalRefShape
   /** Told when the shell exits, so the panel can say so rather than go blank. */
   readonly onExit?: (code: number) => void
   /** Given a focus function on mount, so `⌘J` can put the caret in the shell. */
   readonly onReady?: (focus: () => void) => void
+  readonly focusOnOpen?: boolean | undefined
   readonly label: string
   /**
    * The tablist relationship, when the panel is drawing one.
@@ -72,7 +89,7 @@ export interface TerminalViewProps {
 
 export function TerminalView(props: TerminalViewProps): React.JSX.Element {
   const host = useRef<HTMLDivElement>(null)
-  const { onExit, onReady, terminal } = props
+  const { onExit, onReady, focusOnOpen, terminal } = props
 
   /*
    * The translator, behind a ref rather than in the dependency array.
@@ -87,6 +104,8 @@ export function TerminalView(props: TerminalViewProps): React.JSX.Element {
   const { t } = useTranslation()
   const translate = useRef(t)
   translate.current = t
+  const handlers = useRef({ onExit, onReady, focusOnOpen })
+  handlers.current = { onExit, onReady, focusOnOpen }
 
   /*
    * Keyed on the terminal's identity, not on the object.
@@ -104,15 +123,14 @@ export function TerminalView(props: TerminalViewProps): React.JSX.Element {
    * notice; the dependency is the belt to the key's braces.
    */
   const scope = terminal.scope
-  const conversationId = terminal.scope === 'session' ? terminal.conversationId : null
+  const owner = terminalOwner(terminal)
   const id = terminal.id
 
   useEffect(() => {
     const element = host.current
     if (element === null) return
 
-    const ref: TerminalRefShape =
-      conversationId === null ? { scope: 'global', id } : { scope: 'session', conversationId, id }
+    const ref = terminalRefFrom(scope, owner, id)
 
     const style = getComputedStyle(document.documentElement)
     const term = new Terminal({
@@ -123,9 +141,12 @@ export function TerminalView(props: TerminalViewProps): React.JSX.Element {
       // Ligatures are off everywhere else in this app for the same reason.
       cursorBlink: true,
       scrollback: 5_000,
+      minimumContrastRatio: 4.5,
+      linkHandler: { activate: openLink },
     })
     const fit = new FitAddon()
     term.loadAddon(fit)
+    term.loadAddon(new WebLinksAddon(openLink))
     term.open(element)
     fit.fit()
 
@@ -140,13 +161,17 @@ export function TerminalView(props: TerminalViewProps): React.JSX.Element {
     let attachment: Attachment | null = null
     let queued: TerminalPush[] = []
     let cancelled = false
+    let latest = -1
+    let attempt = 0
+    let ready = false
 
     const apply = (push: TerminalPush, current: Attachment): void => {
+      if (push.kind === 'replaced') return
       if (push.kind === 'exit') {
         term.write(
           `\r\n[2m${translate.current('terminal.processExited', { code: push.code })}[0m\r\n`
         )
-        onExit?.(push.code)
+        handlers.current.onExit?.(push.code)
         return
       }
       // The ack is the renderer half of flow control: without it main can only
@@ -157,7 +182,79 @@ export function TerminalView(props: TerminalViewProps): React.JSX.Element {
       })
     }
 
+    const attach = (): void => {
+      attempt += 1
+      const mine = attempt
+      void window.chorus
+        .attachTerminal({ ref, cols: term.cols, rows: term.rows })
+        .then((opened) => {
+          /*
+           * StrictMode runs this effect twice, and the cleanup can land before the
+           * attach resolves — so an attachment nobody is going to use still has to
+           * be released, or the shell keeps pushing to a view that is gone.
+           */
+          if (cancelled || mine !== attempt || (opened !== null && opened.generation < latest)) {
+            if (opened !== null) void window.chorus.detachTerminal({ ref, epoch: opened.epoch })
+            return
+          }
+          if (opened === null) {
+            const missing = scope === 'project' ? 'terminal.notStarted' : 'terminal.openFailed'
+            term.write(`[2m${translate.current(missing)}[0m\r\n`)
+            return
+          }
+          latest = opened.generation
+          term.write(opened.snapshot)
+          attachment = { ref, epoch: opened.epoch, seq: opened.seq }
+          /*
+           * A shell that died while nobody was watching.
+           *
+           * `exit` is a one-shot push and only the active tab of a panel is
+           * mounted, so a background shell emits to no view at all — this is the
+           * only way its tab learns, and without it a dead terminal looks alive
+           * when you switch back to it.
+           *
+           * The line is written here rather than being in the snapshot because
+           * nothing writes it into main's mirror: it is the *renderer's* notice,
+           * so it is redrawn on each mount whether the exit was seen live or not,
+           * and always lands once at the bottom.
+           */
+          if (opened.exitCode !== null) {
+            term.write(
+              `\r\n[2m${translate.current('terminal.processExited', { code: opened.exitCode })}[0m\r\n`
+            )
+            handlers.current.onExit?.(opened.exitCode)
+          }
+          for (const push of pendingUntilAttached(queued, attachment)) apply(push, attachment)
+          queued = []
+          if (!ready) {
+            ready = true
+            handlers.current.onReady?.(() => {
+              term.focus()
+            })
+          }
+          if (mine === 1 && handlers.current.focusOnOpen !== false) term.focus()
+        })
+        .catch(() => {
+          if (cancelled || mine !== attempt) return
+          term.write(`[2m${translate.current('terminal.openFailed')}[0m\r\n`)
+        })
+    }
+
     const stop = window.chorus.onTerminalOutput((push) => {
+      if (!sameTerminal(push.ref, ref)) return
+      if (push.kind === 'replaced') {
+        if (push.generation <= latest) return
+        latest = push.generation
+        const previous = attachment
+        attachment = null
+        queued = []
+        if (previous !== null) {
+          void window.chorus.detachTerminal({ ref, epoch: previous.epoch })
+        }
+        term.write(FULL_RESET)
+        attach()
+        return
+      }
       if (attachment === null) {
         queued.push(push)
         return
@@ -165,49 +262,7 @@ export function TerminalView(props: TerminalViewProps): React.JSX.Element {
       if (shouldApply(push, attachment)) apply(push, attachment)
     })
 
-    void window.chorus
-      .attachTerminal({ ref, cols: term.cols, rows: term.rows })
-      .then((opened) => {
-        /*
-         * StrictMode runs this effect twice, and the cleanup can land before the
-         * attach resolves — so an attachment nobody is going to use still has to
-         * be released, or the shell keeps pushing to a view that is gone.
-         */
-        if (cancelled) {
-          void window.chorus.detachTerminal({ ref, epoch: opened.epoch })
-          return
-        }
-        term.write(opened.snapshot)
-        attachment = { ref, epoch: opened.epoch, seq: opened.seq }
-        /*
-         * A shell that died while nobody was watching.
-         *
-         * `exit` is a one-shot push and only the active tab of a panel is
-         * mounted, so a background shell emits to no view at all — this is the
-         * only way its tab learns, and without it a dead terminal looks alive
-         * when you switch back to it.
-         *
-         * The line is written here rather than being in the snapshot because
-         * nothing writes it into main's mirror: it is the *renderer's* notice,
-         * so it is redrawn on each mount whether the exit was seen live or not,
-         * and always lands once at the bottom.
-         */
-        if (opened.exitCode !== null) {
-          term.write(
-            `\r\n[2m${translate.current('terminal.processExited', { code: opened.exitCode })}[0m\r\n`
-          )
-          onExit?.(opened.exitCode)
-        }
-        for (const push of pendingUntilAttached(queued, attachment)) apply(push, attachment)
-        queued = []
-        onReady?.(() => {
-          term.focus()
-        })
-        term.focus()
-      })
-      .catch(() => {
-        term.write(`[2m${translate.current('terminal.openFailed')}[0m\r\n`)
-      })
+    attach()
 
     /*
      * `⌘K` clears, the way it does in Terminal.app and every terminal since.
@@ -305,7 +360,7 @@ export function TerminalView(props: TerminalViewProps): React.JSX.Element {
       }
       term.dispose()
     }
-  }, [scope, conversationId, id, onExit, onReady])
+  }, [scope, owner, id])
 
   const surface = props.surface
   return surface === undefined ? (

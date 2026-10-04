@@ -5,7 +5,7 @@ import { Logger, newApprovalId, type AgentId } from '@chorus/shared'
 import { mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
   ChorusRuntime,
   explainPrompt,
@@ -2173,5 +2173,70 @@ describe('naming a conversation', () => {
     expect(namerOf(fakes.deepseek)).toHaveLength(1)
     expect(deepseek?.sent.at(-1)?.text).toMatch(/^Current title: Parser fix\n\n/)
     expect(deepseek?.sent.at(-1)?.text).toContain('the lexer too')
+  })
+})
+
+describe('project reads from an aside', () => {
+  const READ_ONLY = { mode: 'readOnly', writableRoots: [], networkAccess: false }
+
+  it('gives question, explanation and translation asides the parent project reader', async () => {
+    writeSettings(dataPath, { ...DEFAULT_SETTINGS, explainLanguage: 'Arabic' })
+    const fork = vi.spyOn(adapter, 'fork')
+    const purposes = ['question', 'explanation', 'translation'] as const
+    for (const [index, purpose] of purposes.entries()) {
+      const sourceEventId = reply(`The projection lags behind the log${'.'.repeat(index + 1)}`)
+      await runtime.openAside({
+        conversationId,
+        sourceEventId,
+        excerpt: 'The projection lags',
+        purpose,
+        ...(purpose === 'question' ? { question: 'why?' } : {}),
+      })
+    }
+    expect(fork).toHaveBeenCalledTimes(3)
+    for (const [, opts] of fork.mock.calls) {
+      expect(opts.project).toBeDefined()
+      expect(opts.sandbox).toEqual(READ_ONLY)
+      expect(opts.instructions).toBeUndefined()
+      expect(opts.transcript).toBeUndefined()
+      const text = (await opts.project?.terminal({ lines: 5 })) ?? ''
+      const header = JSON.parse(text.slice(0, text.indexOf('\n'))) as unknown
+      expect(header).toMatchObject({ run: 'idle', lines: 0 })
+    }
+  })
+
+  it('gives a recap no reader', async () => {
+    const sourceEventId = reply('A long scattered reply about four other things.')
+    const start = vi.spyOn(adapter, 'start')
+    await runtime.openAside({
+      conversationId,
+      sourceEventId,
+      excerpt: 'A long scattered reply about four other things.',
+      purpose: 'recap',
+    })
+    expect(start).toHaveBeenCalledTimes(1)
+    expect(start.mock.calls[0]?.[0].project).toBeUndefined()
+    expect(start.mock.calls[0]?.[0].sandbox).toEqual(READ_ONLY)
+  })
+
+  it('gives an aside in a remote project no reader', async () => {
+    const agentCwd = mkdtempSync(join(tmpdir(), 'chorus-aside-remote-'))
+    const { project } = runtime.projects.adoptRemote({ host: 'tpa-be', root: 'C:/api', agentCwd })
+    const remote = await runtime.startConversation({ projectId: project.id, agents: ['claude'] })
+    const stored = runtime.store.append({
+      conversationId: remote.conversationId,
+      actor: 'claude',
+      payload: { type: 'agent.message.completed', itemRef: 'm-remote', text: 'Remote reply.' },
+    })
+    if (stored === null) throw new Error('append refused')
+    const fork = vi.spyOn(adapter, 'fork')
+    await runtime.openAside({
+      conversationId: remote.conversationId,
+      sourceEventId: stored.id,
+      excerpt: 'Remote reply.',
+      question: 'why?',
+    })
+    expect(fork).toHaveBeenCalledTimes(1)
+    expect(fork.mock.calls[0]?.[1].project).toBeUndefined()
   })
 })

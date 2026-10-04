@@ -202,29 +202,22 @@ export class EventStore {
   }
 
   read(conversationId: string, options: ReadOptions = {}): StoredEvent[] {
-    const clauses = ['conversation_id = @conversationId']
-    const params: Record<string, unknown> = { conversationId }
-
-    if (options.afterSeq !== undefined) {
-      clauses.push('seq > @afterSeq')
-      params['afterSeq'] = options.afterSeq
-    }
-    if (options.types !== undefined && options.types.length > 0) {
-      // Inlined because SQLite has no array binding; values come from our own
-      // event-type union, never from user input.
-      const list = options.types.map((t) => `'${t.replace(/'/g, "''")}'`).join(', ')
-      clauses.push(`type IN (${list})`)
-    }
-
+    const { where, params } = eventFilter(conversationId, options)
     const limit = options.limit === undefined ? '' : ` LIMIT ${String(options.limit)}`
     const rows = this.db
       .prepare(
         `SELECT seq, id, conversation_id, actor, type, payload, created_at, schema_ver
-           FROM events WHERE ${clauses.join(' AND ')} ORDER BY seq${limit}`
+           FROM events WHERE ${where} ORDER BY seq${limit}`
       )
       .all(params)
 
     return rows.map((r) => toStoredEvent(r))
+  }
+
+  count(conversationId: string, options: Pick<ReadOptions, 'afterSeq' | 'types'> = {}): number {
+    const { where, params } = eventFilter(conversationId, options)
+    const row = this.db.prepare(`SELECT COUNT(*) AS n FROM events WHERE ${where}`).get(params)
+    return (row as { n: number }).n
   }
 
   /**
@@ -388,6 +381,28 @@ export class EventStore {
       })),
       working,
       usageByActor,
+    }
+  }
+
+  pendingDecisionIds(conversationId: string): {
+    pendingApprovalIds: string[]
+    pendingQuestionIds: string[]
+  } {
+    const approvals = this.db
+      .prepare(
+        `SELECT id FROM approvals WHERE conversation_id = @conversationId AND outcome IS NULL
+          ORDER BY created_at`
+      )
+      .all({ conversationId }) as { id: string }[]
+    const questions = this.db
+      .prepare(
+        `SELECT id FROM questions WHERE conversation_id = @conversationId AND answered_at IS NULL
+          ORDER BY created_at`
+      )
+      .all({ conversationId }) as { id: string }[]
+    return {
+      pendingApprovalIds: approvals.map((row) => row.id),
+      pendingQuestionIds: questions.map((row) => row.id),
     }
   }
 
@@ -597,6 +612,27 @@ const OrphanedSessionRow = z.object({
   agent_id: AgentIdSchema,
   session_ref: z.string(),
 })
+
+function eventFilter(
+  conversationId: string,
+  options: Pick<ReadOptions, 'afterSeq' | 'types'>
+): { where: string; params: Record<string, unknown> } {
+  const clauses = ['conversation_id = @conversationId']
+  const params: Record<string, unknown> = { conversationId }
+
+  if (options.afterSeq !== undefined) {
+    clauses.push('seq > @afterSeq')
+    params['afterSeq'] = options.afterSeq
+  }
+  if (options.types !== undefined && options.types.length > 0) {
+    // Inlined because SQLite has no array binding; values come from our own
+    // event-type union, never from user input.
+    const list = options.types.map((t) => `'${t.replace(/'/g, "''")}'`).join(', ')
+    clauses.push(`type IN (${list})`)
+  }
+
+  return { where: clauses.join(' AND '), params }
+}
 
 function toStoredEvent(row: unknown): StoredEvent {
   const parsed = StoredEventRow.parse(row)

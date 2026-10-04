@@ -154,6 +154,31 @@ export const WORKBENCH_FOCUS_CHANNEL = 'workbench:focus'
 
 export const WORKBENCH_TERMINAL_ENV_CHANNEL = 'workbench:terminalEnv'
 
+export const WORKBENCH_LAYOUT_CHANNEL = 'workbench:layout'
+export const WORKBENCH_ACTIVITY_BAR_REPORT_CHANNEL = 'workbench:activityBar:report'
+export const WORKBENCH_ROW_REQUEST_CHANNEL = 'workbench:row:request'
+export const WORKBENCH_ACTIVITY_BAR_PUSH_CHANNEL = 'workbench:activityBar:changed'
+export const WORKBENCH_ROW_REVEAL_PUSH_CHANNEL = 'workbench:row:reveal'
+export const WORKBENCH_ROW_SCROLL_REQUEST_CHANNEL = 'workbench:row:scroll'
+export const WORKBENCH_ROW_SCROLL_PUSH_CHANNEL = 'workbench:row:scrollRequested'
+
+export const WorkbenchLayoutWidth = z.number().int().positive()
+export const WorkbenchActivityBarWidth = z.number().int().nonnegative()
+
+export const WorkbenchActivityBarPush = z
+  .object({ viewId: z.string().min(1), width: WorkbenchActivityBarWidth })
+  .strict()
+export type WorkbenchActivityBarPush = z.infer<typeof WorkbenchActivityBarPush>
+
+export const WorkbenchRowRevealPush = z.object({ viewId: z.string().min(1) }).strict()
+export type WorkbenchRowRevealPush = z.infer<typeof WorkbenchRowRevealPush>
+
+export const WorkbenchRowScrollDelta = z.number()
+export const WorkbenchRowScrollPush = z
+  .object({ viewId: z.string().min(1), delta: WorkbenchRowScrollDelta })
+  .strict()
+export type WorkbenchRowScrollPush = z.infer<typeof WorkbenchRowScrollPush>
+
 export interface WorkbenchTerminalEnv {
   readonly name: string
   readonly value: string
@@ -743,8 +768,16 @@ export const WORKBENCH_SHELL_CONTRACT = {
     response: z.object({ viewId: z.string().min(1) }),
   },
   'workbench:setBounds': {
-    request: z.object({ viewId: z.string().min(1), rect: WorkbenchRect }),
+    request: z.object({
+      viewId: z.string().min(1),
+      rect: WorkbenchRect,
+      layoutWidth: WorkbenchLayoutWidth.optional(),
+    }),
     response: z.object({ ok: z.literal(true) }),
+  },
+  'workbench:activityBar': {
+    request: z.object({ viewId: z.string().min(1) }).strict(),
+    response: z.object({ width: WorkbenchActivityBarWidth }),
   },
   /**
    * Stand every surface down, or bring them back.
@@ -820,10 +853,6 @@ export const WORKBENCH_SHELL_CONTRACT = {
       stills: z.array(z.object({ viewId: z.string(), dataUrl: z.string() })),
     }),
   },
-  'workbench:setCovered': {
-    request: z.object({ viewId: z.string().min(1), covered: z.boolean() }).strict(),
-    response: z.object({ still: z.string().nullable() }),
-  },
   'workbench:close': {
     request: z.object({ viewId: z.string().min(1) }),
     response: z.object({ ok: z.literal(true) }),
@@ -877,9 +906,14 @@ export interface WorkbenchShellApi {
   readonly setWorkbenchVisible: (
     request: WorkbenchShellRequest<'workbench:setVisible'>
   ) => Promise<WorkbenchShellResponse<'workbench:setVisible'>>
-  readonly setWorkbenchCovered: (
-    request: WorkbenchShellRequest<'workbench:setCovered'>
-  ) => Promise<WorkbenchShellResponse<'workbench:setCovered'>>
+  readonly readWorkbenchActivityBar: (
+    request: WorkbenchShellRequest<'workbench:activityBar'>
+  ) => Promise<WorkbenchShellResponse<'workbench:activityBar'>>
+  readonly onWorkbenchActivityBar: (
+    listener: (push: WorkbenchActivityBarPush) => void
+  ) => () => void
+  readonly onWorkbenchRowReveal: (listener: (push: WorkbenchRowRevealPush) => void) => () => void
+  readonly onWorkbenchRowScroll: (listener: (push: WorkbenchRowScrollPush) => void) => () => void
 }
 
 /**
@@ -1011,4 +1045,8 @@ export interface ChorusWorkbenchApi {
   readonly cancelCompletion: (requestId: string) => void
   readonly reportEditorOutcome: (report: EditorReport) => void
   readonly probeCompletionCache: () => Promise<void>
+  readonly onLayoutWidth: (handler: (width: number) => void) => void
+  readonly reportActivityBar: (width: number) => void
+  readonly requestRowReveal: () => void
+  readonly requestRowScroll: (delta: number) => void
 }

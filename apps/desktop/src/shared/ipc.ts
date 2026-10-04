@@ -3,6 +3,7 @@ import { z } from 'zod'
 import { NOTE_SIZE, WorkspaceSnapshot } from './workspace-layout.js'
 import type { WorkbenchShellApi } from './workbench-ipc.js'
 import type { DetachedWindowApi } from './detached-window-ipc.js'
+import type { RunApi } from './run-ipc.js'
 import type { TrafficApi } from './traffic-ipc.js'
 
 /**
@@ -391,8 +392,14 @@ export type IdeSnapshotResult = z.infer<typeof IdeSnapshotResult>
 export const TerminalRefShape = z.discriminatedUnion('scope', [
   z.object({ scope: z.literal('global'), id: z.string() }),
   z.object({ scope: z.literal('session'), conversationId: z.string(), id: z.string() }),
+  z.object({ scope: z.literal('project'), projectId: z.string(), id: z.literal('run') }),
+  z.object({ scope: z.literal('shell'), projectId: z.string(), id: z.string() }),
 ])
 export type TerminalRefShape = z.infer<typeof TerminalRefShape>
+
+const TeardownTerminalRefShape = TerminalRefShape.refine((ref) => ref.scope !== 'project', {
+  message: 'a project run is stopped through run:stop',
+})
 
 /**
  * One terminal's identity, as a string.
@@ -404,8 +411,18 @@ export type TerminalRefShape = z.infer<typeof TerminalRefShape>
  * identity is how a line gets filed against the wrong terminal, which is the
  * defect the buffer is being keyed to fix.
  */
-export const terminalRefKey = (ref: TerminalRefShape): string =>
-  ref.scope === 'global' ? `global:${ref.id}` : `session:${ref.conversationId}:${ref.id}`
+export const terminalRefKey = (ref: TerminalRefShape): string => {
+  switch (ref.scope) {
+    case 'global':
+      return `global:${ref.id}`
+    case 'session':
+      return `session:${ref.conversationId}:${ref.id}`
+    case 'project':
+      return `project:${ref.projectId}:${ref.id}`
+    case 'shell':
+      return `shell:${ref.projectId}:${ref.id}`
+  }
+}
 
 export const TrafficHttpRowShape = z.object({
   source: z.literal('http'),
@@ -601,6 +618,47 @@ export const OpenSessionSchema = z.object({
   draft: z.string().default(''),
   /** Reading and reasoning, executing nothing. Never survives a restart. */
   planning: z.boolean().default(false),
+  starting: z.boolean().optional(),
+})
+
+const StartConversationRequest = z.object({
+  /*
+   * The project it belongs to, and the `cwd` that used to be here is gone.
+   *
+   * That field let the renderer name any directory, and an empty one meant
+   * "start at home" — so a conversation could be created somewhere nobody
+   * had adopted, which is the thing Phase 2 spent its whole length making
+   * impossible everywhere else. A session is started **in a project** now,
+   * and a project is only ever made by a person choosing a folder from a
+   * native dialog.
+   */
+  projectId: z.string().min(1),
+  profileId: z.string().optional(),
+  /**
+   * A conversation whose transcript the new room starts holding.
+   *
+   * An id, never the text. The renderer naming a conversation can only
+   * choose between rooms the log already has, and main reads the transcript
+   * out of the store itself — the same rule `aside:open` states for its
+   * source event, and for the same reason: a caller that could pass prose
+   * here could put words into an agent's history and have them believed as
+   * something the user said earlier.
+   *
+   * Absent means a fresh start, which is what Restart relies on: it goes
+   * through this channel too and simply does not name a source.
+   */
+  continueFrom: z.string().optional(),
+})
+
+const StartedConversationShape = z.object({
+  conversationId: z.string(),
+  participants: z.array(AgentIdSchema),
+  profileId: z.string(),
+  /** The project's root, resolved. Still returned because the UI shows it. */
+  projectId: z.string(),
+  cwd: z.string(),
+  /** Defaults to the folder's name; the user can rename it. */
+  title: z.string(),
 })
 
 export const IPC_CONTRACT = {
@@ -623,44 +681,20 @@ export const IPC_CONTRACT = {
      * is a fact main owns; the renderer cannot ask for less and cannot get it
      * wrong.
      */
-    request: z.object({
-      /*
-       * The project it belongs to, and the `cwd` that used to be here is gone.
-       *
-       * That field let the renderer name any directory, and an empty one meant
-       * "start at home" — so a conversation could be created somewhere nobody
-       * had adopted, which is the thing Phase 2 spent its whole length making
-       * impossible everywhere else. A session is started **in a project** now,
-       * and a project is only ever made by a person choosing a folder from a
-       * native dialog.
-       */
-      projectId: z.string().min(1),
-      profileId: z.string().optional(),
-      /**
-       * A conversation whose transcript the new room starts holding.
-       *
-       * An id, never the text. The renderer naming a conversation can only
-       * choose between rooms the log already has, and main reads the transcript
-       * out of the store itself — the same rule `aside:open` states for its
-       * source event, and for the same reason: a caller that could pass prose
-       * here could put words into an agent's history and have them believed as
-       * something the user said earlier.
-       *
-       * Absent means a fresh start, which is what Restart relies on: it goes
-       * through this channel too and simply does not name a source.
-       */
-      continueFrom: z.string().optional(),
-    }),
-    response: z.object({
-      conversationId: z.string(),
-      participants: z.array(AgentIdSchema),
-      profileId: z.string(),
-      /** The project's root, resolved. Still returned because the UI shows it. */
-      projectId: z.string(),
-      cwd: z.string(),
-      /** Defaults to the folder's name; the user can rename it. */
-      title: z.string(),
-    }),
+    request: StartConversationRequest,
+    response: StartedConversationShape,
+  },
+  'conversation:begin': {
+    request: StartConversationRequest,
+    response: StartedConversationShape,
+  },
+  'conversation:awaitStart': {
+    request: z.object({ conversationId: z.string() }),
+    response: z.discriminatedUnion('status', [
+      z.object({ status: z.literal('ready'), conversation: StartedConversationShape }),
+      z.object({ status: z.literal('failed'), message: z.string() }),
+      z.object({ status: z.literal('cancelled') }),
+    ]),
   },
   'conversation:send': {
     request: z.object({
@@ -935,6 +969,7 @@ export const IPC_CONTRACT = {
        */
       pendingApprovalIds: z.array(z.string()).default([]),
       pendingQuestionIds: z.array(z.string()).default([]),
+      starting: z.boolean().optional(),
     }),
   },
 
@@ -1857,22 +1892,25 @@ export const IPC_CONTRACT = {
       cols: z.number().int().min(1).optional(),
       rows: z.number().int().min(1).optional(),
     }),
-    response: z.object({
-      epoch: z.number().int(),
-      snapshot: z.string(),
-      seq: z.number().int(),
-      cols: z.number().int(),
-      rows: z.number().int(),
-      /*
-       * How the shell ended, or null while it is running.
-       *
-       * On the attach rather than only on the push because `exit` fires once and
-       * only the active tab of a panel is mounted: a shell that dies in the
-       * background has no view to tell, and reopening its tab would show a dead
-       * shell looking alive.
-       */
-      exitCode: z.number().int().nullable(),
-    }),
+    response: z
+      .object({
+        epoch: z.number().int(),
+        generation: z.number().int(),
+        snapshot: z.string(),
+        seq: z.number().int(),
+        cols: z.number().int(),
+        rows: z.number().int(),
+        /*
+         * How the shell ended, or null while it is running.
+         *
+         * On the attach rather than only on the push because `exit` fires once and
+         * only the active tab of a panel is mounted: a shell that dies in the
+         * background has no view to tell, and reopening its tab would show a dead
+         * shell looking alive.
+         */
+        exitCode: z.number().int().nullable(),
+      })
+      .nullable(),
   },
 
   /**
@@ -1889,7 +1927,7 @@ export const IPC_CONTRACT = {
 
   /** Kill the shell. A conversation ending, or the user asking explicitly. */
   'terminal:dispose': {
-    request: z.object({ ref: TerminalRefShape, epoch: z.number().int() }),
+    request: z.object({ ref: TeardownTerminalRefShape, epoch: z.number().int() }),
     response: z.object({ ok: z.literal(true) }),
   },
 
@@ -1908,7 +1946,7 @@ export const IPC_CONTRACT = {
    * acting on a gesture.
    */
   'terminal:kill': {
-    request: z.object({ ref: TerminalRefShape }),
+    request: z.object({ ref: TeardownTerminalRefShape }),
     response: z.object({ ok: z.literal(true) }),
   },
 
@@ -2225,6 +2263,7 @@ export const TerminalPush = z.discriminatedUnion('kind', [
     kind: z.literal('data'),
     ref: TerminalRefShape,
     epoch: z.number().int(),
+    generation: z.number().int(),
     seq: z.number().int(),
     data: z.string(),
   }),
@@ -2232,7 +2271,13 @@ export const TerminalPush = z.discriminatedUnion('kind', [
     kind: z.literal('exit'),
     ref: TerminalRefShape,
     epoch: z.number().int(),
+    generation: z.number().int(),
     code: z.number().int(),
+  }),
+  z.object({
+    kind: z.literal('replaced'),
+    ref: TerminalRefShape,
+    generation: z.number().int(),
   }),
 ])
 export type TerminalPush = z.infer<typeof TerminalPush>
@@ -2262,7 +2307,7 @@ export function isIpcChannel(value: string): value is IpcChannel {
  * channels are not in `IPC_CONTRACT` — they are answered by a registrar that
  * validates `event.sender`. The shape belongs beside the channels it names.
  */
-export interface ChorusApi extends WorkbenchShellApi, DetachedWindowApi, TrafficApi {
+export interface ChorusApi extends WorkbenchShellApi, DetachedWindowApi, TrafficApi, RunApi {
   readonly getAppInfo: () => Promise<AppInfo>
   /** Asks; the answer arrives on `onLimits`. */
   readonly refreshLimits: () => Promise<{ ok: true }>
@@ -2278,6 +2323,12 @@ export interface ChorusApi extends WorkbenchShellApi, DetachedWindowApi, Traffic
   readonly startConversation: (
     request: IpcRequest<'conversation:start'>
   ) => Promise<IpcResponse<'conversation:start'>>
+  readonly beginConversation: (
+    request: IpcRequest<'conversation:begin'>
+  ) => Promise<IpcResponse<'conversation:begin'>>
+  readonly awaitStart: (
+    request: IpcRequest<'conversation:awaitStart'>
+  ) => Promise<IpcResponse<'conversation:awaitStart'>>
   readonly sendMessage: (
     request: IpcRequest<'conversation:send'>
   ) => Promise<IpcResponse<'conversation:send'>>

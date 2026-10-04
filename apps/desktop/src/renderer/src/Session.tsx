@@ -26,8 +26,6 @@ import { askableQuestion, questionText } from '../../shared/question-text.js'
 import {
   useBackgroundAgents,
   useSessionActivity,
-  useWorkbenchShown,
-  useWorkspaceActions,
   useIdeContext,
 } from './workspace/hooks.js'
 import {
@@ -126,6 +124,7 @@ export interface SessionInfo {
   readonly cwd: string
   readonly profileId: string
   readonly title: string
+  readonly starting?: boolean | undefined
 }
 
 /**
@@ -319,8 +318,6 @@ export function Session(props: {
    */
   const activityByAgent = useSessionActivity(conversationId)
   const backgroundAgents = useBackgroundAgents(conversationId)
-  const { toggleWorkbench } = useWorkspaceActions()
-  const workbenchShown = useWorkbenchShown(props.session.projectId)
   /** A passage selected in this pane's transcript, and where to offer to quote it. */
   const [selected, setSelected] = useState<{
     text: string
@@ -1112,6 +1109,7 @@ export function Session(props: {
     [conversationId]
   )
 
+  const onActivate = props.onActivate
   /*
    * A problem sent from VS Code, staged in this pane's composer.
    *
@@ -1138,9 +1136,9 @@ export function Session(props: {
         composer.current?.insert(
           formatDiagnosticBlock(diagnostic, { heading: t('ide.diagnostic.heading') })
         )
-        props.onActivate()
+        onActivate()
       }),
-    [conversationId, t, props]
+    [conversationId, t, onActivate]
   )
 
   /**
@@ -2398,10 +2396,6 @@ export function Session(props: {
         <Composer
           ref={composer}
           conversationId={conversationId}
-          workbenchShown={workbenchShown}
-          onToggleWorkbench={() => {
-            toggleWorkbench(props.session.projectId)
-          }}
           /*
            * The cast, not the live map, and the two differ only when a start
            * failed. An agent whose CLI is missing or whose key is not saved yet
@@ -2411,6 +2405,7 @@ export function Session(props: {
            * it, or appends the reason it could not.
            */
           participants={ALL_AGENTS}
+          starting={props.session.starting === true}
           busy={view.busy}
           working={view.working}
           backgroundAgents={backgroundAgents}

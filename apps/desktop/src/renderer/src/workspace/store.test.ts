@@ -3,6 +3,7 @@ import type { IdeContextPush, TranscriptEvent } from '../../../shared/ipc.js'
 import {
   BOX_WIDTH,
   CLOSED_TERMINAL_PANEL,
+  TRAFFIC_WIDTH,
   WorkspaceSnapshot,
   type TerminalPanelState,
 } from '../../../shared/workspace-layout.js'
@@ -11,6 +12,7 @@ import {
   reducePulse,
   sameWorkspaceSnapshot,
   useWorkspaceStore,
+  workspaceSnapshot,
   type SessionPulse,
 } from './store.js'
 
@@ -493,7 +495,7 @@ describe('a detached project', () => {
 })
 
 describe('resetProjectWidths', () => {
-  it('puts every box and Traffic at the floor in one update, and leaves the Chorus column', () => {
+  it('puts every box and Traffic at its default in one update', () => {
     useWorkspaceStore.setState({
       conversationGroups: {
         p1: {
@@ -514,8 +516,7 @@ describe('resetProjectWidths', () => {
           widths: { g1: 900, g2: 760 },
         },
       },
-      trafficPanels: { p1: { open: true, width: 880 } },
-      chorusWidths: { p1: 1100 },
+      trafficPanels: { p1: { open: true, width: 1_200 } },
     })
 
     const seen: string[] = []
@@ -532,7 +533,121 @@ describe('resetProjectWidths', () => {
       BOX_WIDTH.default,
       BOX_WIDTH.default,
     ])
-    expect(state.trafficPanels['p1']?.width).toBe(BOX_WIDTH.default)
-    expect(state.chorusWidths['p1']).toBe(1100)
+    expect(state.trafficPanels['p1']).toEqual({ open: true, width: TRAFFIC_WIDTH.default })
+  })
+})
+
+const MAIN = [{ id: 'main' }]
+const SPLIT = [{ id: 'main' }, { id: 's2' }]
+
+describe('project widths', () => {
+  it('keeps Traffic at its own floor, not a chat box floor', () => {
+    useWorkspaceStore.setState({ trafficPanels: {} })
+    useWorkspaceStore.getState().setTrafficWidth('p1', BOX_WIDTH.min)
+    expect(useWorkspaceStore.getState().trafficPanels['p1']).toEqual({
+      open: false,
+      width: TRAFFIC_WIDTH.min,
+    })
+  })
+
+  it('keeps the run terminal pane at its own floor, one project at a time', () => {
+    useWorkspaceStore.setState({ projectTerminals: { p2: { width: 900, shells: SPLIT } } })
+    useWorkspaceStore.getState().setProjectTerminalWidth('p1', 120)
+    useWorkspaceStore.getState().setProjectTerminalWidth('p2', 700.4)
+    expect(useWorkspaceStore.getState().projectTerminals).toEqual({
+      p1: { width: 480, shells: MAIN },
+      p2: { width: 700, shells: SPLIT },
+    })
+  })
+
+  it('puts the run terminal pane back to 640 with the row’s widths, keeping its shells', () => {
+    useWorkspaceStore.setState({
+      trafficPanels: { p1: { open: true, width: 1_200 } },
+      projectTerminals: { p1: { width: 1_000, shells: SPLIT }, p2: { width: 900, shells: MAIN } },
+    })
+    useWorkspaceStore.getState().resetProjectWidths('p1')
+    const state = useWorkspaceStore.getState()
+    expect(state.projectTerminals).toEqual({
+      p1: { width: 640, shells: SPLIT },
+      p2: { width: 900, shells: MAIN },
+    })
+    expect(state.trafficPanels['p1']).toEqual({ open: true, width: TRAFFIC_WIDTH.default })
+    expect(workspaceSnapshot(state).projectTerminals).toEqual(state.projectTerminals)
+  })
+})
+
+describe('project shells', () => {
+  it('splits again and again, each with a fresh id, widening the pane only as needed', () => {
+    useWorkspaceStore.setState({ projectTerminals: {} })
+    const store = useWorkspaceStore.getState()
+    const added = Array.from({ length: 7 }, () => store.addProjectShell('p1'))
+
+    const pane = useWorkspaceStore.getState().projectTerminals['p1']
+    expect(new Set(added).size).toBe(7)
+    expect(added).not.toContain('main')
+    expect(pane?.shells.map((shell) => shell.id)).toEqual(['main', ...added])
+    expect(pane?.width).toBe(640 + 8 * 320)
+    expect(useWorkspaceStore.getState().projectTerminals['p2']).toBeUndefined()
+  })
+
+  it('keeps a wider pane as it was when a shell is added', () => {
+    useWorkspaceStore.setState({ projectTerminals: { p1: { width: 1_500, shells: MAIN } } })
+    useWorkspaceStore.getState().addProjectShell('p1')
+    expect(useWorkspaceStore.getState().projectTerminals['p1']?.width).toBe(1_500)
+  })
+
+  it('removes a shell but never the last one', () => {
+    useWorkspaceStore.setState({ projectTerminals: { p1: { width: 960, shells: SPLIT } } })
+    const store = useWorkspaceStore.getState()
+    store.removeProjectShell('p1', 'main')
+    expect(useWorkspaceStore.getState().projectTerminals['p1']).toEqual({
+      width: 960,
+      shells: [{ id: 's2' }],
+    })
+    store.removeProjectShell('p1', 's2')
+    store.removeProjectShell('p1', 'gone')
+    store.removeProjectShell('p2', 'main')
+    expect(useWorkspaceStore.getState().projectTerminals).toEqual({
+      p1: { width: 960, shells: [{ id: 's2' }] },
+    })
+  })
+})
+
+describe('row scroll', () => {
+  it('keeps two projects’ offsets apart', () => {
+    useWorkspaceStore.setState({ rowScroll: {} })
+    const store = useWorkspaceStore.getState()
+    store.setRowScroll('a', 640)
+    store.setRowScroll('b', 120)
+    expect(useWorkspaceStore.getState().rowScroll).toEqual({ a: 640, b: 120 })
+  })
+
+  it('does not update for an unchanged offset or one a row could not report', () => {
+    useWorkspaceStore.setState({ rowScroll: { a: 640 } })
+    const seen: string[] = []
+    const stop = useWorkspaceStore.subscribe(() => {
+      seen.push('update')
+    })
+    const store = useWorkspaceStore.getState()
+    store.setRowScroll('a', 640)
+    store.setRowScroll('a', -1)
+    store.setRowScroll('a', Number.NaN)
+    store.setRowScroll('b', Number.POSITIVE_INFINITY)
+    stop()
+    expect(seen).toHaveLength(0)
+    expect(useWorkspaceStore.getState().rowScroll).toEqual({ a: 640 })
+  })
+
+  it('saves zero when the row is revealed', () => {
+    useWorkspaceStore.setState({ rowScroll: { a: 640 } })
+    useWorkspaceStore.getState().setRowScroll('a', 0)
+    expect(useWorkspaceStore.getState().rowScroll).toEqual({ a: 0 })
+  })
+
+  it('is written with the rest of the snapshot', () => {
+    useWorkspaceStore.setState({ rowScroll: { a: 640 } })
+    const persisted = workspaceSnapshot(useWorkspaceStore.getState())
+    expect(persisted.rowScroll).toEqual({ a: 640 })
+    expect(Object.keys(persisted).sort()).toEqual(Object.keys(WorkspaceSnapshot.shape).sort())
   })
 })

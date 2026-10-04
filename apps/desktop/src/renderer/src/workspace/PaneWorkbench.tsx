@@ -1,6 +1,5 @@
 import { useState } from 'react'
-import { WorkbenchFrame } from '../workbench/WorkbenchFrame.js'
-import { useWorkbenchShown } from './hooks.js'
+import { WorkbenchFrame, type WorkbenchGeometry } from '../workbench/WorkbenchFrame.js'
 
 /**
  * One project's workbench, mounted for **every** tab in the pane rather than
@@ -8,8 +7,7 @@ import { useWorkbenchShown } from './hooks.js'
  *
  * **This is the terminal rule, one level further out.** `WorkbenchFrame` already
  * documents that unmounting it closes the surface — a whole `WebContents`
- * destroyed, every open file lost, a reload on the way back — and that is why
- * the Editor switch passes `hidden` instead of not rendering it. Switching
+ * destroyed, every open file lost, a reload on the way back. Switching
  * project *tabs* had no such protection: the frame was rendered once for
  * `pane.activeTabId` and keyed on it, so changing tabs changed the key and React
  * tore the surface down and built a new one. Every switch paid a full workbench
@@ -24,20 +22,21 @@ import { useWorkbenchShown } from './hooks.js'
  * Chosen for two or three open projects; if that grows into eight, this is the
  * decision to revisit, and a bounded cache is the shape it would take.
  *
- * It is a component rather than a loop body because of the two hooks: the Editor
- * switch is stored per project, and the failure message belongs to the project
- * that failed. Holding the error here rather than in the pane also fixes a
- * mislabelling the pane's own comment warned about — a background surface that
- * refused used to write its message into whatever project happened to be on
- * screen.
+ * It is a component rather than a loop body because the failure message
+ * belongs to the project that failed. Holding the error here rather than in the
+ * pane also fixes a mislabelling the pane's own comment warned about — a
+ * background surface that refused used to write its message into whatever
+ * project happened to be on screen.
  */
 export function PaneWorkbench(props: {
   readonly projectId: string
   readonly active: boolean
   readonly projectRoot: string
-  readonly covered: boolean
+  readonly geometry: (host: HTMLElement) => WorkbenchGeometry | null
+  readonly onActivityBar: (projectId: string, width: number) => void
+  readonly onRevealRow: (projectId: string) => void
+  readonly onScrollRow: (projectId: string, delta: number) => void
 }): React.JSX.Element {
-  const shown = useWorkbenchShown(props.projectId)
   const [failure, setFailure] = useState<string | null>(null)
   return (
     /*
@@ -52,8 +51,17 @@ export function PaneWorkbench(props: {
         /* Displayed only, and any of the project's conversations answers it —
            they all share one root, which is what a project is. */
         projectRoot={props.projectRoot}
-        hidden={!props.active || !shown}
-        covered={props.active && props.covered}
+        hidden={!props.active}
+        geometry={props.geometry}
+        onActivityBar={(width) => {
+          props.onActivityBar(props.projectId, width)
+        }}
+        onRevealRow={() => {
+          props.onRevealRow(props.projectId)
+        }}
+        onScrollRow={(delta) => {
+          props.onScrollRow(props.projectId, delta)
+        }}
         onFailed={setFailure}
       />
       {failure !== null && <p className="workspace-pane-workbench-error">{failure}</p>}

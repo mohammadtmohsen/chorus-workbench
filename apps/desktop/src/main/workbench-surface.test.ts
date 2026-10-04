@@ -5,11 +5,22 @@ import { join } from 'node:path'
 import { LOCAL_HOST } from '@chorus/event-store'
 import { afterAll, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
+  WORKBENCH_ACTIVITY_BAR_PUSH_CHANNEL,
+  WORKBENCH_ACTIVITY_BAR_REPORT_CHANNEL,
+  WORKBENCH_ASK_DIFF_RESULT_CHANNEL,
+  WORKBENCH_CONNECTION_CHANNEL,
   WORKBENCH_EDIT_RESULT_CHANNEL,
   WORKBENCH_FOCUS_CHANNEL,
+  WORKBENCH_LAYOUT_CHANNEL,
+  WORKBENCH_REVEAL_RESULT_CHANNEL,
+  WORKBENCH_ROW_REQUEST_CHANNEL,
+  WORKBENCH_ROW_REVEAL_PUSH_CHANNEL,
+  WORKBENCH_ROW_SCROLL_REQUEST_CHANNEL,
+  WORKBENCH_ROW_SCROLL_PUSH_CHANNEL,
   WORKBENCH_TERMINAL_ENV_CHANNEL,
   WorkbenchConnection,
 } from '../shared/workbench-ipc.js'
+import type { WorkbenchTerminalEnvSource } from './workbench-surface.js'
 
 /**
  * The whole class of defect here is a control that appears to exist because it
@@ -59,15 +70,6 @@ const captureStill = (): { isEmpty: () => boolean; toJPEG: (quality: number) => 
   toJPEG: () => Buffer.from('still'),
 })
 
-let holdCaptures = false
-const heldCaptures: (() => void)[] = []
-
-const releaseCaptures = async (): Promise<void> => {
-  holdCaptures = false
-  for (const release of heldCaptures.splice(0)) release()
-  await Promise.resolve()
-}
-
 class FakeWebContents {
   readonly listeners = new Map<string, ((...args: unknown[]) => void)[]>()
   readonly sent: unknown[] = []
@@ -89,16 +91,16 @@ class FakeWebContents {
   captureCount = 0
   capturePage(): Promise<{ isEmpty: () => boolean; toJPEG: (quality: number) => Buffer }> {
     this.captureCount += 1
-    if (!holdCaptures) return Promise.resolve(captureStill())
-    return new Promise((resolve) => {
-      heldCaptures.push(() => {
-        resolve(captureStill())
-      })
-    })
+    return Promise.resolve(captureStill())
   }
 
-  send(_channel: string, payload: unknown): void {
+  readonly channels: string[] = []
+  send(channel: string, payload?: unknown): void {
+    this.channels.push(channel)
     this.sent.push(payload)
+  }
+  sentOn(channel: string): unknown[] {
+    return this.sent.filter((_payload, index) => this.channels[index] === channel)
   }
   loadURL(): Promise<void> {
     return Promise.resolve()
@@ -348,8 +350,6 @@ beforeEach(() => {
   surface.setDetachedAccessPredicate(null)
   surface.setHandoffExpiredSink(null)
   surface.setWorkbenchTerminalEnvSource(null)
-  holdCaptures = false
-  heldCaptures.length = 0
   showOpenDialog.mockReset()
   acquireWorkbenchRuntime.mockClear()
   releaseWorkbenchRuntime.mockClear()
@@ -990,117 +990,6 @@ describe('a surface changing hands', () => {
   })
 })
 
-describe('a covered surface', () => {
-  const STILL = `data:image/jpeg;base64,${Buffer.from('still').toString('base64')}`
-
-  const settle = async (): Promise<void> => {
-    for (let tick = 0; tick < 10; tick += 1) await Promise.resolve()
-  }
-
-  const cover = async (viewId: string, covered: boolean): Promise<{ still: string | null }> =>
-    (await handlers.get('workbench:setCovered')?.({ sender: shell }, { viewId, covered })) as {
-      still: string | null
-    }
-
-  it('captures while the view is visible, then hides it, and hands back the still', async () => {
-    const viewId = await openAt(shell, ROOT_A)
-    const view = lastView()
-
-    await expect(cover(viewId, true)).resolves.toEqual({ still: STILL })
-
-    expect(view.webContents.captureCount).toBe(1)
-    expect(view.visible).toBe(false)
-  })
-
-  it('hands back the stored still for a second cover without capturing again', async () => {
-    const viewId = await openAt(shell, ROOT_A)
-    const view = lastView()
-    await cover(viewId, true)
-
-    await expect(cover(viewId, true)).resolves.toEqual({ still: STILL })
-
-    expect(view.webContents.captureCount).toBe(1)
-    expect(view.visible).toBe(false)
-  })
-
-  it('lets an uncover arriving during the capture win, leaving the view shown', async () => {
-    holdCaptures = true
-    const viewId = await openAt(shell, ROOT_A)
-    const view = lastView()
-
-    const covering = cover(viewId, true)
-    await settle()
-    expect(view.webContents.captureCount).toBe(1)
-
-    const uncovering = cover(viewId, false)
-    await releaseCaptures()
-
-    await expect(uncovering).resolves.toEqual({ still: null })
-    await expect(covering).resolves.toEqual({ still: null })
-    expect(view.visible).toBe(true)
-  })
-
-  it('leaves a covered view hidden when an overlay comes and goes', async () => {
-    const viewId = await openAt(shell, ROOT_A)
-    const view = lastView()
-    await cover(viewId, true)
-
-    await handlers.get('workbench:setVisible')?.({ sender: shell }, { visible: false })
-    await handlers.get('workbench:setVisible')?.({ sender: shell }, { visible: true })
-
-    expect(view.visible).toBe(false)
-  })
-
-  it('leaves an Editor-switched-off view hidden when the cover is lifted', async () => {
-    const viewId = await openAt(shell, ROOT_A)
-    const view = lastView()
-    await handlers.get('workbench:setVisible')?.({ sender: shell }, { visible: false, viewId })
-
-    await cover(viewId, false)
-
-    expect(view.visible).toBe(false)
-
-    await handlers.get('workbench:setVisible')?.({ sender: shell }, { visible: true, viewId })
-  })
-
-  it('hands back the overlay capture for a cover that cannot capture', async () => {
-    const viewId = await openAt(shell, ROOT_A)
-    const view = lastView()
-    await handlers.get('workbench:setVisible')?.({ sender: shell }, { visible: false })
-
-    await expect(cover(viewId, true)).resolves.toEqual({ still: STILL })
-
-    expect(view.webContents.captureCount).toBe(1)
-    expect(view.visible).toBe(false)
-  })
-
-  it('neither hides nor throws when the surface is destroyed during the capture', async () => {
-    holdCaptures = true
-    const viewId = await openAt(shell, ROOT_A)
-    const view = lastView()
-
-    const covering = cover(viewId, true)
-    await settle()
-    surface.closeSurface(shell as never, viewId)
-    await releaseCaptures()
-
-    await expect(covering).resolves.toEqual({ still: null })
-    expect(view.visible).toBe(true)
-  })
-
-  it('does not carry a cover onto a later surface for the same project', async () => {
-    const first = await openAt(shell, ROOT_A)
-    await cover(first, true)
-    surface.closeSurface(shell as never, first)
-
-    const second = await openAt(shell, ROOT_A)
-    const view = lastView()
-
-    expect(view.visible).toBe(true)
-    await expect(cover(second, true)).resolves.toEqual({ still: STILL })
-  })
-})
-
 /**
  * The Workspace Trust waiver, and the only test here worth writing is the one
  * that tries to get it in a packaged build.
@@ -1460,27 +1349,74 @@ describe('the capture terminal env a surface is told', () => {
   const pull = (sender: FakeWebContents, frame: unknown = sender.mainFrame): unknown =>
     handlers.get(WORKBENCH_TERMINAL_ENV_CHANNEL)?.({ sender, senderFrame: frame })
 
+  const answering = (
+    answer: (place: { readonly host: string; readonly root: string }) => typeof ENV | null
+  ): WorkbenchTerminalEnvSource => ({
+    current: answer,
+    ensure: (place) => Promise.resolve(answer(place)),
+  })
+
   it('answers each surface about its own project, decided by the sender', async () => {
     const asked: unknown[] = []
-    surface.setWorkbenchTerminalEnvSource((place) => {
-      asked.push(place)
-      return place.root === ROOT_A ? ENV : null
+    surface.setWorkbenchTerminalEnvSource({
+      current: () => null,
+      ensure: (place) => {
+        asked.push(place)
+        return Promise.resolve(place.root === ROOT_A ? ENV : null)
+      },
     })
     await openAt(shell, ROOT_A)
     const a = lastView()
     await openAt(shell, ROOT_B)
     const b = lastView()
 
-    expect(pull(a.webContents)).toEqual(ENV)
-    expect(pull(b.webContents)).toBeNull()
+    expect(await pull(a.webContents)).toEqual(ENV)
+    expect(await pull(b.webContents)).toBeNull()
     expect(asked).toEqual([
       { host: LOCAL_HOST, root: ROOT_A },
       { host: LOCAL_HOST, root: ROOT_B },
     ])
   })
 
+  it('waits for the listener before answering, and answers null when it cannot be had', async () => {
+    let ready: (env: typeof ENV | null) => void = () => undefined
+    let failing = false
+    surface.setWorkbenchTerminalEnvSource({
+      current: () => null,
+      ensure: () =>
+        failing
+          ? Promise.reject(new Error('port in use'))
+          : new Promise((resolve) => {
+              ready = resolve
+            }),
+    })
+    await openAt(shell, ROOT_A)
+    const view = lastView()
+
+    let answered: unknown = 'pending'
+    const pulled = Promise.resolve(pull(view.webContents)).then((env) => {
+      answered = env
+    })
+    await Promise.resolve()
+    expect(answered).toBe('pending')
+    ready(ENV)
+    await pulled
+    expect(answered).toEqual(ENV)
+
+    failing = true
+    expect(await pull(view.webContents)).toBeNull()
+  })
+
+  it('knows which local roots have an editor open', async () => {
+    await openAt(shell, ROOT_A)
+
+    expect(surface.hasWorkbenchSurface({ host: LOCAL_HOST, root: ROOT_A })).toBe(true)
+    expect(surface.hasWorkbenchSurface({ host: LOCAL_HOST, root: ROOT_B })).toBe(false)
+    expect(surface.hasWorkbenchSurface({ host: 'elsewhere', root: ROOT_A })).toBe(false)
+  })
+
   it('refuses the shell, and any frame of a surface other than its main frame', async () => {
-    surface.setWorkbenchTerminalEnvSource(() => ENV)
+    surface.setWorkbenchTerminalEnvSource(answering(() => ENV))
     await openAt(shell, ROOT_A)
     const view = lastView()
 
@@ -1491,11 +1427,16 @@ describe('the capture terminal env a surface is told', () => {
     expect(() => pull(view.webContents, null)).toThrow(/unknown workbench surface/)
   })
 
-  it('pushes every open surface its own answer when capture changes', async () => {
+  it('pushes every open surface its own current answer, without preparing anything', async () => {
     let capturing = false
-    surface.setWorkbenchTerminalEnvSource((place) =>
-      capturing && place.root === ROOT_A ? ENV : null
-    )
+    let ensured = 0
+    surface.setWorkbenchTerminalEnvSource({
+      current: (place) => (capturing && place.root === ROOT_A ? ENV : null),
+      ensure: () => {
+        ensured += 1
+        return Promise.resolve(null)
+      },
+    })
     await openAt(shell, ROOT_A)
     const a = lastView()
     await openAt(shell, ROOT_B)
@@ -1508,6 +1449,7 @@ describe('the capture terminal env a surface is told', () => {
 
     expect(a.webContents.sent).toEqual([ENV, null])
     expect(b.webContents.sent).toEqual([null, null])
+    expect(ensured).toBe(0)
   })
 
   it('answers null, never a stale value, when no source is installed', async () => {
@@ -1516,6 +1458,241 @@ describe('the capture terminal env a surface is told', () => {
 
     surface.refreshWorkbenchTerminalEnv()
     expect(view.webContents.sent).toEqual([null])
-    expect(pull(view.webContents)).toBeNull()
+    expect(await pull(view.webContents)).toBeNull()
+  })
+})
+
+describe('the width a surface lays itself out at', () => {
+  const placed = { x: 0, y: 0, width: 600, height: 400 }
+
+  it('tells the surface once per change, and never for a repeat or an absence', async () => {
+    const viewId = await openAt(shell, ROOT_A)
+    const view = lastView()
+
+    surface.setSurfaceBounds(shell as never, viewId, placed, 900)
+    surface.setSurfaceBounds(shell as never, viewId, { ...placed, width: 300 }, 900)
+    surface.setSurfaceBounds(shell as never, viewId, placed)
+    surface.setSurfaceBounds(shell as never, viewId, placed, 1_100)
+
+    expect(view.webContents.sentOn(WORKBENCH_LAYOUT_CHANNEL)).toEqual([900, 1_100])
+    expect(view.bounds).toEqual(placed)
+  })
+
+  it('replays the last width to a document that loads after it was set', async () => {
+    const viewId = await openAt(shell, ROOT_A)
+    const view = lastView()
+
+    view.webContents.emit('did-finish-load')
+    surface.setSurfaceBounds(shell as never, viewId, placed, 900)
+    view.webContents.emit('did-finish-load')
+
+    expect(view.webContents.channels).toEqual([
+      WORKBENCH_CONNECTION_CHANNEL,
+      WORKBENCH_LAYOUT_CHANNEL,
+      WORKBENCH_CONNECTION_CHANNEL,
+      WORKBENCH_LAYOUT_CHANNEL,
+    ])
+    expect(view.webContents.sentOn(WORKBENCH_LAYOUT_CHANNEL)).toEqual([900, 900])
+  })
+
+  it('takes a width only from the window that owns the surface', async () => {
+    const viewId = await openAt(shell, ROOT_A)
+    const view = lastView()
+
+    expect(() => {
+      surface.setSurfaceBounds(new FakeWebContents() as never, viewId, placed, 900)
+    }).toThrow(/belongs to this window/)
+    expect(view.webContents.sentOn(WORKBENCH_LAYOUT_CHANNEL)).toEqual([])
+  })
+
+  it('refuses a width that is not a positive whole number at the boundary', async () => {
+    const viewId = await openAt(shell, ROOT_A)
+    const view = lastView()
+    const setBounds = handlers.get('workbench:setBounds')
+
+    for (const layoutWidth of [0, -10, 900.5, '900']) {
+      await expect(
+        Promise.resolve(setBounds?.({ sender: shell }, { viewId, rect: placed, layoutWidth }))
+      ).rejects.toThrow(/Invalid request/)
+    }
+    await setBounds?.({ sender: shell }, { viewId, rect: placed, layoutWidth: 900 })
+
+    expect(view.webContents.sentOn(WORKBENCH_LAYOUT_CHANNEL)).toEqual([900])
+  })
+})
+
+describe('the activity bar a surface reports', () => {
+  const report = (sender: FakeWebContents, width: unknown): void => {
+    pushes.get(WORKBENCH_ACTIVITY_BAR_REPORT_CHANNEL)?.({ sender }, width)
+  }
+  const read = (sender: FakeWebContents, viewId: string): Promise<unknown> =>
+    Promise.resolve(handlers.get('workbench:activityBar')?.({ sender }, { viewId }))
+
+  it('tells only the owning window, and only when the width changes', async () => {
+    const other = new FakeWebContents()
+    const viewId = await openAt(shell, ROOT_A)
+    const view = lastView()
+    await openAt(other, ROOT_B)
+
+    report(view.webContents, 48)
+    report(view.webContents, 48)
+    report(view.webContents, 36)
+
+    expect(shell.sentOn(WORKBENCH_ACTIVITY_BAR_PUSH_CHANNEL)).toEqual([
+      { viewId, width: 48 },
+      { viewId, width: 36 },
+    ])
+    expect(other.sentOn(WORKBENCH_ACTIVITY_BAR_PUSH_CHANNEL)).toEqual([])
+  })
+
+  it('drops a malformed report and one from a sender that is no surface', async () => {
+    const viewId = await openAt(shell, ROOT_A)
+    const view = lastView()
+
+    for (const wrong of [-1, 47.5, '48', Number.NaN, null]) report(view.webContents, wrong)
+    report(new FakeWebContents(), 48)
+
+    expect(shell.sentOn(WORKBENCH_ACTIVITY_BAR_PUSH_CHANNEL)).toEqual([])
+    await expect(read(shell, viewId)).resolves.toEqual({ width: 0 })
+  })
+
+  it('answers the read for the owner, and for the window the surface is handed to', async () => {
+    surface.registerWorkbenchHandlers(undefined, (projectId) => {
+      if (projectId === 'a') return { host: LOCAL_HOST, root: ROOT_A }
+      throw new Error(`No project with id ${projectId}`)
+    })
+    try {
+      const destination = new FakeWebContents()
+      const viewId = await openAt(shell, ROOT_A)
+      const view = lastView()
+
+      report(view.webContents, 48)
+      await expect(read(shell, viewId)).resolves.toEqual({ width: 48 })
+      await expect(read(new FakeWebContents(), viewId)).rejects.toThrow(/belongs to this window/)
+
+      surface.beginHandoff(shell as never, ROOT_A, destination as never, 'detach')
+      report(view.webContents, 36)
+
+      expect(shell.sentOn(WORKBENCH_ACTIVITY_BAR_PUSH_CHANNEL)).toEqual([{ viewId, width: 48 }])
+      await expect(read(shell, viewId)).rejects.toThrow(/belongs to this window/)
+
+      await surface.openSurface(destination as never, { projectId: 'a' }, undefined)
+      await expect(read(destination, viewId)).resolves.toEqual({ width: 36 })
+    } finally {
+      surface.registerWorkbenchHandlers(undefined)
+    }
+  })
+})
+
+describe('scrolling a row from its native editor', () => {
+  it('forwards signed deltas only from a known surface to its owner', async () => {
+    const viewId = await openAt(shell, ROOT_A)
+    const view = lastView()
+    const request = pushes.get(WORKBENCH_ROW_SCROLL_REQUEST_CHANNEL)
+
+    request?.({ sender: view.webContents }, 120)
+    request?.({ sender: view.webContents }, -40)
+    request?.({ sender: new FakeWebContents() }, 600)
+    for (const wrong of [0, '120', Number.NaN, Number.POSITIVE_INFINITY, null]) {
+      request?.({ sender: view.webContents }, wrong)
+    }
+
+    expect(shell.sentOn(WORKBENCH_ROW_SCROLL_PUSH_CHANNEL)).toEqual([
+      { viewId, delta: 120 },
+      { viewId, delta: -40 },
+    ])
+  })
+
+  it('does not scroll a source window during a handoff', async () => {
+    await openAt(shell, ROOT_A)
+    const view = lastView()
+    surface.beginHandoff(shell as never, ROOT_A, new FakeWebContents() as never, 'detach')
+
+    pushes.get(WORKBENCH_ROW_SCROLL_REQUEST_CHANNEL)?.({ sender: view.webContents }, 100)
+
+    expect(shell.sentOn(WORKBENCH_ROW_SCROLL_PUSH_CHANNEL)).toEqual([])
+  })
+})
+
+describe('bringing an editor back into view', () => {
+  it('asks the owning window when the surface asks, and ignores a sender that is no surface', async () => {
+    const viewId = await openAt(shell, ROOT_A)
+    const view = lastView()
+
+    pushes.get(WORKBENCH_ROW_REQUEST_CHANNEL)?.({ sender: view.webContents })
+    pushes.get(WORKBENCH_ROW_REQUEST_CHANNEL)?.({ sender: new FakeWebContents() })
+
+    expect(shell.sentOn(WORKBENCH_ROW_REVEAL_PUSH_CHANNEL)).toEqual([{ viewId }])
+  })
+
+  it('stays quiet while the surface is between windows', async () => {
+    await openAt(shell, ROOT_A)
+    const view = lastView()
+
+    surface.beginHandoff(shell as never, ROOT_A, new FakeWebContents() as never, 'detach')
+    pushes.get(WORKBENCH_ROW_REQUEST_CHANNEL)?.({ sender: view.webContents })
+
+    expect(shell.sentOn(WORKBENCH_ROW_REVEAL_PUSH_CHANNEL)).toEqual([])
+  })
+
+  it('shows the row for a file the transcript opens', async () => {
+    const viewId = await openAt(shell, ROOT_A)
+    const view = lastView()
+
+    const pending = surface.requestWorkbenchReveal(ROOT_A, {
+      path: join(ROOT_A, 'a.ts'),
+      line: 3,
+      column: null,
+    })
+    expect(shell.sentOn(WORKBENCH_ROW_REVEAL_PUSH_CHANNEL)).toEqual([{ viewId }])
+
+    const [sent] = view.webContents.sent as { requestId: string }[]
+    pushes.get(WORKBENCH_REVEAL_RESULT_CHANNEL)?.(
+      { sender: view.webContents },
+      { requestId: sent?.requestId, ok: true }
+    )
+    await expect(pending).resolves.toEqual({ requestId: sent?.requestId, ok: true })
+  })
+
+  it('leaves the row where it is for an agent applying an edit', async () => {
+    await openAt(shell, ROOT_A)
+    const view = lastView()
+    const edit = {
+      path: join(ROOT_A, 'a.ts'),
+      baseVersion: 1,
+      range: { startLine: 1, startColumn: 1, endLine: 1, endColumn: 2 },
+      oldText: 'a',
+      newText: 'b',
+    }
+
+    const pending = surface.requestWorkbenchEdit({ host: LOCAL_HOST, root: ROOT_A }, edit)
+    expect(shell.sentOn(WORKBENCH_ROW_REVEAL_PUSH_CHANNEL)).toEqual([])
+
+    const [sent] = view.webContents.sent as { requestId: string }[]
+    pushes.get(WORKBENCH_EDIT_RESULT_CHANNEL)?.(
+      { sender: view.webContents },
+      { requestId: sent?.requestId, ok: true, version: 2 }
+    )
+    await expect(pending).resolves.toEqual({ requestId: sent?.requestId, ok: true, version: 2 })
+    expect(shell.sentOn(WORKBENCH_ROW_REVEAL_PUSH_CHANNEL)).toEqual([])
+  })
+
+  it('shows it for a proposed diff, and not for closing one', async () => {
+    const viewId = await openAt(shell, ROOT_A)
+    const view = lastView()
+    const diff = { approvalId: 'approval-1', path: 'a.ts', before: 'a', proposed: 'b' }
+
+    const opened = surface.requestWorkbenchAskDiff(ROOT_A, diff)
+    const closed = surface.requestWorkbenchAskDiff(ROOT_A, { ...diff, close: true })
+    expect(shell.sentOn(WORKBENCH_ROW_REVEAL_PUSH_CHANNEL)).toEqual([{ viewId }])
+
+    for (const sent of view.webContents.sent as { requestId: string }[]) {
+      pushes.get(WORKBENCH_ASK_DIFF_RESULT_CHANNEL)?.(
+        { sender: view.webContents },
+        { requestId: sent.requestId, ok: true }
+      )
+    }
+    await expect(opened).resolves.toMatchObject({ ok: true })
+    await expect(closed).resolves.toMatchObject({ ok: true })
   })
 })

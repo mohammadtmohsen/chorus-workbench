@@ -28,6 +28,13 @@ import {
   type IpcResponse,
 } from '../shared/ipc.js'
 import {
+  RUN_CONTRACT,
+  RUN_PUSH_CHANNEL,
+  RunPush,
+  type RunChannel,
+  type RunResponse,
+} from '../shared/run-ipc.js'
+import {
   TRAFFIC_CONTRACT,
   TRAFFIC_LIVE_PUSH_CHANNEL,
   TRAFFIC_PUSH_CHANNEL,
@@ -37,7 +44,13 @@ import {
   type TrafficResponse,
 } from '../shared/traffic-ipc.js'
 import {
+  WORKBENCH_ACTIVITY_BAR_PUSH_CHANNEL,
+  WORKBENCH_ROW_REVEAL_PUSH_CHANNEL,
+  WORKBENCH_ROW_SCROLL_PUSH_CHANNEL,
   WORKBENCH_SHELL_CONTRACT,
+  WorkbenchActivityBarPush,
+  WorkbenchRowRevealPush,
+  WorkbenchRowScrollPush,
   type WorkbenchShellChannel,
   type WorkbenchShellResponse,
 } from '../shared/workbench-ipc.js'
@@ -95,6 +108,17 @@ function invokeTraffic<C extends TrafficChannel>(channel: C) {
   }
 }
 
+function invokeRun<C extends RunChannel>(channel: C) {
+  return async (request: unknown): Promise<RunResponse<C>> => {
+    const raw: unknown = await ipcRenderer.invoke(channel, request)
+    const parsed = RUN_CONTRACT[channel].response.safeParse(raw)
+    if (!parsed.success) {
+      throw new Error(`Malformed response on "${channel}": ${parsed.error.message}`)
+    }
+    return parsed.data as RunResponse<C>
+  }
+}
+
 /**
  * The same generator over the workbench's shell-facing contract.
  *
@@ -134,9 +158,41 @@ const api: ChorusApi = {
   setWorkbenchBounds: invokeWorkbench('workbench:setBounds'),
   closeWorkbench: invokeWorkbench('workbench:close'),
   setWorkbenchVisible: invokeWorkbench('workbench:setVisible'),
-  setWorkbenchCovered: invokeWorkbench('workbench:setCovered'),
+  readWorkbenchActivityBar: invokeWorkbench('workbench:activityBar'),
+  onWorkbenchActivityBar: (listener) => {
+    const wrapped = (_event: unknown, payload: unknown): void => {
+      const parsed = WorkbenchActivityBarPush.safeParse(payload)
+      if (parsed.success) listener(parsed.data)
+    }
+    ipcRenderer.on(WORKBENCH_ACTIVITY_BAR_PUSH_CHANNEL, wrapped)
+    return () => {
+      ipcRenderer.removeListener(WORKBENCH_ACTIVITY_BAR_PUSH_CHANNEL, wrapped)
+    }
+  },
+  onWorkbenchRowReveal: (listener) => {
+    const wrapped = (_event: unknown, payload: unknown): void => {
+      const parsed = WorkbenchRowRevealPush.safeParse(payload)
+      if (parsed.success) listener(parsed.data)
+    }
+    ipcRenderer.on(WORKBENCH_ROW_REVEAL_PUSH_CHANNEL, wrapped)
+    return () => {
+      ipcRenderer.removeListener(WORKBENCH_ROW_REVEAL_PUSH_CHANNEL, wrapped)
+    }
+  },
+  onWorkbenchRowScroll: (listener) => {
+    const wrapped = (_event: unknown, payload: unknown): void => {
+      const parsed = WorkbenchRowScrollPush.safeParse(payload)
+      if (parsed.success) listener(parsed.data)
+    }
+    ipcRenderer.on(WORKBENCH_ROW_SCROLL_PUSH_CHANNEL, wrapped)
+    return () => {
+      ipcRenderer.removeListener(WORKBENCH_ROW_SCROLL_PUSH_CHANNEL, wrapped)
+    }
+  },
   probeAgents: invoke('agents:probe'),
   startConversation: invoke('conversation:start'),
+  beginConversation: invoke('conversation:begin'),
+  awaitStart: invoke('conversation:awaitStart'),
   sendMessage: invoke('conversation:send'),
   interrupt: invoke('conversation:interrupt'),
   closeConversation: invoke('conversation:close'),
@@ -188,6 +244,13 @@ const api: ChorusApi = {
   readTrafficLegacy: invokeTraffic('traffic:legacy'),
   decideTrafficLegacy: invokeTraffic('traffic:legacyDecide'),
   readTrafficLive: invokeTraffic('traffic:live'),
+  readRunState: invokeRun('run:state'),
+  detectRunScripts: invokeRun('run:detect'),
+  configureRun: invokeRun('run:configure'),
+  startRun: invokeRun('run:start'),
+  restartRun: invokeRun('run:restart'),
+  stopRun: invokeRun('run:stop'),
+  stopRunRecording: invokeRun('run:stopRecording'),
   setBadge: invoke('app:setBadge'),
   notify: invoke('app:notify'),
   revealConversation: invoke('conversation:reveal'),
@@ -352,6 +415,16 @@ const api: ChorusApi = {
     ipcRenderer.on(TRAFFIC_PUSH_CHANNEL, wrapped)
     return () => {
       ipcRenderer.removeListener(TRAFFIC_PUSH_CHANNEL, wrapped)
+    }
+  },
+  onRun: (listener) => {
+    const wrapped = (_event: unknown, payload: unknown): void => {
+      const parsed = RunPush.safeParse(payload)
+      if (parsed.success) listener(parsed.data)
+    }
+    ipcRenderer.on(RUN_PUSH_CHANNEL, wrapped)
+    return () => {
+      ipcRenderer.removeListener(RUN_PUSH_CHANNEL, wrapped)
     }
   },
   onTrafficLive: (listener) => {

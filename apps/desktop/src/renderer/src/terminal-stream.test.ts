@@ -4,6 +4,8 @@ import {
   pendingUntilAttached,
   sameTerminal,
   shouldApply,
+  terminalOwner,
+  terminalRefFrom,
   type Attachment,
 } from './terminal-stream.js'
 
@@ -16,12 +18,16 @@ const C1B: TerminalRefShape = { scope: 'session', conversationId: 'c1', id: 't2'
 /** The global panel's second shell. */
 const GLOBAL_B: TerminalRefShape = { scope: 'global', id: 't2' }
 
+const P1: TerminalRefShape = { scope: 'project', projectId: 'p1', id: 'run' }
+const P2: TerminalRefShape = { scope: 'project', projectId: 'p2', id: 'run' }
+
 const at = (ref: TerminalRefShape, epoch: number, seq: number): Attachment => ({ ref, epoch, seq })
 
 const push = (ref: TerminalRefShape, epoch: number, seq: number, data = 'x'): TerminalPush => ({
   kind: 'data',
   ref,
   epoch,
+  generation: 0,
   seq,
   data,
 })
@@ -81,6 +87,33 @@ describe('sameTerminal', () => {
     expect(sameTerminal(C1, C2)).toBe(false)
     expect(sameTerminal(C1, { scope: 'global', id: 't1' })).toBe(false)
   })
+
+  it("matches a project's run by its project, and to nothing else", () => {
+    expect(sameTerminal(P1, P1)).toBe(true)
+    expect(sameTerminal(P1, P2)).toBe(false)
+    expect(sameTerminal(P1, { scope: 'global', id: 'run' })).toBe(false)
+    expect(sameTerminal({ scope: 'global', id: 'run' }, P1)).toBe(false)
+    expect(sameTerminal(P1, { scope: 'session', conversationId: 'p1', id: 'run' })).toBe(false)
+  })
+
+  it('matches a project shell by project and id, and never to the run or a global', () => {
+    const shell: TerminalRefShape = { scope: 'shell', projectId: 'p1', id: 'run' }
+    expect(sameTerminal(shell, { scope: 'shell', projectId: 'p1', id: 'run' })).toBe(true)
+    expect(sameTerminal(shell, { scope: 'shell', projectId: 'p1', id: 'main' })).toBe(false)
+    expect(sameTerminal(shell, { scope: 'shell', projectId: 'p2', id: 'run' })).toBe(false)
+    expect(sameTerminal(shell, P1)).toBe(false)
+    expect(sameTerminal(P1, shell)).toBe(false)
+    expect(sameTerminal(shell, { scope: 'global', id: 'run' })).toBe(false)
+  })
+})
+
+describe('terminalRefFrom', () => {
+  it('rebuilds every scope exactly from its parts', () => {
+    const shell: TerminalRefShape = { scope: 'shell', projectId: 'p1', id: 'main' }
+    for (const ref of [GLOBAL, C1, P1, shell]) {
+      expect(terminalRefFrom(ref.scope, terminalOwner(ref), ref.id)).toEqual(ref)
+    }
+  })
 })
 
 describe('shouldApply', () => {
@@ -111,7 +144,7 @@ describe('shouldApply', () => {
    * symptom.
    */
   it("ignores a sibling tab's exit in the same conversation", () => {
-    const exit: TerminalPush = { kind: 'exit', ref: C1B, epoch: 2, code: 1 }
+    const exit: TerminalPush = { kind: 'exit', ref: C1B, epoch: 2, generation: 0, code: 1 }
     expect(shouldApply(exit, at(C1, 2, 10))).toBe(false)
   })
 
@@ -140,13 +173,23 @@ describe('shouldApply', () => {
    * frame as the snapshot.
    */
   it('applies an exit regardless of position', () => {
-    const exit: TerminalPush = { kind: 'exit', ref: C1, epoch: 2, code: 0 }
+    const exit: TerminalPush = { kind: 'exit', ref: C1, epoch: 2, generation: 0, code: 0 }
     expect(shouldApply(exit, at(C1, 2, 999))).toBe(true)
   })
 
   it('still ignores an exit for another terminal', () => {
-    const exit: TerminalPush = { kind: 'exit', ref: C2, epoch: 2, code: 0 }
+    const exit: TerminalPush = { kind: 'exit', ref: C2, epoch: 2, generation: 0, code: 0 }
     expect(shouldApply(exit, at(C1, 2, 10))).toBe(false)
+  })
+
+  it("applies a project run's output only to that project", () => {
+    expect(shouldApply(push(P1, 2, 11), at(P1, 2, 10))).toBe(true)
+    expect(shouldApply(push(P2, 2, 11), at(P1, 2, 10))).toBe(false)
+  })
+
+  it('never applies a replacement notice', () => {
+    const replaced: TerminalPush = { kind: 'replaced', ref: P1, generation: 3 }
+    expect(shouldApply(replaced, at(P1, 2, 10))).toBe(false)
   })
 })
 
@@ -167,6 +210,12 @@ describe('pendingUntilAttached', () => {
   it('drops anything queued for another terminal', () => {
     const queued = [push(GLOBAL, 2, 11, 'theirs'), push(C1, 2, 11, 'mine')]
     expect(pendingUntilAttached(queued, at(C1, 2, 10))).toHaveLength(1)
+  })
+
+  it('drops a replacement notice held while attaching', () => {
+    const replaced: TerminalPush = { kind: 'replaced', ref: P1, generation: 3 }
+    const queued = [replaced, push(P1, 2, 11, 'mine')]
+    expect(pendingUntilAttached(queued, at(P1, 2, 10))).toEqual([push(P1, 2, 11, 'mine')])
   })
 
   it('holds nothing back when the queue is empty', () => {

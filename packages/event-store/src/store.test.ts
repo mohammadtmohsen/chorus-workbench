@@ -704,3 +704,201 @@ describe('payload schema: fields added later', () => {
     expect((payload as { patch: string }).patch).not.toContain('SECRETVALUEHERE')
   })
 })
+
+describe('count', () => {
+  const say = (text: string): void => {
+    store.append({ conversationId: CONV, actor: 'user', payload: { type: 'user.message', text } })
+  }
+
+  it('counts what read returns, with afterSeq exclusive', () => {
+    for (const text of ['one', 'two', 'three', 'four', 'five']) say(text)
+    const last = store.lastSeq()
+    for (const afterSeq of [undefined, 0, 1, 3, last - 1, last, last + 10]) {
+      const options = afterSeq === undefined ? {} : { afterSeq }
+      expect(store.count(CONV, options)).toBe(store.read(CONV, options).length)
+    }
+    expect(store.count(CONV, { afterSeq: last - 1 })).toBe(1)
+    expect(store.count(CONV, { afterSeq: last })).toBe(0)
+  })
+
+  it('narrows to the types asked for, and treats an empty list as no filter', () => {
+    say('hello')
+    say('again')
+    const cases = [
+      [[], 3],
+      [['user.message'], 2],
+      [['conversation.created'], 1],
+      [['user.message', 'conversation.created'], 3],
+      [['no.such.type'], 0],
+    ] as const
+    for (const [types, expected] of cases) {
+      expect(store.count(CONV, { types })).toBe(expected)
+      expect(store.count(CONV, { types })).toBe(store.read(CONV, { types }).length)
+    }
+    expect(store.count(CONV, { afterSeq: 1, types: ['user.message'] })).toBe(2)
+    expect(store.count(CONV, { afterSeq: 2, types: ['conversation.created'] })).toBe(0)
+  })
+
+  it('counts only the conversation asked for, and nothing for one that does not exist', () => {
+    store.append({
+      conversationId: 'conv-2',
+      actor: 'user',
+      payload: { type: 'conversation.created', projectId: 'p1', title: 'Other' },
+    })
+    store.append({
+      conversationId: 'conv-2',
+      actor: 'user',
+      payload: { type: 'user.message', text: 'elsewhere' },
+    })
+    expect(store.count(CONV)).toBe(1)
+    expect(store.count('conv-2')).toBe(2)
+    expect(store.count('missing')).toBe(0)
+    expect(store.count('missing', { afterSeq: 0, types: ['user.message'] })).toBe(0)
+  })
+
+  it('counts a row that read refuses to parse', () => {
+    db.prepare(
+      `INSERT INTO events (id, conversation_id, actor, type, payload, created_at, schema_ver)
+       VALUES ('broken', @conversationId, 'user', 'user.message', '{not json', 2000, 1)`
+    ).run({ conversationId: CONV })
+    expect(() => store.read(CONV)).toThrow()
+    expect(store.count(CONV)).toBe(2)
+    expect(store.count(CONV, { types: ['user.message'] })).toBe(1)
+  })
+})
+
+describe('pendingDecisionIds', () => {
+  const fromState = (): { pendingApprovalIds: string[]; pendingQuestionIds: string[] } => {
+    const state = store.transcriptState(CONV)
+    return {
+      pendingApprovalIds: state.approvals.map((approval) => approval.approvalId),
+      pendingQuestionIds: state.questions.map((question) => question.userInputId),
+    }
+  }
+
+  const requestApproval = (approvalId: string, at: number, expiresAt = 9_999): void => {
+    store.append(
+      {
+        conversationId: CONV,
+        actor: 'claude',
+        payload: {
+          type: 'approval.requested',
+          approvalId,
+          kind: 'command',
+          request: {},
+          expiresAt,
+        },
+      },
+      at
+    )
+  }
+
+  const askQuestion = (userInputId: string, at: number, expiresAt = 9_999): void => {
+    store.append(
+      {
+        conversationId: CONV,
+        actor: 'codex',
+        payload: { type: 'userinput.requested', userInputId, request: {}, expiresAt },
+      },
+      at
+    )
+  }
+
+  const decide = (approvalId: string, outcome: 'allow' | 'cancel'): void => {
+    store.append({
+      conversationId: CONV,
+      actor: 'user',
+      payload: {
+        type: 'approval.decided',
+        approvalId,
+        outcome,
+        scope: outcome === 'allow' ? 'once' : null,
+        decidedBy: 'user',
+        policyRuleId: null,
+      },
+    })
+  }
+
+  const answer = (userInputId: string, outcome: 'answered' | 'cancel'): void => {
+    store.append({
+      conversationId: CONV,
+      actor: 'user',
+      payload: {
+        type: 'userinput.answered',
+        userInputId,
+        outcome,
+        answers: [],
+        answeredBy: 'user',
+      },
+    })
+  }
+
+  it('lists what is still waiting in creation order, as the full state does', () => {
+    requestApproval('a-late', 3000)
+    requestApproval('a-early', 2000)
+    askQuestion('q-late', 3500)
+    askQuestion('q-early', 2500)
+    expect(store.pendingDecisionIds(CONV)).toEqual({
+      pendingApprovalIds: ['a-early', 'a-late'],
+      pendingQuestionIds: ['q-early', 'q-late'],
+    })
+    expect(store.pendingDecisionIds(CONV)).toEqual(fromState())
+  })
+
+  it('keeps a request that expired without being resolved', () => {
+    requestApproval('a1', 2000, 1)
+    askQuestion('q1', 2000, 1)
+    expect(store.pendingDecisionIds(CONV)).toEqual({
+      pendingApprovalIds: ['a1'],
+      pendingQuestionIds: ['q1'],
+    })
+    expect(store.pendingDecisionIds(CONV)).toEqual(fromState())
+  })
+
+  it('drops requests once decided, cancelled, withdrawn or answered', () => {
+    requestApproval('a-allowed', 2000)
+    requestApproval('a-cancelled', 2001)
+    requestApproval('a-withdrawn', 2002)
+    requestApproval('a-open', 2003)
+    askQuestion('q-answered', 2004)
+    askQuestion('q-cancelled', 2005)
+    askQuestion('q-open', 2006)
+    decide('a-allowed', 'allow')
+    decide('a-cancelled', 'cancel')
+    store.append({
+      conversationId: CONV,
+      actor: 'claude',
+      payload: { type: 'approval.withdrawn', approvalId: 'a-withdrawn' },
+    })
+    answer('q-answered', 'answered')
+    answer('q-cancelled', 'cancel')
+    expect(store.pendingDecisionIds(CONV)).toEqual({
+      pendingApprovalIds: ['a-open'],
+      pendingQuestionIds: ['q-open'],
+    })
+    expect(store.pendingDecisionIds(CONV)).toEqual(fromState())
+  })
+
+  it('answers only for its own conversation, and empty for one that does not exist', () => {
+    store.append({
+      conversationId: 'conv-2',
+      actor: 'claude',
+      payload: {
+        type: 'approval.requested',
+        approvalId: 'elsewhere',
+        kind: 'command',
+        request: {},
+        expiresAt: 9_999,
+      },
+    })
+    requestApproval('mine', 2000)
+    expect(store.pendingDecisionIds(CONV)).toEqual({
+      pendingApprovalIds: ['mine'],
+      pendingQuestionIds: [],
+    })
+    expect(store.pendingDecisionIds('missing')).toEqual({
+      pendingApprovalIds: [],
+      pendingQuestionIds: [],
+    })
+  })
+})

@@ -1,13 +1,18 @@
+import type { WorkbenchRect } from '../../../shared/workbench-ipc.js'
 import {
   BOX_WIDTH,
-  CHORUS_WIDTH,
   EDITOR_WIDTH,
+  MAIN_PROJECT_SHELL,
+  PROJECT_TERMINAL_WIDTH,
   SIDEBAR_WIDTH,
   TERMINAL_HEIGHT,
+  TRAFFIC_WIDTH,
   type ConversationArrangement,
   type ProjectLayoutSlice,
+  type ProjectTerminalPaneState,
   type ReturnSlot,
   type TerminalPanelState,
+  type TerminalTab,
   type TrafficPanelState,
   type WorkspaceLayoutNode,
   type WorkspacePane,
@@ -24,36 +29,6 @@ export function clampTerminalHeight(height: number): number {
 export function clampSidebarWidth(width: number): number {
   if (!Number.isFinite(width)) return SIDEBAR_WIDTH.default
   return Math.round(Math.max(SIDEBAR_WIDTH.min, width))
-}
-
-/** The same treatment for the workbench/Chorus divider, and for the same reason:
- *  the width comes from a file a person can edit, so it is repaired not trusted. */
-export function clampChorusWidth(width: number): number {
-  if (!Number.isFinite(width)) return CHORUS_WIDTH.default
-  return Math.round(Math.max(CHORUS_WIDTH.min, width))
-}
-
-export interface PaneSplit {
-  readonly chorus: number
-  readonly editor: number
-  readonly raised: number
-  readonly covered: boolean
-}
-
-export function paneSplit(pane: number, stored: number): PaneSplit {
-  const chorus = Math.max(0, Math.min(Math.max(stored, CHORUS_WIDTH.min), pane - EDITOR_WIDTH.peek))
-  const beside = pane - chorus
-  if (beside >= EDITOR_WIDTH.resizeFloor) {
-    return { chorus, editor: beside, raised: beside, covered: false }
-  }
-  const raised = Math.max(pane - CHORUS_WIDTH.min, EDITOR_WIDTH.peek)
-  const covered = chorus > 0 && beside < raised
-  return {
-    chorus,
-    editor: covered ? Math.min(EDITOR_WIDTH.resizeFloor, raised) : raised,
-    raised,
-    covered,
-  }
 }
 
 /**
@@ -109,6 +84,16 @@ export function normalizeTerminalPanel(panel: TerminalPanelState): TerminalPanel
   }
 }
 
+export function normalizeProjectShells(shells: readonly TerminalTab[]): TerminalTab[] {
+  const seen = new Set<string>()
+  const kept = shells.filter((shell) => {
+    if (shell.id === '' || seen.has(shell.id)) return false
+    seen.add(shell.id)
+    return true
+  })
+  return kept.length === 0 ? [{ id: MAIN_PROJECT_SHELL }] : kept
+}
+
 export type SplitDirection = 'left' | 'right' | 'up' | 'down'
 
 /** Four readable editor groups; conversations beyond this remain available as tabs. */
@@ -124,8 +109,6 @@ export const MAX_PANES = 4
  */
 export const EMPTY_WORKSPACE: WorkspaceSnapshot = {
   layout: null,
-  // Empty means every editor is on. See the field's own note in the schema.
-  workbenchHidden: {},
   // Empty means no project has been arranged; reconcile builds each from the
   // live conversation list. See the field's own note in the schema.
   conversationGroups: {},
@@ -133,10 +116,11 @@ export const EMPTY_WORKSPACE: WorkspaceSnapshot = {
   focusedPaneId: null,
   sidebarHidden: true,
   sidebarWidth: SIDEBAR_WIDTH.default,
-  chorusWidths: {},
   terminals: {},
   globalTerminal: { open: false, height: TERMINAL_HEIGHT.default, tabs: [], activeId: null },
   trafficPanels: {},
+  projectTerminals: {},
+  rowScroll: {},
 }
 
 export const DETACHED_PANE_ID = 'detached'
@@ -153,9 +137,9 @@ function withEntry<T>(
 export function sliceOf(workspace: WorkspaceSnapshot, projectId: string): ProjectLayoutSlice {
   return {
     conversationGroups: workspace.conversationGroups[projectId],
-    chorusWidth: workspace.chorusWidths[projectId],
-    workbenchHidden: workspace.workbenchHidden[projectId],
     trafficPanel: workspace.trafficPanels[projectId],
+    projectTerminal: workspace.projectTerminals[projectId],
+    rowScroll: workspace.rowScroll[projectId],
   }
 }
 
@@ -171,9 +155,9 @@ export function mergeSlice(
       projectId,
       slice.conversationGroups
     ),
-    chorusWidths: withEntry(workspace.chorusWidths, projectId, slice.chorusWidth),
-    workbenchHidden: withEntry(workspace.workbenchHidden, projectId, slice.workbenchHidden),
     trafficPanels: withEntry(workspace.trafficPanels, projectId, slice.trafficPanel),
+    projectTerminals: withEntry(workspace.projectTerminals, projectId, slice.projectTerminal),
+    rowScroll: withEntry(workspace.rowScroll, projectId, slice.rowScroll),
   }
 }
 
@@ -375,14 +359,23 @@ export function normalizeWorkspace(workspace: WorkspaceSnapshot): WorkspaceSnaps
      * written by an older build can hold anything, and an out-of-range width
      * here is a pane that cannot be dragged back.
      */
-    chorusWidths: Object.fromEntries(
-      Object.entries(workspace.chorusWidths).map(([id, width]) => [id, clampChorusWidth(width)])
-    ),
     trafficPanels: Object.fromEntries(
       Object.entries(workspace.trafficPanels).map(([projectId, panel]) => [
         projectId,
-        { ...panel, width: clampBoxWidth(panel.width) },
+        { ...panel, width: clampTrafficWidth(panel.width) },
       ])
+    ),
+    projectTerminals: Object.fromEntries(
+      Object.entries(workspace.projectTerminals).map(([projectId, pane]) => [
+        projectId,
+        {
+          width: clampProjectTerminalWidth(pane.width),
+          shells: normalizeProjectShells(pane.shells),
+        },
+      ])
+    ),
+    rowScroll: Object.fromEntries(
+      Object.entries(workspace.rowScroll).filter(([, left]) => isRowScroll(left))
     ),
     /*
      * Every panel's roster repaired, both scopes, on the way through.
@@ -893,11 +886,83 @@ export const EMPTY_ARRANGEMENT: ConversationArrangement = {
   focusedPaneId: null,
 }
 
-export const CLOSED_TRAFFIC: TrafficPanelState = { open: false, width: BOX_WIDTH.default }
+export const CLOSED_TRAFFIC: TrafficPanelState = { open: false, width: TRAFFIC_WIDTH.default }
 
 export function clampBoxWidth(width: number): number {
   if (!Number.isFinite(width)) return BOX_WIDTH.default
   return Math.round(Math.max(BOX_WIDTH.min, width))
+}
+
+export function clampTrafficWidth(width: number): number {
+  if (!Number.isFinite(width)) return TRAFFIC_WIDTH.default
+  return Math.round(Math.max(TRAFFIC_WIDTH.min, width))
+}
+
+export const DEFAULT_PROJECT_TERMINAL: ProjectTerminalPaneState = {
+  width: PROJECT_TERMINAL_WIDTH.default,
+  shells: [{ id: MAIN_PROJECT_SHELL }],
+}
+
+export function clampProjectTerminalWidth(width: number): number {
+  if (!Number.isFinite(width)) return PROJECT_TERMINAL_WIDTH.default
+  return Math.round(Math.max(PROJECT_TERMINAL_WIDTH.min, width))
+}
+
+export function projectTerminalMinimum(shells: number): number {
+  return PROJECT_TERMINAL_WIDTH.run + shells * PROJECT_TERMINAL_WIDTH.slot
+}
+
+export function projectTerminalWidth(pane: ProjectTerminalPaneState): number {
+  return Math.max(pane.width, projectTerminalMinimum(pane.shells.length))
+}
+
+export function isRowScroll(left: number): boolean {
+  return Number.isFinite(left) && left >= 0
+}
+
+export function editorWidthIn(windowWidth: number): number {
+  return Math.round(windowWidth * EDITOR_WIDTH.fraction)
+}
+
+export function clampActivityBar(reported: number, editorWidth: number, paneWidth: number): number {
+  if (!Number.isFinite(reported)) return 0
+  const available = Math.floor(Math.min(editorWidth, paneWidth) / 2)
+  return Math.max(0, Math.min(Math.round(reported), available))
+}
+
+export const ROW_EDGE_INSET = 3
+
+export const ROW_SCROLLBAR_STRIP = 12
+
+export interface MeasuredBox {
+  readonly left: number
+  readonly top: number
+  readonly width: number
+  readonly height: number
+}
+
+export function editorViewport(
+  bar: MeasuredBox,
+  surface: MeasuredBox,
+  scroller: MeasuredBox
+): { readonly rect: WorkbenchRect; readonly layoutWidth: number | undefined } {
+  const x = Math.round(bar.left)
+  const y = Math.round(surface.top)
+  const limit = Math.round(scroller.left + scroller.width) - ROW_EDGE_INSET
+  const floor = Math.round(scroller.top + scroller.height) - ROW_SCROLLBAR_STRIP
+  const barRight = Math.min(Math.round(bar.left + bar.width), limit)
+  const right = Math.max(barRight, Math.min(Math.round(surface.left + surface.width), limit))
+  const bottom = Math.min(Math.round(surface.top + surface.height), floor)
+  const layoutWidth = Math.min(Math.round(surface.width + bar.width), limit - x)
+  return {
+    rect: {
+      x,
+      y,
+      width: Math.max(0, right - x),
+      height: Math.max(0, bottom - y),
+    },
+    layoutWidth: layoutWidth >= 1 ? layoutWidth : undefined,
+  }
 }
 
 export function columnsOf(layout: WorkspaceLayoutNode | null): WorkspaceLayoutNode[] {
@@ -1017,7 +1082,8 @@ export function withColumnWidths(
 export function pushDivider(
   widths: readonly number[],
   index: number,
-  delta: number
+  delta: number,
+  minimums: readonly number[] = widths.map(() => BOX_WIDTH.min)
 ): { widths: number[]; scroll: number } {
   const left = widths[index - 1]
   const right = widths[index]
@@ -1027,7 +1093,8 @@ export function pushDivider(
     next[index - 1] = left + delta
     return { widths: next, scroll: 0 }
   }
-  const shrunk = Math.min(-delta, Math.max(0, left - BOX_WIDTH.min))
+  const floor = minimums[index - 1] ?? BOX_WIDTH.min
+  const shrunk = Math.min(-delta, Math.max(0, left - floor))
   const grown = -delta - shrunk
   next[index - 1] = left - shrunk
   next[index] = right + grown

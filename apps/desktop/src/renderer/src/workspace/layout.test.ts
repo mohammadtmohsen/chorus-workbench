@@ -1,25 +1,33 @@
 import { describe, expect, it } from 'vitest'
 import {
   BOX_WIDTH,
-  CHORUS_WIDTH,
   CLOSED_TERMINAL_PANEL,
-  EDITOR_WIDTH,
+  PROJECT_TERMINAL_WIDTH,
   SIDEBAR_WIDTH,
   TERMINAL_HEIGHT,
+  TRAFFIC_WIDTH,
   type ConversationArrangement,
   type TerminalPanelState,
   type WorkspaceLayoutNode,
   type WorkspacePane,
-  type WorkspaceSnapshot,
+  WorkspaceSnapshot,
 } from '../../../shared/workspace-layout.js'
 import {
   applyDetachedEntries,
+  clampActivityBar,
   clampBoxWidth,
+  clampProjectTerminalWidth,
   clampSidebarWidth,
+  clampTrafficWidth,
+  CLOSED_TRAFFIC,
   closeTab,
   columnsOf,
   columnWidths,
+  DEFAULT_PROJECT_TERMINAL,
+  detachedSnapshot,
   detachTab,
+  editorViewport,
+  editorWidthIn,
   EMPTY_WORKSPACE,
   leafPaneIds,
   MAX_PANES,
@@ -27,18 +35,22 @@ import {
   moveBox,
   moveTab,
   newTerminalId,
+  normalizeProjectShells,
   normalizeTerminalPanel,
   normalizeWorkspace,
   openBox,
   openSession,
-  paneSplit,
   placeSession,
+  projectTerminalMinimum,
+  projectTerminalWidth,
   pushDivider,
   reconcileConversationGroups,
   reconcileWorkspace,
   reorderTab,
   resetBoxes,
   returnTab,
+  ROW_EDGE_INSET,
+  ROW_SCROLLBAR_STRIP,
   setBranchSizes,
   sliceOf,
   splitTab,
@@ -47,6 +59,7 @@ import {
   virtualIndex,
   withColumnWidths,
   withDetachedReturned,
+  type MeasuredBox,
 } from './layout.js'
 
 function onePane(...tabs: string[]): WorkspaceSnapshot {
@@ -753,6 +766,126 @@ describe('pushDivider', () => {
   it('leaves every width alone for a divider that divides nothing', () => {
     expect(pushDivider([500], 0, 40)).toEqual({ widths: [500], scroll: 0 })
   })
+
+  it('stops the item on the left at its own minimum rather than the box floor', () => {
+    expect(pushDivider([600, 500, 800], 1, -300, [352, 500, 800])).toEqual({
+      widths: [352, 552, 800],
+      scroll: 52,
+    })
+  })
+
+  it('only ever widens the item on the right, so Traffic never drops below its floor', () => {
+    expect(pushDivider([500, 800], 1, -120, [500, 800])).toEqual({
+      widths: [500, 920],
+      scroll: 120,
+    })
+  })
+})
+
+describe('editor width', () => {
+  it('keeps eighty percent of the window when it grows or shrinks', () => {
+    expect(editorWidthIn(1_000)).toBe(800)
+    expect(editorWidthIn(2_000)).toBe(1_600)
+    expect(editorWidthIn(500)).toBe(400)
+    expect(editorWidthIn(999)).toBe(799)
+  })
+
+  it('ignores saved editor overrides without losing the rest of an old snapshot', () => {
+    const saved = { ...EMPTY_WORKSPACE, editorWidths: { p1: 1_900 } }
+    expect(WorkspaceSnapshot.parse(saved)).toEqual(EMPTY_WORKSPACE)
+  })
+})
+
+describe('the activity bar gutter', () => {
+  it('keeps the width the editor reported', () => {
+    expect(clampActivityBar(48, 800, 1_300)).toBe(48)
+    expect(clampActivityBar(36, 800, 1_300)).toBe(36)
+    expect(clampActivityBar(47.6, 800, 1_300)).toBe(48)
+  })
+
+  it('cannot be made wider than half the editor or half the pane', () => {
+    expect(clampActivityBar(10_000, 800, 1_300)).toBe(400)
+    expect(clampActivityBar(10_000, 800, 300)).toBe(150)
+  })
+
+  it('reserves nothing for a report that is negative or not a number', () => {
+    expect(clampActivityBar(-3, 800, 1_300)).toBe(0)
+    expect(clampActivityBar(Number.NaN, 800, 1_300)).toBe(0)
+    expect(clampActivityBar(48, 800, 0)).toBe(0)
+  })
+})
+
+describe('the rectangle the native editor is given', () => {
+  const box = (left: number, width: number, top = 43, height = 594): MeasuredBox => ({
+    left,
+    top,
+    width,
+    height,
+  })
+  const bar = box(103, 48)
+  const overlayScroller = box(151, 1_000, 40, 600)
+  const classicScroller = box(151, 1_000, 40, 611)
+
+  it('covers the bar and the whole body at rest, and lays out at that width', () => {
+    expect(editorViewport(bar, box(151, 741), overlayScroller)).toEqual({
+      rect: { x: 103, y: 43, width: 789, height: 585 },
+      layoutWidth: 789,
+    })
+  })
+
+  it('crops from the right as the body scrolls away, at the same logical width', () => {
+    expect(editorViewport(bar, box(-149, 741), overlayScroller)).toEqual({
+      rect: { x: 103, y: 43, width: 489, height: 585 },
+      layoutWidth: 789,
+    })
+  })
+
+  it('keeps the bar on screen once the body has scrolled out entirely', () => {
+    expect(editorViewport(bar, box(-800, 741), overlayScroller).rect).toEqual({
+      x: 103,
+      y: 43,
+      width: 48,
+      height: 585,
+    })
+  })
+
+  it('stops short of the pane edge for an editor wider than it, and lays out to fit', () => {
+    const { rect, layoutWidth } = editorViewport(bar, box(151, 1_600), overlayScroller)
+    expect(rect).toEqual({ x: 103, y: 43, width: 1_045, height: 585 })
+    expect(rect.x + rect.width).toBe(151 + 1_000 - ROW_EDGE_INSET)
+    expect(layoutWidth).toBe(1_045)
+  })
+
+  it('leaves an overlay scrollbar its strip at the bottom of the row', () => {
+    const { rect } = editorViewport(bar, box(151, 741), overlayScroller)
+    expect(rect.y + rect.height).toBe(40 + 600 - ROW_SCROLLBAR_STRIP)
+  })
+
+  it('needs no more room than a classic scrollbar already takes below the body', () => {
+    expect(editorViewport(bar, box(151, 741), classicScroller).rect).toEqual({
+      x: 103,
+      y: 43,
+      width: 789,
+      height: 594,
+    })
+  })
+
+  it('gives a hidden bar no width of its own', () => {
+    const none = box(103, 0)
+    const scroller = box(103, 1_048, 40, 600)
+    expect(editorViewport(none, box(-800, 741), scroller).rect.width).toBe(0)
+    expect(editorViewport(none, box(103, 741), scroller).rect.width).toBe(741)
+  })
+
+  it('rounds sub-pixel geometry, and has no layout width for a pane with no room', () => {
+    expect(editorViewport(box(103.4, 47.6), box(151.2, 740.6), overlayScroller).rect).toEqual({
+      x: 103,
+      y: 43,
+      width: 789,
+      height: 585,
+    })
+    expect(editorViewport(bar, box(151, 741), box(103, 0)).layoutWidth).toBeUndefined()
+  })
 })
 
 describe('resetBoxes', () => {
@@ -774,13 +907,125 @@ describe('resetBoxes', () => {
   })
 })
 
+describe('run terminal pane width', () => {
+  const MAIN = [{ id: 'main' }]
+  const SPLIT = [{ id: 'main' }, { id: 's2' }]
+
+  it('opens at 640 with one shell, and never below its 480 floor', () => {
+    expect(DEFAULT_PROJECT_TERMINAL).toEqual({ width: 640, shells: MAIN })
+    expect(PROJECT_TERMINAL_WIDTH).toEqual({ default: 640, min: 480, run: 640, slot: 320 })
+    expect(clampProjectTerminalWidth(Number.NaN)).toBe(640)
+    expect(clampProjectTerminalWidth(120)).toBe(480)
+    expect(clampProjectTerminalWidth(720.6)).toBe(721)
+  })
+
+  it('keeps 640 for Run and 320 per shell, lifting a narrower stored width', () => {
+    expect(projectTerminalMinimum(1)).toBe(960)
+    expect(projectTerminalMinimum(3)).toBe(1_600)
+    expect(projectTerminalWidth({ width: 640, shells: MAIN })).toBe(960)
+    expect(projectTerminalWidth({ width: 640, shells: [...SPLIT, { id: 's3' }] })).toBe(1_600)
+    expect(projectTerminalWidth({ width: 2_000, shells: SPLIT })).toBe(2_000)
+  })
+
+  it('repairs a stored width on the way through without touching Traffic or the shells', () => {
+    const repaired = normalizeWorkspace({
+      ...EMPTY_WORKSPACE,
+      trafficPanels: { p1: { open: true, width: 1_200 } },
+      projectTerminals: { p1: { width: 40, shells: SPLIT }, p2: { width: 900, shells: MAIN } },
+    })
+    expect(repaired.projectTerminals).toEqual({
+      p1: { width: 480, shells: SPLIT },
+      p2: { width: 900, shells: MAIN },
+    })
+    expect(repaired.trafficPanels).toEqual({ p1: { open: true, width: 1_200 } })
+  })
+
+  it('travels with the project and its shells through a detach and back', () => {
+    const workspace: WorkspaceSnapshot = {
+      ...EMPTY_WORKSPACE,
+      projectTerminals: { p1: { width: 760, shells: SPLIT }, p2: { width: 500, shells: MAIN } },
+    }
+    const slice = sliceOf(workspace, 'p1')
+    expect(slice.projectTerminal).toEqual({ width: 760, shells: SPLIT })
+    expect(detachedSnapshot('p1', slice).projectTerminals).toEqual({
+      p1: { width: 760, shells: SPLIT },
+    })
+    const elsewhere = { ...workspace, projectTerminals: { p2: { width: 500, shells: MAIN } } }
+    const returned = mergeSlice(elsewhere, 'p1', slice)
+    expect(returned.projectTerminals).toEqual({
+      p2: { width: 500, shells: MAIN },
+      p1: { width: 760, shells: SPLIT },
+    })
+    expect(mergeSlice(workspace, 'p1', {}).projectTerminals).toEqual({
+      p2: { width: 500, shells: MAIN },
+    })
+  })
+
+  it('repairs a blank, duplicated or empty roster into a usable one', () => {
+    expect(normalizeProjectShells([])).toEqual(MAIN)
+    expect(normalizeProjectShells([{ id: '' }])).toEqual(MAIN)
+    const messy = [{ id: 's2' }, { id: '' }, { id: 's2' }, { id: 's3' }]
+    expect(normalizeProjectShells(messy)).toEqual([{ id: 's2' }, { id: 's3' }])
+    const repaired = normalizeWorkspace({
+      ...EMPTY_WORKSPACE,
+      projectTerminals: { p1: { width: 640, shells: [] } },
+    })
+    expect(repaired.projectTerminals['p1']?.shells).toEqual(MAIN)
+  })
+
+  it('defaults an older pane to one shell, and parses an empty roster', () => {
+    const parsed = WorkspaceSnapshot.parse({
+      layout: { kind: 'leaf', paneId: 'pane-1' },
+      panes: { 'pane-1': { id: 'pane-1', tabs: ['p1'], activeTabId: 'p1' } },
+      focusedPaneId: 'pane-1',
+      projectTerminals: { p1: { width: 700 }, p2: { width: 700, shells: [] } },
+    })
+    expect(parsed.projectTerminals).toEqual({
+      p1: { width: 700, shells: MAIN },
+      p2: { width: 700, shells: [] },
+    })
+    expect(parsed.panes['pane-1']?.tabs).toEqual(['p1'])
+  })
+
+  it('parses a snapshot written before the pane, keeping its panes and widths', () => {
+    const parsed = WorkspaceSnapshot.parse({
+      layout: { kind: 'leaf', paneId: 'pane-1' },
+      panes: { 'pane-1': { id: 'pane-1', tabs: ['p1'], activeTabId: 'p1' } },
+      focusedPaneId: 'pane-1',
+      trafficPanels: { p1: { open: true, width: 960 } },
+    })
+    expect(parsed.projectTerminals).toEqual({})
+    expect(parsed.panes['pane-1']?.tabs).toEqual(['p1'])
+    expect(parsed.trafficPanels).toEqual({ p1: { open: true, width: 960 } })
+  })
+})
+
 describe('traffic panel', () => {
+  it('opens at its own default rather than a chat box width', () => {
+    expect(CLOSED_TRAFFIC).toEqual({ open: false, width: TRAFFIC_WIDTH.default })
+    expect(clampTrafficWidth(Number.NaN)).toBe(TRAFFIC_WIDTH.default)
+  })
+
   it('clamps a stored width up to the floor', () => {
     const repaired = normalizeWorkspace({
       ...EMPTY_WORKSPACE,
       trafficPanels: { p1: { open: true, width: 40 } },
     })
-    expect(repaired.trafficPanels['p1']).toEqual({ open: true, width: BOX_WIDTH.default })
+    expect(repaired.trafficPanels['p1']).toEqual({ open: true, width: TRAFFIC_WIDTH.min })
+  })
+
+  it('lifts a width saved under the old chat floor without opening or closing it', () => {
+    const repaired = normalizeWorkspace({
+      ...EMPTY_WORKSPACE,
+      trafficPanels: {
+        p1: { open: false, width: BOX_WIDTH.default },
+        p2: { open: true, width: 1_200 },
+      },
+    })
+    expect(repaired.trafficPanels).toEqual({
+      p1: { open: false, width: TRAFFIC_WIDTH.min },
+      p2: { open: true, width: 1_200 },
+    })
   })
 
   it('carries the panel through a slice and back, and drops it when absent', () => {
@@ -795,6 +1040,49 @@ describe('traffic panel', () => {
       width: 640,
     })
     expect(mergeSlice(workspace, 'p1', {}).trafficPanels['p1']).toBeUndefined()
+  })
+})
+
+describe('row scroll', () => {
+  it('moves one project’s offset through a slice without touching another’s', () => {
+    const workspace: WorkspaceSnapshot = { ...EMPTY_WORKSPACE, rowScroll: { a: 640, b: 120 } }
+    const slice = sliceOf(workspace, 'a')
+    expect(slice.rowScroll).toBe(640)
+    const merged = mergeSlice({ ...EMPTY_WORKSPACE, rowScroll: { b: 90 } }, 'a', slice)
+    expect(merged.rowScroll).toEqual({ a: 640, b: 90 })
+  })
+
+  it('drops an offset the slice does not carry', () => {
+    const workspace: WorkspaceSnapshot = { ...EMPTY_WORKSPACE, rowScroll: { a: 640, b: 120 } }
+    expect(sliceOf(EMPTY_WORKSPACE, 'a').rowScroll).toBeUndefined()
+    expect(mergeSlice(workspace, 'a', {}).rowScroll).toEqual({ b: 120 })
+  })
+
+  it('opens a detached window at its offset and brings the latest one back', () => {
+    expect(detachedSnapshot('a', { rowScroll: 640 }).rowScroll).toEqual({ a: 640 })
+    const applied = applyDetachedEntries(
+      { ...onePane('a', 'b'), rowScroll: { a: 640, b: 120 } },
+      [{ projectId: 'a', slice: { rowScroll: 320 } }]
+    )
+    expect(applied.rowScroll).toEqual({ a: 320, b: 120 })
+  })
+
+  it('removes offsets a row could not have reported', () => {
+    const repaired = normalizeWorkspace({
+      ...EMPTY_WORKSPACE,
+      rowScroll: { a: 640, b: 0, c: -40, d: Number.NaN, e: Number.POSITIVE_INFINITY },
+    })
+    expect(repaired.rowScroll).toEqual({ a: 640, b: 0 })
+  })
+
+  it('restores each project’s offset at launch', () => {
+    const restored = reconcileWorkspace(
+      { ...onePane('a', 'b'), rowScroll: { a: 640, b: 120 } },
+      ['c1', 'c2'],
+      ['a', 'b'],
+      { a: ['c1'], b: ['c2'] }
+    )
+    expect(restored.rowScroll).toEqual({ a: 640, b: 120 })
   })
 })
 
@@ -859,10 +1147,10 @@ describe('detached projects', () => {
 
   it('takes a detached project out of the panes and keeps its slice', () => {
     const applied = applyDetachedEntries(onePane('a', 'b'), [
-      { projectId: 'b', slice: { chorusWidth: 480 } },
+      { projectId: 'b', slice: { trafficPanel: { open: true, width: 900 } } },
     ])
     expect(applied.panes['pane-1']?.tabs).toEqual(['a'])
-    expect(applied.chorusWidths['b']).toBe(480)
+    expect(applied.trafficPanels['b']).toEqual({ open: true, width: 900 })
   })
 
   it('gives a dropped tab a slot that returns it where it was dropped', () => {
@@ -872,117 +1160,5 @@ describe('detached projects', () => {
     const slot = { paneId: 'pane-1', index: virtualIndex('pane-1', 1, detached) }
     const returned = returnTab(second.workspace, 'x', slot, { ...detached, x: slot })
     expect(returned.panes['pane-1']?.tabs).toEqual(['a', 'x', 'd'])
-  })
-})
-
-describe('paneSplit', () => {
-  it('puts the editor beside a chat at its floor', () => {
-    expect(paneSplit(1000, CHORUS_WIDTH.default)).toEqual({
-      chorus: 500,
-      editor: 500,
-      raised: 500,
-      covered: false,
-    })
-  })
-
-  it('resizes the editor live while it is at or above the resize floor', () => {
-    expect(paneSplit(1200, 700)).toEqual({
-      chorus: 700,
-      editor: 500,
-      raised: 500,
-      covered: false,
-    })
-  })
-
-  it('holds the chat at its floor for a stored width below it', () => {
-    expect(paneSplit(1000, 100)).toEqual({
-      chorus: CHORUS_WIDTH.min,
-      editor: 500,
-      raised: 500,
-      covered: false,
-    })
-  })
-
-  it('keeps the editor at the floor across the jump, and flips coverage with it', () => {
-    expect(paneSplit(1000, 600)).toEqual({
-      chorus: 600,
-      editor: EDITOR_WIDTH.resizeFloor,
-      raised: EDITOR_WIDTH.resizeFloor,
-      covered: false,
-    })
-    expect(paneSplit(1000, 601)).toEqual({
-      chorus: 601,
-      editor: EDITOR_WIDTH.resizeFloor,
-      raised: 500,
-      covered: true,
-    })
-  })
-
-  it('keeps the editor at the floor across the jump where the raised width equals it', () => {
-    expect(paneSplit(900, 500)).toEqual({
-      chorus: 500,
-      editor: EDITOR_WIDTH.resizeFloor,
-      raised: EDITOR_WIDTH.resizeFloor,
-      covered: false,
-    })
-    expect(paneSplit(900, 501)).toEqual({
-      chorus: 501,
-      editor: EDITOR_WIDTH.resizeFloor,
-      raised: EDITOR_WIDTH.resizeFloor,
-      covered: true,
-    })
-  })
-
-  it('stops the chat at the peek width whatever was stored', () => {
-    expect(paneSplit(1000, 5000)).toEqual({
-      chorus: 1000 - EDITOR_WIDTH.peek,
-      editor: EDITOR_WIDTH.resizeFloor,
-      raised: 500,
-      covered: true,
-    })
-  })
-
-  it('gives the chat a peek of editor beside it in a pane under 561', () => {
-    expect(paneSplit(560, 500)).toEqual({
-      chorus: 499,
-      editor: EDITOR_WIDTH.peek,
-      raised: EDITOR_WIDTH.peek,
-      covered: false,
-    })
-    expect(paneSplit(561, 500)).toEqual({
-      chorus: 500,
-      editor: EDITOR_WIDTH.peek,
-      raised: EDITOR_WIDTH.peek,
-      covered: false,
-    })
-  })
-
-  it('pins the editor beside the chat at 899, below the floor and never resizing', () => {
-    expect(paneSplit(899, 500)).toEqual({
-      chorus: 500,
-      editor: 399,
-      raised: 399,
-      covered: false,
-    })
-    expect(paneSplit(899, 700)).toEqual({
-      chorus: 700,
-      editor: 399,
-      raised: 399,
-      covered: true,
-    })
-  })
-
-  it('begins the resize regime at 900 and not before', () => {
-    expect(paneSplit(900, 500).editor).toBe(EDITOR_WIDTH.resizeFloor)
-    expect(paneSplit(899, 500).editor).toBe(399)
-  })
-
-  it('gives the chat no width at all in a pane below the peek', () => {
-    expect(paneSplit(50, 500)).toEqual({
-      chorus: 0,
-      editor: EDITOR_WIDTH.peek,
-      raised: EDITOR_WIDTH.peek,
-      covered: false,
-    })
   })
 })

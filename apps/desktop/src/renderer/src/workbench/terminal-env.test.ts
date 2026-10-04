@@ -1,7 +1,12 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { WorkbenchTerminalEnv } from '../../../shared/workbench-ipc.js'
 import {
+  issueTerminalEnv,
   overlayTerminalEnv,
+  parseIssuedTerminalEnv,
+  retainIssuedTerminalEnv,
+  reviveTerminalEnv,
+  serializeIssuedTerminalEnv,
   type TerminalEnvMemory,
   type TerminalEnvTarget,
 } from './terminal-env.js'
@@ -44,6 +49,157 @@ describe('overlaying the capture variable on the memory layer', () => {
     const on = overlayTerminalEnv(undefined, null, CAPTURE)
     const off = overlayTerminalEnv({ EXPO_PUBLIC_API_BASE_URL: 'theirs' }, on.owned, null)
     expect(off.memory).toEqual({ EXPO_PUBLIC_API_BASE_URL: 'theirs' })
+  })
+})
+
+describe('the capture variable in terminals the editor revives', () => {
+  const terminal = (env: unknown): Record<string, unknown> => ({
+    id: 3,
+    shellLaunchConfig: { name: 'zsh', env: { FROM_PROFILE: '1' } },
+    processDetails: { cwd: '/repo', title: 'zsh' },
+    processLaunchConfig: { env, executableEnv: { PATH: '/bin' }, options: { cols: 80 } },
+    replayEvent: { events: [{ cols: 80, rows: 24, data: 'npm run dev:clean\r\n' }] },
+    timestamp: 1,
+  })
+  const saved = (...state: unknown[]): string => JSON.stringify({ version: 1, state })
+  const read = (raw: string | undefined): unknown => {
+    const value: unknown = JSON.parse(raw ?? 'null')
+    return value
+  }
+  const NAME = CAPTURE.name
+  const at = (port: number): WorkbenchTerminalEnv => ({
+    name: NAME,
+    value: `http://127.0.0.1:${String(port)}`,
+  })
+
+  it('removes a URL Chorus handed out when it has nothing to hand out now', () => {
+    const raw = saved(terminal({ HOME: '/Users/me', [NAME]: at(30100).value }))
+
+    const revived = reviveTerminalEnv(raw, [at(30100)], null)
+
+    expect(read(revived.raw)).toEqual({ version: 1, state: [terminal({ HOME: '/Users/me' })] })
+    expect(revived.cleaned).toBe(true)
+  })
+
+  it('replaces a port from earlier in the session with the current one', () => {
+    const raw = saved(terminal({ HOME: '/', [NAME]: at(30100).value }))
+
+    const revived = reviveTerminalEnv(raw, [at(30100), at(30105)], at(30105))
+
+    expect(read(revived.raw)).toEqual({
+      version: 1,
+      state: [terminal({ HOME: '/', [NAME]: at(30105).value })],
+    })
+  })
+
+  it('moves the value from a renamed variable to the current name', () => {
+    const old = { name: 'OLD_API_URL', value: at(30100).value }
+    const raw = saved(terminal({ HOME: '/', OLD_API_URL: old.value }))
+
+    const revived = reviveTerminalEnv(raw, [old], at(30100))
+
+    expect(read(revived.raw)).toEqual({
+      version: 1,
+      state: [terminal({ HOME: '/', [NAME]: at(30100).value })],
+    })
+  })
+
+  it('keeps a value of the same name that Chorus never handed out', () => {
+    const raw = saved(terminal({ HOME: '/', [NAME]: 'https://staging.example' }))
+
+    const revived = reviveTerminalEnv(raw, [at(30100)], null)
+
+    expect(revived.raw).toBe(raw)
+    expect(revived.cleaned).toBe(true)
+  })
+
+  it('returns the saved text itself when removing and reapplying gives the same value', () => {
+    const raw = saved(terminal({ HOME: '/', [NAME]: at(30100).value }))
+
+    expect(reviveTerminalEnv(raw, [at(30100)], at(30100)).raw).toBe(raw)
+    expect(reviveTerminalEnv(raw, [], at(30100)).raw).toBe(raw)
+  })
+
+  it('still recognises a URL handed out more than thirty-two changes ago', () => {
+    let issued: readonly WorkbenchTerminalEnv[] = []
+    for (let port = 30100; port < 30140; port += 1) issued = issueTerminalEnv(issued, at(port))
+    const stored = parseIssuedTerminalEnv(serializeIssuedTerminalEnv(issued))
+    const raw = saved(terminal({ HOME: '/', [NAME]: at(30100).value }))
+
+    const revived = reviveTerminalEnv(raw, stored, at(30139))
+
+    expect(stored).toHaveLength(40)
+    expect(read(revived.raw)).toEqual({
+      version: 1,
+      state: [terminal({ HOME: '/', [NAME]: at(30139).value })],
+    })
+  })
+
+  it('cleans what it can read and says the state was incomplete', () => {
+    const raw = saved(terminal({ [NAME]: at(30100).value }), terminal(undefined), 'not a terminal')
+
+    const revived = reviveTerminalEnv(raw, [at(30100)], null)
+
+    expect(revived.cleaned).toBe(false)
+    expect(read(revived.raw)).toEqual({
+      version: 1,
+      state: [terminal({}), terminal(undefined), 'not a terminal'],
+    })
+  })
+
+  it('leaves anything it does not recognise exactly as it found it', () => {
+    const shapes = [
+      '{not json',
+      JSON.stringify({ version: 2, state: [terminal({})] }),
+      JSON.stringify({ version: 1, state: {} }),
+      JSON.stringify([terminal({})]),
+      JSON.stringify(saved(terminal({}))),
+    ]
+    for (const raw of shapes) {
+      expect(reviveTerminalEnv(raw, [at(30100)], CAPTURE)).toEqual({ raw, cleaned: false })
+    }
+    expect(reviveTerminalEnv(undefined, [at(30100)], CAPTURE)).toEqual({
+      raw: undefined,
+      cleaned: false,
+    })
+  })
+})
+
+describe('the record of what Chorus handed to terminals', () => {
+  const pair = { name: 'EXPO_PUBLIC_API_BASE_URL', value: 'http://127.0.0.1:30100' }
+  const other = { name: 'EXPO_PUBLIC_API_BASE_URL', value: 'http://127.0.0.1:30105' }
+
+  it('reads back what it wrote, and nothing it cannot trust', () => {
+    expect(parseIssuedTerminalEnv(serializeIssuedTerminalEnv([pair, other]))).toEqual([pair, other])
+    expect(
+      parseIssuedTerminalEnv(
+        JSON.stringify({
+          version: 1,
+          pairs: [pair, pair, { name: 'MY VAR', value: 'x' }, { name: 'OK', value: 3 }, 'x'],
+        })
+      )
+    ).toEqual([pair])
+    for (const raw of [undefined, '{not json', JSON.stringify({ version: 2, pairs: [pair] })]) {
+      expect(parseIssuedTerminalEnv(raw)).toEqual([])
+    }
+    expect(parseIssuedTerminalEnv(JSON.stringify({ version: 1, pairs: {} }))).toEqual([])
+  })
+
+  it('does not grow when the same value is handed out again', () => {
+    const issued = issueTerminalEnv([], pair)
+
+    expect(issueTerminalEnv(issued, { ...pair })).toBe(issued)
+    expect(issueTerminalEnv(issued, other)).toEqual([pair, other])
+  })
+
+  it('keeps every pair across a reload, and retires them only after a complete cleanup', () => {
+    const issued = [pair, other]
+
+    expect(retainIssuedTerminalEnv(issued, false, null)).toBe(issued)
+    expect(retainIssuedTerminalEnv(issued, false, other)).toBe(issued)
+    expect(retainIssuedTerminalEnv([pair], false, other)).toEqual([pair, other])
+    expect(retainIssuedTerminalEnv(issued, true, null)).toEqual([])
+    expect(retainIssuedTerminalEnv(issued, true, other)).toEqual([other])
   })
 })
 
@@ -131,6 +287,40 @@ describe('the capture variable in a live workbench', () => {
     const fake = memoryTarget()
     terminalEnv.bindTerminalEnv(fake.target)
     expect(fake.layers.get(OSX)).toEqual({ EXPO_PUBLIC_API_BASE_URL: CAPTURE.value })
+    expect(terminalEnv.currentTerminalEnv()).toEqual(CAPTURE)
+  })
+
+  it('records the seeded value when the record binds, and each later value before applying it', async () => {
+    vi.resetModules()
+    const terminalEnv = await import('./terminal-env.js')
+    const main = workbench(() => Promise.resolve(CAPTURE))
+    await terminalEnv.seedTerminalEnv()
+    const fake = memoryTarget()
+    terminalEnv.bindTerminalEnv(fake.target)
+
+    const recorded: [string, string | null][] = []
+    terminalEnv.bindIssuedTerminalEnv((env) => {
+      recorded.push([env.value, fake.layers.get(OSX)?.[env.name] ?? null])
+    })
+    const moved = { name: CAPTURE.name, value: 'http://127.0.0.1:30105' }
+    main.push(moved)
+    main.push(null)
+
+    expect(recorded).toEqual([
+      [CAPTURE.value, CAPTURE.value],
+      [moved.value, CAPTURE.value],
+    ])
+    expect(fake.layers.get(OSX)).toBeUndefined()
+  })
+
+  it('knows the variable from the first pull before any service exists', async () => {
+    vi.resetModules()
+    const terminalEnv = await import('./terminal-env.js')
+    workbench(() => Promise.resolve(CAPTURE))
+
+    expect(terminalEnv.currentTerminalEnv()).toBeNull()
+    await terminalEnv.seedTerminalEnv()
+    expect(terminalEnv.currentTerminalEnv()).toEqual(CAPTURE)
   })
 
   it('restores the memory it found on every platform key when capture stops', async () => {

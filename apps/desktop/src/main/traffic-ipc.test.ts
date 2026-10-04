@@ -18,6 +18,7 @@ const { ProjectTrafficRegistry } = await import('./project-traffic.js')
 const { TRAFFIC_PUSH_CHANNEL } = await import('../shared/traffic-ipc.js')
 
 const PROJECT = 'p1'
+const OTHER = 'p2'
 const CAPTURE = 'cap-1'
 
 const state = {
@@ -56,14 +57,14 @@ const legacy = {
   error: null,
 }
 
-function fakeWindow(): {
+function fakeWindow(id = 7): {
   sender: Record<string, unknown>
   sent: { channel: string; payload: unknown }[]
 } {
   const sent: { channel: string; payload: unknown }[] = []
   const frame = {}
   const sender = {
-    id: 7,
+    id,
     mainFrame: frame,
     send: (channel: string, payload: unknown) => {
       sent.push({ channel, payload })
@@ -121,6 +122,24 @@ const call = (channel: string, event: unknown, raw: unknown): unknown => {
 
 const pushes = (sent: { channel: string; payload: unknown }[]): unknown[] =>
   sent.filter((each) => each.channel === TRAFFIC_PUSH_CHANNEL).map((each) => each.payload)
+
+const deliveredTo = (sent: { channel: string; payload: unknown }[]): string[] =>
+  pushes(sent).map((push) => (push as { subscriptionId: string }).subscriptionId)
+
+const attach = async (event: unknown, projectId: string): Promise<string> => {
+  const attached = (await call('traffic:attach', event, { projectId })) as {
+    subscriptionId: string
+  }
+  return attached.subscriptionId
+}
+
+const rowsFor = (projectId: string, seq = 1): unknown => ({
+  kind: 'rows',
+  projectId,
+  captureId: CAPTURE,
+  seq,
+  rows: [{ ...row, seq }],
+})
 
 const serverOn = (): Promise<{ port: number; close: () => Promise<void> }> =>
   new Promise((resolve) => {
@@ -271,7 +290,7 @@ describe('traffic ipc delivery', () => {
       remember: () => undefined,
       address: () => '127.0.0.1',
     })
-    registry.configure(PROJECT, {})
+    await registry.configure(PROJECT, {})
 
     const { ipc, sent, event } = build(registry)
     await call('traffic:attach', event, { projectId: PROJECT })
@@ -304,5 +323,118 @@ describe('traffic ipc delivery', () => {
     await registry.shutdown()
     ipc.close()
     await upstream.close()
+  })
+})
+
+describe('traffic ipc subscriptions', () => {
+  it('keeps a subscription per project in one window, each with its own credit', async () => {
+    const { sent, listeners, event } = stubRegistry()
+    const first = await attach(event, PROJECT)
+    const second = await attach(event, OTHER)
+
+    listeners[0]?.(rowsFor(PROJECT, 1))
+    listeners[0]?.(rowsFor(OTHER, 1))
+    listeners[0]?.(rowsFor(PROJECT, 2))
+    expect(deliveredTo(sent)).toEqual([first, second])
+
+    await call('traffic:ack', event, { projectId: OTHER, subscriptionId: second, seq: 1 })
+    expect(deliveredTo(sent)).toEqual([first, second])
+
+    await call('traffic:ack', event, { projectId: PROJECT, subscriptionId: first, seq: 1 })
+    expect(deliveredTo(sent)).toEqual([first, second, first])
+  })
+
+  it('replaces only the earlier subscription of the same project', async () => {
+    const { sent, listeners, event } = stubRegistry()
+    const replaced = await attach(event, PROJECT)
+    const other = await attach(event, OTHER)
+    const current = await attach(event, PROJECT)
+
+    listeners[0]?.(rowsFor(PROJECT))
+    listeners[0]?.(rowsFor(OTHER))
+
+    expect(current).not.toBe(replaced)
+    expect(deliveredTo(sent)).toEqual([current, other])
+  })
+
+  it('leaves the newer subscription delivering when a replaced one detaches late', async () => {
+    const { sent, listeners, event } = stubRegistry()
+    const replaced = await attach(event, PROJECT)
+    const current = await attach(event, PROJECT)
+
+    await call('traffic:detach', event, { projectId: PROJECT, subscriptionId: replaced })
+    listeners[0]?.(rowsFor(PROJECT))
+
+    expect(deliveredTo(sent)).toEqual([current])
+  })
+
+  it('keeps delivering to the other projects of a window when one detaches', async () => {
+    const { sent, listeners, event } = stubRegistry()
+    const leaving = await attach(event, PROJECT)
+    const staying = await attach(event, OTHER)
+
+    await call('traffic:detach', event, { projectId: PROJECT, subscriptionId: leaving })
+    listeners[0]?.(rowsFor(PROJECT))
+    listeners[0]?.(rowsFor(OTHER))
+
+    expect(deliveredTo(sent)).toEqual([staying])
+  })
+
+  it('releases every subscription of a closed window and none of another window', async () => {
+    const { ipc, sent, listeners, event } = stubRegistry()
+    const second = fakeWindow(8)
+    ipc.registerShell(second.sender as unknown as WebContents, { kind: 'main' })
+    const secondEvent = { sender: second.sender, senderFrame: second.sender['senderFrame'] }
+    await attach(event, PROJECT)
+    await attach(event, OTHER)
+    const surviving = await attach(secondEvent, PROJECT)
+
+    ipc.releaseShell((event as { sender: WebContents }).sender)
+    listeners[0]?.(rowsFor(PROJECT))
+    listeners[0]?.(rowsFor(OTHER))
+
+    expect(pushes(sent)).toEqual([])
+    expect(deliveredTo(second.sent)).toEqual([surviving])
+  })
+})
+
+describe('manual capture beside a managed run', () => {
+  const routed = (
+    capture: (projectId: string, change: 'start' | 'stop') => Promise<typeof state>
+  ): unknown => {
+    const { sender } = fakeWindow(8)
+    const registry = {
+      subscribe: () => () => undefined,
+      state: () => state,
+      start: () => Promise.reject(new Error('the registry was asked directly')),
+      stop: () => Promise.reject(new Error('the registry was asked directly')),
+    }
+    const ipc = new TrafficIpc({
+      registry: registry as never,
+      isAdopted: () => true,
+      legacy: () => legacy,
+      decideLegacy: () => undefined,
+      capture,
+    })
+    ipc.registerShell(sender as unknown as WebContents, { kind: 'main' })
+    return { sender, senderFrame: sender['senderFrame'] }
+  }
+
+  it('sends Start and Stop through the capture route, never straight to the registry', async () => {
+    const asked: string[] = []
+    const event = routed((projectId, change) => {
+      asked.push(`${change} ${projectId}`)
+      return Promise.resolve(state)
+    })
+    expect(await call('traffic:stop', event, { projectId: PROJECT })).toEqual({ state })
+    expect(await call('traffic:start', event, { projectId: PROJECT })).toEqual({ state })
+    expect(asked).toEqual([`stop ${PROJECT}`, `start ${PROJECT}`])
+  })
+
+  it('answers a refusal from the capture route as a failed request', async () => {
+    const event = routed(() => Promise.reject(new Error('Capture belongs to the running command')))
+    await expect(call('traffic:stop', event, { projectId: PROJECT })).rejects.toThrow(
+      'running command'
+    )
   })
 })

@@ -1,18 +1,19 @@
 import type { IdeContextPush } from '../../../shared/ipc.js'
-import { useCallback, useEffect, useLayoutEffect, useMemo, useState } from 'react'
+import type { RunState } from '../../../shared/run-ipc.js'
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type RefObject } from 'react'
 import { useShallow } from 'zustand/react/shallow'
 import { isAgentId, type AgentId } from '@chorus/shared'
 import { withBackgroundWork, type SessionRowState } from './session-row.js'
 import {
-  CHORUS_WIDTH,
   CLOSED_TERMINAL_PANEL,
   type ConversationArrangement,
+  type ProjectTerminalPaneState,
   type TerminalPanelState,
   type TrafficPanelState,
   type WorkspaceLayoutNode,
   type WorkspacePane,
 } from '../../../shared/workspace-layout.js'
-import { CLOSED_TRAFFIC, leafPaneIds, tabLocation } from './layout.js'
+import { CLOSED_TRAFFIC, DEFAULT_PROJECT_TERMINAL, leafPaneIds, tabLocation } from './layout.js'
 import {
   useWorkspaceStore,
   type SessionPulse,
@@ -55,8 +56,11 @@ function selectActions(state: WorkspaceStore): WorkspaceActions {
     showConversationIn,
     focusConversationGroup,
     adoptConversation,
-    toggleTraffic,
     setTrafficWidth,
+    setProjectTerminalWidth,
+    addProjectShell,
+    removeProjectShell,
+    setRowScroll,
     moveConversationBox,
     setConversationWidths,
     resetProjectWidths,
@@ -81,8 +85,6 @@ function selectActions(state: WorkspaceStore): WorkspaceActions {
     removeProject,
     setSidebarHidden,
     setSidebarWidth,
-    setChorusWidth,
-    toggleWorkbench,
     toggleGlobalTerminal,
     setGlobalTerminalOpen,
     setGlobalTerminalHeight,
@@ -109,8 +111,11 @@ function selectActions(state: WorkspaceStore): WorkspaceActions {
     showConversationIn,
     focusConversationGroup,
     adoptConversation,
-    toggleTraffic,
     setTrafficWidth,
+    setProjectTerminalWidth,
+    addProjectShell,
+    removeProjectShell,
+    setRowScroll,
     moveConversationBox,
     setConversationWidths,
     resetProjectWidths,
@@ -135,8 +140,6 @@ function selectActions(state: WorkspaceStore): WorkspaceActions {
     removeProject,
     setSidebarHidden,
     setSidebarWidth,
-    setChorusWidth,
-    toggleWorkbench,
     toggleGlobalTerminal,
     setGlobalTerminalOpen,
     setGlobalTerminalHeight,
@@ -231,61 +234,121 @@ export function useSidebarWidth(): number {
   return useWorkspaceStore((state) => state.sidebarWidth)
 }
 
-/** Whether this project's workbench is on screen. Absent means on. */
-export function useWorkbenchShown(projectId: string | null): boolean {
-  return useWorkspaceStore((state) =>
-    projectId === null ? false : state.workbenchHidden[projectId] !== true
-  )
-}
-
-/**
- * One project's workbench/Chorus divider, falling back to the default.
- *
- * The fallback lives here rather than in the store so that a project which has
- * never been dragged holds *no* entry — the record then says exactly which
- * projects somebody has arranged, and seeding every project with 420 on first
- * sight would make that unanswerable.
- */
-export function useChorusWidth(projectId: string | null): number {
-  return useWorkspaceStore((state) =>
-    projectId === null
-      ? CHORUS_WIDTH.default
-      : (state.chorusWidths[projectId] ?? CHORUS_WIDTH.default)
-  )
-}
-
-export function useRaisedEditor(
-  projectId: string | null,
-  covered: boolean
-): readonly [raised: boolean, raise: () => void, lower: () => void] {
-  const [raisedIn, setRaisedIn] = useState<string | null>(null)
-  useLayoutEffect(() => {
-    if (!covered || raisedIn !== projectId) setRaisedIn(null)
-  }, [covered, projectId, raisedIn])
-  const raise = useCallback(() => {
-    setRaisedIn(projectId)
-  }, [projectId])
-  const lower = useCallback(() => {
-    setRaisedIn(null)
-  }, [])
-  return [covered && raisedIn !== null && raisedIn === projectId, raise, lower]
-}
-
 export function useTrafficPanel(projectId: string | null): TrafficPanelState {
   return useWorkspaceStore((state) =>
     projectId === null ? CLOSED_TRAFFIC : (state.trafficPanels[projectId] ?? CLOSED_TRAFFIC)
   )
 }
 
+export function useProjectTerminalPane(projectId: string | null): ProjectTerminalPaneState {
+  return useWorkspaceStore((state) =>
+    projectId === null
+      ? DEFAULT_PROJECT_TERMINAL
+      : (state.projectTerminals[projectId] ?? DEFAULT_PROJECT_TERMINAL)
+  )
+}
+
+export function useProjectRun(projectId: string | null): RunState | null {
+  const [run, setRun] = useState<{ readonly projectId: string; readonly state: RunState } | null>(
+    null
+  )
+  useEffect(() => {
+    if (projectId === null) return undefined
+    let mounted = true
+    let pushed = false
+    const stop = window.chorus.onRun((push) => {
+      if (push.projectId !== projectId) return
+      pushed = true
+      setRun({ projectId, state: push })
+    })
+    void window.chorus
+      .readRunState({ projectId })
+      .then((read) => {
+        if (mounted && !pushed) setRun({ projectId, state: read })
+      })
+      .catch(() => undefined)
+    return () => {
+      mounted = false
+      stop()
+    }
+  }, [projectId])
+  return run !== null && run.projectId === projectId ? run.state : null
+}
+
+const GESTURES = ['wheel', 'pointerdown', 'keydown', 'touchstart'] as const
+
+interface RowRestore {
+  readonly projectId: string
+  readonly target: number
+  applied: number
+  touched: boolean
+  settled: boolean
+}
+
+export function useRowScroll(
+  scroller: RefObject<HTMLElement | null>,
+  projectId: string | null,
+  settled: boolean,
+  mounted: boolean
+): void {
+  const restoring = useRef<RowRestore | null>(null)
+  useLayoutEffect(() => {
+    const row = scroller.current
+    if (row === null || projectId === null) return undefined
+    const store = useWorkspaceStore.getState()
+    const target = store.rowScroll[projectId] ?? 0
+    row.scrollLeft = target
+    const plan: RowRestore = {
+      projectId,
+      target,
+      applied: row.scrollLeft,
+      touched: false,
+      settled: false,
+    }
+    restoring.current = plan
+    const touch = (): void => {
+      plan.touched = true
+    }
+    const save = (): void => {
+      const pending = restoring.current === plan && !plan.touched
+      if (pending && (!plan.settled || row.scrollLeft === plan.applied)) return
+      if (restoring.current === plan) restoring.current = null
+      store.setRowScroll(projectId, row.scrollLeft)
+    }
+    for (const gesture of GESTURES) {
+      row.addEventListener(gesture, touch, { capture: true, passive: true })
+    }
+    row.addEventListener('scroll', save, { passive: true })
+    return () => {
+      for (const gesture of GESTURES) row.removeEventListener(gesture, touch, { capture: true })
+      row.removeEventListener('scroll', save)
+      if (restoring.current === plan) restoring.current = null
+    }
+  }, [scroller, projectId, mounted])
+  useLayoutEffect(() => {
+    const row = scroller.current
+    const plan = restoring.current
+    if (!settled || row === null || plan === null) return
+    if (plan.projectId !== projectId || plan.settled) return
+    if (!plan.touched) {
+      row.scrollLeft = plan.target
+      plan.applied = row.scrollLeft
+    }
+    plan.settled = true
+  }, [scroller, projectId, settled, mounted])
+}
+
 export function useTrafficLive(projectId: string | null): boolean {
   const [live, setLive] = useState<readonly string[]>([])
   useEffect(() => {
     let mounted = true
+    let pushed = false
     const stop = window.chorus.onTrafficLive((push) => {
+      pushed = true
       setLive(push.projectIds)
     })
     void window.chorus.readTrafficLive({}).then((read) => {
-      if (mounted) setLive(read.projectIds)
+      if (mounted && !pushed) setLive(read.projectIds)
     })
     return () => {
       mounted = false

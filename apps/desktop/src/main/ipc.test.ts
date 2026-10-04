@@ -211,6 +211,51 @@ describe('conversation:start', () => {
   })
 })
 
+describe('conversation:begin and conversation:awaitStart', () => {
+  const begun = {
+    conversationId: 'c1',
+    participants: [],
+    profileId: 'read-only',
+    projectId: 'p1',
+    cwd: '/tmp/repo',
+    title: 'repo',
+  }
+
+  type Channel = 'conversation:begin' | 'conversation:awaitStart'
+  const handler = (runtime: unknown, channel: Channel) => {
+    const handlers = buildHandlers(runtime as ChorusRuntime, () => null)
+    return handlers[channel] as (r: unknown) => Promise<unknown>
+  }
+
+  it('begins inside the project it was given, with no directory and no cast', async () => {
+    const beginConversation = vi.fn((_options: Record<string, unknown>) => begun)
+    const begin = handler({ beginConversation }, 'conversation:begin')
+    const answer = await begin({ projectId: 'p1', agents: ['claude'], continueFrom: 'c0' })
+
+    expect(answer).toEqual(begun)
+    expect(beginConversation).toHaveBeenCalledWith({ projectId: 'p1', continueFrom: 'c0' })
+    expect(Object.keys(beginConversation.mock.calls[0]?.[0] ?? {})).not.toContain('profileId')
+  })
+
+  it('passes a profile when one is given', async () => {
+    const beginConversation = vi.fn((_options: Record<string, unknown>) => begun)
+    const begin = handler({ beginConversation }, 'conversation:begin')
+    await begin({ projectId: 'p1', profileId: 't' })
+
+    expect(beginConversation).toHaveBeenCalledWith({ projectId: 'p1', profileId: 't' })
+  })
+
+  it('asks for the outcome of the conversation it names', async () => {
+    const outcome = { status: 'failed', message: 'claude fell over' }
+    const awaitStart = vi.fn((_conversationId: string) => Promise.resolve(outcome))
+    const wait = handler({ awaitStart }, 'conversation:awaitStart')
+    const answer = await wait({ conversationId: 'c1' })
+
+    expect(answer).toBe(outcome)
+    expect(awaitStart).toHaveBeenCalledWith('c1')
+  })
+})
+
 describe('the channels that could move a conversation', () => {
   /*
    * A guard rather than a formality. The renderer's controls are gone, but a

@@ -166,29 +166,30 @@
    *
    * Tokens rather than a palette handed to xterm, because a hardcoded ANSI set
    * would be the first thing in this file to ignore the light block below —
-   * every other rule in the app reads a variable, and a terminal drawing #ef7f92
+   * every other rule in the app reads a variable, and a terminal drawing #e5e510
    * on white would be the one surface that never got the memo.
    *
-   * Drawn from the syntax hues above wherever a hue exists, so a red in a diff
-   * and a red from `git status` are the same red. The eight "bright" slots are
-   * the same hues lifted, not eight more decisions.
+   * The editor terminal's own defaults (`terminal.ansi*` and `terminal.foreground`
+   * in the workbench's `terminalColorRegistry`), so a command's output looks the
+   * same in a Chorus terminal as in the editor's terminal beside it.
    */
-  --ansi-black: #3a3552;
-  --ansi-red: #ef7f92;
-  --ansi-green: #9fd39f;
-  --ansi-yellow: #e9a05c;
-  --ansi-blue: #8fb4ef;
-  --ansi-magenta: #c39aef;
-  --ansi-cyan: #7fd1c1;
-  --ansi-white: #ede8df;
-  --ansi-bright-black: #6f6890;
-  --ansi-bright-red: #ff9aab;
-  --ansi-bright-green: #b8e3b8;
-  --ansi-bright-yellow: #ffbb80;
-  --ansi-bright-blue: #aecbff;
-  --ansi-bright-magenta: #d9b8ff;
-  --ansi-bright-cyan: #a3e5d9;
-  --ansi-bright-white: #ffffff;
+  --terminal-foreground: #cccccc;
+  --ansi-black: #000000;
+  --ansi-red: #cd3131;
+  --ansi-green: #0dbc79;
+  --ansi-yellow: #e5e510;
+  --ansi-blue: #2472c8;
+  --ansi-magenta: #bc3fbc;
+  --ansi-cyan: #11a8cd;
+  --ansi-white: #e5e5e5;
+  --ansi-bright-black: #666666;
+  --ansi-bright-red: #f14c4c;
+  --ansi-bright-green: #23d18b;
+  --ansi-bright-yellow: #f5f543;
+  --ansi-bright-blue: #3b8eea;
+  --ansi-bright-magenta: #d670d6;
+  --ansi-bright-cyan: #29b8db;
+  --ansi-bright-white: #e5e5e5;
 
   /*
    * SF Mono first: it is what Terminal.app draws with on this machine, so the
@@ -410,29 +411,31 @@
     --git-renamed: #007100;
 
     /*
-     * The same sixteen, re-decided for a light ground.
+     * The editor terminal's light defaults, from the same registry.
      *
-     * `white` and `bright-white` invert rather than staying pale: a program that
+     * `white` is a dark gray there rather than staying pale: a program that
      * prints white text is asking for its *most prominent* colour, and on a
-     * light background pale is invisible. Every light terminal theme makes this
-     * trade; naming it here stops someone "fixing" it back.
+     * light background pale is invisible. The slots that stay pale, such as
+     * bright white and yellow, are lifted by the contrast floor `TerminalView`
+     * gives xterm, as the editor's terminal does.
      */
-    --ansi-black: #2a2640;
-    --ansi-red: #b32740;
-    --ansi-green: #1f7a3a;
-    --ansi-yellow: #a75d15;
-    --ansi-blue: #2a5fa8;
-    --ansi-magenta: #7b3fbf;
-    --ansi-cyan: #10716a;
-    --ansi-white: #5f5975;
-    --ansi-bright-black: #7a7392;
-    --ansi-bright-red: #8e1b30;
-    --ansi-bright-green: #15612c;
-    --ansi-bright-yellow: #82460f;
-    --ansi-bright-blue: #1d4784;
-    --ansi-bright-magenta: #5f2f96;
-    --ansi-bright-cyan: #0a5a54;
-    --ansi-bright-white: #1b1826;
+    --terminal-foreground: #333333;
+    --ansi-black: #000000;
+    --ansi-red: #cd3131;
+    --ansi-green: #107c10;
+    --ansi-yellow: #949800;
+    --ansi-blue: #0451a5;
+    --ansi-magenta: #bc05bc;
+    --ansi-cyan: #0598bc;
+    --ansi-white: #555555;
+    --ansi-bright-black: #666666;
+    --ansi-bright-red: #cd3131;
+    --ansi-bright-green: #14ce14;
+    --ansi-bright-yellow: #b5ba00;
+    --ansi-bright-blue: #0451a5;
+    --ansi-bright-magenta: #bc05bc;
+    --ansi-bright-cyan: #0598bc;
+    --ansi-bright-white: #a5a5a5;
 
     /*
      * The same roles, re-decided for a light ground.
@@ -7015,41 +7018,6 @@ input::placeholder {
 }
 
 /*
- * The Editor switch — shows and hides this project's workbench.
- *
- * It was a label saying which editor a selection came from, beside a pill naming
- * the file and a chip deciding whether to send it. All three are one control
- * now: context is always sent, so there is nothing to disclose and nothing to
- * decide, and the chip that sat here does the obvious thing instead.
- *
- */
-/*
- * Square, because the label is gone and the border is not.
- *
- * The pill kept its chrome deliberately: `@claude` and `@codex` beside it are
- * momentary — press one, it types a mention — while this one *is* something,
- * on or off, and the border and background are what say so. A bare icon here
- * would read as a third thing to press rather than a switch to look at.
- *
- * So width matches height rather than following text that no longer exists,
- * and `gap`, `font` and `white-space` go with the label they were laying out.
- */
-.ide-source {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  /* Never squashed: the row is `nowrap`, and only the pill may give. */
-  flex: none;
-  width: 28px;
-  height: 28px;
-  padding: 0;
-  border: 1px solid var(--border-default);
-  border-radius: 8px;
-  background: var(--bg-surface);
-  color: var(--text-secondary);
-}
-
-/*
  * The standing-instruction toggle, beside the editor button.
  *
  * A word rather than an icon, and `flex: none` like its neighbour so the row's
@@ -7080,40 +7048,6 @@ input::placeholder {
 .composer-style:disabled {
   opacity: 0.45;
   cursor: default;
-}
-
-.ide-source-icon {
-  width: 14px;
-  height: 14px;
-  fill: currentcolor;
-  opacity: 0.85;
-}
-
-.ide-source {
-  cursor: pointer;
-}
-
-.ide-source:hover,
-.ide-source:focus-visible {
-  border-color: var(--border-strong);
-  color: var(--text-primary);
-}
-
-/*
- * Off reads as off, and by more than colour.
- *
- * The editor being hidden is the unusual state and the one worth seeing at a
- * glance, so it is the one that changes: the chip dims and the mark goes
- * hollow. WCAG 1.4.1 — the border weight moves with the colour, so the state
- * survives a monochrome display.
- */
-.ide-source[aria-pressed='false'] {
-  border-style: dashed;
-  color: var(--text-muted);
-}
-
-.ide-source[aria-pressed='false'] .ide-source-icon {
-  opacity: 0.5;
 }
 
 /*
@@ -7305,6 +7239,8 @@ input::placeholder {
   flex-wrap: wrap;
   align-items: center;
   gap: calc(var(--step) * 2);
+  max-height: none;
+  overflow: visible;
 }
 
 .traffic-forwarded {
@@ -11053,10 +10989,13 @@ input::placeholder {
   user-select: none;
 }
 
-.workbench-still[data-cover] {
-  width: auto;
-  right: auto;
-  object-fit: fill;
+.workbench-still[data-native] {
+  position: fixed;
+  inset: auto;
+  left: var(--native-x);
+  top: var(--native-y);
+  width: var(--native-width);
+  height: var(--native-height);
 }
 
 /*
@@ -11075,22 +11014,6 @@ input::placeholder {
   justify-content: center;
   margin: 0;
   padding-inline: calc(var(--step) * 6);
-  color: var(--text-muted);
-  font-size: 12px;
-  text-align: center;
-  text-wrap: balance;
-  pointer-events: none;
-}
-
-.workbench-covered-hint {
-  position: absolute;
-  inset: 0 auto 0 0;
-  width: 48px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  margin: 0;
-  padding-inline: var(--step);
   color: var(--text-muted);
   font-size: 12px;
   text-align: center;
@@ -12492,22 +12415,25 @@ input::placeholder {
   color: var(--text-primary);
 }
 
-/*
- * A project pane's two regions — plan §2.4.
- *
- * The workbench takes the space and Chorus sits beside it, because that is the
- * hierarchy: the project is the environment and the conversation is one thing
- * happening in it. Row rather than column so the transcript keeps a readable
- * measure while the editor gets the width it needs.
- *
- * The workbench region is a **placeholder with a rectangle**. Nothing renders
- * inside it: main mirrors a `WebContentsView` over the space it occupies, which
- * is why it needs a size and no content, and why `position: relative` matters —
- * the error line below is the only thing that ever draws here.
- */
 .workspace-pane-content {
-  flex-direction: row;
   position: relative;
+  z-index: 0;
+}
+
+.workspace-pane-row {
+  display: flex;
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
+}
+
+.workspace-pane-gutter {
+  flex: 0 0 auto;
+  min-height: 0;
+}
+
+.workspace-pane-bar {
+  height: 100%;
 }
 
 /*
@@ -12526,7 +12452,6 @@ input::placeholder {
  */
 .workspace-pane-workbench {
   position: relative;
-  flex: 0 0 calc(100% - 500px);
   min-width: 0;
   min-height: 0;
   /*
@@ -12545,34 +12470,7 @@ input::placeholder {
    * an unbroken rounded pane, which is what it looks like in every editor that
    * has both.
    */
-  padding: 3px 8px 3px 13px;
-}
-
-.workspace-pane-workbench[data-covered='true'] {
-  cursor: pointer;
-}
-
-.editor-toggle-bar {
-  position: absolute;
-  inset: 0 auto 0 0;
-  z-index: 1;
-  width: 10px;
-  padding: 0;
-  border: 0;
-  border-right: 1px solid var(--border-default);
-  background: var(--bg-canvas);
-  cursor: pointer;
-  -webkit-app-region: no-drag;
-}
-
-.editor-toggle-bar:disabled {
-  cursor: default;
-}
-
-.editor-toggle-bar:not(:disabled):hover,
-.editor-toggle-bar:not(:disabled):focus-visible {
-  background: color-mix(in srgb, var(--accent-text) 30%, var(--bg-canvas));
-  outline: none;
+  padding: 3px 8px 3px 0;
 }
 
 /*
@@ -12628,73 +12526,6 @@ input::placeholder {
   font-size: 12px;
 }
 
-/* Chorus beside it: the dock, then the conversation, stacked. */
-/*
- * Longhand, and `clamp()` on `width` rather than inside the `flex` shorthand.
- *
- * `flex: 0 0 clamp(…)` is the obvious way to write this and it is why the
- * workbench came up squeezed into a third of the pane with the editor wrapping
- * at twenty characters: a `flex-basis` the parser will not accept invalidates
- * the **whole** declaration, so the column lost its grow and shrink values too
- * and fell back to sizing on content. A dropped declaration is silent — there is
- * no warning anywhere, only a layout that looks like a design decision.
- */
-/*
- * A **row** of conversation groups, where it used to be a column of dock + one
- * transcript.
- *
- * The direction flipped when a project's conversations gained groups: the
- * children here are now one or two `.conversation-column`s side by side, and
- * each of those is the column that used to be this element.
- */
-.workspace-pane-chorus {
-  display: flex;
-  /*
-   * A column, since the notes pad joined the conversation tree in here.
-   *
-   * It was `row`, which read as deliberate and was not: the only child was
-   * `.conversation-branch`, and a lone `flex: 1 1 auto` child fills its parent
-   * either way — so the direction had never been tested against a second child.
-   * The pad is that second child, and under `row` it docked to the left of the
-   * conversations as a narrow strip instead of sitting above them.
-   *
-   * The tree is unaffected. It still stretches to the full width and takes the
-   * height left over, and its own splits are decided by `data-orientation` on
-   * `.conversation-branch` rather than by anything inherited from here.
-   */
-  flex-direction: column;
-  /*
-   * A stacking context of its own, so the notes pad's `z-index` is decided
-   * here and not against the whole pane.
-   *
-   * Without it the column is transparent to stacking: every transcript, dock
-   * and card inside competes directly with the pad, and the ones that happen to
-   * be positioned win by document order. The symptom is the pad drawing over
-   * some conversation groups and under others in the same row, which is what a
-   * z-index that is only *usually* high enough looks like.
-   *
-   * `z-index: 0` rather than a number, because this element does not need to
-   * beat anything outside itself — the sash beside it is deliberately above,
-   * and the drag ghost is portalled to the body and out of reach either way.
-   */
-  position: relative;
-  z-index: 0;
-  flex-grow: 0;
-  flex-shrink: 1;
-  flex-basis: auto;
-  width: clamp(340px, 30%, 520px);
-  min-width: 500px;
-  min-height: 0;
-  border-left: 1px solid var(--border-default);
-}
-
-.workspace-pane-chorus:not([data-full='true']) {
-  position: absolute;
-  inset: 0 0 0 auto;
-  min-width: 0;
-  background: var(--bg-canvas);
-}
-
 .project-header {
   flex: 0 0 auto;
   display: flex;
@@ -12729,6 +12560,10 @@ input::placeholder {
   border-left: 1px solid var(--border-default);
 }
 
+.conversation-scroller > .conversation-sash[data-fixed] {
+  cursor: default;
+}
+
 .conversation-slot {
   display: flex;
   min-width: 500px;
@@ -12742,7 +12577,7 @@ input::placeholder {
 
 .traffic-box {
   flex: 0 0 auto;
-  min-width: 500px;
+  min-width: 800px;
   display: flex;
   flex-direction: column;
   min-height: 0;
@@ -12752,45 +12587,214 @@ input::placeholder {
   cursor: default;
 }
 
-/*
- * With the editor off, Chorus is the pane.
- *
- * `flex-grow` alone is not enough: the rule above sets an explicit `width`, and a
- * flex item's width wins over its ability to grow — so without clearing it the
- * column stayed at its clamp and sat in the left half of the pane with dead
- * space beside it. The border goes too; there is nothing on the other side of it
- * to divide.
- *
- * The project's remembered `chorusWidths` entry is untouched by any of this. It is an inline
- * style that the pane simply stops writing while the editor is off, so switching
- * back restores the divider exactly where it was left.
- */
-.workspace-pane-chorus[data-full='true'] {
-  /*
-   * **All three, because `width` and `flex-basis: auto` are what the base rule
-   * sizes this column with.**
-   *
-   * The base rule used to set `flex-shrink: 0` as well, on the reading that a
-   * column carrying an inline pixel width must stay exactly it. With the
-   * workbench off that zero was the bug — overriding `flex-grow` and `width`
-   * left the shrink at zero, so the column took its *content's* width as a floor
-   * it was forbidden to go under. Measured at 773px inside a 373px parent,
-   * ending 393px past the right of the window, which is the text being cut off.
-   *
-   * The same zero was the bug with the workbench **on**, one drag further out: a
-   * pane narrowed past the stored width left the column overflowing
-   * `.workspace-pane-content`, which clips. It is `1` now, so the column compacts
-   * instead — and it still sits at exactly its pixel width whenever the pane can
-   * hold it, because flex only distributes free space that has gone negative.
-   *
-   * `min-width: 0` cannot help a box that is not allowed to shrink at all, which
-   * is why adding it did not fix this. A zero basis is what makes the growth
-   * divide the parent rather than start from what the content wants.
-   */
+.project-terminal-box {
+  flex: 0 0 auto;
+  min-width: 480px;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.project-terminal-box .conversation-dock-tab {
+  cursor: default;
+}
+
+.project-terminal-state {
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+.project-terminal-body {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.project-terminal-empty {
+  padding: calc(var(--step) * 3);
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.project-terminal-empty p {
+  margin: 0;
+}
+
+.project-terminal-slots {
+  display: flex;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+.project-terminal-slot {
+  display: flex;
   flex: 1 1 0;
-  width: auto;
+  flex-direction: column;
+  min-width: 320px;
+  min-height: 0;
+}
+
+.project-terminal-slot--run {
+  min-width: 640px;
+}
+
+.project-terminal-slot + .project-terminal-slot {
+  border-left: 1px solid var(--border-default);
+}
+
+.project-terminal-slot-head {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: var(--step);
+  padding: calc(var(--step) * 0.5) calc(var(--step) * 2);
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+.project-terminal-slot-title {
+  flex: 1 1 auto;
   min-width: 0;
-  border-left: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.project-terminal-slot-close {
+  flex: none;
+  padding: 0 calc(var(--step) * 0.5);
+  border: 0;
+  background: none;
+  color: inherit;
+  font-size: 13px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.project-terminal-slot-close:hover,
+.project-terminal-slot-close:focus-visible {
+  color: var(--text-primary);
+}
+
+.run-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--step);
+  margin-top: var(--step);
+}
+
+.run-status {
+  flex: 1 1 auto;
+  min-width: 0;
+  color: var(--text-primary);
+  font-size: 12px;
+}
+
+.project-run {
+  display: flex;
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 40%;
+  margin-top: calc(var(--step) * 1.5);
+}
+
+.project-run > .run-primary {
+  flex: 0 1 auto;
+}
+
+.run-primary {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--step);
+  min-width: 0;
+}
+
+.run-capture-icon {
+  flex: none;
+}
+
+.run-primary[data-live='true'] {
+  border-color: color-mix(in srgb, var(--danger) 55%, transparent);
+  color: var(--danger);
+}
+
+.run-primary > .traffic-live-dot {
+  position: absolute;
+  top: 2px;
+  right: 2px;
+}
+
+.run-primary-label {
+  min-width: 0;
+  max-width: 180px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.run-controls .traffic-action:disabled,
+.project-run .traffic-action:disabled {
+  cursor: default;
+  opacity: 0.5;
+}
+
+.run-unavailable {
+  margin: 0;
+  padding: var(--step) calc(var(--step) * 3);
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+.run-setup {
+  display: flex;
+  flex: 0 1 auto;
+  flex-direction: column;
+  gap: calc(var(--step) * 2);
+  min-width: 0;
+  min-height: 0;
+  max-height: 50%;
+  padding: calc(var(--step) * 2) calc(var(--step) * 3);
+  border-bottom: 1px solid var(--border-default);
+  overflow-y: auto;
+}
+
+.run-setup > * {
+  flex-shrink: 0;
+}
+
+.run-choices {
+  display: flex;
+  flex-direction: column;
+  gap: var(--step);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.run-choice {
+  display: flex;
+  align-items: center;
+  gap: calc(var(--step) * 2);
+  font-size: 12px;
+}
+
+.run-command {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text-muted);
+  font-size: 11px;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.run-variables {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--step);
 }
 
 /*
@@ -13095,16 +13099,6 @@ input::placeholder {
   color: var(--text-primary);
 }
 
-.conversation-dock-add[data-live='true'] {
-  position: relative;
-}
-
-.conversation-dock-add > .traffic-live-dot {
-  position: absolute;
-  top: 3px;
-  right: 3px;
-}
-
 .traffic-live {
   display: inline-flex;
   flex: none;
@@ -13196,38 +13190,6 @@ input::placeholder {
 /* The tab in flight, dimmed where it came from. */
 .conversation-dock-tab[data-dragging] {
   opacity: 0.4;
-}
-
-/*
- * The workbench/Chorus divider.
- *
- * Wider hit area than it looks: 1px of visible line inside 9px of grab target,
- * the same trade `.workspace-sash` makes. A `col-resize` cursor and a hover tint
- * are the only affordance — a visible handle would draw a third vertical edge
- * into a pane that already has two.
- */
-/* No negative margin on the left: that would put the grab area back over the
-   view the padding above just cleared. It may overlap Chorus, which is ours. */
-.chorus-sash {
-  position: absolute;
-  inset: 0 auto 0 -5px;
-  width: 9px;
-  z-index: 2;
-  cursor: col-resize;
-  background: transparent;
-  -webkit-app-region: no-drag;
-}
-
-.chorus-sash:hover,
-.chorus-sash:focus-visible {
-  background: linear-gradient(
-    to right,
-    transparent 4px,
-    var(--accent-text) 4px,
-    var(--accent-text) 5px,
-    transparent 5px
-  );
-  outline: none;
 }
 
 /*

@@ -61,21 +61,48 @@ describe('open project persistence', () => {
          * The Phase 9 slice of this list, and the reason it is spelled out
          * rather than spread from a helper: this test's whole job is to fail
          * when the schema gains or loses a field, so each one is named here on
-         * purpose. `changes` left with the Changes panel; the three below
-         * arrived with project-level layout — the conversation `PaneTree` per
-         * project, the Chorus/editor divider position, and the Editor switch.
-         *
-         * `workbenchHidden` is keyed by what is *hidden* rather than what is
-         * shown, so the empty object means every editor is on. Defaulting it
-         * the other way would open a restored workspace with every workbench
-         * dark and nothing saying why.
+         * purpose. `changes` left with the Changes panel.
          */
         conversationGroups: {},
-        chorusWidths: {},
-        workbenchHidden: {},
         globalTerminal: { open: false, height: TERMINAL_HEIGHT.default, tabs: [], activeId: null },
         trafficPanels: {},
+        projectTerminals: {},
+        rowScroll: {},
       },
+    })
+  })
+
+  it('still restores the conversations from a workspace written before the run terminal pane', () => {
+    const parsed = parseOpenProjects(
+      file({
+        ...paneLayout,
+        sidebarHidden: false,
+        trafficPanels: { a: { open: true, width: 960 } },
+        rowScroll: { a: 320 },
+      })
+    )
+    expect(parsed.projects[0]?.conversations).toHaveLength(1)
+    expect(parsed.workspace?.projectTerminals).toEqual({})
+    expect(parsed.workspace?.trafficPanels).toEqual({ a: { open: true, width: 960 } })
+    expect(parsed.workspace?.rowScroll).toEqual({ a: 320 })
+  })
+
+  it('keeps the conversations when a pane predates shells or holds a broken roster', () => {
+    const parsed = parseOpenProjects(
+      file({
+        ...paneLayout,
+        projectTerminals: {
+          a: { width: 700 },
+          b: { width: 700, shells: [] },
+          c: { width: 700, shells: [{ id: '' }, { id: 's2' }, { id: 's2' }] },
+        },
+      })
+    )
+    expect(parsed.projects[0]?.conversations).toHaveLength(1)
+    expect(parsed.workspace?.projectTerminals).toEqual({
+      a: { width: 700, shells: [{ id: 'main' }] },
+      b: { width: 700, shells: [] },
+      c: { width: 700, shells: [{ id: '' }, { id: 's2' }, { id: 's2' }] },
     })
   })
 
@@ -186,6 +213,14 @@ describe('open project persistence', () => {
       tabs: [{ id: 'g1' }, { id: 'g2' }],
       activeId: 'g2',
     })
+  })
+
+  it('keeps each project’s row offset', () => {
+    const parsed = parseOpenProjects(
+      file({ ...paneLayout, sidebarHidden: false, rowScroll: { a: 640, b: 0 } })
+    )
+    expect(parsed.projects[0]?.conversations).toHaveLength(1)
+    expect(parsed.workspace?.rowScroll).toEqual({ a: 640, b: 0 })
   })
 
   it('keeps a draft that was never sent', () => {

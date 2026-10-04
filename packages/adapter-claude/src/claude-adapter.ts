@@ -10,6 +10,7 @@ import {
   type Query,
 } from '@anthropic-ai/claude-agent-sdk'
 import { editorMcpServer } from './editor-tool.js'
+import { PROJECT_TOOL_IDS, projectMcpServer } from './project-tool.js'
 import { READ_TRANSCRIPT_TOOL, transcriptMcpServer } from './transcript-tool.js'
 import type {
   AccountSummary,
@@ -51,6 +52,16 @@ import {
 } from './mapping.js'
 
 const run = promisify(execFile)
+
+const VERSION_PROBE_TTL_MS = 30_000
+
+type VersionProbe = { readonly version: string } | { readonly reason: string }
+
+interface VersionProbeEntry {
+  readonly key: string
+  readonly result: Promise<VersionProbe>
+  doneAt: number | null
+}
 
 /**
  * `AgentAdapter` over `@anthropic-ai/claude-agent-sdk`.
@@ -1098,6 +1109,7 @@ export class ClaudeAdapter implements AgentAdapter {
   /** How to spawn it ourselves, which is not always the path the SDK is given. */
   private launch: { readonly file: string; readonly args: readonly string[] } | undefined
   private resolving: Promise<void> | null = null
+  private latestProbe: VersionProbeEntry | undefined
   private readonly approvalTtlMs: number
   private readonly now: () => number
   private readonly createQuery:
@@ -1179,6 +1191,35 @@ export class ClaudeAdapter implements AgentAdapter {
     return this.resolving
   }
 
+  private probeVersion(file: string, args: readonly string[]): Promise<VersionProbe> {
+    const key = JSON.stringify([file, ...args])
+    const current = this.latestProbe
+    if (current?.key === key) {
+      if (current.doneAt === null) return current.result
+      const age = this.now() - current.doneAt
+      if (age >= 0 && age < VERSION_PROBE_TTL_MS) return current.result
+    }
+    const result = run(file, [...args, '--version'], { timeout: 10_000 }).then(
+      ({ stdout }): VersionProbe => {
+        const version = /\d+\.\d+\.\d+[\w.-]*/.exec(stdout.trim())?.[0]
+        return version === undefined
+          ? { reason: `could not parse version from "${stdout.trim()}"` }
+          : { version }
+      },
+      (error: unknown): VersionProbe => ({
+        reason: error instanceof Error ? error.message : String(error),
+      })
+    )
+    const entry: VersionProbeEntry = { key, result, doneAt: null }
+    this.latestProbe = entry
+    void result.then((outcome) => {
+      if (this.latestProbe !== entry) return
+      if ('version' in outcome) entry.doneAt = this.now()
+      else this.latestProbe = undefined
+    })
+    return result
+  }
+
   async health(): Promise<HealthStatus> {
     // Health runs before any session, so this is where the lookup lands.
     await this.resolveOnce()
@@ -1190,13 +1231,8 @@ export class ClaudeAdapter implements AgentAdapter {
        * unavailable.
        */
       const probe = this.launch ?? { file: this.executablePath ?? this.command, args: [] }
-      const { stdout } = await run(probe.file, [...probe.args, '--version'], {
-        timeout: 10_000,
-      })
-      const version = /\d+\.\d+\.\d+[\w.-]*/.exec(stdout.trim())?.[0]
-      if (version === undefined) {
-        return { state: 'unavailable', reason: `could not parse version from "${stdout.trim()}"` }
-      }
+      const outcome = await this.probeVersion(probe.file, probe.args)
+      if ('reason' in outcome) return { state: 'unavailable', reason: outcome.reason }
       /*
        * Asked *after* the probe, not before, so a missing binary still reports
        * as a missing binary. "Needs a key" is only the useful answer once
@@ -1205,7 +1241,7 @@ export class ClaudeAdapter implements AgentAdapter {
        */
       const blocked = this.precondition?.() ?? null
       return blocked === null
-        ? { state: 'ready', version }
+        ? { state: 'ready', version: outcome.version }
         : { state: 'unavailable', reason: blocked }
     } catch (error) {
       return {
@@ -1368,13 +1404,13 @@ export class ClaudeAdapter implements AgentAdapter {
       opts.editorPlace ?? { host: '', root: opts.cwd }
     )
     const transcriptServer = transcriptMcpServer(opts.transcript)
+    const projectServer = projectMcpServer(opts.project)
+    const mcpServers = { ...editorServer, ...transcriptServer, ...projectServer }
 
     const options: Options = {
       cwd: opts.cwd,
       includePartialMessages: true,
-      ...(editorServer === undefined && transcriptServer === undefined
-        ? {}
-        : { mcpServers: { ...editorServer, ...transcriptServer } }),
+      ...(Object.keys(mcpServers).length === 0 ? {} : { mcpServers }),
       /*
        * Hook activity, which was mapped and never arrived.
        *
@@ -1517,7 +1553,10 @@ export class ClaudeAdapter implements AgentAdapter {
        */
       ...(fork?.inherits === 'nothing' ? { settingSources: [] } : {}),
       canUseTool: (toolName, input, options) => {
-        if (toolName === READ_TRANSCRIPT_TOOL) {
+        if (
+          toolName === READ_TRANSCRIPT_TOOL ||
+          (projectServer !== undefined && PROJECT_TOOL_IDS.has(toolName))
+        ) {
           return Promise.resolve<PermissionResult>({ behavior: 'allow', updatedInput: input })
         }
         const session = holder.session

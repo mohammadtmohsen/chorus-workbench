@@ -3,11 +3,15 @@ import {
   TerminalService,
   describeForeground,
   type Frame,
+  type LaunchSpec,
+  type ProjectTerminalRef,
   type Pty,
   type PtyOptions,
+  type TerminalAttachment,
   type TerminalEvent,
   type TerminalPush,
   type TerminalRef,
+  type TerminalServiceOptions,
 } from './terminal.js'
 
 /** A PTY that records what was asked of it and lets a test push output in. */
@@ -63,7 +67,7 @@ interface Harness {
   tick: () => void
 }
 
-function build(): Harness {
+function build(overrides: Partial<TerminalServiceOptions> = {}): Harness {
   const spawned: FakePty[] = []
   const pushes: TerminalPush[] = []
   const queued: (() => void)[] = []
@@ -86,7 +90,18 @@ function build(): Harness {
     // a Windows runner — these tests assert a shell called `zsh`, not whichever
     // fallback the host happens to have.
     shell: { file: '/bin/zsh', args: ['-l'] },
-    cwdFor: (ref) => (ref.scope === 'global' ? '/home/me' : `/work/${ref.conversationId}`),
+    cwdFor: (ref) => {
+      switch (ref.scope) {
+        case 'global':
+          return '/home/me'
+        case 'session':
+          return `/work/${ref.conversationId}`
+        case 'project':
+          return `/projects/${ref.projectId}`
+        case 'shell':
+          return `/shells/${ref.projectId}`
+      }
+    },
     env: { SHELL: '/bin/zsh' },
     frame,
     spawn: (options) => {
@@ -94,6 +109,7 @@ function build(): Harness {
       spawned.push(pty)
       return pty
     },
+    ...overrides,
   })
   service.subscribe((p) => pushes.push(p))
   return {
@@ -122,6 +138,29 @@ const settled = async (): Promise<void> => {
 const data = (pushes: TerminalPush[]): Extract<TerminalPush, { kind: 'data' }>[] =>
   pushes.filter((p): p is Extract<TerminalPush, { kind: 'data' }> => p.kind === 'data')
 
+async function attached(
+  service: TerminalService,
+  ref: TerminalRef,
+  size?: { cols: number; rows: number }
+): Promise<TerminalAttachment> {
+  const opened = await service.attach(ref, size)
+  if (opened === null) throw new Error('nothing to attach to')
+  return opened
+}
+
+const PROJECT: ProjectTerminalRef = { scope: 'project', projectId: 'p1', id: 'run' }
+const PROJECT_B: ProjectTerminalRef = { scope: 'project', projectId: 'p2', id: 'run' }
+
+const RUN_ENV = { SHELL: '/bin/zsh', EXPO_PUBLIC_API_BASE_URL: 'http://127.0.0.1:30100' }
+
+const launchSpec = (generation: number, cwd = '/repo/p1'): LaunchSpec => ({
+  cwd,
+  env: RUN_ENV,
+  file: '/bin/zsh',
+  args: ['-lc', 'npm run dev'],
+  generation,
+})
+
 describe('opening', () => {
   it('spawns nothing until something attaches', () => {
     const { spawned } = build()
@@ -142,7 +181,7 @@ describe('opening', () => {
 
   it('reuses the shell when a view remounts', async () => {
     const { service, spawned } = build()
-    const first = await service.attach(GLOBAL)
+    const first = await attached(service, GLOBAL)
     service.detach(GLOBAL, first.epoch)
     await service.attach(GLOBAL)
     expect(spawned).toHaveLength(1)
@@ -155,7 +194,7 @@ describe('the tap', () => {
     const seen: [TerminalRef, TerminalEvent][] = []
     service.tap((ref, event) => seen.push([ref, event]))
 
-    const opened = await service.attach(GLOBAL)
+    const opened = await attached(service, GLOBAL)
     service.detach(GLOBAL, opened.epoch)
     spawned[0]?.emit('metro is listening')
 
@@ -168,7 +207,7 @@ describe('the tap', () => {
     const seen: TerminalEvent[] = []
     service.tap((_ref, event) => seen.push(event))
 
-    const opened = await service.attach(GLOBAL)
+    const opened = await attached(service, GLOBAL)
     service.detach(GLOBAL, opened.epoch)
     spawned[0]?.finish(7)
 
@@ -194,7 +233,7 @@ describe('the tap', () => {
     const { service, spawned, pushes, tick } = build()
     service.tap(() => undefined)
 
-    const opened = await service.attach(GLOBAL)
+    const opened = await attached(service, GLOBAL)
     spawned[0]?.emit('one')
     spawned[0]?.emit('two')
     tick()
@@ -269,8 +308,8 @@ describe('several terminals in one scope', () => {
    */
   it('routes a write to the shell it names', async () => {
     const { service, spawned } = build()
-    const first = await service.attach(SESSION)
-    const second = await service.attach(SESSION_B)
+    const first = await attached(service, SESSION)
+    const second = await attached(service, SESSION_B)
     service.write(SESSION, first.epoch, 'one')
     service.write(SESSION_B, second.epoch, 'two')
     expect(spawned[0]?.written).toEqual(['one'])
@@ -324,7 +363,7 @@ describe('several terminals in one scope', () => {
   it('killing one sibling leaves the other running and reachable', async () => {
     const { service, spawned } = build()
     await service.attach(SESSION)
-    const second = await service.attach(SESSION_B)
+    const second = await attached(service, SESSION_B)
     service.dispose(SESSION)
     expect(spawned[0]?.killed).toBe(true)
     expect(spawned[1]?.killed).toBe(false)
@@ -343,7 +382,7 @@ describe('killing a shell nothing is attached to', () => {
    */
   it('kills a detached terminal that no view could speak for', async () => {
     const { service, spawned } = build()
-    const opened = await service.attach(SESSION)
+    const opened = await attached(service, SESSION)
     service.detach(SESSION, opened.epoch)
     service.dispose(SESSION)
     expect(spawned[0]?.killed).toBe(true)
@@ -366,7 +405,7 @@ describe('killing a shell nothing is attached to', () => {
    */
   it('still ignores a dispose carrying a superseded epoch', async () => {
     const { service, spawned } = build()
-    const first = await service.attach(SESSION)
+    const first = await attached(service, SESSION)
     await service.attach(SESSION)
     service.disposeIfCurrent(SESSION, first.epoch)
     expect(spawned[0]?.killed).toBe(false)
@@ -382,16 +421,16 @@ describe('an exit that nobody was watching', () => {
    */
   it('reports the code to a view that attaches afterwards', async () => {
     const { service, spawned } = build()
-    const first = await service.attach(SESSION)
+    const first = await attached(service, SESSION)
     service.detach(SESSION, first.epoch)
     spawned[0]?.finish(3)
-    const second = await service.attach(SESSION)
+    const second = await attached(service, SESSION)
     expect(second.exitCode).toBe(3)
   })
 
   it('says nothing about a shell that is still running', async () => {
     const { service } = build()
-    const opened = await service.attach(SESSION)
+    const opened = await attached(service, SESSION)
     expect(opened.exitCode).toBeNull()
     expect(service.describe(SESSION)?.exitCode).toBeNull()
   })
@@ -433,10 +472,10 @@ describe('an exit that nobody was watching', () => {
    */
   it('keeps a zero exit rather than treating it as absent', async () => {
     const { service, spawned } = build()
-    const first = await service.attach(SESSION)
+    const first = await attached(service, SESSION)
     service.detach(SESSION, first.epoch)
     spawned[0]?.finish(0)
-    expect((await service.attach(SESSION)).exitCode).toBe(0)
+    expect((await attached(service, SESSION)).exitCode).toBe(0)
   })
 })
 
@@ -448,7 +487,7 @@ describe('detach is not dispose', () => {
    */
   it('detaching leaves the shell alive', async () => {
     const { service, spawned } = build()
-    const { epoch } = await service.attach(GLOBAL)
+    const { epoch } = await attached(service, GLOBAL)
     service.detach(GLOBAL, epoch)
     expect(spawned[0]?.killed).toBe(false)
     expect(service.describe(GLOBAL)?.running).toBe(true)
@@ -456,17 +495,17 @@ describe('detach is not dispose', () => {
 
   it('output still reaches the mirror while detached, so the snapshot is current', async () => {
     const { service, spawned } = build()
-    const first = await service.attach(GLOBAL)
+    const first = await attached(service, GLOBAL)
     service.detach(GLOBAL, first.epoch)
     spawned[0]?.emit('while you were away')
     await settled()
-    const again = await service.attach(GLOBAL)
+    const again = await attached(service, GLOBAL)
     expect(again.snapshot).toContain('while you were away')
   })
 
   it('stops pushing to a detached view', async () => {
     const { service, spawned, pushes, tick } = build()
-    const { epoch } = await service.attach(GLOBAL)
+    const { epoch } = await attached(service, GLOBAL)
     service.detach(GLOBAL, epoch)
     spawned[0]?.emit('quiet')
     tick()
@@ -483,7 +522,7 @@ describe('epochs', () => {
    */
   it('a stale detach cannot unsubscribe the view that replaced it', async () => {
     const { service, spawned, pushes, tick } = build()
-    const stale = await service.attach(GLOBAL)
+    const stale = await attached(service, GLOBAL)
     await service.attach(GLOBAL)
     service.detach(GLOBAL, stale.epoch)
     spawned[0]?.emit('still here')
@@ -493,7 +532,7 @@ describe('epochs', () => {
 
   it('ignores a write stamped with a superseded epoch', async () => {
     const { service, spawned } = build()
-    const stale = await service.attach(GLOBAL)
+    const stale = await attached(service, GLOBAL)
     await service.attach(GLOBAL)
     service.write(GLOBAL, stale.epoch, 'ls\r')
     expect(spawned[0]?.written).toHaveLength(0)
@@ -501,14 +540,14 @@ describe('epochs', () => {
 
   it('accepts a write from the current epoch', async () => {
     const { service, spawned } = build()
-    const now = await service.attach(GLOBAL)
+    const now = await attached(service, GLOBAL)
     service.write(GLOBAL, now.epoch, 'ls\r')
     expect(spawned[0]?.written).toEqual(['ls\r'])
   })
 
   it('ignores a resize stamped with a superseded epoch', async () => {
     const { service, spawned } = build()
-    const stale = await service.attach(GLOBAL, { cols: 80, rows: 24 })
+    const stale = await attached(service, GLOBAL, { cols: 80, rows: 24 })
     await service.attach(GLOBAL)
     service.resize(GLOBAL, stale.epoch, 200, 50)
     expect(spawned[0]?.sizes).toHaveLength(0)
@@ -516,7 +555,7 @@ describe('epochs', () => {
 
   it('ignores an ack stamped with a superseded epoch', async () => {
     const { service, spawned, tick } = build()
-    const stale = await service.attach(GLOBAL)
+    const stale = await attached(service, GLOBAL)
     await service.attach(GLOBAL)
     for (let i = 0; i < 100; i += 1) spawned[0]?.emit('x')
     tick()
@@ -536,14 +575,14 @@ describe('geometry', () => {
 
   it('forwards a resize so SIGWINCH fires', async () => {
     const { service, spawned } = build()
-    const { epoch } = await service.attach(GLOBAL, { cols: 80, rows: 24 })
+    const { epoch } = await attached(service, GLOBAL, { cols: 80, rows: 24 })
     service.resize(GLOBAL, epoch, 100, 30)
     expect(spawned[0]?.sizes).toEqual([[100, 30]])
   })
 
   it('does not churn the shell when the size has not changed', async () => {
     const { service, spawned } = build()
-    const { epoch } = await service.attach(GLOBAL, { cols: 80, rows: 24 })
+    const { epoch } = await attached(service, GLOBAL, { cols: 80, rows: 24 })
     service.resize(GLOBAL, epoch, 80, 24)
     expect(spawned[0]?.sizes).toHaveLength(0)
   })
@@ -560,7 +599,7 @@ describe('the snapshot', () => {
     await service.attach(GLOBAL)
     spawned[0]?.emit('[31mred')
     await settled()
-    const again = await service.attach(GLOBAL)
+    const again = await attached(service, GLOBAL)
     expect(again.snapshot).toContain('31m')
   })
 
@@ -570,7 +609,7 @@ describe('the snapshot', () => {
     spawned[0]?.emit('[?1049h')
     spawned[0]?.emit('inside vim')
     await settled()
-    const { snapshot } = await service.attach(GLOBAL)
+    const { snapshot } = await attached(service, GLOBAL)
     expect(snapshot).toContain('1049')
     expect(snapshot).toContain('inside vim')
   })
@@ -584,7 +623,7 @@ describe('the snapshot', () => {
     const { service, spawned } = build()
     await service.attach(GLOBAL)
     spawned[0]?.emit('written just now')
-    const again = await service.attach(GLOBAL)
+    const again = await attached(service, GLOBAL)
     expect(again.snapshot).toContain('written just now')
     expect(again.seq).toBe(1)
   })
@@ -639,7 +678,7 @@ describe('backpressure', () => {
    */
   it('pauses the shell when the mirror falls behind, with nobody attached', async () => {
     const { service, spawned } = build()
-    const { epoch } = await service.attach(GLOBAL)
+    const { epoch } = await attached(service, GLOBAL)
     service.detach(GLOBAL, epoch)
     for (let i = 0; i < 100; i += 1) spawned[0]?.emit(`line ${String(i)}\r\n`)
     expect(spawned[0]?.paused).toBe(true)
@@ -647,7 +686,7 @@ describe('backpressure', () => {
 
   it('resumes once the mirror has caught up', async () => {
     const { service, spawned } = build()
-    const { epoch } = await service.attach(GLOBAL)
+    const { epoch } = await attached(service, GLOBAL)
     service.detach(GLOBAL, epoch)
     for (let i = 0; i < 100; i += 1) spawned[0]?.emit(`line ${String(i)}\r\n`)
     expect(spawned[0]?.paused).toBe(true)
@@ -671,7 +710,7 @@ describe('backpressure', () => {
 
   it('resumes when the view acknowledges what it consumed', async () => {
     const { service, spawned, tick } = build()
-    const { epoch } = await service.attach(GLOBAL)
+    const { epoch } = await attached(service, GLOBAL)
     for (let i = 0; i < 100; i += 1) spawned[0]?.emit(`line ${String(i)}\r\n`)
     tick()
     await settled()
@@ -696,7 +735,7 @@ describe('backpressure', () => {
    */
   it('delivers every byte, in order, under a firehose', async () => {
     const { service, spawned, pushes, tick } = build()
-    const { epoch } = await service.attach(GLOBAL)
+    const { epoch } = await attached(service, GLOBAL)
     let sent = ''
     for (let i = 0; i < 2_000; i += 1) {
       const chunk = `chunk-${String(i)}\r\n`
@@ -737,7 +776,7 @@ describe('a shell that exits', () => {
 
   it('swallows a write instead of throwing', async () => {
     const { service, spawned } = build()
-    const { epoch } = await service.attach(GLOBAL)
+    const { epoch } = await attached(service, GLOBAL)
     spawned[0]?.finish(0)
     expect(() => {
       service.write(GLOBAL, epoch, 'ls\r')
@@ -787,15 +826,15 @@ describe('clearing', () => {
    */
   it('empties the snapshot a remount would restore', async () => {
     const { service, spawned } = build()
-    const { epoch } = await service.attach(GLOBAL)
+    const { epoch } = await attached(service, GLOBAL)
     spawned[0]?.emit('a line nobody wants to see again\r\n')
     await settled()
-    expect((await service.attach(GLOBAL)).snapshot).toContain('nobody wants')
+    expect((await attached(service, GLOBAL)).snapshot).toContain('nobody wants')
 
-    const current = await service.attach(GLOBAL)
+    const current = await attached(service, GLOBAL)
     service.clear(GLOBAL, current.epoch)
     await settled()
-    expect((await service.attach(GLOBAL)).snapshot).not.toContain('nobody wants')
+    expect((await attached(service, GLOBAL)).snapshot).not.toContain('nobody wants')
     expect(epoch).toBeLessThan(current.epoch)
   })
 
@@ -806,14 +845,14 @@ describe('clearing', () => {
    */
   it('says nothing to the shell', async () => {
     const { service, spawned } = build()
-    const { epoch } = await service.attach(GLOBAL)
+    const { epoch } = await attached(service, GLOBAL)
     service.clear(GLOBAL, epoch)
     expect(spawned[0]?.written).toHaveLength(0)
   })
 
   it('does not kill anything', async () => {
     const { service, spawned } = build()
-    const { epoch } = await service.attach(GLOBAL)
+    const { epoch } = await attached(service, GLOBAL)
     service.clear(GLOBAL, epoch)
     expect(spawned[0]?.killed).toBe(false)
     expect(service.describe(GLOBAL)?.running).toBe(true)
@@ -821,13 +860,571 @@ describe('clearing', () => {
 
   it('ignores a clear stamped with a superseded epoch', async () => {
     const { service, spawned } = build()
-    const stale = await service.attach(GLOBAL)
+    const stale = await attached(service, GLOBAL)
     await service.attach(GLOBAL)
     spawned[0]?.emit('still wanted')
     await settled()
     service.clear(GLOBAL, stale.epoch)
     await settled()
-    expect((await service.attach(GLOBAL)).snapshot).toContain('still wanted')
+    expect((await attached(service, GLOBAL)).snapshot).toContain('still wanted')
+  })
+})
+
+describe('the project run', () => {
+  describe('before anything has run', () => {
+    it('attaching spawns nothing and finds nothing', async () => {
+      const { service, spawned } = build()
+      expect(await service.attach(PROJECT)).toBeNull()
+      expect(await service.attach(PROJECT, { cols: 100, rows: 30 })).toBeNull()
+      expect(spawned).toHaveLength(0)
+      expect(service.describe(PROJECT)).toBeNull()
+    })
+
+    it('has no text to read', () => {
+      const { service } = build()
+      expect(service.readText(PROJECT, 10, 1_000)).toBeNull()
+    })
+
+    it('has nothing to interrupt', () => {
+      const { service, spawned } = build()
+      expect(service.interrupt(PROJECT, 0)).toBe(false)
+      expect(spawned).toHaveLength(0)
+    })
+  })
+
+  describe('launching', () => {
+    it('runs the command it was given, where and with the env it was given', () => {
+      const { service, spawned } = build()
+      expect(service.launch(PROJECT, launchSpec(1))).toEqual({ kind: 'launched', pid: 1234 })
+      expect(spawned).toHaveLength(1)
+      expect(spawned[0]?.options.file).toBe('/bin/zsh')
+      expect(spawned[0]?.options.args).toEqual(['-lc', 'npm run dev'])
+      expect(spawned[0]?.options.cwd).toBe('/repo/p1')
+      expect(spawned[0]?.options.env).toEqual(RUN_ENV)
+    })
+
+    it('announces the replacement with the generation it was launched under', () => {
+      const { service, pushes } = build()
+      service.launch(PROJECT, launchSpec(4))
+      expect(pushes).toEqual([{ kind: 'replaced', ref: PROJECT, generation: 4 }])
+    })
+
+    it('can be attached to once it exists, and says which generation it is', async () => {
+      const { service, spawned } = build()
+      service.launch(PROJECT, launchSpec(2))
+      const opened = await attached(service, PROJECT)
+      expect(opened.generation).toBe(2)
+      expect(opened.exitCode).toBeNull()
+      expect(spawned).toHaveLength(1)
+    })
+
+    it('refuses to start over a run that is still alive', () => {
+      const { service, spawned, pushes } = build()
+      service.launch(PROJECT, launchSpec(1))
+      expect(service.launch(PROJECT, launchSpec(2))).toEqual({
+        kind: 'refused',
+        reason: 'live-run',
+      })
+      expect(spawned).toHaveLength(1)
+      expect(spawned[0]?.killed).toBe(false)
+      expect(pushes.filter((p) => p.kind === 'replaced')).toHaveLength(1)
+    })
+
+    it('replaces a run that has exited, at the size the old one had', async () => {
+      const { service, spawned } = build()
+      service.launch(PROJECT, launchSpec(1))
+      await service.attach(PROJECT, { cols: 132, rows: 40 })
+      spawned[0]?.finish(0)
+      expect(service.launch(PROJECT, launchSpec(2))).toEqual({ kind: 'launched', pid: 1234 })
+      expect(spawned).toHaveLength(2)
+      expect(spawned[1]?.options.cols).toBe(132)
+      expect(spawned[1]?.options.rows).toBe(40)
+      expect((await attached(service, PROJECT)).generation).toBe(2)
+    })
+  })
+
+  describe('a run that has finished', () => {
+    it('keeps what it printed, and its code, until the next one starts', async () => {
+      const { service, spawned } = build()
+      service.launch(PROJECT, launchSpec(1))
+      spawned[0]?.emit('build failed\r\n')
+      spawned[0]?.finish(1)
+      await settled()
+      const opened = await attached(service, PROJECT)
+      expect(opened.snapshot).toContain('build failed')
+      expect(opened.exitCode).toBe(1)
+      expect(service.readText(PROJECT, 10, 1_000)).toBe('build failed')
+    })
+
+    it('is gone once killed, and attaching does not open a shell in its place', async () => {
+      const { service, spawned } = build()
+      service.launch(PROJECT, launchSpec(1))
+      service.dispose(PROJECT)
+      expect(spawned[0]?.killed).toBe(true)
+      expect(await service.attach(PROJECT)).toBeNull()
+      expect(spawned).toHaveLength(1)
+    })
+  })
+
+  describe('isolation', () => {
+    it("one project's run cannot see or stop another's", async () => {
+      const { service, spawned } = build()
+      service.launch(PROJECT, launchSpec(1))
+      service.launch(PROJECT_B, launchSpec(1, '/repo/p2'))
+      expect(spawned).toHaveLength(2)
+      expect(spawned[1]?.options.cwd).toBe('/repo/p2')
+
+      spawned[1]?.emit('only in p2\r\n')
+      await settled()
+      expect(service.readText(PROJECT, 10, 1_000)).toBe('')
+      expect(service.readText(PROJECT_B, 10, 1_000)).toBe('only in p2')
+
+      spawned[0]?.finish(0)
+      expect(service.launch(PROJECT_B, launchSpec(2))).toEqual({
+        kind: 'refused',
+        reason: 'live-run',
+      })
+      service.dispose(PROJECT)
+      expect(spawned[1]?.killed).toBe(false)
+      expect(service.describe(PROJECT_B)?.running).toBe(true)
+    })
+
+    it('a conversation ending leaves the run alone', () => {
+      const { service, spawned } = build()
+      service.launch(PROJECT, launchSpec(1))
+      service.disposeSession('c1')
+      expect(spawned[0]?.killed).toBe(false)
+      expect(service.describe(PROJECT)?.running).toBe(true)
+    })
+
+    it('a global or session shell never becomes the run', async () => {
+      const { service, spawned } = build()
+      await service.attach(GLOBAL)
+      await service.attach(SESSION)
+      expect(await service.attach(PROJECT)).toBeNull()
+      expect(spawned).toHaveLength(2)
+      expect(spawned.map((p) => p.options.cwd)).toEqual(['/home/me', '/work/c1'])
+    })
+
+    it('quitting kills the run with everything else', async () => {
+      const { service, spawned } = build()
+      await service.attach(GLOBAL)
+      await service.attach(SESSION)
+      service.launch(PROJECT, launchSpec(1))
+      service.close()
+      expect(spawned).toHaveLength(3)
+      expect(spawned.every((p) => p.killed)).toBe(true)
+      expect(service.describe(PROJECT)).toBeNull()
+    })
+  })
+
+  describe('epochs across a replacement', () => {
+    it('an epoch from the old run cannot drive the new one', async () => {
+      const { service, spawned } = build()
+      service.launch(PROJECT, launchSpec(1))
+      const old = await attached(service, PROJECT)
+      spawned[0]?.finish(0)
+      service.launch(PROJECT, launchSpec(2))
+      const fresh = await attached(service, PROJECT)
+      expect(fresh.epoch).toBeGreaterThan(old.epoch)
+
+      service.write(PROJECT, old.epoch, 'ls\r')
+      service.resize(PROJECT, old.epoch, 200, 50)
+      service.clear(PROJECT, old.epoch)
+      service.disposeIfCurrent(PROJECT, old.epoch)
+      expect(spawned[1]?.written).toHaveLength(0)
+      expect(spawned[1]?.sizes).toHaveLength(0)
+      expect(spawned[1]?.killed).toBe(false)
+
+      service.write(PROJECT, fresh.epoch, 'ls\r')
+      expect(spawned[1]?.written).toEqual(['ls\r'])
+    })
+
+    it('never hands two shells the same epoch', async () => {
+      const { service } = build()
+      const first = await attached(service, GLOBAL)
+      const second = await attached(service, SESSION)
+      service.launch(PROJECT, launchSpec(1))
+      const third = await attached(service, PROJECT)
+      expect(new Set([first.epoch, second.epoch, third.epoch]).size).toBe(3)
+    })
+  })
+
+  describe('a run that has been let go', () => {
+    it('drops a frame that was queued for the view when it was killed', async () => {
+      const { service, spawned, pushes, tick } = build()
+      service.launch(PROJECT, launchSpec(1))
+      await service.attach(PROJECT)
+      spawned[0]?.emit('queued for the view')
+      service.dispose(PROJECT)
+      tick()
+      expect(data(pushes)).toHaveLength(0)
+    })
+
+    it('says nothing to views or taps when it writes or exits after being killed', async () => {
+      const { service, spawned, pushes, tick } = build()
+      const seen: TerminalEvent[] = []
+      service.tap((_ref, event) => seen.push(event))
+      service.launch(PROJECT, launchSpec(1))
+      await service.attach(PROJECT)
+      service.dispose(PROJECT)
+      pushes.length = 0
+
+      spawned[0]?.emit('hangup received')
+      spawned[0]?.finish(129)
+      tick()
+      await settled()
+
+      expect(pushes).toHaveLength(0)
+      expect(seen).toHaveLength(0)
+    })
+
+    it('cannot speak for the run that replaced it', async () => {
+      const { service, spawned, pushes, tick } = build()
+      const seen: TerminalEvent[] = []
+      service.tap((_ref, event) => seen.push(event))
+      service.launch(PROJECT, launchSpec(1))
+      await service.attach(PROJECT)
+      spawned[0]?.finish(0)
+      service.launch(PROJECT, launchSpec(2))
+      await service.attach(PROJECT)
+      pushes.length = 0
+      seen.length = 0
+
+      spawned[0]?.emit('late from the old run')
+      spawned[0]?.finish(3)
+      tick()
+      await settled()
+
+      expect(pushes).toHaveLength(0)
+      expect(seen).toHaveLength(0)
+      expect(service.describe(PROJECT)).toMatchObject({ running: true, exitCode: null })
+    })
+
+    it('an attach overtaken by a replacement gets nothing', async () => {
+      const { service, spawned } = build()
+      service.launch(PROJECT, launchSpec(1))
+      spawned[0]?.emit('last line of the old run')
+      spawned[0]?.finish(0)
+      const racing = service.attach(PROJECT)
+      service.launch(PROJECT, launchSpec(2))
+      expect(await racing).toBeNull()
+      expect((await attached(service, PROJECT)).generation).toBe(2)
+    })
+  })
+
+  describe('generations', () => {
+    it('ride on the data and the exit a view receives', async () => {
+      const { service, spawned, pushes, tick } = build()
+      service.launch(PROJECT, launchSpec(5))
+      const opened = await attached(service, PROJECT)
+      spawned[0]?.emit('ready')
+      tick()
+      expect(data(pushes)[0]).toMatchObject({ epoch: opened.epoch, generation: 5, data: 'ready' })
+      spawned[0]?.finish(0)
+      expect(pushes.at(-1)).toMatchObject({ kind: 'exit', generation: 5, code: 0 })
+    })
+
+    it('ride on what the tap sees', () => {
+      const { service, spawned } = build()
+      const seen: [TerminalRef, TerminalEvent, number][] = []
+      service.tap((ref, event, generation) => seen.push([ref, event, generation]))
+      service.launch(PROJECT, launchSpec(5))
+      spawned[0]?.emit('ready')
+      spawned[0]?.finish(0)
+      expect(seen).toEqual([
+        [PROJECT, { kind: 'data', data: 'ready' }, 5],
+        [PROJECT, { kind: 'exit', code: 0 }, 5],
+      ])
+    })
+
+    it('are zero for a shell nobody launched', async () => {
+      const { service } = build()
+      expect((await attached(service, GLOBAL)).generation).toBe(0)
+      expect((await attached(service, SESSION)).generation).toBe(0)
+    })
+  })
+
+  describe('interrupting', () => {
+    it('sends ⌃C only to the generation it names, and only while it is alive', () => {
+      const { service, spawned } = build()
+      service.launch(PROJECT, launchSpec(3))
+      expect(service.interrupt(PROJECT, 2)).toBe(false)
+      expect(service.interrupt(PROJECT_B, 3)).toBe(false)
+      expect(spawned[0]?.written).toHaveLength(0)
+
+      expect(service.interrupt(PROJECT, 3)).toBe(true)
+      expect(spawned[0]?.written).toEqual(['\x03'])
+
+      spawned[0]?.finish(130)
+      expect(service.interrupt(PROJECT, 3)).toBe(false)
+      expect(spawned[0]?.written).toHaveLength(1)
+    })
+  })
+
+  describe('reading the text back', () => {
+    it('reads the last lines, not the first', async () => {
+      const { service, spawned } = build()
+      service.launch(PROJECT, launchSpec(1))
+      for (let i = 1; i <= 5; i += 1) spawned[0]?.emit(`line ${String(i)}\r\n`)
+      await settled()
+      expect(service.readText(PROJECT, 2, 10_000)).toBe('line 4\nline 5')
+      expect(service.readText(PROJECT, 0, 10_000)).toBe('')
+    })
+
+    it('cuts to the byte budget from the end', async () => {
+      const { service, spawned } = build()
+      service.launch(PROJECT, launchSpec(1))
+      for (let i = 1; i <= 5; i += 1) spawned[0]?.emit(`line ${String(i)}\r\n`)
+      await settled()
+      expect(service.readText(PROJECT, 100, 6)).toBe('line 5')
+      expect(service.readText(PROJECT, 100, 0)).toBe('')
+    })
+
+    it('never starts in the middle of a character', async () => {
+      const { service, spawned } = build()
+      service.launch(PROJECT, launchSpec(1))
+      spawned[0]?.emit('héllo\r\n')
+      await settled()
+      expect(service.readText(PROJECT, 10, 4)).toBe('llo')
+    })
+
+    it('gives a line the terminal wrapped back as one line', async () => {
+      const { service, spawned } = build()
+      service.launch(PROJECT, launchSpec(1))
+      spawned[0]?.emit(`${'x'.repeat(200)}\r\nnext\r\n`)
+      await settled()
+      expect(service.readText(PROJECT, 10, 10_000)).toBe(`${'x'.repeat(200)}\nnext`)
+    })
+
+    it('keeps the spaces that fall on a wrap', async () => {
+      const { service, spawned } = build()
+      service.launch(PROJECT, launchSpec(1))
+      const text = `${'x'.repeat(78)}    tail`
+      spawned[0]?.emit(`${text}\r\n`)
+      await settled()
+      expect(service.readText(PROJECT, 10, 10_000)).toBe(text)
+    })
+
+    it('does not invent a space where a wide character moved to the next row', async () => {
+      const { service, spawned } = build()
+      service.launch(PROJECT, launchSpec(1))
+      const text = `${'x'.repeat(79)}界tail`
+      spawned[0]?.emit(`${text}\r\n`)
+      await settled()
+      expect(service.readText(PROJECT, 10, 10_000)).toBe(text)
+    })
+
+    it('keeps a printed space before a wide character on the next row', async () => {
+      const { service, spawned } = build()
+      service.launch(PROJECT, launchSpec(1))
+      const text = `${'x'.repeat(79)} 界tail`
+      spawned[0]?.emit(`${text}\r\n`)
+      await settled()
+      expect(service.readText(PROJECT, 10, 10_000)).toBe(text)
+    })
+  })
+})
+
+describe('project shells', () => {
+  const SHELL_A: TerminalRef = { scope: 'shell', projectId: 'p1', id: 'main' }
+  const SHELL_B: TerminalRef = { scope: 'shell', projectId: 'p1', id: 's2' }
+  const OTHER: TerminalRef = { scope: 'shell', projectId: 'p2', id: 'main' }
+  const BASE_ENV = { SHELL: '/bin/zsh' }
+
+  it('opens each shell lazily as a login shell at its project, with its own env', async () => {
+    const { service, spawned } = build({
+      envFor: (ref) =>
+        ref.scope === 'shell' ? { ...BASE_ENV, REDIRECT: `for-${ref.projectId}` } : BASE_ENV,
+    })
+    expect(spawned).toHaveLength(0)
+
+    await service.attach(SHELL_A)
+    await service.attach(OTHER)
+    await service.attach(GLOBAL)
+
+    expect(spawned.map((pty) => pty.options.cwd)).toEqual(['/shells/p1', '/shells/p2', '/home/me'])
+    expect(spawned[0]?.options.file).toBe('/bin/zsh')
+    expect(spawned[0]?.options.args).toEqual(['-l'])
+    expect(spawned[0]?.options.env).toEqual({ ...BASE_ENV, REDIRECT: 'for-p1' })
+    expect(spawned[1]?.options.env).toEqual({ ...BASE_ENV, REDIRECT: 'for-p2' })
+    expect(spawned[2]?.options.env).toEqual(BASE_ENV)
+  })
+
+  it('spawns nothing where the project has nowhere to open', async () => {
+    const { service, spawned } = build({
+      cwdFor: (ref) => (ref.scope === 'shell' ? null : '/home/me'),
+    })
+    expect(await service.attach(SHELL_A, { cols: 100, rows: 30 })).toBeNull()
+    expect(spawned).toHaveLength(0)
+    expect(service.describe(SHELL_A)).toBeNull()
+    expect(await attached(service, GLOBAL)).not.toBeNull()
+  })
+
+  it('keeps several shells per project, and each project’s, apart', async () => {
+    const { service, spawned, pushes, tick } = build()
+    const a = await attached(service, SHELL_A)
+    const b = await attached(service, SHELL_B)
+    const other = await attached(service, OTHER)
+    expect(spawned).toHaveLength(3)
+
+    service.write(SHELL_B, b.epoch, 'npm run android\r')
+    service.write(SHELL_A, b.epoch, 'wrong epoch\r')
+    service.write(OTHER, a.epoch, 'wrong epoch\r')
+    expect(spawned[0]?.written).toEqual([])
+    expect(spawned[1]?.written).toEqual(['npm run android\r'])
+    expect(spawned[2]?.written).toEqual([])
+
+    spawned[2]?.emit('only in p2')
+    tick()
+    expect(data(pushes).map((push) => push.ref)).toEqual([OTHER])
+    expect(data(pushes)[0]?.epoch).toBe(other.epoch)
+
+    service.dispose(SHELL_A)
+    expect(spawned[0]?.killed).toBe(true)
+    expect(service.describe(SHELL_B)?.running).toBe(true)
+    expect(service.describe(OTHER)?.running).toBe(true)
+  })
+
+  it('never reaches, reads or replaces the managed run of the same project', async () => {
+    const { service, spawned, pushes } = build()
+    await attached(service, SHELL_A)
+    service.launch(PROJECT, launchSpec(1))
+    expect(spawned).toHaveLength(2)
+
+    spawned[0]?.emit('typed in the shell\r\n')
+    await settled()
+    expect(service.readText(PROJECT, 10, 1_000)).toBe('')
+    expect(service.interrupt(PROJECT, 1)).toBe(true)
+    expect(spawned[0]?.written).toEqual([])
+
+    service.dispose(SHELL_A)
+    expect(service.describe(PROJECT)?.running).toBe(true)
+    expect(spawned[1]?.killed).toBe(false)
+
+    await attached(service, SHELL_B)
+    spawned[1]?.finish(0)
+    service.launch(PROJECT, launchSpec(2))
+    expect(spawned[2]?.killed).toBe(false)
+    expect(service.describe(SHELL_B)?.running).toBe(true)
+    expect(pushes.filter((push) => push.kind === 'replaced').map((push) => push.ref)).toEqual([
+      PROJECT,
+      PROJECT,
+    ])
+  })
+
+  it('refuses a project’s shells once disposed, even a project that never had one', async () => {
+    const { service, spawned } = build()
+    service.disposeShells('p2')
+    expect(await service.attach(OTHER)).toBeNull()
+    expect(spawned).toHaveLength(0)
+
+    await attached(service, SHELL_A)
+    service.disposeShells('p1')
+    expect(spawned[0]?.killed).toBe(true)
+    expect(await service.attach(SHELL_A)).toBeNull()
+    expect(await service.attach(SHELL_B)).toBeNull()
+    expect(spawned).toHaveLength(1)
+
+    expect(await attached(service, GLOBAL)).not.toBeNull()
+    service.launch(PROJECT, launchSpec(1))
+    expect(service.describe(PROJECT)?.running).toBe(true)
+  })
+
+  it('refuses new shells at once, leaving running ones for the later kill', async () => {
+    const { service, spawned } = build()
+    await attached(service, SHELL_A)
+    service.refuseShells('p1')
+
+    expect(await service.attach(SHELL_B)).toBeNull()
+    expect(spawned).toHaveLength(1)
+    expect(spawned[0]?.killed).toBe(false)
+    expect((await attached(service, SHELL_A)).exitCode).toBeNull()
+    await attached(service, OTHER)
+    expect(spawned).toHaveLength(2)
+
+    service.disposeShells('p1')
+    expect(spawned[0]?.killed).toBe(true)
+    expect(spawned[1]?.killed).toBe(false)
+  })
+
+  it('releases an attach still waiting on the mirror when the shells are disposed', async () => {
+    const { service, spawned } = build()
+    await attached(service, SHELL_A)
+    spawned[0]?.emit('building')
+    const late = service.attach(SHELL_A)
+    service.disposeShells('p1')
+    expect(await late).toBeNull()
+    expect(spawned).toHaveLength(1)
+  })
+
+  it('kills every shell on quit and opens none afterwards', async () => {
+    const { service, spawned } = build()
+    await attached(service, SHELL_A)
+    await attached(service, OTHER)
+    service.close()
+    expect(spawned.map((pty) => pty.killed)).toEqual([true, true])
+    expect(await service.attach(SHELL_B)).toBeNull()
+    expect(spawned).toHaveLength(2)
+  })
+
+  it('keeps a shell whose kill failed reachable, and forgets it once a kill succeeds', async () => {
+    const { service, spawned } = build()
+    await attached(service, SHELL_A)
+    const pty = spawned[0]
+    if (pty === undefined) throw new Error('no shell was spawned')
+    pty.kill = () => {
+      throw new Error('kill failed')
+    }
+
+    expect(() => {
+      service.dispose(SHELL_A)
+    }).toThrow('kill failed')
+    expect(service.describe(SHELL_A)?.running).toBe(true)
+    expect((await attached(service, SHELL_A)).exitCode).toBeNull()
+    expect(spawned).toHaveLength(1)
+
+    pty.kill = () => {
+      pty.killed = true
+    }
+    service.dispose(SHELL_A)
+    expect(pty.killed).toBe(true)
+    expect(service.describe(SHELL_A)).toBeNull()
+  })
+
+  it('stops the other shells when one kill fails, and still refuses new ones', async () => {
+    const { service, spawned } = build()
+    await attached(service, SHELL_A)
+    await attached(service, SHELL_B)
+    const failing = spawned[0]
+    if (failing === undefined) throw new Error('no shell was spawned')
+    failing.kill = () => {
+      throw new Error('kill failed')
+    }
+
+    expect(() => {
+      service.disposeShells('p1')
+    }).toThrow('kill failed')
+    expect(spawned[1]?.killed).toBe(true)
+    expect(service.describe(SHELL_B)).toBeNull()
+    expect(service.describe(SHELL_A)?.running).toBe(true)
+    expect(await service.attach({ scope: 'shell', projectId: 'p1', id: 'new' })).toBeNull()
+    expect(spawned).toHaveLength(2)
+  })
+
+  it('ignores a stale epoch per shell, and a dispose carrying one', async () => {
+    const { service, spawned } = build()
+    const first = await attached(service, SHELL_A)
+    const second = await attached(service, SHELL_A)
+    expect(second.epoch).toBeGreaterThan(first.epoch)
+
+    service.write(SHELL_A, first.epoch, 'stale\r')
+    service.disposeIfCurrent(SHELL_A, first.epoch)
+    expect(spawned[0]?.written).toEqual([])
+    expect(spawned[0]?.killed).toBe(false)
+
+    service.disposeIfCurrent(SHELL_A, second.epoch)
+    expect(spawned[0]?.killed).toBe(true)
   })
 })
 

@@ -92,6 +92,10 @@ export const COMPLETION_CHANNEL = 'workbench:completion'
 export const COMPLETION_CANCEL_CHANNEL = 'workbench:completion:cancel'
 export const EDITOR_REPORT_CHANNEL = 'workbench:editor:report'
 export const COMPLETION_PROBE_CHANNEL = 'workbench:completion:probe'
+export const LAYOUT_CHANNEL = 'workbench:layout'
+export const ACTIVITY_BAR_REPORT_CHANNEL = 'workbench:activityBar:report'
+export const ROW_REQUEST_CHANNEL = 'workbench:row:request'
+export const ROW_SCROLL_REQUEST_CHANNEL = 'workbench:row:scroll'
 
 /**
  * A hand-written check instead of a schema, for the reason above — and it is now
@@ -143,6 +147,10 @@ export function asTerminalEnv(value: unknown): WorkbenchTerminalEnv | null {
   return { name, value: url }
 }
 
+export function asLayoutWidth(value: unknown): number | null {
+  return typeof value === 'number' && Number.isInteger(value) && value > 0 ? value : null
+}
+
 /**
  * The earliest possible receiver.
  *
@@ -160,6 +168,16 @@ ipcRenderer.on(CONNECTION_CHANNEL, (_event, payload: unknown) => {
   // and should surface at the boundary rather than deep inside VS Code's startup.
   const parsed = asConnection(payload)
   if (parsed !== null) buffered = parsed
+})
+
+let layoutWidth: number | null = null
+let layoutHandler: ((width: number) => void) | null = null
+
+ipcRenderer.on(LAYOUT_CHANNEL, (_event, payload: unknown) => {
+  const width = asLayoutWidth(payload)
+  if (width === null) return
+  layoutWidth = width
+  layoutHandler?.(width)
 })
 
 const api: ChorusWorkbenchApi = {
@@ -469,6 +487,22 @@ const api: ChorusWorkbenchApi = {
         }
       })()
     })
+  },
+
+  onLayoutWidth: (handler) => {
+    layoutHandler = handler
+    if (layoutWidth !== null) handler(layoutWidth)
+  },
+
+  reportActivityBar: (width) => {
+    ipcRenderer.send(ACTIVITY_BAR_REPORT_CHANNEL, width)
+  },
+
+  requestRowReveal: () => {
+    ipcRenderer.send(ROW_REQUEST_CHANNEL)
+  },
+  requestRowScroll: (delta) => {
+    ipcRenderer.send(ROW_SCROLL_REQUEST_CHANNEL, delta)
   },
 }
 

@@ -89,6 +89,7 @@ export interface TrafficServiceOptions {
   readonly now?: () => number
   /** How much of one body to keep, per direction. A seam for tests, not a knob. */
   readonly bodyLimit?: number
+  readonly recording?: boolean
 }
 
 const TAP = 8_192
@@ -262,6 +263,7 @@ export class CapturedBody {
   private readonly captureId: () => string
   private decoded: Buffer | null = null
   private decodeRun: Promise<BodyDecoding> | null = null
+  private released = false
 
   /*
    * Declared rather than initialised in place, deliberately. A field written
@@ -294,6 +296,7 @@ export class CapturedBody {
   }
 
   push(chunk: Buffer): void {
+    if (this.released) return
     this.observedBytes += chunk.length
     if (this.state === 'pending') this.state = 'streaming'
 
@@ -335,6 +338,7 @@ export class CapturedBody {
   }
 
   private async decodeWithinSlot(): Promise<BodyDecoding> {
+    if (this.isReleased()) return this.decoding
     const encoding = (this.contentEncoding ?? '').trim().toLowerCase()
     if (encoding === '' || encoding === 'identity') {
       // No second copy: an identity body is already its own decoded form, and
@@ -370,6 +374,7 @@ export class CapturedBody {
       unzip.end(Buffer.concat(this.parts))
     })
 
+    if (this.isReleased()) return this.decoding
     if (this.truncationReason() !== null) {
       this.decoding = 'limit'
       return this.decoding
@@ -407,6 +412,10 @@ export class CapturedBody {
     return this.truncation
   }
 
+  isReleased(): boolean {
+    return this.released
+  }
+
   encodedPage(offset: number, length: number): Buffer | null {
     const whole = Buffer.concat(this.parts)
     if (offset >= whole.length) return Buffer.alloc(0)
@@ -437,6 +446,7 @@ export class CapturedBody {
 
   /** Releases what it kept, so the budget is not charged for what is gone. */
   release(): void {
+    this.released = true
     if (this.budget !== null) {
       if (this.capturedBytes > 0) this.budget.release(this.captureId(), this.capturedBytes)
       if (this.decodedBytes > 0) {
@@ -579,13 +589,13 @@ export class CaptureStore {
   }
 
   clear(): void {
-    for (const [id, capture] of this.entries) {
+    for (const capture of this.entries.values()) {
       capture.request.release()
       capture.response.release()
-      this.touched.delete(id)
-      this.evicted.add(id)
     }
     this.entries.clear()
+    this.touched.clear()
+    this.evicted.clear()
   }
 
   private oldest(keepId: string | null): string | null {
@@ -649,6 +659,8 @@ export class TrafficService {
   private server: Server | null = null
   private seq = 0
   private epoch = 0
+  private generation = 0
+  private recording: boolean
   private attached = false
   private flush: (() => void) | null = null
 
@@ -665,6 +677,23 @@ export class TrafficService {
       limit: options.bodyLimit ?? BODY_LIMIT,
     })
     this.now = options.now ?? Date.now
+    this.recording = options.recording ?? true
+  }
+
+  isRecording(): boolean {
+    return this.recording
+  }
+
+  reset(recording: boolean): void {
+    this.generation += 1
+    this.recording = recording
+    this.rows.length = 0
+    this.outbox.length = 0
+    if (this.flush !== null) {
+      this.flush()
+      this.flush = null
+    }
+    this.captures.clear()
   }
 
   /** One captured exchange's headers, bodies and timing, or null once it is gone. */
@@ -710,6 +739,7 @@ export class TrafficService {
        */
       server.on('upgrade', (request, socket) => {
         socket.end('HTTP/1.1 501 Not Implemented\r\nConnection: close\r\nContent-Length: 0\r\n\r\n')
+        if (!this.recording) return
         this.absorb({
           source: 'http',
           m: request.method ?? 'GET',
@@ -739,6 +769,7 @@ export class TrafficService {
   }
 
   async close(): Promise<void> {
+    this.reset(false)
     const server = this.server
     this.server = null
     if (server === null) return
@@ -786,10 +817,12 @@ export class TrafficService {
   }
 
   logLine(ref: TerminalRef, line: string, exit: number | null = null): void {
+    if (!this.recording) return
     this.absorb({ source: 'log', ref, line, exit })
   }
 
   logcatLine(line: string): void {
+    if (!this.recording) return
     this.absorb({ source: 'logcat', line })
   }
 
@@ -808,18 +841,26 @@ export class TrafficService {
     const started = this.now()
     const target = this.targetOf(req.url)
     const requestHeaders = headerPairs(req.rawHeaders)
-    const capture = this.captures.start(
-      {
-        method,
-        url: line,
-        forwardedUrl: target?.toString() ?? '',
-        requestHeaders,
-        forwardedHeaders: heldBack(requestHeaders),
-      },
-      started
-    )
-    capture.request.contentType = req.headers['content-type'] ?? null
-    capture.request.contentEncoding = req.headers['content-encoding'] ?? null
+    const generation = this.recording ? this.generation : null
+    const live = (): boolean => generation === this.generation
+    const capture =
+      generation === null
+        ? null
+        : this.captures.start(
+            {
+              method,
+              url: line,
+              forwardedUrl: target?.toString() ?? '',
+              requestHeaders,
+              forwardedHeaders: heldBack(requestHeaders),
+            },
+            started
+          )
+    const kept = (): TrafficCaptured | null => (live() ? capture : null)
+    if (capture !== null) {
+      capture.request.contentType = req.headers['content-type'] ?? null
+      capture.request.contentEncoding = req.headers['content-encoding'] ?? null
+    }
     /*
      * The row goes up before the exchange happens, not after it.
      *
@@ -828,19 +869,22 @@ export class TrafficService {
      * owed immediately, and one that appeared only at settle would make every
      * slow request look like no request at all.
      */
-    const rowSeq = this.absorb({
-      source: 'http',
-      m: method,
-      u: line,
-      dpop,
-      status: null,
-      aborted: false,
-      requestId: capture.id,
-      parsed: false,
-      code: null,
-      nextAction: null,
-      transport: null,
-    })
+    const rowSeq =
+      capture === null
+        ? null
+        : this.absorb({
+            source: 'http',
+            m: method,
+            u: line,
+            dpop,
+            status: null,
+            aborted: false,
+            requestId: capture.id,
+            parsed: false,
+            code: null,
+            nextAction: null,
+            transport: null,
+          })
 
     let recorded = false
     const record = (
@@ -852,6 +896,7 @@ export class TrafficService {
     ): void => {
       if (recorded) return
       recorded = true
+      if (capture === null || rowSeq === null || !live()) return
       capture.status = status
       capture.transport = transport
       capture.settledAt = this.now()
@@ -876,7 +921,7 @@ export class TrafficService {
     }
 
     req.on('data', (chunk: Buffer) => {
-      capture.request.push(chunk)
+      kept()?.request.push(chunk)
     })
 
     if (target === null) {
@@ -899,21 +944,26 @@ export class TrafficService {
       },
       (upRes) => {
         const status = upRes.statusCode ?? 502
-        capture.upstreamAt = this.now()
-        capture.status = status
-        capture.responseHeaders = headerPairs(upRes.rawHeaders)
-        capture.response.contentType = upRes.headers['content-type'] ?? null
-        capture.response.contentEncoding = upRes.headers['content-encoding'] ?? null
+        const answered = kept()
+        if (answered !== null) {
+          answered.upstreamAt = this.now()
+          answered.status = status
+          answered.responseHeaders = headerPairs(upRes.rawHeaders)
+          answered.response.contentType = upRes.headers['content-type'] ?? null
+          answered.response.contentEncoding = upRes.headers['content-encoding'] ?? null
+        }
         res.writeHead(status, upRes.headers)
         upRes.pipe(res)
         upRes.on('data', (chunk: Buffer) => {
-          capture.response.push(chunk)
+          kept()?.response.push(chunk)
         })
         upRes.on('end', () => {
-          capture.upstreamDoneAt = this.now()
-          capture.trailers = trailerPairs(upRes.trailers)
+          const finished = kept()
+          if (finished === null) return
+          finished.upstreamDoneAt = this.now()
+          finished.trailers = trailerPairs(upRes.trailers)
         })
-        const envelope = this.tap(upRes)
+        const envelope = answered === null ? Promise.resolve(UNREAD) : this.tap(upRes, live)
         const settle = (read: Envelope, transport: string | null): void => {
           record(url, status, read, false, transport)
         }
@@ -1004,6 +1054,7 @@ export class TrafficService {
    */
   private readonly tunnel = (req: IncomingMessage, client: Socket): void => {
     client.end('HTTP/1.1 501 Not Implemented\r\nConnection: close\r\nContent-Length: 0\r\n\r\n')
+    if (!this.recording) return
     this.absorb({
       source: 'http',
       m: 'CONNECT',
@@ -1019,10 +1070,14 @@ export class TrafficService {
     })
   }
 
-  private tap(res: IncomingMessage): Promise<Envelope> {
+  private tap(res: IncomingMessage, live: () => boolean): Promise<Envelope> {
     const parts: Buffer[] = []
     let held = 0
     res.on('data', (chunk: Buffer) => {
+      if (!live()) {
+        parts.length = 0
+        return
+      }
       const room = this.tapBytes - held
       if (room <= 0) return
       const kept = chunk.length > room ? chunk.subarray(0, room) : chunk
@@ -1034,6 +1089,10 @@ export class TrafficService {
         resolve(UNREAD)
       })
       res.on('end', () => {
+        if (!live()) {
+          resolve(UNREAD)
+          return
+        }
         const prefix = Buffer.concat(parts)
         void decode(prefix, res.headers['content-encoding'])
           .then((text) => {

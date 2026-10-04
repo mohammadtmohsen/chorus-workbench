@@ -1,5 +1,12 @@
 import { describe, expect, it } from 'vitest'
-import { IPC_CHANNELS, IPC_CONTRACT, TerminalPush, TerminalRefShape, isIpcChannel } from './ipc.js'
+import {
+  IPC_CHANNELS,
+  IPC_CONTRACT,
+  TerminalPush,
+  TerminalRefShape,
+  isIpcChannel,
+  terminalRefKey,
+} from './ipc.js'
 import { extractVersion } from '../main/agent-probe.js'
 
 describe('IPC contract', () => {
@@ -21,6 +28,42 @@ describe('IPC contract', () => {
   it('rejects a malformed response payload', () => {
     const result = IPC_CONTRACT['app:getInfo'].response.safeParse({ appVersion: 1 })
     expect(result.success).toBe(false)
+  })
+})
+
+describe('starting a conversation in two steps', () => {
+  const started = {
+    conversationId: 'c1',
+    participants: ['claude'],
+    profileId: 'read-only',
+    projectId: 'p1',
+    cwd: '/tmp/repo',
+    title: 'repo',
+  }
+
+  it('takes the same request to begin as to start', () => {
+    const begin = IPC_CONTRACT['conversation:begin']
+    expect(begin.request).toBe(IPC_CONTRACT['conversation:start'].request)
+    expect(begin.response).toBe(IPC_CONTRACT['conversation:start'].response)
+    expect(begin.request.safeParse({ projectId: '' }).success).toBe(false)
+  })
+
+  it('answers a ready, failed or cancelled outcome, and nothing else', () => {
+    const outcome = IPC_CONTRACT['conversation:awaitStart'].response
+    expect(outcome.safeParse({ status: 'ready', conversation: started }).success).toBe(true)
+    expect(outcome.safeParse({ status: 'failed', message: 'claude fell over' }).success).toBe(true)
+    expect(outcome.safeParse({ status: 'cancelled' }).success).toBe(true)
+    expect(outcome.safeParse({ status: 'failed' }).success).toBe(false)
+    expect(outcome.safeParse({ status: 'starting' }).success).toBe(false)
+  })
+
+  it('lists a starting room as starting, and one without the field as ready', () => {
+    const active = IPC_CONTRACT['conversation:active'].response
+    const open = { ...started, unread: 0 }
+    const starting = active.parse({ sessions: [{ ...open, starting: true }] }).sessions[0]
+    const ready = active.parse({ sessions: [open] }).sessions[0]
+    expect(starting?.starting).toBe(true)
+    expect(ready?.starting).toBeUndefined()
   })
 })
 
@@ -75,6 +118,26 @@ describe('the terminal reference', () => {
       'c1'
     )
   })
+
+  it("accepts a project's run, and only under the id 'run'", () => {
+    const run = { scope: 'project', projectId: 'p1', id: 'run' }
+    expect(TerminalRefShape.safeParse(run).success).toBe(true)
+    expect(TerminalRefShape.safeParse({ ...run, id: 't1' }).success).toBe(false)
+    expect(TerminalRefShape.safeParse({ scope: 'project', id: 'run' }).success).toBe(false)
+  })
+
+  it('accepts a project shell under any id, never without its project', () => {
+    const shell = { scope: 'shell', projectId: 'p1', id: 'main' }
+    const parsed = TerminalRefShape.safeParse(shell)
+    expect(parsed.success && parsed.data).toEqual(shell)
+    expect(TerminalRefShape.safeParse({ scope: 'shell', id: 'main' }).success).toBe(false)
+    expect(terminalRefKey({ scope: 'shell', projectId: 'p1', id: 'run' })).not.toBe(
+      terminalRefKey({ scope: 'project', projectId: 'p1', id: 'run' })
+    )
+    expect(terminalRefKey({ scope: 'shell', projectId: 'p1', id: 'main' })).not.toBe(
+      terminalRefKey({ scope: 'shell', projectId: 'p2', id: 'main' })
+    )
+  })
 })
 
 describe('terminal channels', () => {
@@ -88,6 +151,7 @@ describe('terminal channels', () => {
 
     const response = IPC_CONTRACT['terminal:attach'].response.safeParse({
       epoch: 1,
+      generation: 0,
       snapshot: '[31mred',
       seq: 7,
       cols: 80,
@@ -95,6 +159,10 @@ describe('terminal channels', () => {
       exitCode: null,
     })
     expect(response.success).toBe(true)
+  })
+
+  it('answers an attach with null when there is no run to attach to', () => {
+    expect(IPC_CONTRACT['terminal:attach'].response.safeParse(null).success).toBe(true)
   })
 
   it('lets attach omit a size, since the panel may not be laid out yet', () => {
@@ -124,6 +192,7 @@ describe('terminal channels', () => {
         kind: 'data',
         ref: { scope: 'global', id: 't1' },
         epoch: 2,
+        generation: 0,
         seq: 9,
         data: 'hi\r\n',
       }).success
@@ -133,9 +202,24 @@ describe('terminal channels', () => {
         kind: 'exit',
         ref: { scope: 'global', id: 't1' },
         epoch: 2,
+        generation: 0,
         code: 0,
       }).success
     ).toBe(true)
+  })
+
+  it('carries a replacement on the same channel, with its generation', () => {
+    const ref = { scope: 'project', projectId: 'p1', id: 'run' }
+    expect(TerminalPush.safeParse({ kind: 'replaced', ref, generation: 3 }).success).toBe(true)
+    expect(TerminalPush.safeParse({ kind: 'replaced', ref }).success).toBe(false)
+  })
+
+  it('rejects output or an exit that does not say which run it came from', () => {
+    const ref = { scope: 'project', projectId: 'p1', id: 'run' }
+    const output = { kind: 'data', ref, epoch: 2, seq: 9, data: 'hi' }
+    const exit = { kind: 'exit', ref, epoch: 2, code: 0 }
+    expect(TerminalPush.safeParse(output).success).toBe(false)
+    expect(TerminalPush.safeParse(exit).success).toBe(false)
   })
 
   it('rejects a data push with no sequence number to align against', () => {
@@ -144,6 +228,7 @@ describe('terminal channels', () => {
         kind: 'data',
         ref: { scope: 'global', id: 't1' },
         epoch: 2,
+        generation: 0,
         data: 'hi',
       }).success
     ).toBe(false)
@@ -159,6 +244,38 @@ describe('terminal channels', () => {
     const ref = { scope: 'global', id: 't1' }
     expect(IPC_CONTRACT['terminal:kill'].request.safeParse({ ref }).success).toBe(true)
     expect(IPC_CONTRACT['terminal:dispose'].request.safeParse({ ref }).success).toBe(false)
+  })
+
+  it('refuses to kill or dispose a project run, which only run:stop may end', () => {
+    const ref = { scope: 'project', projectId: 'p1', id: 'run' }
+    expect(IPC_CONTRACT['terminal:kill'].request.safeParse({ ref }).success).toBe(false)
+    expect(IPC_CONTRACT['terminal:dispose'].request.safeParse({ ref, epoch: 1 }).success).toBe(
+      false
+    )
+    const session = { scope: 'session', conversationId: 'c1', id: 't1' }
+    expect(IPC_CONTRACT['terminal:kill'].request.safeParse({ ref: session }).success).toBe(true)
+    expect(
+      IPC_CONTRACT['terminal:dispose'].request.safeParse({ ref: session, epoch: 1 }).success
+    ).toBe(true)
+  })
+
+  it('lets a project shell be killed or disposed like any other terminal', () => {
+    const ref = { scope: 'shell', projectId: 'p1', id: 'run' }
+    expect(IPC_CONTRACT['terminal:kill'].request.safeParse({ ref }).success).toBe(true)
+    expect(IPC_CONTRACT['terminal:dispose'].request.safeParse({ ref, epoch: 1 }).success).toBe(true)
+  })
+
+  it('still lets a view attach, type into, resize and detach from a project run', () => {
+    const ref = { scope: 'project', projectId: 'p1', id: 'run' }
+    expect(IPC_CONTRACT['terminal:attach'].request.safeParse({ ref }).success).toBe(true)
+    expect(
+      IPC_CONTRACT['terminal:write'].request.safeParse({ ref, epoch: 1, data: 'r' }).success
+    ).toBe(true)
+    expect(
+      IPC_CONTRACT['terminal:resize'].request.safeParse({ ref, epoch: 1, cols: 80, rows: 24 })
+        .success
+    ).toBe(true)
+    expect(IPC_CONTRACT['terminal:detach'].request.safeParse({ ref, epoch: 1 }).success).toBe(true)
   })
 
   it('still requires a terminal to kill', () => {

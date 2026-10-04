@@ -1,4 +1,6 @@
+import type { TFunction } from 'i18next'
 import { useCallback, useEffect, useId, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
 import { useTranslation } from 'react-i18next'
 import {
   DEFAULT_LOGCAT_FILTER,
@@ -9,10 +11,17 @@ import {
   type TrafficSourceShape,
 } from '../../shared/ipc.js'
 import type {
-  TrafficFailure,
-  TrafficLegacy,
-  TrafficPush,
-  TrafficState,
+  DetectedScriptsShape,
+  RunCommandsShape,
+  RunFailureShape,
+  RunState,
+} from '../../shared/run-ipc.js'
+import {
+  TRAFFIC_ENV_NAME,
+  type TrafficFailure,
+  type TrafficLegacy,
+  type TrafficPush,
+  type TrafficState,
 } from '../../shared/traffic-ipc.js'
 import { TrafficRequestInspector } from './TrafficRequestInspector.js'
 import {
@@ -40,6 +49,11 @@ export interface TrafficTerminalOption {
   readonly label: string
 }
 
+export interface TrafficRunHost {
+  readonly element: HTMLElement | null
+  readonly reveal: () => void
+}
+
 const sourceValue = (source: TrafficSourceShape): string =>
   source.kind === 'off' ? '' : source.kind === 'logcat' ? 'logcat' : terminalRefKey(source.ref)
 
@@ -56,7 +70,7 @@ const idle: TrafficState = {
   forwardedDevices: 0,
 }
 
-const FAILURE_KEYS: Record<TrafficFailure, string> = {
+export const FAILURE_KEYS: Record<TrafficFailure, string> = {
   'in-use': 'traffic.portInUse',
   failed: 'traffic.startFailed',
   'source-busy': 'traffic.sourceBusy',
@@ -68,9 +82,106 @@ const FAILURE_KEYS: Record<TrafficFailure, string> = {
   unresolved: 'traffic.unresolved',
 }
 
+export const RUN_FAILURE_KEYS: Record<RunFailureShape, string> = {
+  'not-local': 'run.failedNotLocal',
+  'unsupported-platform': 'run.failedPlatform',
+  'unsupported-shell': 'run.failedShell',
+  'no-command': 'run.failedNoCommand',
+  'no-origin': 'run.failedNoOrigin',
+  'no-variable': 'run.failedNoVariable',
+  'capture-failed': 'run.failedCapture',
+  'no-redirect': 'run.failedRedirect',
+  'spawn-failed': 'run.failedSpawn',
+  cancelled: 'run.failedCancelled',
+  'stop-incomplete': 'run.failedStopIncomplete',
+}
+
+export function runBusy(run: RunState | null): boolean {
+  const kind = run?.process.kind
+  return kind === 'starting' || kind === 'running' || kind === 'stopping'
+}
+
+export function runStatusText(run: RunState | null, t: TFunction): string {
+  const current = run?.process ?? { kind: 'idle' as const }
+  switch (current.kind) {
+    case 'idle':
+      return t('run.notStarted')
+    case 'starting':
+      return t('run.starting', { label: current.active.label })
+    case 'running':
+      return t('run.running', { label: current.active.label })
+    case 'stopping':
+      return t('run.stopping')
+    case 'exited':
+      return current.code === null
+        ? t('run.exitedUnknown', { label: current.active.label })
+        : t('run.exited', { label: current.active.label, code: current.code })
+    case 'failed':
+      return t(RUN_FAILURE_KEYS[current.reason])
+  }
+}
+
+const COMMAND_LIMIT = 500
+const LABEL_LIMIT = 40
+const ID_LIMIT = 64
+const VARIABLE_LIMIT = 64
+
+interface RunChoice {
+  readonly id: string
+  readonly label: string
+  readonly command: string
+  readonly fits: boolean
+}
+
+function uniqueId(base: string, taken: ReadonlySet<string>): string {
+  const bounded = base.slice(0, ID_LIMIT)
+  if (!taken.has(bounded)) return bounded
+  for (let next = 2; ; next += 1) {
+    const suffix = `~${String(next)}`
+    const candidate = `${base.slice(0, ID_LIMIT - suffix.length)}${suffix}`
+    if (!taken.has(candidate)) return candidate
+  }
+}
+
+function savedChoices(saved: RunCommandsShape | null): RunChoice[] {
+  return (saved?.commands ?? []).map((each) => ({ ...each, fits: true }))
+}
+
+function withOffered(
+  current: readonly RunChoice[],
+  found: DetectedScriptsShape | null
+): RunChoice[] {
+  const known = new Set(current.map((each) => each.command))
+  const taken = new Set(current.map((each) => each.id))
+  const offered: RunChoice[] = []
+  for (const script of found?.scripts ?? []) {
+    if (known.has(script.command)) continue
+    known.add(script.command)
+    const id = uniqueId(`script:${script.name}`, taken)
+    taken.add(id)
+    offered.push({
+      id,
+      label: script.name.slice(0, LABEL_LIMIT),
+      command: script.command,
+      fits: script.command.length <= COMMAND_LIMIT,
+    })
+  }
+  return [...current, ...offered]
+}
+
+function suggestedId(choices: readonly RunChoice[]): string | null {
+  const usable = choices.filter((each) => each.fits)
+  const preferred = ['dev', 'start']
+    .map((name) => usable.find((each) => each.label === name))
+    .find((each) => each !== undefined)
+  return (preferred ?? usable[0])?.id ?? null
+}
+
 export function TrafficPanel(props: {
   readonly projectId: string
   readonly terminals: readonly TrafficTerminalOption[]
+  readonly run?: RunState | null
+  readonly runHost?: TrafficRunHost
 }): React.JSX.Element {
   const { t } = useTranslation()
   const { projectId } = props
@@ -99,6 +210,25 @@ export function TrafficPanel(props: {
    */
   const [refusedAt, setRefusedAt] = useState<'origin' | 'port' | 'envVar' | null>(null)
   const [selectedSeq, setSelectedSeq] = useState<number | null>(null)
+  const [setupOpen, setSetupOpen] = useState(false)
+  const [detected, setDetected] = useState<DetectedScriptsShape | null>(null)
+  const [choices, setChoicesState] = useState<readonly RunChoice[]>([])
+  const [chosenCommand, setChosenCommand] = useState<string | null>(null)
+  const [customLabel, setCustomLabel] = useState('')
+  const [customCommand, setCustomCommand] = useState('')
+  const [setupError, setSetupError] = useState<string | null>(null)
+  const [runRefused, setRunRefused] = useState(false)
+  const [savingChoice, setSavingChoice] = useState<RunChoice | null>(null)
+  const [choiceRefused, setChoiceRefused] = useState(false)
+  const [confirmed, setConfirmed] = useState<RunCommandsShape | null>(props.run?.commands ?? null)
+  const actingFor = useRef<object | null>(null)
+  const setupSession = useRef(0)
+  const choicesNow = useRef<readonly RunChoice[]>([])
+  const selectedNow = useRef<string | null>(null)
+  const wantedChoice = useRef<RunChoice | null>(null)
+  const sendingFor = useRef<object | null>(null)
+  const confirmedNow = useRef<RunCommandsShape | null>(props.run?.commands ?? null)
+  const variableEdited = useRef(false)
   const [search, setSearch] = useState('')
   /** Null means the last page, which keeps following as rows arrive. */
   const [page, setPage] = useState<number | null>(null)
@@ -173,6 +303,27 @@ export function TrafficPanel(props: {
     setSelectedSeq(first.seq)
   }, [stream.projectId, stream.rows, projectId])
 
+  useEffect(() => {
+    setupSession.current += 1
+    wantedChoice.current = null
+    setSetupOpen(false)
+    setDetected(null)
+    setSetupError(null)
+    setRunRefused(false)
+    setSavingChoice(null)
+    setChoiceRefused(false)
+    confirmedNow.current = props.run?.commands ?? null
+    setConfirmed(confirmedNow.current)
+  }, [projectId])
+
+  useEffect(() => {
+    const lifetime = {}
+    actingFor.current = lifetime
+    return () => {
+      actingFor.current = null
+    }
+  }, [projectId])
+
   // A selection belongs to the project's history, not to the panel: switching
   // project closes whatever was open rather than describing the wrong one. The
   // scroll follows the same rule, from the other end — a different project opens
@@ -236,10 +387,12 @@ export function TrafficPanel(props: {
     let cancelled = false
 
     const stopListening = window.chorus.onTraffic((push) => {
+      if (push.projectId !== projectId) return
       if (attachment === null) {
         queued.push(push)
         return
       }
+      if (push.subscriptionId !== attachment.subscriptionId) return
       setStream((previous) => reduceTraffic(previous, push))
       /*
        * Every kind, and that is the fix rather than a tidy-up.
@@ -255,7 +408,10 @@ export function TrafficPanel(props: {
         subscriptionId: attachment.subscriptionId,
         seq: push.kind === 'rows' ? push.seq : attachment.seq,
       })
-      if (push.kind === 'state') setCapture(push.state)
+      if (push.kind === 'state' && push.projectId === projectId) {
+        setCapture(push.state)
+        if (push.state.failure !== 'capturing') setFailure(push.state.failure)
+      }
     })
 
     void window.chorus
@@ -290,6 +446,7 @@ export function TrafficPanel(props: {
           seq: opened.seq,
         })
         setCapture(opened.state)
+        setFailure(opened.state.failure === 'capturing' ? null : opened.state.failure)
         setPortDraft(String(opened.state.wantedPort ?? DEFAULT_TRAFFIC_PORT))
         setOriginDraft(opened.state.origin ?? '')
         setEnvVarDraft(opened.state.envVar ?? '')
@@ -307,6 +464,10 @@ export function TrafficPanel(props: {
       }
     }
   }, [projectId])
+
+  useEffect(() => {
+    setPortDraft(String(capture.wantedPort ?? DEFAULT_TRAFFIC_PORT))
+  }, [capture.wantedPort])
 
   useEffect(() => {
     void window.chorus
@@ -465,19 +626,280 @@ export function TrafficPanel(props: {
         : `${capture.envVar}=http://${capture.address}`
 
   const toggle = useCallback((): void => {
+    const lifetime = actingFor.current
     const call = capture.capturing
       ? window.chorus.stopTraffic({ projectId })
       : window.chorus.startTraffic({ projectId })
     void call
       .then(({ state }) => {
+        if (lifetime === null || actingFor.current !== lifetime) return
         setCapture(state)
         setFailure(state.failure)
         setPortDraft(String(state.wantedPort ?? DEFAULT_TRAFFIC_PORT))
       })
       .catch(() => {
+        if (lifetime === null || actingFor.current !== lifetime) return
         setFailure('action')
       })
   }, [projectId, capture.capturing])
+
+  const run = props.run ?? null
+  const managedRun = run !== null && run.available ? run : null
+  const busy = runBusy(run)
+  const commands = run?.commands ?? null
+  const defaultCommand =
+    confirmed === null
+      ? null
+      : (confirmed.commands.find((each) => each.id === confirmed.defaultId) ?? null)
+  const commandsKey = commands === null ? '' : JSON.stringify(commands)
+  const needsSetup = confirmed === null || capture.origin === null || capture.envVar === null
+
+  const setChoices = (next: readonly RunChoice[]): void => {
+    choicesNow.current = next
+    setChoicesState(next)
+  }
+
+  const selectCommand = (id: string | null): void => {
+    selectedNow.current = id
+    setChosenCommand(id)
+  }
+
+  const closeSetup = (): void => {
+    setupSession.current += 1
+    setSetupOpen(false)
+    setSetupError(null)
+  }
+
+  const seedChoices = (
+    saved: RunCommandsShape | null,
+    found: DetectedScriptsShape | null
+  ): void => {
+    const pending = wantedChoice.current
+    const base = withOffered(savedChoices(saved), found)
+    setChoices(
+      pending === null
+        ? base
+        : base.some((each) => each.id === pending.id)
+          ? base.map((each) => (each.id === pending.id ? pending : each))
+          : [...base, pending]
+    )
+    selectCommand(pending?.id ?? saved?.defaultId ?? null)
+  }
+
+  const sendChoice = async (): Promise<void> => {
+    const lifetime = actingFor.current
+    if (lifetime === null) return
+    sendingFor.current = lifetime
+    try {
+      for (;;) {
+        const choice = wantedChoice.current
+        if (choice === null || actingFor.current !== lifetime) return
+        let answered: RunCommandsShape | null
+        try {
+          const reply = await window.chorus.configureRun({
+            projectId,
+            commands: {
+              version: 1,
+              defaultId: choice.id,
+              commands: [{ id: choice.id, label: choice.label, command: choice.command }],
+            },
+          })
+          answered = reply.commands
+        } catch {
+          if (actingFor.current !== lifetime) return
+          if (wantedChoice.current !== choice) continue
+          wantedChoice.current = null
+          setSavingChoice(null)
+          setChoiceRefused(true)
+          const fallback = confirmedNow.current
+          const entry =
+            fallback === null
+              ? undefined
+              : fallback.commands.find((each) => each.id === fallback.defaultId)
+          if (entry !== undefined) {
+            const restored: RunChoice = { ...entry, fits: true }
+            setChoices(
+              choicesNow.current.some((each) => each.id === entry.id)
+                ? choicesNow.current.map((each) => (each.id === entry.id ? restored : each))
+                : [...choicesNow.current, restored]
+            )
+          }
+          selectCommand(fallback?.defaultId ?? null)
+          return
+        }
+        if (actingFor.current !== lifetime) return
+        confirmedNow.current = answered
+        setConfirmed(answered)
+        if (wantedChoice.current === choice) {
+          wantedChoice.current = null
+          setSavingChoice(null)
+          return
+        }
+      }
+    } finally {
+      if (sendingFor.current === lifetime) sendingFor.current = null
+    }
+  }
+
+  const applyChoice = (choice: RunChoice): void => {
+    selectCommand(choice.id)
+    setChoiceRefused(false)
+    wantedChoice.current = choice
+    setSavingChoice(choice)
+    if (sendingFor.current === null || sendingFor.current !== actingFor.current) void sendChoice()
+  }
+
+  const commitSetup = (config: { readonly origin: string } | { readonly envVar: string }): void => {
+    const lifetime = actingFor.current
+    void window.chorus
+      .configureTraffic({ projectId, config })
+      .then(({ state, failure: refused }) => {
+        if (lifetime === null || actingFor.current !== lifetime) return
+        setCapture(state)
+        const kept = 'origin' in config ? state.origin : state.envVar
+        if (refused !== null || kept === null) {
+          setSetupError(refused === 'capturing' ? 'run.whileRecording' : 'run.configFailed')
+          return
+        }
+        setSetupError(null)
+        if ('origin' in config) setOriginDraft(kept)
+        else setEnvVarDraft(kept)
+      })
+      .catch(() => {
+        if (lifetime === null || actingFor.current !== lifetime) return
+        setSetupError('run.configFailed')
+      })
+  }
+
+  const commitSetupOrigin = (): void => {
+    const origin = originDraft.trim()
+    if (origin === '') {
+      setSetupError('run.needOrigin')
+      return
+    }
+    commitSetup({ origin })
+  }
+
+  const commitSetupVariable = (name: string): void => {
+    const variable = name.trim()
+    if (variable === '') {
+      setSetupError('run.needVariable')
+      return
+    }
+    if (variable.length > VARIABLE_LIMIT || !TRAFFIC_ENV_NAME.test(variable)) {
+      setSetupError('run.badVariable')
+      return
+    }
+    commitSetup({ envVar: variable })
+  }
+
+  const openSetup = (): void => {
+    setupSession.current += 1
+    const session = setupSession.current
+    variableEdited.current = false
+    seedChoices(confirmedNow.current, null)
+    setSetupOpen(true)
+    setSetupError(null)
+    setDetected(null)
+    void window.chorus
+      .detectRunScripts({ projectId })
+      .then((found) => {
+        if (session !== setupSession.current) return
+        setDetected(found)
+        const merged = withOffered(choicesNow.current, found)
+        setChoices(merged)
+        if (selectedNow.current === null) {
+          const suggestion = suggestedId(merged)
+          const suggested = merged.find((each) => each.id === suggestion)
+          if (suggested !== undefined) applyChoice(suggested)
+        }
+      })
+      .catch(() => undefined)
+  }
+
+  const toggleSetup = (): void => {
+    if (setupOpen) closeSetup()
+    else openSetup()
+  }
+
+  useEffect(() => {
+    const only = detected?.variables.length === 1 ? detected.variables[0] : undefined
+    if (!setupOpen || only === undefined || variableEdited.current) return
+    if (stream.projectId !== projectId || capture.envVar !== null) return
+    variableEdited.current = true
+    setEnvVarDraft(only)
+    commitSetupVariable(only)
+  }, [setupOpen, detected, stream.projectId, projectId, capture.envVar])
+
+  useEffect(() => {
+    confirmedNow.current = commands
+    setConfirmed(commands)
+    if (!setupOpen || wantedChoice.current !== null) return
+    const incoming =
+      commands === null
+        ? undefined
+        : commands.commands.find((each) => each.id === commands.defaultId)
+    const shown = choicesNow.current.find((each) => each.id === selectedNow.current)
+    if (
+      incoming !== undefined &&
+      shown !== undefined &&
+      incoming.id === shown.id &&
+      incoming.label === shown.label &&
+      incoming.command === shown.command
+    ) {
+      return
+    }
+    seedChoices(commands, detected)
+  }, [commandsKey])
+
+  const addCustom = (): void => {
+    const command = customCommand
+    if (command.trim() === '') return
+    if (command.length > COMMAND_LIMIT) {
+      setSetupError('run.commandTooLong')
+      return
+    }
+    const named = customLabel.trim()
+    if (named.length > LABEL_LIMIT) {
+      setSetupError('run.labelTooLong')
+      return
+    }
+    const taken = new Set(choicesNow.current.map((each) => each.id))
+    let next = 1
+    while (taken.has(`custom:${String(next)}`)) next += 1
+    const added: RunChoice = {
+      id: `custom:${String(next)}`,
+      label: named === '' ? command.trim().slice(0, LABEL_LIMIT) : named,
+      command,
+      fits: true,
+    }
+    setChoices([...choicesNow.current, added])
+    applyChoice(added)
+    setSetupError(null)
+    setCustomLabel('')
+    setCustomCommand('')
+  }
+
+  const act = (call: Promise<unknown>): void => {
+    const lifetime = actingFor.current
+    void call
+      .then(() => {
+        if (lifetime !== null && actingFor.current === lifetime) setRunRefused(false)
+      })
+      .catch(() => {
+        if (lifetime !== null && actingFor.current === lifetime) setRunRefused(true)
+      })
+  }
+
+  const runCommand = (): void => {
+    if (wantedChoice.current !== null) return
+    if (needsSetup) {
+      if (!setupOpen) openSetup()
+      props.runHost?.reveal()
+      return
+    }
+    act(window.chorus.startRun({ projectId }))
+  }
 
   /*
    * Emptying the history, which is a different question from forwarding.
@@ -664,6 +1086,125 @@ export function TrafficPanel(props: {
             row.source === 'http' && row.seq === selectedSeq
         ) ?? null)
 
+  const indicator = (
+    <>
+      <span className="run-capture-icon" aria-hidden="true">
+        ⇄
+      </span>
+      {capture.capturing && <span className="traffic-live-dot" aria-hidden="true" />}
+    </>
+  )
+
+  const runLabel = needsSetup
+    ? t('run.setUp')
+    : t('run.run', { label: defaultCommand?.label ?? '' })
+
+  const runKind = managedRun?.process.kind ?? 'idle'
+  const cleanupShown =
+    managedRun?.cleanupPending === true &&
+    (runKind === 'idle' || runKind === 'exited' || runKind === 'failed')
+  const stopShown =
+    runKind === 'starting' || runKind === 'running' || runKind === 'stopping' || cleanupShown
+  const stopTitle =
+    runKind === 'stopping'
+      ? t('run.stopping')
+      : cleanupShown
+        ? t('run.cleanupPending')
+        : t('run.stop')
+  const setupId = `${fields}-run-setup`
+  const runHostElement = props.runHost?.element ?? null
+
+  const runToggle =
+    managedRun === null ? null : stopShown ? (
+      <button
+        type="button"
+        className="traffic-action run-primary"
+        data-run-action="stop"
+        data-live={capture.capturing}
+        disabled={managedRun.process.kind === 'stopping'}
+        title={stopTitle}
+        onClick={() => {
+          act(window.chorus.stopRun({ projectId }))
+        }}
+      >
+        {indicator}
+        <span className="run-primary-label">
+          {managedRun.process.kind === 'failed' ? t('run.retryStop') : t('run.stop')}
+        </span>
+      </button>
+    ) : (
+      <button
+        type="button"
+        className="traffic-action run-primary"
+        data-run-action="run"
+        data-live={capture.capturing}
+        disabled={savingChoice !== null}
+        title={savingChoice === null ? runLabel : t('run.saving')}
+        onClick={runCommand}
+      >
+        {indicator}
+        <span className="run-primary-label">
+          {savingChoice === null ? runLabel : t('run.run', { label: savingChoice.label })}
+        </span>
+      </button>
+    )
+
+  const runControls =
+    managedRun === null ? (
+      <button
+        type="button"
+        className="traffic-action run-primary"
+        data-live={capture.capturing}
+        aria-pressed={capture.capturing}
+        aria-label={capture.capturing ? t('traffic.stop') : t('traffic.start')}
+        /*
+         * Off, not silently refused. With no address committed, `start()`
+         * returns before it binds and the panel's only answer was one line of
+         * text under the fold — so the button read as dead when it had in fact
+         * answered every time it was pressed.
+         */
+        disabled={!capture.capturing && capture.origin === null}
+        title={
+          !capture.capturing && capture.origin === null ? t('traffic.noOrigin') : undefined
+        }
+        onClick={toggle}
+      >
+        {indicator}
+        <span className="run-primary-label">
+          {capture.capturing ? t('traffic.stop') : t('traffic.start')}
+        </span>
+      </button>
+    ) : (
+      <div className="run-controls" data-run-state={managedRun.process.kind}>
+        <span className="run-status" role="status" title={runStatusText(managedRun, t)}>
+          {runStatusText(managedRun, t)}
+        </span>
+        {props.runHost === undefined && runToggle}
+        <button
+          type="button"
+          className="traffic-action"
+          data-run-action="edit"
+          aria-expanded={setupOpen}
+          aria-controls={setupId}
+          onClick={toggleSetup}
+        >
+          {t('run.editCommands')}
+        </button>
+        {capture.capturing && !busy && (
+          <button
+            type="button"
+            className="traffic-action"
+            data-run-action="stop-recording"
+            onClick={() => {
+              act(window.chorus.stopRunRecording({ projectId }))
+            }}
+          >
+            {t('run.stopRecording')}
+          </button>
+        )}
+      </div>
+    )
+
   /* Where to send the app, before there is anything to show — used whole-panel
    * before a capture and as the top half of the split while one is running. One
    * value rather than two copies, which would agree until one was edited. */
@@ -692,29 +1233,169 @@ export function TrafficPanel(props: {
             ? t('traffic.notListening')
             : t('traffic.listeningOn', { host: capture.address })}
         </span>
-        {capture.capturing && capture.forwardedDevices > 0 && (
+        {capture.address !== null && capture.forwardedDevices > 0 && (
           <span className="traffic-forwarded">
             {t('traffic.androidForwarded', { count: capture.forwardedDevices })}
           </span>
         )}
-        <button
-          type="button"
-          className="traffic-action"
-          aria-pressed={capture.capturing}
-          aria-label={capture.capturing ? t('traffic.stop') : t('traffic.start')}
-          /*
-           * Off, not silently refused. With no address committed, `start()`
-           * returns before it binds and the panel's only answer was one line of
-           * text under the fold — so the button read as dead when it had in fact
-           * answered every time it was pressed.
-           */
-          disabled={!capture.capturing && capture.origin === null}
-          title={!capture.capturing && capture.origin === null ? t('traffic.noOrigin') : undefined}
-          onClick={toggle}
-        >
-          {capture.capturing ? t('traffic.stop') : t('traffic.start')}
-        </button>
+        {runControls}
       </header>
+      {runToggle !== null && runHostElement !== null && createPortal(runToggle, runHostElement)}
+
+      {run !== null && !run.available && <p className="run-unavailable">{t('run.unavailable')}</p>}
+
+      {runRefused && <p className="traffic-stopped">{t('run.actionFailed')}</p>}
+
+      {choiceRefused && (
+        <p className="traffic-stopped" role="alert">
+          {t('run.saveFailed')}
+        </p>
+      )}
+
+      {cleanupShown && <p className="traffic-stopped">{t('run.cleanupPending')}</p>}
+
+      {managedRun !== null && setupOpen && (
+        <section className="run-setup" id={setupId} aria-label={t('run.setupTitle')}>
+          <p className="traffic-field-name">{t('run.scripts')}</p>
+          {detected !== null && detected.scripts.length === 0 && (
+            <p className="traffic-field-hint">{t('run.noScripts')}</p>
+          )}
+          <ul className="run-choices">
+            {choices.map((choice) => (
+              <li key={choice.id} className="run-choice" data-run-choice={choice.id}>
+                <label className="run-choice-pick">
+                  <input
+                    type="radio"
+                    name={`${fields}-run-choice`}
+                    checked={chosenCommand === choice.id}
+                    disabled={!choice.fits}
+                    onChange={() => {
+                      applyChoice(choice)
+                    }}
+                  />
+                  {choice.label}
+                </label>
+                <code className="run-command">{choice.command}</code>
+                {!choice.fits && (
+                  <span className="traffic-field-hint">{t('run.scriptTooLong')}</span>
+                )}
+              </li>
+            ))}
+          </ul>
+          <div className="traffic-source-row">
+            <div className="traffic-field" data-run-field="custom-label">
+              <label className="traffic-field-name" htmlFor={`${fields}-run-label`}>
+                {t('run.customLabel')}
+              </label>
+              <input
+                id={`${fields}-run-label`}
+                className="traffic-origin"
+                type="text"
+                spellCheck={false}
+                value={customLabel}
+                onChange={(event) => {
+                  setCustomLabel(event.target.value)
+                }}
+              />
+            </div>
+            <div className="traffic-field" data-run-field="custom-command">
+              <label className="traffic-field-name" htmlFor={`${fields}-run-command`}>
+                {t('run.customCommand')}
+              </label>
+              <input
+                id={`${fields}-run-command`}
+                className="traffic-origin"
+                type="text"
+                spellCheck={false}
+                value={customCommand}
+                onChange={(event) => {
+                  setCustomCommand(event.target.value)
+                }}
+                onKeyDown={(event) => {
+                  if (event.key === 'Enter') addCustom()
+                }}
+              />
+            </div>
+            <button
+              type="button"
+              className="traffic-action"
+              data-run-action="add"
+              onClick={addCustom}
+            >
+              {t('run.add')}
+            </button>
+          </div>
+          {capture.origin === null && (
+            <div className="traffic-field" data-run-field="origin">
+              <label className="traffic-field-name" htmlFor={`${fields}-run-origin`}>
+                {t('traffic.origin')}
+              </label>
+              <input
+                id={`${fields}-run-origin`}
+                className="traffic-origin"
+                type="text"
+                spellCheck={false}
+                placeholder={t('traffic.originPlaceholder')}
+                value={originDraft}
+                onChange={(event) => {
+                  setOriginDraft(event.target.value)
+                }}
+                onBlur={commitSetupOrigin}
+                onKeyDown={(event) => {
+                  if (event.key === 'Enter') commitSetupOrigin()
+                }}
+              />
+            </div>
+          )}
+          {capture.envVar === null && (
+            <div className="traffic-field" data-run-field="variable">
+              <label className="traffic-field-name" htmlFor={`${fields}-run-variable`}>
+                {t('run.variable')}
+              </label>
+              <input
+                id={`${fields}-run-variable`}
+                className="traffic-origin"
+                type="text"
+                spellCheck={false}
+                placeholder={t('traffic.envVarPlaceholder')}
+                value={envVarDraft}
+                onChange={(event) => {
+                  variableEdited.current = true
+                  setEnvVarDraft(event.target.value)
+                }}
+                onBlur={() => {
+                  commitSetupVariable(envVarDraft)
+                }}
+                onKeyDown={(event) => {
+                  if (event.key === 'Enter') commitSetupVariable(envVarDraft)
+                }}
+              />
+              {detected !== null && detected.variables.length > 1 && (
+                <span className="run-variables">
+                  <span className="traffic-field-hint">{t('run.variableChoices')}</span>
+                  {detected.variables.map((name) => (
+                    <button
+                      key={name}
+                      type="button"
+                      className="traffic-tab"
+                      data-run-variable={name}
+                      onClick={() => {
+                        variableEdited.current = true
+                        setEnvVarDraft(name)
+                        commitSetupVariable(name)
+                      }}
+                    >
+                      {name}
+                    </button>
+                  ))}
+                </span>
+              )}
+            </div>
+          )}
+          {capture.capturing && <p className="traffic-field-hint">{t('run.whileRecording')}</p>}
+          {setupError !== null && <p className="traffic-stopped">{t(setupError)}</p>}
+        </section>
+      )}
 
       {legacy !== null && !legacy.completed && (
         <div className="traffic-legacy">

@@ -1,8 +1,20 @@
 import { getService, IConfigurationService, initialize } from '@codingame/monaco-vscode-api'
+import { registerServiceInitializePreParticipant } from '@codingame/monaco-vscode-api/lifecycle'
 import { ConfigurationTarget } from '@codingame/monaco-vscode-api/vscode/vs/platform/configuration/common/configuration'
+import { IWorkspaceContextService } from '@codingame/monaco-vscode-api/vscode/vs/platform/workspace/common/workspace.service'
 import { IURLService } from '@codingame/monaco-vscode-api/vscode/vs/platform/url/common/url.service'
 import { ILogService } from '@codingame/monaco-vscode-api/vscode/vs/platform/log/common/log.service'
+import { IStorageService } from '@codingame/monaco-vscode-api/vscode/vs/platform/storage/common/storage.service'
+import { RunOnceScheduler } from '@codingame/monaco-vscode-api/vscode/vs/base/common/async'
 import { URI } from '@codingame/monaco-vscode-api/vscode/vs/base/common/uri'
+import { IDialogService } from '@codingame/monaco-vscode-api/vscode/vs/platform/dialogs/common/dialogs.service'
+import { IQuickInputService } from '@codingame/monaco-vscode-api/vscode/vs/platform/quickinput/common/quickInput.service'
+import { Parts } from '@codingame/monaco-vscode-api/vscode/vs/workbench/services/layout/browser/layoutService'
+import { IWorkbenchLayoutService } from '@codingame/monaco-vscode-api/vscode/vs/workbench/services/layout/browser/layoutService.service'
+import { DEFAULT_WORKSPACE_WINDOW_SIZE } from '@codingame/monaco-vscode-api/vscode/vs/platform/window/common/window'
+import { IWebviewService } from '@codingame/monaco-vscode-api/vscode/vs/workbench/contrib/webview/browser/webview.service'
+import type { IWebview } from '@codingame/monaco-vscode-api/vscode/vs/workbench/contrib/webview/browser/webview'
+import type { IMouseWheelEvent } from '@codingame/monaco-vscode-api/vscode/vs/base/browser/mouseEvent'
 import { prepareWorkbench } from './services.js'
 import { reportEditorContext } from './context.js'
 import { serveWorkbenchEdits, serveWorkbenchReveal, serveWorkbenchSnapshot } from './edit.js'
@@ -15,6 +27,109 @@ import { persistUserSettings, restoreUserSettings } from './user-settings.js'
 import { restoreBrowserExtensions, synchronizeBrowserExtensions } from './browser-extensions.js'
 import { seedWindowFocus } from './window-focus.js'
 import { bindTerminalEnv, seedTerminalEnv, type TerminalEnvMemory } from './terminal-env.js'
+import {
+  addsIframe,
+  horizontalRowWheel,
+  isCropped,
+  leftActivityBarWidth,
+  trackModifiers,
+  watchWheelSources,
+  type WheelModifiers,
+} from './viewport.js'
+
+async function forwardWebviewWheels(
+  container: HTMLElement,
+  modifiers: () => WheelModifiers
+): Promise<void> {
+  const webviews = await getService(IWebviewService)
+  const watch = watchWheelSources<IWebview, IMouseWheelEvent>((event) => {
+    if (container.style.width === '') return
+    const delta = horizontalRowWheel(
+      { deltaX: event.deltaX, deltaY: event.deltaY, deltaMode: event.deltaMode, ...modifiers() },
+      container.clientWidth
+    )
+    if (delta !== 0) window.chorusWorkbench.requestRowScroll(delta)
+  })
+  const mounted = new MutationObserver((records) => {
+    if (addsIframe(records)) watch(webviews.webviews)
+  })
+  mounted.observe(document.body, { childList: true, subtree: true })
+  watch(webviews.webviews)
+}
+
+async function watchWorkbenchChrome(
+  container: HTMLElement,
+  revealIfCropped: () => void
+): Promise<void> {
+  const layout = await getService(IWorkbenchLayoutService)
+  let reported: number | null = null
+  const reportActivityBar = (): void => {
+    const bar = layout.isVisible(Parts.ACTIVITYBAR_PART)
+      ? layout.getContainer(window, Parts.ACTIVITYBAR_PART)
+      : undefined
+    const width = leftActivityBarWidth(
+      bar?.getBoundingClientRect() ?? null,
+      container.getBoundingClientRect().left
+    )
+    if (width === reported) return
+    reported = width
+    window.chorusWorkbench.reportActivityBar(width)
+  }
+  layout.onDidLayoutMainContainer(reportActivityBar)
+  layout.onDidChangePartVisibility(reportActivityBar)
+  const activityBar = layout.getContainer(window, Parts.ACTIVITYBAR_PART)
+  activityBar?.addEventListener('pointerdown', revealIfCropped, true)
+  if (activityBar !== undefined) {
+    const resized = new ResizeObserver(reportActivityBar)
+    resized.observe(activityBar)
+  }
+  reportActivityBar()
+
+  const quickInput = await getService(IQuickInputService)
+  quickInput.onShow(revealIfCropped)
+  const dialogs = await getService(IDialogService)
+  dialogs.onWillShowDialog(revealIfCropped)
+}
+
+async function savePanelLayout(logs: ILogService): Promise<void> {
+  const layout = await getService(IWorkbenchLayoutService)
+  const storage = await getService(IStorageService)
+  const save = new RunOnceScheduler(() => {
+    storage.flush().catch((error: unknown) => {
+      const detail = error instanceof Error ? (error.stack ?? error.message) : String(error)
+      logs.error(`Chorus: panel layout could not be saved — ${detail}`)
+    })
+  }, 200)
+  const settle = (): void => {
+    save.schedule()
+  }
+  layout.onDidChangePartVisibility((event) => {
+    if (event.partId === Parts.PANEL_PART) settle()
+  })
+  layout.onDidChangePanelPosition(settle)
+  const panel = layout.getContainer(window, Parts.PANEL_PART)
+  if (panel !== undefined) {
+    const resized = new ResizeObserver(settle)
+    resized.observe(panel)
+  }
+}
+
+function holdUsableRoot(container: HTMLElement): () => void {
+  const usable = (size: number): boolean => Number.isFinite(size) && size > 0
+  let width = usable(screen.availWidth) ? screen.availWidth : DEFAULT_WORKSPACE_WINDOW_SIZE.width
+  let height = usable(screen.availHeight)
+    ? screen.availHeight
+    : DEFAULT_WORKSPACE_WINDOW_SIZE.height
+  return () => {
+    const viewportWidth = window.innerWidth
+    const viewportHeight = window.innerHeight
+    if (usable(viewportWidth)) width = viewportWidth
+    if (usable(viewportHeight)) height = viewportHeight
+    container.style.minWidth =
+      container.style.width === '' && !usable(viewportWidth) ? `${String(width)}px` : ''
+    container.style.minHeight = usable(viewportHeight) ? '' : `${String(height)}px`
+  }
+}
 
 /**
  * One workbench, in one document, in one process.
@@ -81,6 +196,48 @@ async function main(): Promise<void> {
   const container = document.createElement('div')
   container.className = 'workbench-root'
   document.body.replaceChildren(container)
+  const holdRoot = holdUsableRoot(container)
+  holdRoot()
+  window.addEventListener('resize', holdRoot)
+
+  window.chorusWorkbench.onLayoutWidth((width) => {
+    const next = `${String(width)}px`
+    if (container.style.width === next) return
+    container.style.width = next
+    window.dispatchEvent(new Event('resize'))
+  })
+  const revealIfCropped = (): void => {
+    if (isCropped(window.innerWidth, container.clientWidth)) {
+      window.chorusWorkbench.requestRowReveal()
+    }
+  }
+  const modifiers = trackModifiers()
+  window.addEventListener(
+    'keydown',
+    (event) => {
+      modifiers.update(event)
+    },
+    true
+  )
+  window.addEventListener(
+    'keyup',
+    (event) => {
+      modifiers.update(event)
+    },
+    true
+  )
+  window.addEventListener('blur', modifiers.reset)
+  window.addEventListener(
+    'wheel',
+    (event) => {
+      if (container.style.width === '' || event.defaultPrevented) return
+      const delta = horizontalRowWheel(event, container.clientWidth)
+      if (delta === 0) return
+      event.stopPropagation()
+      window.chorusWorkbench.requestRowScroll(delta)
+    },
+    { capture: true, passive: false }
+  )
 
   /*
    * Before `initialize`, because a service that resolves a worker during startup
@@ -89,24 +246,28 @@ async function main(): Promise<void> {
    */
   registerWorkbenchWorkers()
 
+  registerServiceInitializePreParticipant(async (accessor) => {
+    const configuration = accessor.get(IConfigurationService)
+    const workspace = accessor.get(IWorkspaceContextService)
+    const terminalLogs = accessor.get(ILogService)
+    await workspace.getCompleteWorkspace()
+    bindTerminalEnv({
+      read: (key) => configuration.inspect<TerminalEnvMemory>(key).memoryValue,
+      write: (key, memory) => configuration.updateValue(key, memory, ConfigurationTarget.MEMORY),
+      watch: (listener) => {
+        configuration.onDidChangeConfiguration((event) => {
+          listener((key) => event.affectsConfiguration(key))
+        })
+      },
+      fail: (error) => {
+        const detail = error instanceof Error ? (error.stack ?? error.message) : String(error)
+        terminalLogs.error(`Chorus: capture terminal environment could not be applied — ${detail}`)
+      },
+    })
+  })
+
   const { services, options, env } = prepareWorkbench(connection)
   await initialize(services, container, options, env)
-
-  const configuration = await getService(IConfigurationService)
-  const terminalLogs = await getService(ILogService)
-  bindTerminalEnv({
-    read: (key) => configuration.inspect<TerminalEnvMemory>(key).memoryValue,
-    write: (key, memory) => configuration.updateValue(key, memory, ConfigurationTarget.MEMORY),
-    watch: (listener) => {
-      configuration.onDidChangeConfiguration((event) => {
-        listener((key) => event.affectsConfiguration(key))
-      })
-    },
-    fail: (error) => {
-      const detail = error instanceof Error ? (error.stack ?? error.message) : String(error)
-      terminalLogs.error(`Chorus: capture terminal environment could not be applied — ${detail}`)
-    },
-  })
 
   /*
    * After `initialize`, because the file service does not exist before it. Not
@@ -188,6 +349,18 @@ async function main(): Promise<void> {
    * whichever logger is attached.
    */
   const logs = await getService(ILogService)
+  await watchWorkbenchChrome(container, revealIfCropped).catch((error: unknown) => {
+    const detail = error instanceof Error ? (error.stack ?? error.message) : String(error)
+    logs.error(`Chorus: workbench viewport reporting failed to start — ${detail}`)
+  })
+  await savePanelLayout(logs).catch((error: unknown) => {
+    const detail = error instanceof Error ? (error.stack ?? error.message) : String(error)
+    logs.error(`Chorus: panel layout saving failed to start — ${detail}`)
+  })
+  await forwardWebviewWheels(container, modifiers.current).catch((error: unknown) => {
+    const detail = error instanceof Error ? (error.stack ?? error.message) : String(error)
+    logs.error(`Chorus: webview swipe forwarding failed to start — ${detail}`)
+  })
   await reportEditorContext(connection.projectRoot).catch((error: unknown) => {
     const detail = error instanceof Error ? (error.stack ?? error.message) : String(error)
     logs.error(`Chorus: editor context reporting failed to start — ${detail}`)

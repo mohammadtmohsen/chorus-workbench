@@ -92,10 +92,8 @@ export interface ComposerState {
 
 export interface ComposerProps {
   readonly conversationId: string
-  /** Whether this project's workbench is on screen — the Editor switch's state. */
-  readonly workbenchShown: boolean
-  readonly onToggleWorkbench: () => void
   readonly participants: readonly string[]
+  readonly starting: boolean
   /** Drives whether the one button offers Send or Stop. */
   readonly busy: boolean
   readonly working: readonly string[]
@@ -186,7 +184,7 @@ const ASK_CEILING = 8
 export const Composer = forwardRef<ComposerHandle, ComposerProps>(
   function Composer(props, ref): React.JSX.Element {
     const { t } = useTranslation()
-    const { conversationId, participants } = props
+    const { conversationId, participants, starting } = props
 
     const [draft, setDraftState] = useState(() =>
       originalCollaborationText(props.initial?.draft ?? '')
@@ -955,6 +953,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(
     const { onError, onSending, onSendFailed } = props
 
     const send = useCallback(() => {
+      if (starting) return
       /*
        * The paths join the message on the way out, not while you are writing it.
        *
@@ -1045,7 +1044,18 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(
           onSendFailed()
           onError(error)
         })
-    }, [conversationId, task, pair, attached, ideAttached, t, onError, onSending, onSendFailed])
+    }, [
+      starting,
+      conversationId,
+      task,
+      pair,
+      attached,
+      ideAttached,
+      t,
+      onError,
+      onSending,
+      onSendFailed,
+    ])
 
     useImperativeHandle(
       ref,
@@ -1426,7 +1436,11 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(
               send()
             }}
           />
-          {team || pair !== null ? (
+          {starting ? (
+            <div className="composer-collaboration" role="status">
+              {t('conversation.agentsStarting')}
+            </div>
+          ) : team || pair !== null ? (
             <div className="composer-collaboration" role="status">
               {team
                 ? t('conversation.teamPreview')
@@ -1620,7 +1634,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(
               type="button"
               className="composer-style"
               aria-pressed={styleOn}
-              disabled={stylePending || props.busy || props.working.length > 0}
+              disabled={starting || stylePending || props.busy || props.working.length > 0}
               aria-label={styleOn ? t('conversation.styleOff') : t('conversation.styleOn')}
               onClick={() => {
                 const next = !styleOn
@@ -1644,17 +1658,6 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(
               }}
             >
               {styleOn ? t('conversation.styleBadgeOn') : t('conversation.styleBadgeOff')}
-            </button>
-            <button
-              type="button"
-              className="ide-source"
-              aria-pressed={props.workbenchShown}
-              aria-label={props.workbenchShown ? t('ide.hideEditor') : t('ide.showEditor')}
-              onClick={props.onToggleWorkbench}
-            >
-              <svg className="ide-source-icon" viewBox="0 0 24 24" aria-hidden="true">
-                <path d="M17 3.5 9.5 11 5 7.5 3 9l4 3-4 3 2 1.5L9.5 13l7.5 7.5 4-2v-13l-4-2Zm0 4.2v8.6L12 12l5-4.3Z" />
-              </svg>
             </button>
             {participants.map((agent) => (
               <button
@@ -1784,7 +1787,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(
                    working, so the app's primary action was the one button with
                    nothing to say for itself on hover. */
                 title={props.busy ? t('conversation.steer') : t('conversation.send')}
-                disabled={!hasDraft || participants.length === 0}
+                disabled={starting || !hasDraft || participants.length === 0}
               >
                 <span aria-hidden="true">↑</span>
               </button>

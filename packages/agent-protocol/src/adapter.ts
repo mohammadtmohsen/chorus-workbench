@@ -1,6 +1,7 @@
 import type { AgentId, ApprovalId, UserInputId } from '@chorus/shared'
 import type { ApprovalDecision } from './approval.js'
 import type { EditorPlace } from './editor-edit.js'
+import type { ProjectReader } from './project-tools.js'
 import type { UserInputResponse } from './user-input.js'
 import type { AgentEvent } from './events.js'
 
@@ -142,6 +143,7 @@ export interface SessionOpts {
   readonly instructions?: string
   readonly transcript?: TranscriptReader
   readonly editorPlace?: EditorPlace
+  readonly project?: ProjectReader
 }
 
 export interface TranscriptRequest {

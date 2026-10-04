@@ -690,6 +690,13 @@ export const MIGRATIONS: readonly Migration[] = [
        WHERE conversations.id = latest.conversation_id;
     `,
   },
+  {
+    version: 20,
+    name: 'the-commands-a-project-runs',
+    up: `
+      ALTER TABLE projects ADD COLUMN run_commands TEXT;
+    `,
+  },
 ]
 
 export interface MigrationResult {

@@ -15,7 +15,11 @@ import {
   type TrafficReadResult,
   type TrafficRequest,
 } from '../shared/traffic-ipc.js'
-import type { ProjectTrafficPush, ProjectTrafficRegistry } from './project-traffic.js'
+import type {
+  ProjectTrafficPush,
+  ProjectTrafficRegistry,
+  ProjectTrafficState,
+} from './project-traffic.js'
 
 const PENDING_LIMIT = 64
 const PENDING_BYTES = 256 * 1_024
@@ -62,6 +66,7 @@ interface Deps {
   readonly isAdopted: (projectId: string) => boolean
   readonly legacy: () => TrafficLegacy
   readonly decideLegacy: (keep: boolean) => void
+  readonly capture?: (projectId: string, change: 'start' | 'stop') => Promise<ProjectTrafficState>
 }
 
 export class TrafficIpc {
@@ -70,7 +75,7 @@ export class TrafficIpc {
     { readonly webContents: WebContents; readonly role: ShellRole }
   >()
   private readonly subscriptions = new Map<string, Subscription>()
-  private readonly byDocument = new Map<number, string>()
+  private readonly byDocument = new Map<number, Map<string, string>>()
   private readonly live = new Set<string>()
   private readonly deps: Deps
   private readonly detach: () => void
@@ -91,10 +96,10 @@ export class TrafficIpc {
   releaseShell(webContents: WebContents): void {
     const id = webContents.id
     this.shells.delete(id)
-    const subscriptionId = this.byDocument.get(id)
-    if (subscriptionId === undefined) return
+    const projects = this.byDocument.get(id)
+    if (projects === undefined) return
     this.byDocument.delete(id)
-    this.subscriptions.delete(subscriptionId)
+    for (const subscriptionId of projects.values()) this.subscriptions.delete(subscriptionId)
   }
 
   close(): void {
@@ -170,20 +175,21 @@ export class TrafficIpc {
 
     switch (channel) {
       case 'traffic:start':
-        return registry.start(projectId).then((next) => ({ state: next }))
+        return this.capture(projectId, 'start').then((next) => ({ state: next }))
       case 'traffic:stop':
-        return registry.stop(projectId).then((next) => ({ state: next }))
+        return this.capture(projectId, 'stop').then((next) => ({ state: next }))
       case 'traffic:clear':
         return registry.clear(projectId)
       case 'traffic:configure': {
         const config = (request as { config: Record<string, unknown> }).config
-        const next = registry.configure(projectId, {
-          origin: config['origin'] as string | null | undefined,
-          port: config['port'] as number | null | undefined,
-          access: config['access'] as 'loopback' | 'lan' | undefined,
-          envVar: config['envVar'] as string | null | undefined,
-        })
-        return { state: next, failure: next.failure }
+        return registry
+          .configure(projectId, {
+            origin: config['origin'] as string | null | undefined,
+            port: config['port'] as number | null | undefined,
+            access: config['access'] as 'loopback' | 'lan' | undefined,
+            envVar: config['envVar'] as string | null | undefined,
+          })
+          .then((next) => ({ state: next, failure: next.failure }))
       }
       case 'traffic:selectSource':
         return {
@@ -193,6 +199,13 @@ export class TrafficIpc {
           ),
         }
     }
+  }
+
+  private capture(projectId: string, change: 'start' | 'stop'): Promise<ProjectTrafficState> {
+    const routed = this.deps.capture
+    if (routed !== undefined) return routed(projectId, change)
+    const registry = this.deps.registry
+    return change === 'start' ? registry.start(projectId) : registry.stop(projectId)
   }
 
   private attach(
@@ -209,7 +222,8 @@ export class TrafficIpc {
       throw new Error('That project is not in the registry')
     }
 
-    const previous = this.byDocument.get(event.sender.id)
+    const projects = this.byDocument.get(event.sender.id) ?? new Map<string, string>()
+    const previous = projects.get(request.projectId)
     if (previous !== undefined) this.subscriptions.delete(previous)
 
     const id = randomUUID()
@@ -221,7 +235,8 @@ export class TrafficIpc {
       pendingBytes: 0,
       outstanding: false,
     })
-    this.byDocument.set(event.sender.id, id)
+    projects.set(request.projectId, id)
+    this.byDocument.set(event.sender.id, projects)
 
     return {
       subscriptionId: id,
@@ -239,7 +254,11 @@ export class TrafficIpc {
     const subscription = this.own(event, request.subscriptionId)
     if (subscription === null) return { ok: true }
     this.subscriptions.delete(subscription.id)
-    this.byDocument.delete(event.sender.id)
+    const projects = this.byDocument.get(event.sender.id)
+    if (projects?.get(subscription.projectId) === subscription.id) {
+      projects.delete(subscription.projectId)
+    }
+    if (projects?.size === 0) this.byDocument.delete(event.sender.id)
     return { ok: true }
   }
 

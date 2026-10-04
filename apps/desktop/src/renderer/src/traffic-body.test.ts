@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { TrafficBodyDescriptor } from '../../shared/traffic-ipc.js'
+import { maskHeaders } from '../../shared/traffic-mask.js'
 import {
   bodyView,
   bytesFromBase64,
@@ -10,7 +11,6 @@ import {
   isForm,
   isTextual,
   jsonTree,
-  maskHeaders,
   prettyJson,
   previewTokens,
   textOf,

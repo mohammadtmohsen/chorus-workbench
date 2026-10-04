@@ -1,31 +1,46 @@
-import { Fragment, useEffect, useLayoutEffect, useRef, useState } from 'react'
-import { createPortal, flushSync } from 'react-dom'
-import type { PointerEvent as ReactPointerEvent } from 'react'
+import { Fragment, useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
+import type {
+  KeyboardEvent as ReactKeyboardEvent,
+  PointerEvent as ReactPointerEvent,
+} from 'react'
 import { useTranslation } from 'react-i18next'
 import { BOX_WIDTH, type WorkspaceLayoutNode } from '../../../shared/workspace-layout.js'
 import type { SessionInfo } from '../Session.js'
-import { primaryShift } from '../shortcuts.js'
+import { ProjectTerminalPane } from '../ProjectTerminalPane.js'
 import { TrafficPanel, type TrafficTerminalOption } from '../TrafficPanel.js'
+import type { WorkbenchGeometry } from '../workbench/WorkbenchFrame.js'
 import { ConversationTree } from './ConversationTree.js'
 import { ProjectNotes } from './ProjectNotes.js'
 import type { NoteSize } from '../noteSize.js'
 import { useConversationDrag } from './useConversationDrag.js'
 import type { ProjectInfo } from './session-row.js'
 import type { ActiveTabDrag } from './useTabDrag.js'
-import { columnWidths, columnsOf, paneSplit, pushDivider } from './layout.js'
+import {
+  clampActivityBar,
+  columnWidths,
+  columnsOf,
+  editorViewport,
+  editorWidthIn,
+  leafPaneIds,
+  projectTerminalMinimum,
+  projectTerminalWidth,
+  ROW_EDGE_INSET,
+} from './layout.js'
 import {
   useConversationGroups,
-  useChorusWidth,
   usePane,
-  useRaisedEditor,
+  useProjectRun,
+  useProjectTerminalPane,
+  useRowScroll,
   useTrafficLive,
   useTrafficPanel,
-  useWorkbenchShown,
   useWorkspaceActions,
 } from './hooks.js'
 import { PaneWorkbench } from './PaneWorkbench.js'
-import { ChorusSash } from './ChorusSash.js'
 import { PaneTabStrip } from './PaneTabStrip.js'
+import { routeRowWheel, startRowPush, stepRow, type RowWidths } from './row-drag.js'
+import { useWorkspaceStore } from './store.js'
 
 export interface LayoutViewProps {
   readonly node: WorkspaceLayoutNode
@@ -99,44 +114,87 @@ export function EditorPane(
   /* The row the pad is drawn from — its text and the box it is read in, which
      travel together precisely so they cannot be one refresh apart. */
   const note = props.projects.find((project) => project.id === projectId)
-  const chorusWidth = useChorusWidth(projectId)
-  const workbenchShown = useWorkbenchShown(projectId)
   const content = useRef<HTMLDivElement>(null)
+  const scroller = useRef<HTMLDivElement>(null)
+  const trafficBox = useRef<HTMLElement>(null)
+  const [runHost, setRunHost] = useState<HTMLDivElement | null>(null)
+  const activityBar = useRef<HTMLDivElement>(null)
   const [paneWidth, setPaneWidth] = useState(0)
+  const [windowWidth, setWindowWidth] = useState(() => window.innerWidth)
+  const [activityBars, setActivityBars] = useState<Readonly<Record<string, number>>>({})
   const hasPane = pane !== undefined
   useLayoutEffect(() => {
     const element = content.current
     if (element === null) return undefined
-    setPaneWidth(element.clientWidth)
-    const observer = new ResizeObserver(() => {
+    const measureWidth = (): void => {
       setPaneWidth(element.clientWidth)
-    })
+      setWindowWidth(window.innerWidth)
+    }
+    measureWidth()
+    const observer = new ResizeObserver(measureWidth)
     observer.observe(element)
+    window.addEventListener('resize', measureWidth)
     return () => {
       observer.disconnect()
+      window.removeEventListener('resize', measureWidth)
     }
   }, [hasPane])
-  const split = workbenchShown && paneWidth > 0 ? paneSplit(paneWidth, chorusWidth) : null
-  const [raised, raiseEditor, lowerEditor] = useRaisedEditor(projectId, split?.covered === true)
-  const covered = split?.covered === true && !raised
-  const canToggleEditor = split?.covered === true
-  const paneFocused = props.focusedPaneId === props.paneId
   useEffect(() => {
-    if (!paneFocused || !canToggleEditor) return undefined
-    const onKeyDown = (event: KeyboardEvent): void => {
-      if (!primaryShift(event) || event.code !== 'Slash') return
-      event.preventDefault()
-      if (raised) lowerEditor()
-      else raiseEditor()
-    }
-    document.addEventListener('keydown', onKeyDown)
-    return () => {
-      document.removeEventListener('keydown', onKeyDown)
-    }
-  }, [paneFocused, canToggleEditor, raised, raiseEditor, lowerEditor])
+    const row = scroller.current
+    return row === null ? undefined : routeRowWheel(row)
+  }, [hasPane])
+  useEffect(() => {
+    const row = scroller.current
+    if (row === null || projectId === null) return
+    const left = useWorkspaceStore.getState().rowScroll[projectId]
+    if (left !== undefined) row.scrollLeft = left
+  }, [projectId, hasPane])
+  const editorWidth = editorWidthIn(windowWidth)
+  const barWidth =
+    projectId === null ? 0 : clampActivityBar(activityBars[projectId] ?? 0, editorWidth, paneWidth)
+  const gutterWidth = ROW_EDGE_INSET + barWidth
+  const bodyWidth = Math.max(0, editorWidth - gutterWidth)
+  const geometry = useCallback((host: HTMLElement): WorkbenchGeometry | null => {
+    const bar = activityBar.current
+    const row = scroller.current
+    if (bar === null || row === null) return null
+    return editorViewport(
+      bar.getBoundingClientRect(),
+      host.getBoundingClientRect(),
+      row.getBoundingClientRect()
+    )
+  }, [])
+  const recordActivityBar = useCallback((id: string, width: number) => {
+    setActivityBars((current) => (current[id] === width ? current : { ...current, [id]: width }))
+  }, [])
+  const revealRow = (id: string): void => {
+    if (id !== projectId) return
+    const row = scroller.current
+    if (row !== null) row.scrollLeft = 0
+  }
+  const scrollRow = (id: string, delta: number): void => {
+    if (id !== projectId) return
+    const row = scroller.current
+    if (row !== null) row.scrollLeft += delta
+  }
+  const revealInRow = (box: Element | null): void => {
+    const row = scroller.current
+    if (row === null || box === null) return
+    const shown = row.getBoundingClientRect()
+    const placed = box.getBoundingClientRect()
+    if (placed.left >= shown.left && placed.right <= shown.right) return
+    row.scrollLeft += placed.left - shown.left
+  }
+  const revealTraffic = (): void => {
+    revealInRow(trafficBox.current)
+  }
   const arrangement = useConversationGroups(projectId)
   const traffic = useTrafficPanel(projectId)
   const trafficLive = useTrafficLive(projectId)
+  const run = useProjectRun(projectId)
+  const terminalPane = useProjectTerminalPane(projectId)
+  const terminalMinimum = projectTerminalMinimum(terminalPane.shells.length)
+  useRowScroll(scroller, projectId, run !== null, hasPane)
   const widths = arrangement === undefined ? [] : columnWidths(arrangement)
   const focusedConversationGroupId = arrangement?.focusedPaneId ?? null
   const activeConversationId =
@@ -149,8 +207,10 @@ export function EditorPane(
     moveConversationBox,
     setConversationWidths,
     resetProjectWidths,
-    toggleTraffic,
     setTrafficWidth,
+    setProjectTerminalWidth,
+    addProjectShell,
+    removeProjectShell,
   } = useWorkspaceActions()
   const commitLayout = props.onCommitLayout
   /*
@@ -166,20 +226,34 @@ export function EditorPane(
       commitLayout()
     },
   })
+  const applyRow = (id: string) => (row: RowWidths) => {
+    setConversationWidths(id, row.boxes)
+    if (row.traffic !== null) setTrafficWidth(id, row.traffic)
+    if (row.terminal !== null) setProjectTerminalWidth(id, row.terminal)
+  }
   const pushRow = (event: ReactPointerEvent<HTMLDivElement>): void => {
     if (projectId === null) return
-    startRowPush(
-      event,
-      (boxWidths, trafficWidth) => {
-        setConversationWidths(projectId, boxWidths)
-        if (trafficWidth !== null) setTrafficWidth(projectId, trafficWidth)
-      },
-      commitLayout
-    )
+    startRowPush(event, applyRow(projectId), commitLayout)
+  }
+  const nudgeRow = (event: ReactKeyboardEvent<HTMLDivElement>): void => {
+    if (projectId === null) return
+    stepRow(event, applyRow(projectId))
+  }
+  const commitNudge = (event: ReactKeyboardEvent<HTMLDivElement>): void => {
+    if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') commitLayout()
   }
   const resetWidths = (): void => {
     if (projectId === null) return
     resetProjectWidths(projectId)
+    commitLayout()
+  }
+  const addShell = (id: string): string => {
+    const shell = addProjectShell(id)
+    commitLayout()
+    return shell
+  }
+  const removeShell = (id: string, shellId: string): void => {
+    removeProjectShell(id, shellId)
     commitLayout()
   }
 
@@ -200,6 +274,18 @@ export function EditorPane(
       ? []
       : [...props.sessions.values()].filter((session) => session.projectId === projectId)
   const focused = props.focusedPaneId === props.paneId
+  const rowSash = (
+    <div
+      className="conversation-sash"
+      role="separator"
+      aria-orientation="vertical"
+      tabIndex={0}
+      onPointerDown={pushRow}
+      onKeyDown={nudgeRow}
+      onKeyUp={commitNudge}
+      onDoubleClick={resetWidths}
+    />
+  )
   return (
     <section
       className="workspace-pane"
@@ -225,149 +311,98 @@ export function EditorPane(
         aria-labelledby={projectId === null ? undefined : `tab-${props.paneId}-${projectId}`}
       >
         {/*
-          Two regions: the workbench, and Chorus beside it.
+          The project's scratchpad, above its conversations.
 
-          Plan §2.4 sets the shape — each visible project gets its own surface in
-          its own `WebContentsView`, up to the four-pane cap. So this mounts per
-          pane rather than once for the focused one: four panes showing four
-          projects are four surfaces, which is the configuration the containment
-          gate proved for two and the memory gate is owed for four.
-
-          It is also, knowingly, the configuration C-054 has only ever been seen
-          in. That defect is undiagnosed and this decision walks into it rather
-          than around it.
+          **Keyed by project, and the key is load-bearing.** The pad seeds its
+          draft from props once, so without it switching tabs would leave the
+          previous project's note in the box — the worst failure available to
+          something you type into, because the next keystroke files it against
+          the wrong project.
         */}
-        {/*
-          Rendered even when the editor is switched off, and that is the point.
-
-          Unmounting `WorkbenchFrame` runs its cleanup, which closes the surface
-          — a whole `WebContents` destroyed, and switching back would reload the
-          workbench and lose every open file. So the frame stays mounted with
-          `hidden`, which stops it reporting bounds and asks main to make its one
-          view invisible. The view keeps its rectangle, nothing inside it
-          reflows, and coming back is a compositing change rather than a launch.
-
-          The region and the sash are what actually leave the layout, so Chorus
-          takes the pane.
-        */}
-        {projectId !== null && workbenchShown && (
-          <button
-            type="button"
-            className="editor-toggle-bar"
-            disabled={split?.covered !== true}
-            aria-pressed={raised}
-            aria-label={t('workbench.toggleEditor')}
-            title={t('workbench.toggleEditor')}
-            onClick={raised ? lowerEditor : raiseEditor}
-          />
-        )}
         {projectId !== null && (
-          /*
-            One slot per project open in this pane, keyed by project so a tab
-            switch moves which one is visible rather than destroying one surface
-            and building another. The region itself still leaves the layout when
-            the *active* project's Editor switch is off, which is what the
-            `hidden` here is for.
-          */
-          <div
-            className="workspace-pane-workbench"
-            hidden={!workbenchShown}
-            data-covered={covered}
-            style={
-              split === null
-                ? undefined
-                : { flex: `0 0 ${String(raised ? split.raised : split.editor)}px` }
-            }
-            onClick={covered ? raiseEditor : undefined}
-          >
-            {/* `pane` is non-null here: `projectId` is read off it, and the
-                guard above is what narrows both. */}
-            {pane.tabs.map((id) => (
-              <PaneWorkbench
-                key={id}
-                projectId={id}
-                active={id === projectId}
-                covered={covered}
-                projectRoot={
-                  [...props.sessions.values()].find((session) => session.projectId === id)?.cwd ??
-                  ''
-                }
-              />
-            ))}
+          <div className="project-header">
+            <ProjectNotes
+              key={projectId}
+              projectId={projectId}
+              /* Only the focused pane's pad answers ⌘⇧N — see the effect that
+                 reads this. Four panes are four mounted pads. */
+              active={focused}
+              conversationId={activeConversationId}
+              notes={note?.notes ?? null}
+              size={{ width: note?.noteWidth ?? null, height: note?.noteHeight ?? null }}
+              onSave={props.onSetProjectNotes}
+              onSaveSize={props.onSetProjectNoteSize}
+              onSendSelection={props.onSendProjectNoteSelection}
+            />
+            <div className="project-run" ref={setRunHost} />
+            <button
+              type="button"
+              className="conversation-dock-add"
+              aria-label={t('conversation.newInGroup')}
+              title={t('conversation.newInGroup')}
+              onClick={() => {
+                props.onStartInProject(projectId)
+              }}
+            >
+              +
+            </button>
           </div>
         )}
-        <div
-          className="workspace-pane-chorus"
-          /* Full width with the editor off: the sash is gone, so there is nothing
-             left for the remembered width to divide. */
-          style={
-            workbenchShown ? { width: `${String(split?.chorus ?? chorusWidth)}px` } : undefined
-          }
-          data-full={!workbenchShown}
-          onPointerDown={raised ? lowerEditor : undefined}
-        >
-          {projectId !== null && workbenchShown && (
-            <ChorusSash projectId={projectId} onCommit={props.onCommitLayout} />
-          )}
-          {/*
-            The project's scratchpad, above its conversations.
-
-            **Keyed by project, and the key is load-bearing.** The pad seeds its
-            draft from props once, so without it switching tabs would leave the
-            previous project's note in the box — the worst failure available to
-            something you type into, because the next keystroke files it against
-            the wrong project.
-
-            First child of the Chorus column rather than anywhere nicer: the
-            editor beside it is a native view composited over the window, so a
-            pad that floated across that edge would vanish at it rather than
-            overlap. Everything Chorus draws stays on Chorus's side.
-          */}
+        <div className="workspace-pane-row">
           {projectId !== null && (
-            <div className="project-header">
-              <ProjectNotes
-                key={projectId}
-                projectId={projectId}
-                /* Only the focused pane's pad answers ⌘⇧N — see the effect that
-                   reads this. Four panes are four mounted pads. */
-                active={focused}
-                conversationId={activeConversationId}
-                notes={note?.notes ?? null}
-                size={{ width: note?.noteWidth ?? null, height: note?.noteHeight ?? null }}
-                onSave={props.onSetProjectNotes}
-                onSaveSize={props.onSetProjectNoteSize}
-                onSendSelection={props.onSendProjectNoteSelection}
+            <div
+              className="workspace-pane-gutter"
+              style={{
+                width: `${String(gutterWidth)}px`,
+                paddingLeft: `${String(ROW_EDGE_INSET)}px`,
+              }}
+            >
+              <div
+                className="workspace-pane-bar"
+                ref={activityBar}
+                style={{ width: `${String(barWidth)}px` }}
               />
-              <button
-                type="button"
-                className="conversation-dock-add"
-                data-traffic-open="true"
-                data-live={trafficLive}
-                aria-pressed={traffic.open}
-                aria-label={trafficLive ? t('traffic.tabTitleLive') : t('traffic.tabTitle')}
-                title={trafficLive ? t('traffic.tabTitleLive') : t('traffic.tabTitle')}
-                onClick={() => {
-                  toggleTraffic(projectId)
-                  commitLayout()
-                }}
-              >
-                <span aria-hidden="true">⇄</span>
-                {trafficLive && <span className="traffic-live-dot" aria-hidden="true" />}
-              </button>
-              <button
-                type="button"
-                className="conversation-dock-add"
-                aria-label={t('conversation.newInGroup')}
-                title={t('conversation.newInGroup')}
-                onClick={() => {
-                  props.onStartInProject(projectId)
-                }}
-              >
-                +
-              </button>
             </div>
           )}
-          <div className="conversation-scroller">
+          <div className="conversation-scroller" ref={scroller}>
+            {projectId !== null && (
+              /*
+                One slot per project open in this pane, keyed by project so a tab
+                switch moves which one is visible rather than destroying one surface
+                and building another.
+              */
+              <div
+                className="workspace-pane-workbench"
+                style={{ flex: `0 0 ${String(bodyWidth)}px` }}
+              >
+                {/* `pane` is non-null here: `projectId` is read off it, and the
+                    guard above is what narrows both. */}
+                {pane.tabs.map((id) => (
+                  <PaneWorkbench
+                    key={id}
+                    projectId={id}
+                    active={id === projectId}
+                    projectRoot={
+                      [...props.sessions.values()].find((session) => session.projectId === id)
+                        ?.cwd ?? ''
+                    }
+                    geometry={geometry}
+                    onActivityBar={recordActivityBar}
+                    onRevealRow={revealRow}
+                    onScrollRow={scrollRow}
+                  />
+                ))}
+              </div>
+            )}
+            {projectId !== null && (
+              <div
+                className="conversation-sash"
+                data-fixed
+                role="separator"
+                aria-orientation="vertical"
+                onDoubleClick={resetWidths}
+              />
+            )}
             {/*
               A project whose conversations have all ended.
 
@@ -392,21 +427,12 @@ export function EditorPane(
             {projectId !== null &&
               arrangement?.layout != null &&
               columnsOf(arrangement.layout).map((column, index, columns) => (
-                <Fragment key={index}>
-                  {index > 0 && (
-                    <div
-                      className="conversation-sash"
-                      role="separator"
-                      aria-orientation="vertical"
-                      tabIndex={0}
-                      onPointerDown={pushRow}
-                      onDoubleClick={resetWidths}
-                    />
-                  )}
+                <Fragment key={leafPaneIds(column)[0] ?? index}>
+                  {index > 0 && rowSash}
                   <div
                     className="conversation-slot"
                     style={{
-                      flex: `${index === columns.length - 1 && !traffic.open ? '1' : '0'} 0 ${String(widths[index] ?? BOX_WIDTH.default)}px`,
+                      flex: `0 0 ${String(widths[index] ?? BOX_WIDTH.default)}px`,
                     }}
                   >
                     {/*
@@ -442,17 +468,14 @@ export function EditorPane(
                   </div>
                 </Fragment>
               ))}
-            {projectId !== null && traffic.open && (
+            {projectId !== null && (
               <>
-                <div
-                  className="conversation-sash"
-                  role="separator"
-                  aria-orientation="vertical"
-                  tabIndex={0}
-                  onPointerDown={pushRow}
-                  onDoubleClick={resetWidths}
-                />
-                <section className="traffic-box" style={{ flex: `1 0 ${String(traffic.width)}px` }}>
+                {rowSash}
+                <section
+                  className="traffic-box"
+                  ref={trafficBox}
+                  style={{ flex: `0 0 ${String(traffic.width)}px` }}
+                >
                   <div className="conversation-dock">
                     <div className="conversation-dock-tabs">
                       <div
@@ -471,24 +494,39 @@ export function EditorPane(
                             </span>
                           )}
                         </span>
-                        <button
-                          type="button"
-                          className="conversation-dock-tab-close"
-                          aria-label={t('traffic.close')}
-                          title={t('traffic.close')}
-                          onClick={() => {
-                            toggleTraffic(projectId)
-                            commitLayout()
-                          }}
-                        >
-                          <span aria-hidden="true">×</span>
-                        </button>
                       </div>
                     </div>
                   </div>
                   <div className="conversation-body">
-                    <TrafficPanel projectId={projectId} terminals={props.trafficTerminals} />
+                    <TrafficPanel
+                      projectId={projectId}
+                      terminals={props.trafficTerminals}
+                      run={run}
+                      runHost={{ element: runHost, reveal: revealTraffic }}
+                    />
                   </div>
+                </section>
+              </>
+            )}
+            {projectId !== null && run?.available === true && (
+              <>
+                {rowSash}
+                <section
+                  className="project-terminal-box"
+                  data-min-width={terminalMinimum}
+                  style={{
+                    flex: `0 0 ${String(projectTerminalWidth(terminalPane))}px`,
+                  }}
+                >
+                  <ProjectTerminalPane
+                    key={projectId}
+                    projectId={projectId}
+                    run={run}
+                    shells={terminalPane.shells}
+                    onAddShell={addShell}
+                    onRemoveShell={removeShell}
+                    onReveal={revealInRow}
+                  />
                 </section>
               </>
             )}
@@ -517,50 +555,4 @@ export function EditorPane(
       </div>
     </section>
   )
-}
-
-function startRowPush(
-  event: ReactPointerEvent<HTMLDivElement>,
-  apply: (boxWidths: number[], trafficWidth: number | null) => void,
-  commit: () => void
-): void {
-  if (event.button !== 0) return
-  const sash = event.currentTarget
-  const scroller = sash.parentElement
-  if (scroller === null) return
-  const children = [...scroller.children]
-  const isItem = (child: Element): boolean => !child.classList.contains('conversation-sash')
-  const items = children.filter(isItem)
-  const index = children.slice(0, children.indexOf(sash)).filter(isItem).length
-  const boxAt = items.map((item) => item.classList.contains('conversation-slot'))
-  const trafficAt = items.findIndex((item) => item.classList.contains('traffic-box'))
-  const frozen = items.map((item, at) =>
-    boxAt[at] === true || at === trafficAt ? item.getBoundingClientRect().width : BOX_WIDTH.min
-  )
-  const originX = event.clientX
-  const originScroll = scroller.scrollLeft
-  let dragged = false
-  sash.setPointerCapture(event.pointerId)
-  const move = (moved: PointerEvent): void => {
-    if (moved.clientX === originX && !dragged) return
-    dragged = true
-    const pushed = pushDivider(frozen, index, moved.clientX - originX)
-    flushSync(() => {
-      apply(
-        pushed.widths.filter((_, at) => boxAt[at] === true),
-        trafficAt < 0 ? null : (pushed.widths[trafficAt] ?? null)
-      )
-    })
-    scroller.scrollLeft = originScroll + pushed.scroll
-  }
-  const stop = (): void => {
-    sash.removeEventListener('pointermove', move)
-    sash.removeEventListener('pointerup', stop)
-    sash.removeEventListener('pointercancel', stop)
-    sash.releasePointerCapture(event.pointerId)
-    if (dragged) commit()
-  }
-  sash.addEventListener('pointermove', move)
-  sash.addEventListener('pointerup', stop)
-  sash.addEventListener('pointercancel', stop)
 }

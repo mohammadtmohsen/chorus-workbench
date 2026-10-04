@@ -9,6 +9,7 @@ import type {
   AgentAdapter,
   AgentSession,
   ApprovalDecision,
+  HealthStatus,
   McpServerHealth,
   ModelChoice,
   SessionOpts,
@@ -19,6 +20,7 @@ import type {
 } from '@chorus/agent-protocol'
 import { mergeUsageWindows } from '@chorus/agent-protocol'
 import {
+  hasWorkbenchSurface,
   refreshWorkbenchTerminalEnv,
   requestWorkbenchAskDiff,
   requestWorkbenchEdit,
@@ -36,6 +38,7 @@ import {
   type AsideSummary,
   type ConversationSummary,
   type KeptNote,
+  type RunCommands,
   type SqliteHandle,
   type StoredEvent,
   type TranscriptState,
@@ -114,6 +117,9 @@ import {
   type ProjectTrafficState,
 } from './project-traffic.js'
 import { LineCarries } from './log-lines.js'
+import { ProjectRunner, runAvailable } from './project-run.js'
+import { projectReader } from './project-read.js'
+import { resolveShell } from './shell.js'
 import { AdbReverse, readRememberedDevices, writeRememberedDevices } from './adb-reverse.js'
 import { LogcatService } from './logcat.js'
 import type { WorkspaceSnapshot } from '../shared/workspace-layout.js'
@@ -174,6 +180,24 @@ export interface StartConversationOptions {
    */
   readonly continueFrom?: string
 }
+
+const FAILED_START_LIMIT = 64
+const STARTUP_DRAIN_MS = 3_000
+const STARTUP_CANCELLED = 'The conversation was closed before its agents started'
+
+export interface StartedConversation {
+  readonly conversationId: string
+  readonly participants: AgentId[]
+  readonly profileId: string
+  readonly projectId: string
+  readonly cwd: string
+  readonly title: string
+}
+
+export type StartOutcome =
+  | { readonly status: 'ready'; readonly conversation: StartedConversation }
+  | { readonly status: 'failed'; readonly message: string }
+  | { readonly status: 'cancelled' }
 
 interface Participant {
   readonly agentId: AgentId
@@ -374,6 +398,23 @@ interface ActiveConversation {
   styleOn: boolean
   handoffEpoch: number
   readonly working: Set<AgentId>
+}
+
+interface StartingConversation {
+  readonly conversationId: string
+  readonly agents: readonly AgentId[]
+  readonly projectId: string
+  readonly cwd: string
+  readonly title: string
+  readonly profile: PermissionProfile
+  readonly grants: SessionGrants
+  readonly styleOn: boolean
+  readonly continueFrom: string | undefined
+  readonly settled: Promise<StartOutcome>
+  readonly settle: (outcome: StartOutcome) => void
+  readonly started: Participant[]
+  draft: string
+  cancelled: boolean
 }
 
 /**
@@ -1407,6 +1448,10 @@ const lanAddress = (): string | null => {
 
 export class ChorusRuntime {
   private readonly active = new Map<string, ActiveConversation>()
+  private readonly starting = new Map<string, StartingConversation>()
+  private readonly failedStarts = new Map<string, string>()
+  private readonly startupWork = new Set<Promise<unknown>>()
+  private closing = false
   /**
    * The restore in flight, so two callers cannot both perform it.
    *
@@ -1478,10 +1523,22 @@ export class ChorusRuntime {
    * the same reason too.
    */
   private readonly terminals = new TerminalService({
-    cwdFor: (ref) =>
-      ref.scope === 'global' ? homedir() : (this.active.get(ref.conversationId)?.cwd ?? homedir()),
+    cwdFor: (ref) => {
+      switch (ref.scope) {
+        case 'global':
+          return homedir()
+        case 'session':
+          return this.active.get(ref.conversationId)?.cwd ?? homedir()
+        case 'project':
+          return this.projects.get(ref.projectId)?.canonicalRoot ?? homedir()
+        case 'shell':
+          return this.shellRoot(ref.projectId)
+      }
+    },
+    envFor: (ref) => (ref.scope === 'shell' ? this.shellEnv(ref.projectId) : process.env),
   })
   private readonly traffic: ProjectTrafficRegistry
+  private readonly runner: ProjectRunner
   /**
    * Partial lines, one per terminal — see `LineCarries`.
    *
@@ -1543,7 +1600,6 @@ export class ChorusRuntime {
   private readonly previews = new EditPreviews()
 
   private constructor(
-    private readonly db: SqliteHandle,
     readonly store: EventStore,
     private readonly adapters: Map<AgentId, AgentAdapter>,
     readonly log: Logger,
@@ -1584,6 +1640,8 @@ export class ChorusRuntime {
         })
       },
       address: () => lanAddress(),
+      wantsReady: (projectId) => this.ownsLocalSurface(projectId),
+      localProject: (projectId) => this.projects.get(projectId)?.host === LOCAL_HOST,
     })
     this.logcat.subscribe((line) => {
       this.traffic.routeLogcatLine(line)
@@ -1595,6 +1653,18 @@ export class ChorusRuntime {
     })
     this.adbReverse.onChange(() => {
       this.traffic.setForwarded((port) => this.adbReverse.forwarded(port))
+    })
+    this.runner = new ProjectRunner({
+      project: (projectId) => this.projects.get(projectId),
+      traffic: this.traffic,
+      terminals: this.terminals,
+      shell: () => resolveShell(process.env, process.platform),
+      env: () => process.env,
+      platform: process.platform,
+      kill: (pid, signal) => {
+        process.kill(pid, signal)
+      },
+      log: this.log,
     })
     /*
      * The tap observes; it does not read history. A terminal running Metro holds
@@ -1635,6 +1705,43 @@ export class ChorusRuntime {
     return terminalEnvOf(this.traffic.state(project.id))
   }
 
+  async ensureTerminalEnv(place: WorkbenchPlace): Promise<WorkbenchTerminalEnv | null> {
+    if (place.host !== LOCAL_HOST) return null
+    const project = this.projects.findByPlace(place)
+    if (project === null) return null
+    await this.traffic.prepare(project.id)
+    return terminalEnvOf(this.traffic.state(project.id))
+  }
+
+  private shellRoot(projectId: string): string | null {
+    if (readOnlyProfiling()) return null
+    const project = this.projects.get(projectId)
+    if (project === null || !runAvailable(project, process.platform)) return null
+    return project.canonicalRoot
+  }
+
+  private shellEnv(projectId: string): NodeJS.ProcessEnv {
+    const redirect = terminalEnvOf(this.traffic.state(projectId))
+    return redirect === null ? process.env : { ...process.env, [redirect.name]: redirect.value }
+  }
+
+  private disposeProjectShells(projectId: string): void {
+    try {
+      this.terminals.disposeShells(projectId)
+    } catch (error) {
+      this.log.warn('project shells did not all stop', {
+        projectId,
+        message: error instanceof Error ? error.message : String(error),
+      })
+    }
+  }
+
+  private ownsLocalSurface(projectId: string): boolean {
+    const project = this.projects.get(projectId)
+    if (project?.host !== LOCAL_HOST) return false
+    return hasWorkbenchSurface({ host: LOCAL_HOST, root: project.canonicalRoot })
+  }
+
   static open(
     userDataPath: string,
     log: Logger,
@@ -1671,7 +1778,6 @@ export class ChorusRuntime {
     const projects = new ProjectService(new ProjectStore(db), db)
 
     return new ChorusRuntime(
-      db,
       store,
       adapters ?? defaultAdapters(userDataPath),
       log,
@@ -1832,14 +1938,22 @@ export class ChorusRuntime {
     })
   }
 
-  async startConversation(options: StartConversationOptions): Promise<{
-    conversationId: string
-    participants: AgentId[]
-    profileId: string
-    projectId: string
-    cwd: string
-    title: string
-  }> {
+  async startConversation(options: StartConversationOptions): Promise<StartedConversation> {
+    const { conversationId } = this.beginConversation(options)
+    const outcome = await this.awaitStart(conversationId)
+    switch (outcome.status) {
+      case 'ready':
+        return outcome.conversation
+      case 'failed':
+        throw new Error(outcome.message)
+      case 'cancelled':
+        throw new Error(STARTUP_CANCELLED)
+    }
+  }
+
+  beginConversation(options: StartConversationOptions): StartedConversation {
+    if (this.closing) throw new Error('Chorus is shutting down')
+
     /*
      * The whole cast unless a caller narrowed it, and a narrowed empty list is
      * still refused rather than quietly widened.
@@ -1879,8 +1993,100 @@ export class ChorusRuntime {
       throw new Error('A conversation cannot be started: CHORUS_PROFILE_READONLY is set')
     }
 
+    const conversationId = newConversationId()
+    const profile = profileById(options.profileId ?? '')
+
+    // One set of grants for the whole conversation: allowing something for
+    // Codex should not mean being asked again the moment Claude does the same.
+    const grants = this.newGrants()
+
     /*
-     * Composed before anything is minted, so a source that is not there costs
+     * Read once, and used by both the agents and the room they belong to.
+     *
+     * The agents are started before the `ActiveConversation` exists, so this
+     * cannot come from `conversation.styleOn` — and reading the sheet twice would
+     * let a settings write land between the two and produce a room whose flag
+     * says one thing while its agents were spawned under another.
+     *
+     * **This is the bug the first version shipped with.** The factory below
+     * passed a bare `{ cwd, profile }`, so a new conversation was always spawned
+     * without the instruction whatever the checkbox said — while the flag was
+     * seeded `true` from that same checkbox. The composer's toggle then did
+     * nothing on its first click, because `setAnswerStyle` returns early when the
+     * flag already matches what was asked for.
+     */
+    const styleOn = this.defaultStyleOn()
+
+    let settle: (outcome: StartOutcome) => void = () => undefined
+    const settled = new Promise<StartOutcome>((resolve) => {
+      settle = resolve
+    })
+    const starting: StartingConversation = {
+      conversationId,
+      agents,
+      projectId: options.projectId,
+      cwd,
+      title: options.title ?? folderName(cwd),
+      profile,
+      grants,
+      styleOn,
+      continueFrom: options.continueFrom,
+      settled,
+      settle,
+      started: [],
+      draft: '',
+      cancelled: false,
+    }
+    this.starting.set(conversationId, starting)
+    this.trackStartup(
+      this.bootStarting(starting)
+        .catch((error: unknown) =>
+          this.failStart(starting, [error instanceof Error ? error.message : String(error)])
+        )
+        .then(settle, (error: unknown) => {
+          const message = error instanceof Error ? error.message : String(error)
+          settle({ status: 'failed', message })
+        })
+    )
+    this.onConversations?.()
+    return {
+      conversationId,
+      participants: [],
+      profileId: profile.id,
+      projectId: options.projectId,
+      cwd,
+      title: starting.title,
+    }
+  }
+
+  async awaitStart(conversationId: string): Promise<StartOutcome> {
+    const starting = this.starting.get(conversationId)
+    if (starting !== undefined) {
+      const outcome = await starting.settled
+      if (outcome.status === 'failed') this.failedStarts.delete(conversationId)
+      return outcome
+    }
+    const failure = this.failedStarts.get(conversationId)
+    if (failure !== undefined) {
+      this.failedStarts.delete(conversationId)
+      return { status: 'failed', message: failure }
+    }
+    const open = this.active.get(conversationId)
+    return open === undefined
+      ? { status: 'cancelled' }
+      : { status: 'ready', conversation: this.startedInfo(open) }
+  }
+
+  private async bootStarting(starting: StartingConversation): Promise<StartOutcome> {
+    const stopped = (): boolean => starting.cancelled
+    await new Promise<void>((resolve) => {
+      setImmediate(resolve)
+    })
+    if (stopped()) return { status: 'cancelled' }
+    const { conversationId, cwd, profile, grants, styleOn } = starting
+
+    /*
+     * Composed before anything is appended, so a source that is not there costs
      * nothing.
      *
      * `carriedChain` returns nothing for an unknown id and `composeCarryover`
@@ -1891,11 +2097,10 @@ export class ChorusRuntime {
      * the carry is what they wanted *in* it.
      */
     const carryover =
-      options.continueFrom === undefined
+      starting.continueFrom === undefined
         ? null
-        : composeCarryover(this.carriedChain(options.continueFrom))
+        : composeCarryover(this.carriedChain(starting.continueFrom))
 
-    const conversationId = newConversationId()
     this.store.append({
       conversationId,
       actor: 'user',
@@ -1904,9 +2109,9 @@ export class ChorusRuntime {
         // Recorded only when something was actually carried. Naming a source
         // that turned out to be empty would make the reopen path below rebuild
         // a seed that does not exist, every launch, forever.
-        ...(carryover === null || options.continueFrom === undefined
+        ...(carryover === null || starting.continueFrom === undefined
           ? {}
-          : { continuedFrom: options.continueFrom }),
+          : { continuedFrom: starting.continueFrom }),
         /*
          * A real project id at last. This read `options.projectId ?? cwd`, so
          * every conversation ever started without one recorded its *path* in the
@@ -1914,10 +2119,10 @@ export class ChorusRuntime {
          * sit empty since migration 1 while every row in `conversations` claimed
          * to have a project.
          */
-        projectId: options.projectId,
+        projectId: starting.projectId,
         // The folder is what a conversation is about until you say otherwise,
         // and it is a better answer than "Untitled" for one you never rename.
-        title: options.title ?? folderName(cwd),
+        title: starting.title,
       },
     })
 
@@ -1950,33 +2155,10 @@ export class ChorusRuntime {
       })
     }
 
-    const profile = profileById(options.profileId ?? '')
-
-    // One set of grants for the whole conversation: allowing something for
-    // Codex should not mean being asked again the moment Claude does the same.
-    const grants = this.newGrants()
-
-    /*
-     * Read once, and used by both the agents and the room they belong to.
-     *
-     * The agents are started before the `ActiveConversation` exists, so this
-     * cannot come from `conversation.styleOn` — and reading the sheet twice would
-     * let a settings write land between the two and produce a room whose flag
-     * says one thing while its agents were spawned under another.
-     *
-     * **This is the bug the first version shipped with.** The factory below
-     * passed a bare `{ cwd, profile }`, so a new conversation was always spawned
-     * without the instruction whatever the checkbox said — while the flag was
-     * seeded `true` from that same checkbox. The composer's toggle then did
-     * nothing on its first click, because `setAnswerStyle` returns early when the
-     * flag already matches what was asked for.
-     */
-    const styleOn = this.defaultStyleOn()
-
     // Started in parallel: two agents booting sequentially doubles the wait for
     // no reason, and one failing should not hide the other.
     const started = await Promise.allSettled(
-      agents.map((agentId) =>
+      starting.agents.map((agentId) =>
         /*
          * Resolved per agent, and resolved *here*.
          *
@@ -1991,30 +2173,42 @@ export class ChorusRuntime {
           conversationId,
           (resuming) =>
             this.sessionOptsFor(
-              { conversationId, cwd, profile, styleOn, projectId: options.projectId },
+              { conversationId, cwd, profile, styleOn, projectId: starting.projectId },
               agentId,
               resuming
             ),
           profile,
-          grants
-        )
+          grants,
+          undefined,
+          false,
+          undefined,
+          stopped
+        ).then((participant) => {
+          if (stopped()) {
+            this.closeStarted(participant)
+            throw new Error(STARTUP_CANCELLED)
+          }
+          starting.started.push(participant)
+          return participant
+        })
       )
     )
+    if (stopped()) return { status: 'cancelled' }
 
     const conversation: ActiveConversation = {
       conversationId,
       participants: new Map(),
       grants,
       profile,
-      projectId: options.projectId,
+      projectId: starting.projectId,
       cwd,
-      title: options.title ?? folderName(cwd),
+      title: starting.title,
       lastAddressed: undefined,
       handoffEpoch: 0, // A new room has nothing unread in it, and the log's end is what "nothing"
       // means — seeding 0 would count the whole database as news.
       working: new Set(),
       lastSeenSeq: this.store.lastSeq(),
-      draft: '',
+      draft: starting.draft,
       planning: false,
       // The same value the agents above were spawned under, not a second read.
       styleOn,
@@ -2031,9 +2225,7 @@ export class ChorusRuntime {
       }
     }
 
-    if (conversation.participants.size === 0) {
-      throw new Error(failures.join('; ') || 'No agent could be started')
-    }
+    if (conversation.participants.size === 0) return this.failStart(starting, failures)
 
     /*
      * The carried transcript waits with the agents rather than being sent.
@@ -2071,16 +2263,117 @@ export class ChorusRuntime {
       agents: [...conversation.participants.keys()].join(','),
       profile: profile.id,
     })
+    this.starting.delete(conversationId)
     this.active.set(conversationId, conversation)
     this.rememberOpen()
     this.onConversations?.()
+    return { status: 'ready', conversation: this.startedInfo(conversation) }
+  }
+
+  private failStart(starting: StartingConversation, failures: readonly string[]): StartOutcome {
+    if (starting.cancelled) return { status: 'cancelled' }
+    const message = failures.join('; ') || 'No agent could be started'
+    const { conversationId } = starting
+    this.starting.delete(conversationId)
+    for (const participant of starting.started.splice(0)) this.closeStarted(participant)
+    if (this.active.delete(conversationId)) {
+      try {
+        this.rememberOpen()
+      } catch (error) {
+        this.log.warn('a failed start could not be dropped from the reopen list', {
+          conversationId,
+          message: error instanceof Error ? error.message : String(error),
+        })
+      }
+    }
+    this.failedStarts.set(conversationId, message)
+    if (this.failedStarts.size > FAILED_START_LIMIT) {
+      const oldest = this.failedStarts.keys().next()
+      if (oldest.done !== true) this.failedStarts.delete(oldest.value)
+    }
+    this.onConversations?.()
+    return { status: 'failed', message }
+  }
+
+  private cancelStarting(starting: StartingConversation): void {
+    starting.cancelled = true
+    this.starting.delete(starting.conversationId)
+    starting.settle({ status: 'cancelled' })
+    for (const participant of starting.started.splice(0)) this.closeStarted(participant)
+    this.onConversations?.()
+  }
+
+  private closeStarted(participant: Participant): void {
+    this.trackStartup(
+      participant.service.close(this.closing ? 'shutdown' : 'closed').catch((error: unknown) => {
+        this.log.warn('a starting agent could not be closed', {
+          agentId: participant.agentId,
+          message: error instanceof Error ? error.message : String(error),
+        })
+      })
+    )
+  }
+
+  private trackStartup(work: Promise<unknown>): void {
+    this.startupWork.add(work)
+    const forget = (): void => {
+      this.startupWork.delete(work)
+    }
+    void work.then(forget, forget)
+  }
+
+  private async drainStartups(): Promise<void> {
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const deadline = new Promise<'expired'>((resolve) => {
+      timer = setTimeout(() => {
+        resolve('expired')
+      }, STARTUP_DRAIN_MS)
+    })
+    while (this.startupWork.size > 0) {
+      const result = await Promise.race([Promise.allSettled([...this.startupWork]), deadline])
+      if (result === 'expired') break
+    }
+    clearTimeout(timer)
+  }
+
+  private startedInfo(conversation: ActiveConversation): StartedConversation {
     return {
-      conversationId,
+      conversationId: conversation.conversationId,
       participants: [...conversation.participants.keys()],
-      profileId: profile.id,
-      projectId: options.projectId,
-      cwd,
+      profileId: conversation.profile.id,
+      projectId: conversation.projectId,
+      cwd: conversation.cwd,
       title: conversation.title,
+    }
+  }
+
+  private startingSession(starting: StartingConversation): {
+    conversationId: string
+    participants: AgentId[]
+    profileId: string
+    projectId: string
+    cwd: string
+    title: string
+    unread: number
+    pendingApprovalIds: string[]
+    pendingQuestionIds: string[]
+    draft: string
+    planning: boolean
+    starting: true
+  } {
+    return {
+      conversationId: starting.conversationId,
+      participants: [],
+      profileId: starting.profile.id,
+      projectId: starting.projectId,
+      cwd: starting.cwd,
+      title: starting.title,
+      unread: 0,
+      pendingApprovalIds: [],
+      pendingQuestionIds: [],
+      draft: starting.draft,
+      planning: false,
+      starting: true,
     }
   }
 
@@ -2476,9 +2769,11 @@ export class ChorusRuntime {
       )
     const ledger = recapLedger(history, parent.cwd)
 
+    const reader = recapping ? undefined : this.projectReaderFor(parent.projectId)
     const opts: SessionOpts = {
       cwd: parent.cwd,
       sandbox: { mode: 'readOnly', writableRoots: [], networkAccess: false },
+      ...(reader === undefined ? {} : { project: reader }),
     }
     /*
      * A recap starts a session; every other purpose branches one.
@@ -3125,6 +3420,12 @@ export class ChorusRuntime {
    * the gap fails loudly rather than being handed to a session on its way out.
    */
   async closeConversation(conversationId: string): Promise<void> {
+    const starting = this.starting.get(conversationId)
+    if (starting !== undefined) {
+      this.cancelStarting(starting)
+      return
+    }
+    if (this.failedStarts.delete(conversationId)) return
     const conversation = this.require(conversationId)
     this.active.delete(conversationId)
     this.rememberOpen()
@@ -3571,8 +3872,9 @@ export class ChorusRuntime {
     pendingQuestionIds: string[]
     draft: string
     planning: boolean
+    starting?: boolean
   }[] {
-    return [...this.active.entries()].map(([conversationId, open]) => ({
+    const ready = [...this.active.entries()].map(([conversationId, open]) => ({
       conversationId,
       participants: [...open.participants.keys()],
       profileId: open.profile.id,
@@ -3584,6 +3886,10 @@ export class ChorusRuntime {
       draft: open.draft,
       planning: open.planning,
     }))
+    return [
+      ...ready,
+      ...[...this.starting.values()].map((starting) => this.startingSession(starting)),
+    ]
   }
 
   /** Conversations with live agents right now, newest last. */
@@ -3596,10 +3902,10 @@ export class ChorusRuntime {
    * transcript underneath it.
    */
   private unreadSince(conversationId: string, lastSeenSeq: number): number {
-    return this.store.read(conversationId, {
+    return this.store.count(conversationId, {
       afterSeq: lastSeenSeq,
       types: [...UNREAD_EVENT_TYPES],
-    }).length
+    })
   }
 
   /**
@@ -3618,6 +3924,11 @@ export class ChorusRuntime {
    * arriving for a room that just ended is a race, not an error.
    */
   rememberDraft(conversationId: string, draft: string): void {
+    const starting = this.starting.get(conversationId)
+    if (starting !== undefined) {
+      starting.draft = draft
+      return
+    }
     const conversation = this.active.get(conversationId)
     if (conversation === undefined || conversation.draft === draft) return
     conversation.draft = draft
@@ -3642,7 +3953,7 @@ export class ChorusRuntime {
   listConversations(): (ConversationSummary & { open: boolean })[] {
     return this.store.listConversations().map((summary) => ({
       ...summary,
-      open: this.active.has(summary.conversationId),
+      open: this.active.has(summary.conversationId) || this.starting.has(summary.conversationId),
     }))
   }
 
@@ -3675,11 +3986,7 @@ export class ChorusRuntime {
     pendingApprovalIds: string[]
     pendingQuestionIds: string[]
   } {
-    const state = this.store.transcriptState(conversationId)
-    return {
-      pendingApprovalIds: state.approvals.map((approval) => approval.approvalId),
-      pendingQuestionIds: state.questions.map((question) => question.userInputId),
-    }
+    return this.store.pendingDecisionIds(conversationId)
   }
 
   async reopenConversation(conversationId: string): Promise<{
@@ -3692,7 +3999,10 @@ export class ChorusRuntime {
     unread: number
     pendingApprovalIds: string[]
     pendingQuestionIds: string[]
+    starting?: boolean
   }> {
+    const starting = this.starting.get(conversationId)
+    if (starting !== undefined) return this.startingSession(starting)
     const open = this.active.get(conversationId)
     if (open !== undefined) {
       return {
@@ -3898,7 +4208,11 @@ export class ChorusRuntime {
 
   /** Whether this conversation carries the instruction, for the control that says so. */
   answerStyle(conversationId: string): boolean {
-    return this.active.get(conversationId)?.styleOn ?? false
+    return (
+      this.active.get(conversationId)?.styleOn ??
+      this.starting.get(conversationId)?.styleOn ??
+      false
+    )
   }
 
   /**
@@ -4160,17 +4474,31 @@ export class ChorusRuntime {
       conversationId === undefined
         ? undefined
         : (request) => composeHistory(this.store.read(conversationId), request)
+    const reader = this.projectReaderFor(where.projectId)
     return {
       cwd: where.cwd,
       ...(preferred === '' ? {} : { model: preferred }),
       ...(instructions === '' ? {} : { instructions }),
       ...(transcript === undefined ? {} : { transcript }),
       ...(editorPlace === undefined ? {} : { editorPlace }),
+      ...(reader === undefined ? {} : { project: reader }),
       sandbox:
         where.profile.id === 'read-only'
           ? { mode: 'readOnly', writableRoots: [], networkAccess: false }
           : { mode: 'workspaceWrite', writableRoots: [where.cwd], networkAccess: false },
     }
+  }
+
+  private projectReaderFor(projectId: string | undefined): SessionOpts['project'] {
+    if (projectId === undefined || this.projects.get(projectId)?.host !== LOCAL_HOST) {
+      return undefined
+    }
+    return projectReader(projectId, {
+      local: (id) => this.projects.get(id)?.host === LOCAL_HOST,
+      runner: this.runner,
+      terminals: this.terminals,
+      traffic: this.traffic,
+    })
   }
 
   /**
@@ -4727,6 +5055,10 @@ export class ChorusRuntime {
    * rooms to make it possible would be destroying the thing being recovered.
    */
   async forgetProject(projectId: string): Promise<{ forgotten: boolean }> {
+    this.terminals.refuseShells(projectId)
+    for (const starting of [...this.starting.values()]) {
+      if (starting.projectId === projectId) this.cancelStarting(starting)
+    }
     const open = [...this.active.values()].filter((c) => c.projectId === projectId)
     /*
      * Sequential, not `Promise.all`. Closing a conversation tears down agent
@@ -4750,7 +5082,9 @@ export class ChorusRuntime {
      * it was released the port stayed held by a project that no longer exists
      * and can never be started again to give it up.
      */
+    await this.runner.dispose(projectId)
     await this.traffic.dispose(projectId)
+    this.disposeProjectShells(projectId)
     this.adbReverse.sync(this.traffic.capturingPorts())
     refreshWorkbenchTerminalEnv()
     return { forgotten: this.projects.forget(projectId) }
@@ -4774,7 +5108,9 @@ export class ChorusRuntime {
    * somebody moves a working project on purpose.
    */
   relocateProject(projectId: string, proposed: string): { root: string } {
-    const open = [...this.active.values()].filter((c) => c.projectId === projectId).length
+    const open = [...this.active.values(), ...this.starting.values()].filter(
+      (c) => c.projectId === projectId
+    ).length
     if (open > 0) {
       throw new Error(
         `This project still has ${String(open)} open conversation${open === 1 ? '' : 's'}. Close them before moving it.`
@@ -5015,7 +5351,8 @@ export class ChorusRuntime {
   async attachTerminal(
     ref: TerminalRef,
     size?: { cols: number; rows: number }
-  ): Promise<TerminalAttachment> {
+  ): Promise<TerminalAttachment | null> {
+    if (ref.scope === 'shell' && this.closing) return null
     return await this.terminals.attach(ref, size)
   }
 
@@ -5031,6 +5368,7 @@ export class ChorusRuntime {
    * least recoverable thing this surface can do.
    */
   disposeTerminal(ref: TerminalRef, epoch: number): void {
+    if (ref.scope === 'project') throw new Error('A project run is stopped through run:stop')
     this.terminals.disposeIfCurrent(ref, epoch)
   }
 
@@ -5045,6 +5383,7 @@ export class ChorusRuntime {
    * nothing.
    */
   killTerminal(ref: TerminalRef): void {
+    if (ref.scope === 'project') throw new Error('A project run is stopped through run:stop')
     this.terminals.dispose(ref)
   }
 
@@ -5070,6 +5409,14 @@ export class ChorusRuntime {
 
   trafficRegistry(): ProjectTrafficRegistry {
     return this.traffic
+  }
+
+  projectRunner(): ProjectRunner {
+    return this.runner
+  }
+
+  setRunCommands(projectId: string, commands: RunCommands | null): void {
+    this.projects.setRunCommands(projectId, commands)
   }
 
   /**
@@ -5134,12 +5481,19 @@ export class ChorusRuntime {
   }
 
   async disposeProjectTraffic(projectId: string): Promise<void> {
+    this.terminals.refuseShells(projectId)
+    await this.runner.dispose(projectId)
     await this.traffic.dispose(projectId)
+    this.disposeProjectShells(projectId)
     this.adbReverse.sync(this.traffic.capturingPorts())
     refreshWorkbenchTerminalEnv()
   }
 
   async close(): Promise<void> {
+    this.closing = true
+    for (const starting of [...this.starting.values()]) this.cancelStarting(starting)
+    await this.drainStartups()
+    this.failedStarts.clear()
     /*
      * Refs are read here, not only when a session starts.
      *
@@ -5150,6 +5504,7 @@ export class ChorusRuntime {
      * memory of the conversation it was supposedly continuing.
      */
     this.rememberOpen()
+    await this.runner.close()
 
     /*
      * Terminals first, and the global one is why this line exists.
@@ -5196,7 +5551,7 @@ export class ChorusRuntime {
 
     const dropped = this.store.droppedWrites()
     if (dropped > 0) this.log.warn('events arrived after the log closed', { dropped })
-    this.db.close()
+    this.store.close()
   }
 
   private async startParticipant(
@@ -5235,7 +5590,8 @@ export class ChorusRuntime {
      * rebuilt from the log cannot answer a question about a file the agent read
      * (measured; see the plan's STATUS). A fork of the parent can.
      */
-    forkFrom?: string
+    forkFrom?: string,
+    stopped: () => boolean = () => false
   ): Promise<Participant> {
     const adapter = this.adapters.get(agentId)
     if (adapter === undefined) throw new Error(`No adapter registered for "${agentId}"`)
@@ -5257,6 +5613,7 @@ export class ChorusRuntime {
     }
 
     const health = await adapter.health()
+    if (stopped()) throw new Error(STARTUP_CANCELLED)
     if (health.state !== 'ready') {
       const detail = health.state === 'unauthenticated' ? health.hint : health.reason
       throw new Error(`${agentId} is not ready: ${detail}`)
@@ -5308,6 +5665,56 @@ export class ChorusRuntime {
     // The options actually used, so what is attached matches what was opened
     // rather than a second guess at which branch ran.
     const { session, opts: usedOpts } = opened
+    const owner: { service?: ConversationService } = {}
+    try {
+      return await this.joinParticipant({
+        agentId,
+        conversationId,
+        adapter,
+        profile,
+        grants,
+        health,
+        reopening,
+        session,
+        usedOpts,
+        stopped,
+        owner,
+      })
+    } catch (error) {
+      const reason = this.closing ? 'shutdown' : 'closed'
+      const release = owner.service === undefined ? session.close() : owner.service.close(reason)
+      await release.catch(() => undefined)
+      throw error
+    }
+  }
+
+  private async joinParticipant(join: {
+    readonly agentId: AgentId
+    readonly conversationId: string
+    readonly adapter: AgentAdapter
+    readonly profile: PermissionProfile
+    readonly grants: SessionGrants
+    readonly health: HealthStatus
+    readonly reopening: boolean
+    readonly session: SupervisedSession
+    readonly usedOpts: SessionOpts
+    readonly stopped: () => boolean
+    readonly owner: { service?: ConversationService }
+  }): Promise<Participant> {
+    const {
+      agentId,
+      conversationId,
+      adapter,
+      profile,
+      grants,
+      health,
+      reopening,
+      session,
+      usedOpts,
+      stopped,
+      owner,
+    } = join
+    if (stopped()) throw new Error(STARTUP_CANCELLED)
     /*
      * The preferred effort, applied once the session exists.
      *
@@ -5372,6 +5779,7 @@ export class ChorusRuntime {
           message: error instanceof Error ? error.message : String(error),
         })
       })
+      if (stopped()) throw new Error(STARTUP_CANCELLED)
     }
 
     const service = new ConversationService({
@@ -5503,7 +5911,9 @@ export class ChorusRuntime {
         }).catch(() => undefined)
       },
     })
+    owner.service = service
     await service.attach(session, usedOpts, health, reopening)
+    if (stopped()) throw new Error(STARTUP_CANCELLED)
     // Joining mid-conversation is not a case yet, but starting at the current
     // end of the log is what makes it one when it is.
     return { agentId, service, session, seenSeq: this.store.lastSeq() }

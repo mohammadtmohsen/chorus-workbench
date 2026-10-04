@@ -268,7 +268,12 @@ export interface Notice extends AgentEventBase {
   readonly level: 'info' | 'warn' | 'error'
   readonly source: NoticeSource
   readonly text: string
-  readonly code?: 'editWithoutApproval' | 'editVisibilityUnavailable' | 'staleEditPreview'
+  readonly code?:
+    | 'editWithoutApproval'
+    | 'editVisibilityUnavailable'
+    | 'staleEditPreview'
+    | 'projectToolsUnavailable'
+    | 'projectToolsUnconfirmed'
   readonly detail?: string
   /**
    * How much of `detail` was dropped, when it was too big to keep whole.

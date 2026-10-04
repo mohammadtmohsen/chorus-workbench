@@ -27,6 +27,8 @@ import {
   registerIpcHandlers,
 } from './ipc.js'
 import { TrafficIpc } from './traffic-ipc.js'
+import { RunIpc } from './run-ipc.js'
+import { detectScripts } from './project-scripts.js'
 import { createLogger } from './logging.js'
 import { registerNoteImageScheme, serveNoteImages } from './note-images.js'
 import { createQuitGate } from './quit-gate.js'
@@ -61,6 +63,7 @@ const devServerUrl = process.env['ELECTRON_RENDERER_URL']
  * register until it does.
  */
 let trafficIpc: TrafficIpc | null = null
+let runIpc: RunIpc | null = null
 
 /** The shell's one document, named once so the load and the allowlist agree. */
 const SHELL_ENTRY_FILE = join(__dirname, '../renderer/index.html')
@@ -130,12 +133,15 @@ function createWindow(role: ShellWindowRole): BrowserWindow {
    * a role. A document with no role is refused every traffic request, which is
    * the safe default rather than the convenient one.
    */
-  trafficIpc?.registerShell(
-    window.webContents,
-    role.kind === 'main' ? { kind: 'main' } : { kind: 'detached', projectId: role.projectId }
-  )
+  const shellRole =
+    role.kind === 'main'
+      ? { kind: 'main' as const }
+      : { kind: 'detached' as const, projectId: role.projectId }
+  trafficIpc?.registerShell(window.webContents, shellRole)
+  runIpc?.registerShell(window.webContents, shellRole)
   window.webContents.on('destroyed', () => {
     trafficIpc?.releaseShell(window.webContents)
+    runIpc?.releaseShell(window.webContents)
   })
 
   // Avoids a white flash before the renderer has painted.
@@ -353,7 +359,10 @@ void app.whenReady().then(async () => {
    * message about the channel rather than about the workbench.
    */
   registerWorkbenchHandlers(devServerUrl, (projectId) => opened.projects.workbenchTarget(projectId))
-  setWorkbenchTerminalEnvSource((place) => opened.terminalEnvFor(place))
+  setWorkbenchTerminalEnvSource({
+    current: (place) => opened.terminalEnvFor(place),
+    ensure: (place) => opened.ensureTerminalEnv(place),
+  })
   const detachedDeps: DetachedWindowDeps = {
     mainWindow: () => mainWindow,
     createDetachedWindow: (projectId, title, x, y) => {
@@ -409,6 +418,17 @@ void app.whenReady().then(async () => {
     decideLegacy: (keep) => {
       opened.decideLegacyTraffic(keep)
     },
+    capture: (projectId, change) => opened.projectRunner().captureOnly(projectId, change),
+  })
+  runIpc = new RunIpc({
+    runner: opened.projectRunner(),
+    project: (projectId) => opened.projects.get(projectId),
+    isAdopted: (projectId) => opened.projects.get(projectId) !== null,
+    setCommands: (projectId, commands) => {
+      opened.setRunCommands(projectId, commands)
+    },
+    detect: detectScripts,
+    platform: process.platform,
   })
   // Takes no runtime: the watches are keyed by the conversations that ask for
   // one, not by what the runtime happens to have open.
@@ -586,6 +606,8 @@ async function shutDownEverything(): Promise<void> {
   const bridge = ideBridge
   runtime = null
   ideBridge = null
+  runIpc?.close()
+  runIpc = null
   // Synchronous and first: a watch holds no resource worth draining, and one
   // still firing during shutdown would push at windows that are going away.
   // Same reasoning one level out: a surface left attached to a window that is

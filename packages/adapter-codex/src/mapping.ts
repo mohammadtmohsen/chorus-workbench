@@ -7,6 +7,7 @@ import {
   type UserInputResponse,
 } from '@chorus/agent-protocol'
 import type { AgentId, ApprovalId, UserInputId } from '@chorus/shared'
+import type { DynamicToolCallStatus } from './generated/v2/DynamicToolCallStatus.js'
 import type { PatchApplyStatus } from './generated/v2/PatchApplyStatus.js'
 import type { PatchChangeKind } from './generated/v2/PatchChangeKind.js'
 
@@ -54,6 +55,17 @@ export interface ThreadItem {
   summary?: string[]
   steps?: { text?: string; step?: string; completed?: boolean; status?: string }[]
 }
+
+interface DynamicToolCallItem {
+  readonly id: string
+  readonly namespace?: string | null
+  readonly tool?: string
+  readonly arguments?: unknown
+  readonly status?: DynamicToolCallStatus
+  readonly success?: boolean | null
+}
+
+const ARGUMENT_CHARS = 120
 
 /**
  * Returns `null` for notifications Chorus does not surface — MCP startup chatter,
@@ -278,10 +290,39 @@ function mapItem(
             outcome: mapPatchStatus(item.status),
           }
 
+    case 'dynamicToolCall':
+      return mapDynamicToolCall(p['item'] as DynamicToolCallItem, base, phase)
+
     // userMessage echoes what we already logged; reasoning and plan arrive as
     // their own delta streams.
     default:
       return null
+  }
+}
+
+function mapDynamicToolCall(
+  item: DynamicToolCallItem,
+  base: { agentId: AgentId; seq: number; at: number; raw: unknown },
+  phase: 'started' | 'completed'
+): AgentEvent {
+  if (phase === 'completed') {
+    return {
+      ...base,
+      type: 'tool.completed',
+      itemRef: item.id,
+      status: item.status === 'completed' && item.success === true ? 'ok' : 'error',
+    }
+  }
+  const tool = item.tool ?? ''
+  const namespace = item.namespace ?? ''
+  const args = item.arguments === undefined ? '' : JSON.stringify(item.arguments)
+  const detail = args.length > ARGUMENT_CHARS ? `${args.slice(0, ARGUMENT_CHARS - 1)}…` : args
+  return {
+    ...base,
+    type: 'tool.started',
+    itemRef: item.id,
+    name: namespace === '' ? tool : `${namespace}.${tool}`,
+    ...(detail === '' ? {} : { detail }),
   }
 }
 

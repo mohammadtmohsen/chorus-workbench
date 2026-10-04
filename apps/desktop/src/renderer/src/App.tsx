@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { ErrorNotice } from './ErrorNotice.js'
 import { ToastStack } from './ToastStack.js'
 import { useTranslation } from 'react-i18next'
@@ -6,7 +6,10 @@ import type { AgentProbeResult, IpcRequest, IpcResponse } from '../../shared/ipc
 import type { WindowRole } from '../../shared/detached-window-ipc.js'
 import { ChorusLogo } from './ChorusLogo.js'
 import { LogViewer } from './LogViewer.js'
-import { fail, Session, type SessionCarry, type SessionInfo } from './Session.js'
+import { fail, type SessionCarry, type SessionInfo } from './Session.js'
+import { holdShellCloses } from './project-shell-closes.js'
+import { SessionHost } from './SessionHost.js'
+import { useConversationStarts } from './useConversationStarts.js'
 import { trimCarry } from './carry.js'
 import { EMPTY_VIEW } from './transcript.js'
 import { roomsWaiting, trackPending } from './notify.js'
@@ -105,6 +108,7 @@ export function App({ role }: { readonly role: WindowRole }): React.JSX.Element 
   const [explainLanguage, setExplainLanguage] = useState('')
   const [sessions, setSessions] = useState<SessionInfo[]>([])
   const sessionsRef = useRef<SessionInfo[]>([])
+  const sessionsRevision = useRef(0)
   /** So the opening session of a launch is opened once, and only on a launch. */
   const autoStarted = useRef(false)
   const carries = useRef(new Map<string, SessionCarry>())
@@ -145,7 +149,7 @@ export function App({ role }: { readonly role: WindowRole }): React.JSX.Element 
       { readonly focused: boolean; readonly visibleConversationIds: readonly string[] }
     >()
   )
-  const [starting, setStarting] = useState(false)
+  const closedIds = useRef(new Set<string>())
   const [showingLogs, setShowingLogs] = useState(false)
   const [showingSettings, setShowingSettings] = useState(false)
   const [showingHistory, setShowingHistory] = useState(false)
@@ -192,11 +196,10 @@ export function App({ role }: { readonly role: WindowRole }): React.JSX.Element 
   )
 
   const updateSessions = useCallback((change: (current: SessionInfo[]) => SessionInfo[]) => {
-    setSessions((current) => {
-      const next = change(current)
-      sessionsRef.current = next
-      return next
-    })
+    const next = change(sessionsRef.current)
+    sessionsRef.current = next
+    sessionsRevision.current += 1
+    setSessions(next)
   }, [])
 
   /**
@@ -209,6 +212,7 @@ export function App({ role }: { readonly role: WindowRole }): React.JSX.Element 
    */
   const openFromHistory = useCallback(
     async (conversationId: string) => {
+      closedIds.current.delete(conversationId)
       const already = sessionsRef.current.find(
         (session) => session.conversationId === conversationId
       )
@@ -552,17 +556,22 @@ export function App({ role }: { readonly role: WindowRole }): React.JSX.Element 
     if (role.kind !== 'detached') return undefined
     const projectId = role.projectId
     return window.chorus.onFlushRequest(({ requestId }) => {
+      let release = (): void => undefined
       Promise.all(
         [...draftReaders.current].map(([conversationId, read]) =>
           window.chorus.rememberDraft({ conversationId, draft: read() })
         )
       )
-        .then(() =>
-          window.chorus.sendFlushResult({
+        .then(async () => {
+          release = await holdShellCloses(projectId)
+          return window.chorus.sendFlushResult({
             requestId,
             slice: sliceOf(useWorkspaceStore.getState(), projectId),
           })
-        )
+        })
+        .finally(() => {
+          release()
+        })
         .catch(fail(setError))
     })
   }, [role])
@@ -893,6 +902,7 @@ export function App({ role }: { readonly role: WindowRole }): React.JSX.Element 
    */
   const finishEnd = useCallback(
     (conversationId: string) => {
+      closedIds.current.add(conversationId)
       const ending = sessionsRef.current.find((s) => s.conversationId === conversationId)
       carries.current.delete(conversationId)
       updateSessions((current) =>
@@ -990,87 +1000,26 @@ export function App({ role }: { readonly role: WindowRole }): React.JSX.Element 
    * function any more: without a project there is nothing to start, and Add
    * Project is the affordance that fixes that.
    */
-  const startIn = useCallback(
-    (
-      projectId: string,
-      /*
-       * An object rather than two optional strings in a row, and that is a
-       * decision about the next mistake rather than about this call.
-       *
-       * Both are conversation ids, both are optional, and they mean opposite
-       * things — one is the room being thrown away, the other the room being
-       * carried forward. Positionally, transposing them is invisible at the
-       * call site and silent at runtime: you would end the wrong conversation
-       * and carry the one you meant to end. Named, it cannot happen.
-       */
-      options: {
-        /**
-         * A conversation this one replaces, ended once the new one exists.
-         *
-         * **After, never before**, and the ordering is the whole of why this is
-         * a parameter rather than two calls at the call site. `endNow` closes
-         * the project's tab when the conversation it ends was the last one in
-         * it — so ending first would tear the project down and rebuild it
-         * around the replacement, which is a visible flash and a pane that
-         * loses its place. Started first, the new conversation is the sibling
-         * that keeps the project open, and the end is a tab closing beside it.
-         *
-         * It also means a failed start ends nothing. The `catch` below is
-         * reached instead, and the person still has the conversation they were
-         * in.
-         */
-        replacing?: string
-        /**
-         * A conversation the new one goes on from, transcript and all.
-         *
-         * **Always named by a caller, never inferred here.** An earlier build
-         * guessed it — the conversation active in the project's focused group —
-         * so every `+` silently carried whatever happened to be on screen. That
-         * makes the cheapest gesture in the app the expensive one, and gives no
-         * way to say "start clean" except by starting and restarting. Continuing
-         * is now its own control on the conversation you want to continue, and
-         * `+` means what it says again.
-         */
-        continueFrom?: string
-      } = {}
-    ) => {
-      setError(null)
-      setStarting(true)
-
-      window.chorus
-        .startConversation({
-          projectId,
-          profileId: defaults.profileId,
-          ...(options.continueFrom === undefined ? {} : { continueFrom: options.continueFrom }),
-        })
-        .then(async (session) => {
-          updateSessions((current) =>
-            current.some((existing) => existing.conversationId === session.conversationId)
-              ? current
-              : [...current, session]
-          )
-          useWorkspaceStore.getState().openProject(session.projectId)
-          /* A tab for it, in the focused group. Without this the conversation
-             streams into a project that has nowhere to show it until relaunch. */
-          if (useWorkspaceStore.getState().detached[session.projectId] === undefined) {
-            useWorkspaceStore
-              .getState()
-              .adoptConversation(session.projectId, session.conversationId)
-          }
-          useWorkspaceStore.getState().clearConversationUnread(session.conversationId)
-          // `finishEnd` and not `endNow`: restart has already asked its own
-          // question by the time this runs, and asking again would be two
-          // dialogs for one gesture.
-          if (options.replacing !== undefined) finishEnd(options.replacing)
-          await refreshProjects()
-        })
-        .catch(fail(setError))
-        .finally(() => {
-          setStarting(false)
-        })
-    },
-    [defaults, updateSessions, refreshProjects, finishEnd]
-  )
+  const reportError = useMemo(() => fail(setError), [])
+  const clearError = useCallback(() => {
+    setError(null)
+  }, [])
+  const forgetDetached = useCallback((projectId: string) => {
+    detachedVisibility.current.delete(projectId)
+  }, [])
+  const { starting, startIn } = useConversationStarts({
+    role,
+    profileId: defaults.profileId,
+    sessionsRef,
+    revision: sessionsRevision,
+    closedIds,
+    updateSessions,
+    finishEnd,
+    refreshProjects,
+    reportError,
+    clearError,
+    forgetDetached,
+  })
 
   /*
    * `+` starts in the most recently opened project, which is what the list is
@@ -1117,10 +1066,12 @@ export function App({ role }: { readonly role: WindowRole }): React.JSX.Element 
   const detachProject = useCallback(
     (projectId: string) => {
       const title = projects.find((project) => project.id === projectId)?.name ?? projectId
+      let release = (): void => undefined
       window.chorus
         .prepareDetach({ projectId, title })
         .then(async (prepared) => {
           if (!('ticket' in prepared)) return
+          release = await holdShellCloses(projectId)
           await Promise.all(
             sessionsRef.current
               .filter((session) => session.projectId === projectId)
@@ -1147,16 +1098,21 @@ export function App({ role }: { readonly role: WindowRole }): React.JSX.Element 
           useWorkspaceStore.setState(detached.workspace)
           useWorkspaceStore.getState().markDetached(projectId, detached.slot)
         })
+        .finally(() => {
+          release()
+        })
         .catch(fail(setError))
     },
     [projects]
   )
 
   const redockProject = useCallback((projectId: string) => {
+    let release = (): void => undefined
     window.chorus
       .prepareRedock({ projectId })
       .then(async (prepared) => {
         if (!('ticket' in prepared)) return
+        release = await holdShellCloses(projectId)
         await Promise.all(
           [...draftReaders.current].map(([conversationId, read]) =>
             window.chorus.rememberDraft({ conversationId, draft: read() })
@@ -1166,6 +1122,9 @@ export function App({ role }: { readonly role: WindowRole }): React.JSX.Element 
           ticket: prepared.ticket,
           slice: sliceOf(useWorkspaceStore.getState(), projectId),
         })
+      })
+      .finally(() => {
+        release()
       })
       .catch(fail(setError))
   }, [])
@@ -1291,8 +1250,17 @@ export function App({ role }: { readonly role: WindowRole }): React.JSX.Element 
    * more than the keystroke, because the *other* confirmations in this app guard
    * things that genuinely cannot be undone.
    */
+  const stillStarting = useCallback(
+    (conversationId: string): boolean =>
+      sessionsRef.current.some(
+        (session) => session.conversationId === conversationId && session.starting === true
+      ),
+    []
+  )
+
   const rename = useCallback(
     (conversationId: string, title: string) => {
+      if (stillStarting(conversationId)) return
       window.chorus
         .renameConversation({ conversationId, title })
         .then(({ title: applied }) => {
@@ -1304,7 +1272,7 @@ export function App({ role }: { readonly role: WindowRole }): React.JSX.Element 
         })
         .catch(fail(setError))
     },
-    [updateSessions]
+    [updateSessions, stillStarting]
   )
 
   const keepCarry = useCallback((conversationId: string, carry: SessionCarry) => {
@@ -1333,6 +1301,7 @@ export function App({ role }: { readonly role: WindowRole }): React.JSX.Element 
   /** What a conversation may do, changed from wherever the profile is shown. */
   const applyProfile = useCallback(
     async (conversationId: string, profileId: string) => {
+      if (stillStarting(conversationId)) return
       try {
         const { profileId: applied } = await window.chorus.setProfile({ conversationId, profileId })
         updateSessions((current) =>
@@ -1347,7 +1316,7 @@ export function App({ role }: { readonly role: WindowRole }): React.JSX.Element 
         fail(setError)(error)
       }
     },
-    [updateSessions, remember]
+    [updateSessions, remember, stillStarting]
   )
 
   /*
@@ -1403,9 +1372,13 @@ export function App({ role }: { readonly role: WindowRole }): React.JSX.Element 
     [refreshProjects]
   )
 
-  const sendNoteSelection = useCallback((conversationId: string, text: string) => {
-    window.chorus.sendMessage({ conversationId, text }).catch(fail(setError))
-  }, [])
+  const sendNoteSelection = useCallback(
+    (conversationId: string, text: string) => {
+      if (stillStarting(conversationId)) return
+      window.chorus.sendMessage({ conversationId, text }).catch(fail(setError))
+    },
+    [stillStarting]
+  )
 
   /*
    * The app's own note, written straight into state as well as to disk.
@@ -1594,48 +1567,6 @@ export function App({ role }: { readonly role: WindowRole }): React.JSX.Element 
     })
   }, [role.kind, commitLayout])
 
-  useEffect(
-    () =>
-      window.chorus.onConversationsChanged(() => {
-        window.chorus
-          .readActiveSessions()
-          .then(({ sessions: active }) => {
-            const scoped =
-              role.kind === 'detached'
-                ? active.filter((session) => session.projectId === role.projectId)
-                : active
-            const current = sessionsRef.current
-            const activeIds = new Set(scoped.map((session) => session.conversationId))
-            const added = scoped.filter(
-              (session) =>
-                !current.some((existing) => existing.conversationId === session.conversationId)
-            )
-            const removed = current.filter((session) => !activeIds.has(session.conversationId))
-            if (added.length === 0 && removed.length === 0) return
-            updateSessions(() => [
-              ...added,
-              ...current.filter((session) => activeIds.has(session.conversationId)),
-            ])
-            const store = useWorkspaceStore.getState()
-            for (const session of removed) store.removeSession(session.conversationId)
-            if (role.kind === 'detached') {
-              for (const session of added) {
-                store.adoptConversation(session.projectId, session.conversationId)
-              }
-              return
-            }
-            for (const projectId of Object.keys(store.detached)) {
-              if (!scoped.some((session) => session.projectId === projectId)) {
-                store.clearDetached(projectId)
-                detachedVisibility.current.delete(projectId)
-              }
-            }
-          })
-          .catch(fail(setError))
-      }),
-    [role, updateSessions]
-  )
-
   /*
    * Reorder writes through the same way, but builds its own order: the
    * debounced subscription only fires on *workspace store* changes, and the
@@ -1798,34 +1729,16 @@ export function App({ role }: { readonly role: WindowRole }): React.JSX.Element 
     focused: boolean,
     paneId: string
   ): React.ReactNode => (
-    <Session
+    <SessionHost
       key={session.conversationId}
       session={session}
       active={focused}
-      onActivate={() => {
-        useWorkspaceStore.getState().focusPane(paneId)
-      }}
+      paneId={paneId}
+      startIn={startIn}
       carry={carries.current.get(session.conversationId)}
       onCarry={keepCarry}
       onDraftReader={keepDraftReader}
       onPromoteAside={promoteAside}
-      /*
-       * Ending this room and opening a fresh one in the same project, in
-       * one gesture. `startIn`'s `replacing` argument is what orders the
-       * two — see there for why the new one has to exist first.
-       */
-      onRestart={() => {
-        startIn(session.projectId, { replacing: session.conversationId })
-      }}
-      /*
-       * Opening a fresh room that goes on from this one, and ending
-       * nothing. The exact opposite of Restart beside it, from the same
-       * conversation and through the same call — which is why the two
-       * pass different named fields rather than the same positional one.
-       */
-      onContinue={() => {
-        startIn(session.projectId, { continueFrom: session.conversationId })
-      }}
       /* Read once here rather than per pane: it decides whether Explain
          exists under every reply, and four panes asking the same question
          of the same file is four answers that must agree. */

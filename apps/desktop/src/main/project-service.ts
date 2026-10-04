@@ -8,6 +8,7 @@ import {
   type Database,
   type Project,
   type ProjectStore,
+  type RunCommands,
   type TrafficAccess,
   type TrafficLegacyImport,
   UnresolvedLegacyTrafficError,
@@ -379,6 +380,10 @@ export class ProjectService {
     }
   ): Project {
     return this.projects.setTrafficConfig(projectId, input)
+  }
+
+  setRunCommands(projectId: string, commands: RunCommands | null): Project {
+    return this.projects.setRunCommands(projectId, commands)
   }
 
   nextTrafficPort(projectId: string): number {

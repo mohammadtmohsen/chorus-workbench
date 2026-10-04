@@ -4,12 +4,24 @@ import {
   StorageScope,
 } from '@codingame/monaco-vscode-storage-service-override'
 import { Emitter } from '@codingame/monaco-vscode-api/vscode/vs/base/common/event'
+import { StorageTarget } from '@codingame/monaco-vscode-api/vscode/vs/platform/storage/common/storage'
 import type { IStorage } from '@codingame/monaco-vscode-api/vscode/vs/base/parts/storage/common/storage'
 import type {
   IStorageDatabase,
   IStorageItemsChangeEvent,
   IUpdateRequest,
+  StorageValue,
 } from '@codingame/monaco-vscode-api/vscode/vs/base/parts/storage/common/storage'
+import type { WorkbenchTerminalEnv } from '../../../shared/workbench-ipc.js'
+import {
+  bindIssuedTerminalEnv,
+  currentTerminalEnv,
+  issueTerminalEnv,
+  parseIssuedTerminalEnv,
+  retainIssuedTerminalEnv,
+  reviveTerminalEnv,
+  serializeIssuedTerminalEnv,
+} from './terminal-env.js'
 
 /**
  * The workbench's key-value store, made durable through Chorus rather than
@@ -192,6 +204,20 @@ export class ChorusStorageDatabase implements IStorageDatabase {
   }
 }
 
+const SIDE_BAR_SIZE_KEY = 'workbench.sideBar.size'
+const SIDE_BAR_DEFAULT_WIDTH = 350
+const SIDE_BAR_DEFAULT_APPLIED_KEY = 'chorus.sideBar.defaultWidthApplied'
+const PANEL_SIZE_KEY = 'workbench.panel.size'
+const PANEL_DEFAULT_HEIGHT = 400
+const PANEL_DEFAULT_APPLIED_KEY = 'chorus.panel.defaultHeightApplied'
+const PROJECT_PANEL_KEYS: ReadonlySet<string> = new Set([
+  PANEL_SIZE_KEY,
+  'workbench.panel.lastNonMaximizedHeight',
+  'workbench.panel.lastNonMaximizedWidth',
+])
+const TERMINAL_BUFFER_STATE_KEY = 'terminal.integrated.bufferState'
+const TERMINAL_ISSUED_ENV_KEY = 'chorus.terminal.issuedEnv'
+
 /**
  * Adds the one storage scope the override package cannot reach.
  *
@@ -224,6 +250,31 @@ export class ChorusStorageService extends BrowserStorageService {
     return super.getStorage(scope)
   }
 
+  override get(key: string, scope: StorageScope, fallbackValue: string): string
+  override get(key: string, scope: StorageScope): string | undefined
+  override get(key: string, scope: StorageScope, fallbackValue?: string): string | undefined {
+    if (scope === StorageScope.PROFILE && PROJECT_PANEL_KEYS.has(key)) {
+      const own = super.get(key, StorageScope.WORKSPACE)
+      if (own !== undefined) return own
+    }
+    return fallbackValue === undefined
+      ? super.get(key, scope)
+      : super.get(key, scope, fallbackValue)
+  }
+
+  override store(
+    key: string,
+    value: StorageValue,
+    scope: StorageScope,
+    target: StorageTarget,
+    external?: boolean
+  ): void {
+    if (scope === StorageScope.PROFILE && PROJECT_PANEL_KEYS.has(key)) {
+      super.store(key, value, StorageScope.WORKSPACE, target, external)
+    }
+    super.store(key, value, scope, target, external)
+  }
+
   protected override async doInitialize(): Promise<void> {
     /*
      * Created and initialised alongside the base scopes rather than lazily. The
@@ -233,5 +284,46 @@ export class ChorusStorageService extends BrowserStorageService {
      */
     this.sharedStorage = new Storage(new ChorusStorageDatabase('application-shared'))
     await Promise.all([this.sharedStorage.init(), super.doInitialize()])
+    this.applyDefaultSize(SIDE_BAR_SIZE_KEY, SIDE_BAR_DEFAULT_WIDTH, SIDE_BAR_DEFAULT_APPLIED_KEY)
+    this.applyDefaultSize(PANEL_SIZE_KEY, PANEL_DEFAULT_HEIGHT, PANEL_DEFAULT_APPLIED_KEY)
+    this.reviveTerminals()
+  }
+
+  private reviveTerminals(): void {
+    const saved = this.get(TERMINAL_BUFFER_STATE_KEY, StorageScope.WORKSPACE)
+    const issued = this.issuedTerminalEnv()
+    const current = currentTerminalEnv()
+    const revived = reviveTerminalEnv(saved, issued, current)
+    if (revived.raw !== undefined && revived.raw !== saved) {
+      this.store(
+        TERMINAL_BUFFER_STATE_KEY,
+        revived.raw,
+        StorageScope.WORKSPACE,
+        StorageTarget.MACHINE
+      )
+    }
+    const retained = retainIssuedTerminalEnv(issued, revived.cleaned, current)
+    if (retained.length > 0) this.keepIssuedTerminalEnv(retained)
+    else if (revived.cleaned) this.remove(TERMINAL_ISSUED_ENV_KEY, StorageScope.WORKSPACE)
+    bindIssuedTerminalEnv((env) => {
+      this.keepIssuedTerminalEnv(issueTerminalEnv(this.issuedTerminalEnv(), env))
+    })
+  }
+
+  private issuedTerminalEnv(): readonly WorkbenchTerminalEnv[] {
+    return parseIssuedTerminalEnv(this.get(TERMINAL_ISSUED_ENV_KEY, StorageScope.WORKSPACE))
+  }
+
+  private keepIssuedTerminalEnv(issued: readonly WorkbenchTerminalEnv[]): void {
+    const next = serializeIssuedTerminalEnv(issued)
+    if (next === this.get(TERMINAL_ISSUED_ENV_KEY, StorageScope.WORKSPACE)) return
+    this.store(TERMINAL_ISSUED_ENV_KEY, next, StorageScope.WORKSPACE, StorageTarget.MACHINE)
+  }
+
+  private applyDefaultSize(sizeKey: string, size: number, appliedKey: string): void {
+    const applied = String(size)
+    if (this.get(appliedKey, StorageScope.PROFILE) === applied) return
+    super.store(sizeKey, size, StorageScope.PROFILE, StorageTarget.MACHINE)
+    this.store(appliedKey, applied, StorageScope.PROFILE, StorageTarget.MACHINE)
   }
 }

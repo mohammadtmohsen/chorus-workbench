@@ -140,8 +140,6 @@ try {
     if (tile !== undefined) tile.click()
     return true
   })()`)
-  await app.until(`document.querySelector('[data-traffic-open]') !== null`, { timeout: 60_000 })
-  await clicked('[data-traffic-open]')
   await app.until(`document.querySelector('.traffic-panel') !== null`, { timeout: 60_000 })
   check('the panel opened', await app.evaluate(`document.querySelector('.traffic-panel') !== null`))
 
@@ -215,7 +213,7 @@ try {
     await app.evaluate(`JSON.stringify({
       envLine: document.querySelector('.traffic-env')?.innerText ?? null,
       header: document.querySelector('.traffic-panel')?.innerText.split('\\n').slice(0, 2).join(' | ') ?? null,
-      startDisabled: document.querySelector('[aria-label="Start capture"]')?.disabled ?? 'no button',
+      startDisabled: document.querySelector('.traffic-panel [aria-label="Start capture"]')?.disabled ?? 'no button',
     })`)
   )
 
@@ -328,7 +326,7 @@ try {
     })()`)
   )
 
-  say('start', await clicked('[aria-label="Start capture"]'))
+  say('start', await clicked('.traffic-panel [aria-label="Start capture"]'))
   await wait(3_000)
 
   const header = await app.evaluate(`document.querySelector('.traffic-panel')?.innerText ?? ''`)

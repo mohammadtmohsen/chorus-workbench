@@ -11,6 +11,7 @@ import {
   ProjectStore,
   remoteProjectHost,
   ReservedTrafficPortError,
+  type RunCommands,
   UnknownProjectError,
   UnknownTrafficOwnershipError,
   UnresolvedLegacyTrafficError,
@@ -734,20 +735,26 @@ describe('the traffic tables, added to a database that already has projects', ()
     }
     const store = new ProjectStore(upgraded, { caseSensitivePaths: true })
     const before = add(store, '/code/older')
-    store.setTrafficConfig(before.id, {
-      trafficOrigin: 'http://127.0.0.1:8080',
-      trafficPort: 30_100,
-      trafficAccess: 'loopback',
-      trafficEnvVar: 'API_URL',
-    })
-    const chosen = store.get(before.id)
-    expect(chosen?.trafficAccess).toBe('loopback')
+    upgraded
+      .prepare(
+        `UPDATE projects
+            SET traffic_origin = @origin, traffic_port = 30100,
+                traffic_access = 'loopback', traffic_env_var = 'API_URL'
+          WHERE id = @id`
+      )
+      .run({ origin: 'http://127.0.0.1:8080', id: before.id })
+    expect(
+      upgraded.prepare(`SELECT traffic_access FROM projects WHERE id = @id`).get({ id: before.id })
+    ).toEqual({ traffic_access: 'loopback' })
 
     migrate(upgraded)
 
     expect(new ProjectStore(upgraded, { caseSensitivePaths: true }).get(before.id)).toEqual({
-      ...chosen,
+      ...before,
+      trafficOrigin: 'http://127.0.0.1:8080',
+      trafficPort: 30_100,
       trafficAccess: 'lan',
+      trafficEnvVar: 'API_URL',
     })
   })
 
@@ -777,5 +784,118 @@ describe('the traffic tables, added to a database that already has projects', ()
       true
     )
     expect(store.legacyTrafficImport().candidate?.port).toBe(0)
+  })
+})
+
+describe('saved run commands', () => {
+  const saved: RunCommands = {
+    version: 1,
+    defaultId: 'clean',
+    commands: [
+      { id: 'dev', label: 'dev', command: 'npm run dev' },
+      { id: 'clean', label: 'dev:clean', command: 'npm run dev:clean' },
+    ],
+  }
+
+  it('reads null for a project nobody has set up', () => {
+    const project = add(sensitive(), '/code/mobile')
+
+    expect(project.runCommands).toBeNull()
+    expect(sensitive().get(project.id)?.runCommands).toBeNull()
+  })
+
+  it('keeps what was saved across a fresh store, and clears it back to null', () => {
+    const project = add(sensitive(), '/code/mobile')
+
+    expect(sensitive().setRunCommands(project.id, saved).runCommands).toEqual(saved)
+    expect(sensitive().get(project.id)?.runCommands).toEqual(saved)
+
+    expect(sensitive().setRunCommands(project.id, null).runCommands).toBeNull()
+    expect(sensitive().get(project.id)?.runCommands).toBeNull()
+  })
+
+  it('stores a label and a command without their surrounding blanks', () => {
+    const project = add(sensitive(), '/code/mobile')
+
+    const stored = sensitive().setRunCommands(project.id, {
+      version: 1,
+      defaultId: 'dev',
+      commands: [{ id: 'dev', label: '  dev  ', command: '  npm run dev  ' }],
+    })
+
+    expect(stored.runCommands?.commands).toEqual([
+      { id: 'dev', label: 'dev', command: 'npm run dev' },
+    ])
+  })
+
+  it('refuses two commands with one id, and a default that names nothing, keeping the old value', () => {
+    const project = add(sensitive(), '/code/mobile')
+    sensitive().setRunCommands(project.id, saved)
+
+    expect(() =>
+      sensitive().setRunCommands(project.id, {
+        version: 1,
+        defaultId: 'dev',
+        commands: [
+          { id: 'dev', label: 'dev', command: 'npm run dev' },
+          { id: 'dev', label: 'again', command: 'npm run dev:clean' },
+        ],
+      })
+    ).toThrow()
+    expect(() =>
+      sensitive().setRunCommands(project.id, { ...saved, defaultId: 'missing' })
+    ).toThrow()
+    expect(() => sensitive().setRunCommands(project.id, { ...saved, commands: [] })).toThrow()
+
+    expect(sensitive().get(project.id)?.runCommands).toEqual(saved)
+  })
+
+  it('refuses a project nobody adopted', () => {
+    expect(() => sensitive().setRunCommands('nobody', saved)).toThrow(UnknownProjectError)
+  })
+
+  it('reads an unreadable or invalid stored value as null and still loads the project', () => {
+    const project = add(sensitive(), '/code/mobile', 'Mobile')
+    const write = (value: string): void => {
+      db.prepare(`UPDATE projects SET run_commands = @value WHERE id = @id`).run({
+        value,
+        id: project.id,
+      })
+    }
+
+    for (const value of [
+      '{not json',
+      JSON.stringify({ ...saved, version: 2 }),
+      JSON.stringify({ ...saved, defaultId: 'missing' }),
+      JSON.stringify([saved]),
+    ]) {
+      write(value)
+      const loaded = sensitive().get(project.id)
+      expect(loaded?.name).toBe('Mobile')
+      expect(loaded?.runCommands).toBeNull()
+    }
+  })
+
+  it('adds the column to a database that already has projects, leaving them unconfigured', () => {
+    const upgraded = openSqlite({ path: ':memory:' })
+    for (const step of MIGRATIONS.filter((m) => m.version <= 19)) {
+      upgraded.exec(step.up)
+      upgraded.exec(`PRAGMA user_version = ${String(step.version)}`)
+    }
+    const before = add(new ProjectStore(upgraded, { caseSensitivePaths: true }), '/code/older')
+    upgraded
+      .prepare(`UPDATE projects SET notes = 'keep me', traffic_env_var = 'API_URL' WHERE id = @id`)
+      .run({ id: before.id })
+
+    migrate(upgraded)
+
+    const after = new ProjectStore(upgraded, { caseSensitivePaths: true })
+    expect(after.get(before.id)).toEqual({
+      ...before,
+      notes: 'keep me',
+      trafficEnvVar: 'API_URL',
+      runCommands: null,
+    })
+    expect(after.setRunCommands(before.id, saved).runCommands).toEqual(saved)
   })
 })

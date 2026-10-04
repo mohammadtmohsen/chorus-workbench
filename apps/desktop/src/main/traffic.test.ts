@@ -13,6 +13,7 @@ import {
   CaptureStore,
   CapturedBody,
   TrafficService,
+  type CaptureBudget,
   type TrafficHttpRow,
   type TrafficPush,
   type TrafficServiceOptions,
@@ -903,6 +904,21 @@ describe('CaptureStore', () => {
     expect(store.get(first.id)).toBeNull()
     expect(store.wasEvicted(first.id)).toBe(true)
   })
+
+  it('forgets what it cleared rather than calling it evicted, and still records later evictions', () => {
+    const store = new CaptureStore({ entries: 1 })
+    const dropped = store.start(input, 1)
+    const cleared = store.start(input, 2)
+
+    store.clear()
+    expect(store.get(cleared.id)).toBeNull()
+    expect(store.wasEvicted(cleared.id)).toBe(false)
+    expect(store.wasEvicted(dropped.id)).toBe(false)
+
+    const older = store.start(input, 3)
+    store.start(input, 4)
+    expect(store.wasEvicted(older.id)).toBe(true)
+  })
 })
 
 describe('capture accounting', () => {
@@ -1001,5 +1017,248 @@ describe('pending rows', () => {
     // The same row, not a second one: a request is one line that fills in.
     expect(service.snapshot()).toHaveLength(1)
     expect(httpRow(service).status).toBe(200)
+  })
+})
+
+const settled = (): Promise<void> =>
+  new Promise((resolve) => {
+    setTimeout(resolve, 50)
+  })
+
+const ledger = (): {
+  readonly budget: CaptureBudget
+  readonly held: () => number
+  readonly retains: () => number
+} => {
+  const bytes = new Map<string, number>()
+  let retains = 0
+  return {
+    budget: {
+      retain: (captureId, count) => {
+        retains += 1
+        bytes.set(captureId, (bytes.get(captureId) ?? 0) + count)
+        return null
+      },
+      release: (captureId, count) => {
+        bytes.set(captureId, (bytes.get(captureId) ?? 0) - count)
+      },
+    },
+    held: () => [...bytes.values()].reduce((sum, each) => sum + each, 0),
+    retains: () => retains,
+  }
+}
+
+describe('forwarding while not recording', () => {
+  it('answers the app exactly as a recording proxy would, and keeps nothing', async () => {
+    const body = JSON.stringify({ code: 'OK' })
+    const source = await answering(body)
+    const account = ledger()
+    const { service, port } = await proxy({
+      origin: `http://127.0.0.1:${String(source.port)}`,
+      recording: false,
+      budget: account.budget,
+    })
+
+    const reply = await through(port, '/api/mobile/v1/me')
+    await settled()
+
+    expect(reply.status).toBe(200)
+    expect(reply.body.toString('utf8')).toBe(body)
+    expect(service.snapshot()).toHaveLength(0)
+    expect(account.retains()).toBe(0)
+  })
+
+  it('still answers 502 for an unreachable upstream, with no row', async () => {
+    const gone = await startUpstream(() => undefined)
+    await gone.close()
+    const { service, port } = await proxy({
+      origin: `http://127.0.0.1:${String(gone.port)}`,
+      recording: false,
+    })
+
+    const reply = await through(port, '/nowhere')
+    await settled()
+
+    expect(reply.status).toBe(502)
+    expect(service.snapshot()).toHaveLength(0)
+  })
+
+  it('takes no log, logcat, upgrade or CONNECT row', async () => {
+    const target = await startTarget()
+    const { service, port } = await proxy({ recording: false })
+
+    service.logLine({ scope: 'global', id: 't1' }, 'metro is listening')
+    service.logcatLine('ReactNativeJS: hello')
+    const answer = await attemptConnect(port, `127.0.0.1:${String(target.port)}`)
+    await settled()
+    await target.close()
+
+    expect(answer.startsWith('HTTP/1.1 501')).toBe(true)
+    expect(service.snapshot()).toHaveLength(0)
+  })
+
+  it('records from the next request once recording is turned on', async () => {
+    const source = await answering('{"code":"OK"}')
+    const { service, port } = await proxy({
+      origin: `http://127.0.0.1:${String(source.port)}`,
+      recording: false,
+    })
+    await through(port, '/before')
+
+    service.reset(true)
+    await through(port, '/after')
+    await until(() => service.snapshot().length > 0)
+
+    expect(service.snapshot()).toHaveLength(1)
+    expect(httpRow(service).u.endsWith('/after')).toBe(true)
+    expect(service.captured(httpRow(service).requestId)).not.toBeNull()
+  })
+})
+
+describe('a request still in flight when recording restarts', () => {
+  it('writes no row and keeps no body in the new recording', async () => {
+    let release: () => void = () => undefined
+    const held = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    const source = await upstream((_req, res) => {
+      void held.then(() => {
+        res.writeHead(200, { 'content-type': 'application/json' })
+        res.end('{"code":"LATE"}')
+      })
+    })
+    const { service, port } = await proxy({ origin: `http://127.0.0.1:${String(source.port)}` })
+
+    const answered = through(port, '/slow')
+    await until(() => service.snapshot().length > 0)
+    const old = httpRow(service).requestId
+
+    service.reset(true)
+    expect(service.snapshot()).toHaveLength(0)
+    expect(service.captured(old)).toBeNull()
+
+    release()
+    const reply = await answered
+    await settled()
+
+    expect(reply.status).toBe(200)
+    expect(service.snapshot()).toHaveLength(0)
+    expect(service.captured(old)).toBeNull()
+  })
+
+  it('keeps no more body and writes no row once recording ends part-way through a response', async () => {
+    let finish: () => void = () => undefined
+    const held = new Promise<void>((resolve) => {
+      finish = resolve
+    })
+    const source = await upstream((_req, res) => {
+      res.writeHead(200, { 'content-type': 'application/json' })
+      res.write('{"code":')
+      void held.then(() => {
+        res.end('"LATE"}')
+      })
+    })
+    const account = ledger()
+    const { service, port } = await proxy({
+      origin: `http://127.0.0.1:${String(source.port)}`,
+      budget: account.budget,
+    })
+
+    const answered = through(port, '/streaming')
+    await until(() => account.retains() > 0)
+    const before = account.retains()
+
+    service.reset(true)
+    finish()
+    const reply = await answered
+    await settled()
+
+    expect(reply.body.toString('utf8')).toBe('{"code":"LATE"}')
+    expect(account.retains()).toBe(before)
+    expect(account.held()).toBe(0)
+    expect(service.snapshot()).toHaveLength(0)
+  })
+})
+
+describe('closing a service', () => {
+  it('gives back every retained byte and delivers nothing it had queued', async () => {
+    const source = await upstream((_req, res) => {
+      res.writeHead(200, { 'content-type': 'application/json', 'content-encoding': 'gzip' })
+      res.end(gzipSync(Buffer.from('{"code":"OK"}')))
+    })
+    const account = ledger()
+    const timing = manualFrame()
+    const { service, port } = await proxy({
+      origin: `http://127.0.0.1:${String(source.port)}`,
+      budget: account.budget,
+      frame: timing.frame,
+    })
+    const delivered: TrafficPush[] = []
+    service.subscribe((push) => {
+      delivered.push(push)
+    })
+    service.attach()
+
+    await through(port, '/gz')
+    await until(() => service.snapshot().length > 0 && httpRow(service).status !== null)
+    const id = httpRow(service).requestId
+    const capture = service.captured(id)
+    expect(account.held()).toBeGreaterThan(0)
+
+    await service.close()
+    timing.flush()
+    await capture?.response.decode()
+
+    expect(delivered).toHaveLength(0)
+    expect(service.captured(id)).toBeNull()
+    expect(account.held()).toBe(0)
+  })
+})
+
+describe('a released body', () => {
+  it('neither keeps nor charges bytes pushed after it was released', () => {
+    const charged: number[] = []
+    const body = new CapturedBody(
+      1_000,
+      {
+        retain: (_captureId, bytes) => {
+          charged.push(bytes)
+          return null
+        },
+        release: () => undefined,
+      },
+      () => 'capture-1'
+    )
+    body.push(Buffer.alloc(10))
+    body.release()
+    body.push(Buffer.alloc(20))
+
+    expect(charged).toEqual([10])
+    expect(body.capturedBytes).toBe(0)
+    expect(body.encodedPage(0, 64)?.length).toBe(0)
+  })
+
+  it('charges nothing for a decode that finishes after the release', async () => {
+    const charged: string[] = []
+    const body = new CapturedBody(
+      1_000,
+      {
+        retain: (captureId) => {
+          charged.push(captureId)
+          return null
+        },
+        release: () => undefined,
+      },
+      () => 'capture-1'
+    )
+    body.contentEncoding = 'gzip'
+    body.push(gzipSync(Buffer.from('{"code":"OK"}')))
+
+    const decoding = body.decode()
+    body.release()
+    await decoding
+
+    expect(charged.some((key) => key.endsWith(':decoded'))).toBe(false)
+    expect(body.decodedPage(0, 64)).toBeNull()
   })
 })

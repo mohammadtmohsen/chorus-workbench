@@ -21,8 +21,45 @@ import type { TerminalPush, TerminalRefShape } from '../../shared/ipc.js'
  */
 export function sameTerminal(a: TerminalRefShape, b: TerminalRefShape): boolean {
   if (a.id !== b.id) return false
-  if (a.scope === 'global') return b.scope === 'global'
-  return b.scope === 'session' && a.conversationId === b.conversationId
+  switch (a.scope) {
+    case 'global':
+      return b.scope === 'global'
+    case 'session':
+      return b.scope === 'session' && a.conversationId === b.conversationId
+    case 'project':
+      return b.scope === 'project' && a.projectId === b.projectId
+    case 'shell':
+      return b.scope === 'shell' && a.projectId === b.projectId
+  }
+}
+
+export function terminalRefFrom(
+  scope: TerminalRefShape['scope'],
+  owner: string,
+  id: string
+): TerminalRefShape {
+  switch (scope) {
+    case 'global':
+      return { scope, id }
+    case 'session':
+      return { scope, conversationId: owner, id }
+    case 'project':
+      return { scope, projectId: owner, id: 'run' }
+    case 'shell':
+      return { scope, projectId: owner, id }
+  }
+}
+
+export function terminalOwner(ref: TerminalRefShape): string {
+  switch (ref.scope) {
+    case 'global':
+      return ''
+    case 'session':
+      return ref.conversationId
+    case 'project':
+    case 'shell':
+      return ref.projectId
+  }
 }
 
 export interface Attachment {
@@ -49,6 +86,7 @@ export interface Attachment {
  * against, so it is held rather than judged — see `pendingUntilAttached`.
  */
 export function shouldApply(push: TerminalPush, attachment: Attachment): boolean {
+  if (push.kind === 'replaced') return false
   if (!sameTerminal(push.ref, attachment.ref)) return false
   if (push.epoch !== attachment.epoch) return false
   if (push.kind === 'exit') return true

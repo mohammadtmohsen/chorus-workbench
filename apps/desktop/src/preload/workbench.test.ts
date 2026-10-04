@@ -22,6 +22,10 @@ import {
   WORKBENCH_COMPLETION_CANCEL_CHANNEL,
   WORKBENCH_EDITOR_REPORT_CHANNEL,
   WORKBENCH_COMPLETION_PROBE_CHANNEL,
+  WORKBENCH_LAYOUT_CHANNEL,
+  WORKBENCH_ACTIVITY_BAR_REPORT_CHANNEL,
+  WORKBENCH_ROW_REQUEST_CHANNEL,
+  WORKBENCH_ROW_SCROLL_REQUEST_CHANNEL,
 } from '../shared/workbench-ipc.js'
 
 /**
@@ -34,6 +38,7 @@ import {
 
 const listeners = new Map<string, (event: unknown, payload: unknown) => void>()
 const invoke = vi.fn()
+const send = vi.fn()
 
 interface Exposed {
   connection: () => Promise<unknown>
@@ -43,6 +48,10 @@ interface Exposed {
   writeBrowserExtensions: (text: string) => Promise<void>
   onBrowserExtensionsChanged: (handler: (text: string) => void) => void
   onTerminalEnvChanged: (handler: (env: unknown) => void) => void
+  onLayoutWidth: (handler: (width: number) => void) => void
+  reportActivityBar: (width: number) => void
+  requestRowReveal: () => void
+  requestRowScroll: (delta: number) => void
 }
 let exposed: Exposed | null = null
 
@@ -66,6 +75,7 @@ vi.mock('electron', () => ({
       listeners.set(channel, listener)
     },
     invoke,
+    send,
   },
 }))
 
@@ -92,7 +102,12 @@ const {
   COMPLETION_CANCEL_CHANNEL,
   EDITOR_REPORT_CHANNEL,
   COMPLETION_PROBE_CHANNEL,
+  LAYOUT_CHANNEL,
+  ACTIVITY_BAR_REPORT_CHANNEL,
+  ROW_REQUEST_CHANNEL,
+  ROW_SCROLL_REQUEST_CHANNEL,
   asConnection,
+  asLayoutWidth,
   asTerminalEnv,
 } = await import('./workbench.js')
 
@@ -120,9 +135,13 @@ describe('the workbench preload', () => {
     expect(COMPLETION_CANCEL_CHANNEL).toBe(WORKBENCH_COMPLETION_CANCEL_CHANNEL)
     expect(EDITOR_REPORT_CHANNEL).toBe(WORKBENCH_EDITOR_REPORT_CHANNEL)
     expect(COMPLETION_PROBE_CHANNEL).toBe(WORKBENCH_COMPLETION_PROBE_CHANNEL)
+    expect(LAYOUT_CHANNEL).toBe(WORKBENCH_LAYOUT_CHANNEL)
+    expect(ACTIVITY_BAR_REPORT_CHANNEL).toBe(WORKBENCH_ACTIVITY_BAR_REPORT_CHANNEL)
+    expect(ROW_REQUEST_CHANNEL).toBe(WORKBENCH_ROW_REQUEST_CHANNEL)
+    expect(ROW_SCROLL_REQUEST_CHANNEL).toBe(WORKBENCH_ROW_SCROLL_REQUEST_CHANNEL)
   })
 
-  it('exposes exactly twenty-seven methods, and no twenty-eighth', () => {
+  it('exposes exactly thirty methods, and no thirty-first', () => {
     // The list, not the count: a method named here is a capability a document
     // running extension code is handed, so which ones they are is the assertion.
     expect(Object.keys(exposed ?? {})).toEqual([
@@ -236,6 +255,10 @@ describe('the workbench preload', () => {
        */
       'onRevealRequest',
       'onEditRequest',
+      'onLayoutWidth',
+      'reportActivityBar',
+      'requestRowReveal',
+      'requestRowScroll',
     ])
   })
 
@@ -244,6 +267,38 @@ describe('the workbench preload', () => {
     // earlier than the workbench's own module graph finishing. Nothing else can
     // be listening by then.
     expect(listeners.has(CONNECTION_CHANNEL)).toBe(true)
+    expect(listeners.has(LAYOUT_CHANNEL)).toBe(true)
+  })
+
+  it('accepts only a positive whole layout width', () => {
+    expect(asLayoutWidth(900)).toBe(900)
+    for (const wrong of [0, -1, 900.5, Number.NaN, Number.POSITIVE_INFINITY, '900', null]) {
+      expect(asLayoutWidth(wrong)).toBeNull()
+    }
+  })
+
+  it('hands a late subscriber the width that arrived first, then every later one', () => {
+    listeners.get(LAYOUT_CHANNEL)?.(null, 900)
+    listeners.get(LAYOUT_CHANNEL)?.(null, 'wide')
+    const received: number[] = []
+    exposed?.onLayoutWidth((width) => {
+      received.push(width)
+    })
+    listeners.get(LAYOUT_CHANNEL)?.(null, 1_100)
+    listeners.get(LAYOUT_CHANNEL)?.(null, -4)
+    expect(received).toEqual([900, 1_100])
+  })
+
+  it('sends the activity bar width and a row request on their own channels, naming nothing else', () => {
+    send.mockClear()
+    exposed?.reportActivityBar(48)
+    exposed?.requestRowReveal()
+    exposed?.requestRowScroll(-120)
+    expect(send.mock.calls).toEqual([
+      [ACTIVITY_BAR_REPORT_CHANNEL, 48],
+      [ROW_REQUEST_CHANNEL],
+      [ROW_SCROLL_REQUEST_CHANNEL, -120],
+    ])
   })
 
   it('answers from the buffer without a pull once the push has arrived', async () => {

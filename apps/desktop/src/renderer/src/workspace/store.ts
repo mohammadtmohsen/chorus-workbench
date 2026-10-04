@@ -16,22 +16,25 @@ import type {
 // `WorkspaceSnapshot` is imported as a value, not a type: `SNAPSHOT_KEYS` below
 // reads its keys off the schema so the list cannot drift from the shape.
 import {
-  BOX_WIDTH,
   CLOSED_TERMINAL_PANEL,
+  PROJECT_TERMINAL_WIDTH,
+  TRAFFIC_WIDTH,
   WorkspaceSnapshot,
 } from '../../../shared/workspace-layout.js'
 import {
   activateTab,
-  clampBoxWidth,
-  clampChorusWidth,
+  clampProjectTerminalWidth,
   clampSidebarWidth,
+  clampTrafficWidth,
   CLOSED_TRAFFIC,
+  DEFAULT_PROJECT_TERMINAL,
   closePane,
   closeTab,
   EMPTY_ARRANGEMENT,
   EMPTY_WORKSPACE,
   equalizeBranch,
   focusPane,
+  isRowScroll,
   leafPaneIds,
   moveBox,
   moveTab,
@@ -40,6 +43,7 @@ import {
   openBox,
   openSession,
   placeSession,
+  projectTerminalMinimum,
   reconcileWorkspace,
   newTerminalId,
   normalizeTerminalPanel,
@@ -299,10 +303,6 @@ export interface WorkspaceActions {
   activateSessionTerminal: (conversationId: string, id: string) => void
   /** Committed on drop, not on every pointer move; see `useSidebarResize`. */
   setSidebarWidth: (width: number) => void
-  /** The workbench/Chorus divider, for one project. See the field's own note. */
-  setChorusWidth: (projectId: string, width: number) => void
-  /** Shows or hides a project's workbench. Chorus takes the pane when it is off. */
-  toggleWorkbench: (projectId: string) => void
   /**
    * Puts a conversation on screen in the group that holds it.
    *
@@ -322,8 +322,11 @@ export interface WorkspaceActions {
    * produce a conversation may call it without checking first.
    */
   adoptConversation: (projectId: string, conversationId: string) => void
-  toggleTraffic: (projectId: string) => void
   setTrafficWidth: (projectId: string, width: number) => void
+  setProjectTerminalWidth: (projectId: string, width: number) => void
+  addProjectShell: (projectId: string) => string
+  removeProjectShell: (projectId: string, id: string) => void
+  setRowScroll: (projectId: string, left: number) => void
   moveConversationBox: (
     projectId: string,
     boxId: string,
@@ -470,10 +473,10 @@ function snapshot(state: WorkspaceStore): WorkspaceSnapshot {
     focusedPaneId: state.focusedPaneId,
     sidebarHidden: state.sidebarHidden,
     sidebarWidth: state.sidebarWidth,
-    chorusWidths: state.chorusWidths,
     conversationGroups: state.conversationGroups,
     trafficPanels: state.trafficPanels,
-    workbenchHidden: state.workbenchHidden,
+    projectTerminals: state.projectTerminals,
+    rowScroll: state.rowScroll,
     terminals: state.terminals,
     globalTerminal: state.globalTerminal,
     /*
@@ -879,11 +882,6 @@ export const useWorkspaceStore = create<WorkspaceStore>()(
       setSidebarWidth: (width) => {
         set({ sidebarWidth: clampSidebarWidth(width) })
       },
-      setChorusWidth: (projectId, width) => {
-        set((state) => ({
-          chorusWidths: { ...state.chorusWidths, [projectId]: clampChorusWidth(width) },
-        }))
-      },
       showConversationIn: (projectId, groupId, conversationId) => {
         set((state) => ({
           conversationGroups: editArrangement(state, projectId, (arrangement) =>
@@ -925,27 +923,58 @@ export const useWorkspaceStore = create<WorkspaceStore>()(
           ),
         }))
       },
-      toggleTraffic: (projectId) => {
-        set((state) => {
-          const current = state.trafficPanels[projectId] ?? CLOSED_TRAFFIC
-          return {
-            trafficPanels: {
-              ...state.trafficPanels,
-              [projectId]: { ...current, open: !current.open },
-            },
-          }
-        })
-      },
       setTrafficWidth: (projectId, width) => {
         set((state) => {
           const current = state.trafficPanels[projectId] ?? CLOSED_TRAFFIC
           return {
             trafficPanels: {
               ...state.trafficPanels,
-              [projectId]: { ...current, width: clampBoxWidth(width) },
+              [projectId]: { ...current, width: clampTrafficWidth(width) },
             },
           }
         })
+      },
+      setProjectTerminalWidth: (projectId, width) => {
+        set((state) => {
+          const current = state.projectTerminals[projectId] ?? DEFAULT_PROJECT_TERMINAL
+          return {
+            projectTerminals: {
+              ...state.projectTerminals,
+              [projectId]: { ...current, width: clampProjectTerminalWidth(width) },
+            },
+          }
+        })
+      },
+      addProjectShell: (projectId) => {
+        const id = newTerminalId()
+        set((state) => {
+          const current = state.projectTerminals[projectId] ?? DEFAULT_PROJECT_TERMINAL
+          const shells = [...current.shells, { id }]
+          const width = Math.max(
+            clampProjectTerminalWidth(current.width),
+            projectTerminalMinimum(shells.length)
+          )
+          return { projectTerminals: { ...state.projectTerminals, [projectId]: { width, shells } } }
+        })
+        return id
+      },
+      removeProjectShell: (projectId, id) => {
+        set((state) => {
+          const current = state.projectTerminals[projectId]
+          if (current === undefined) return state
+          const shells = current.shells.filter((shell) => shell.id !== id)
+          if (shells.length === 0 || shells.length === current.shells.length) return state
+          return {
+            projectTerminals: { ...state.projectTerminals, [projectId]: { ...current, shells } },
+          }
+        })
+      },
+      setRowScroll: (projectId, left) => {
+        set((state) =>
+          !isRowScroll(left) || state.rowScroll[projectId] === left
+            ? state
+            : { rowScroll: { ...state.rowScroll, [projectId]: left } }
+        )
       },
       moveConversationBox: (projectId, boxId, targetBoxId, direction) => {
         set((state) => ({
@@ -964,27 +993,18 @@ export const useWorkspaceStore = create<WorkspaceStore>()(
       resetProjectWidths: (projectId) => {
         set((state) => {
           const traffic = state.trafficPanels[projectId] ?? CLOSED_TRAFFIC
+          const terminal = state.projectTerminals[projectId] ?? DEFAULT_PROJECT_TERMINAL
           return {
             conversationGroups: editArrangement(state, projectId, resetBoxes),
             trafficPanels: {
               ...state.trafficPanels,
-              [projectId]: { ...traffic, width: BOX_WIDTH.default },
+              [projectId]: { ...traffic, width: TRAFFIC_WIDTH.default },
+            },
+            projectTerminals: {
+              ...state.projectTerminals,
+              [projectId]: { ...terminal, width: PROJECT_TERMINAL_WIDTH.default },
             },
           }
-        })
-      },
-      toggleWorkbench: (projectId) => {
-        set((state) => {
-          /*
-           * Omitted by rest-destructuring rather than `delete`, and the record
-           * stays keyed by what is *hidden* — so absent means the editor is on
-           * and a project that was never toggled needs no entry at all.
-           */
-          if (state.workbenchHidden[projectId] === true) {
-            const { [projectId]: _shown, ...rest } = state.workbenchHidden
-            return { workbenchHidden: rest }
-          }
-          return { workbenchHidden: { ...state.workbenchHidden, [projectId]: true } }
         })
       },
       ingestEvents: (events, reported) => {

@@ -10,11 +10,21 @@ import type {
   ForkOpts,
   HealthStatus,
   ModelChoice,
+  ProjectReader,
   SandboxPolicy,
   SessionOpts,
   UserInputResponse,
 } from '@chorus/agent-protocol'
+import {
+  PROJECT_NAMESPACE_DESCRIPTION,
+  PROJECT_TOOL_DESCRIPTIONS,
+  PROJECT_TOOL_INPUT_SCHEMAS,
+  PROJECT_TOOL_NAMES,
+  PROJECT_TOOL_NAMESPACE,
+  runProjectTool,
+} from '@chorus/agent-protocol'
 import type { AgentId, ApprovalId, UserInputId } from '@chorus/shared'
+import type { DynamicToolCallResponse } from './generated/v2/DynamicToolCallResponse.js'
 import {
   mapApprovalRequest,
   mapNotification,
@@ -25,10 +35,20 @@ import {
   toCodexUserInputResponse,
   type ThreadItem,
 } from './mapping.js'
-import { JsonRpcClient } from './rpc.js'
+import { JsonRpcClient, RpcError } from './rpc.js'
 import { createStdioTransport, type Transport } from './transport.js'
 
 const run = promisify(execFile)
+
+const VERSION_PROBE_TTL_MS = 30_000
+
+type VersionProbe = { readonly version: string } | { readonly reason: string }
+
+interface VersionProbeEntry {
+  readonly key: string
+  readonly result: Promise<VersionProbe>
+  doneAt: number | null
+}
 
 /**
  * `AgentAdapter` over `codex app-server`.
@@ -97,6 +117,48 @@ function developerInstructions(opts: SessionOpts): { developerInstructions?: str
 
 /** Enough to cover any in-flight turn without growing without bound. */
 const MAX_REMEMBERED_ITEMS = 200
+
+const EXPERIMENTAL_CAPABILITIES = { experimentalApi: true, requestAttestation: false } as const
+
+const INVALID_REQUEST = -32600
+
+const CAPABILITY_FIELDS = ['experimentalApi', 'requestAttestation'] as const
+
+const TOOLS_GATED = 'thread/start.dynamicTools requires experimentalApi capability'
+
+const unknownField = (field: string): string => `Invalid request: unknown field \`${field}\``
+
+const PROJECT_DYNAMIC_TOOLS = [
+  {
+    type: 'namespace',
+    name: PROJECT_TOOL_NAMESPACE,
+    description: PROJECT_NAMESPACE_DESCRIPTION,
+    tools: PROJECT_TOOL_NAMES.map((name) => ({
+      type: 'function',
+      name,
+      description: PROJECT_TOOL_DESCRIPTIONS[name],
+      inputSchema: PROJECT_TOOL_INPUT_SCHEMAS[name],
+    })),
+  },
+] as const
+
+function refusedCapability(error: unknown): boolean {
+  if (!(error instanceof RpcError) || error.code !== INVALID_REQUEST) return false
+  const { message } = error
+  return CAPABILITY_FIELDS.some((field) => message.startsWith(unknownField(field)))
+}
+
+function refusedTools(error: unknown): boolean {
+  if (!(error instanceof RpcError) || error.code !== INVALID_REQUEST) return false
+  return error.message === TOOLS_GATED || error.message.startsWith(unknownField('dynamicTools'))
+}
+
+type ProjectToolsNotice = 'projectToolsUnavailable' | 'projectToolsUnconfirmed'
+
+const toolReply = (text: string, success: boolean): DynamicToolCallResponse => ({
+  contentItems: [{ type: 'inputText', text }],
+  success,
+})
 
 export interface CodexAdapterOptions {
   readonly command?: string
@@ -175,7 +237,8 @@ export class CodexSession implements AgentSession {
     readonly sessionRef: string,
     private readonly rpc: JsonRpcClient,
     private readonly approvalTtlMs: number,
-    private readonly now: () => number
+    private readonly now: () => number,
+    private readonly project?: ProjectReader
   ) {
     this.rpc.onNotification((method, params) => {
       this.ingest(method, params)
@@ -398,6 +461,33 @@ export class CodexSession implements AgentSession {
     this.emit(event)
   }
 
+  announce(code: ProjectToolsNotice): void {
+    this.emit({
+      agentId: 'codex' satisfies AgentId,
+      seq: this.seq + 1,
+      at: this.now(),
+      type: 'notice',
+      level: code === 'projectToolsUnavailable' ? 'warn' : 'info',
+      source: 'system',
+      text: '',
+      code,
+    })
+  }
+
+  private async callTool(params: unknown): Promise<DynamicToolCallResponse> {
+    const call: Record<string, unknown> =
+      typeof params === 'object' && params !== null ? (params as Record<string, unknown>) : {}
+    if (call['threadId'] !== this.sessionRef) {
+      return toolReply('This tool call names a different thread.', false)
+    }
+    const tool = call['tool']
+    if (call['namespace'] !== PROJECT_TOOL_NAMESPACE || typeof tool !== 'string') {
+      return toolReply('Unknown tool.', false)
+    }
+    const result = await runProjectTool(this.project, tool, call['arguments'])
+    return toolReply(result.text, result.ok)
+  }
+
   /**
    * Approvals arrive as requests, and the promise returned here is what holds
    * the server's request open until the user answers. Nothing times it out on
@@ -405,6 +495,7 @@ export class CodexSession implements AgentSession {
    * thing standing between a closed laptop and a wedged session (plan §4.4).
    */
   private handleServerRequest(method: string, params: unknown): Promise<unknown> {
+    if (method === 'item/tool/call') return this.callTool(params)
     /*
      * Questions first, because they used to land in the fall-through below and
      * be answered with `{}` — Codex was handed an empty response and the
@@ -534,6 +625,7 @@ export class CodexAdapter implements AgentAdapter {
   private readonly resolveCommand:
     (() => Promise<{ readonly file: string; readonly args: readonly string[] } | null>) | undefined
   private resolving: Promise<void> | null = null
+  private latestProbe: VersionProbeEntry | undefined
   /** True once a lookup ran and came back with nothing. */
   private lookupFoundNothing = false
   /** An explicit command is the caller's business; we do not second-guess it. */
@@ -568,13 +660,10 @@ export class CodexAdapter implements AgentAdapter {
     // "spawn codex ENOENT" when the command has not been resolved yet.
     await this.resolveCommandOnce()
     try {
-      const { stdout } = await run(this.command, [...this.commandArgs, '--version'], {
-        timeout: 10_000,
-      })
-      const version = /\d+\.\d+\.\d+[\w.-]*/.exec(stdout.trim())?.[0]
-      return version === undefined
-        ? { state: 'unavailable', reason: `could not parse version from "${stdout.trim()}"` }
-        : { state: 'ready', version }
+      const outcome = await this.probeVersion(this.command, this.commandArgs)
+      return 'reason' in outcome
+        ? { state: 'unavailable', reason: outcome.reason }
+        : { state: 'ready', version: outcome.version }
     } catch (error) {
       return {
         state: 'unavailable',
@@ -584,16 +673,37 @@ export class CodexAdapter implements AgentAdapter {
   }
 
   async start(opts: SessionOpts): Promise<AgentSession> {
-    const rpc = await this.handshake()
-    const started = (await rpc.request('thread/start', {
+    const { rpc, experimental } = await this.connect(opts)
+    const params = {
       cwd: opts.cwd,
       approvalPolicy: 'on-request',
       sandbox: toSandboxMode(opts.sandbox),
       ...(opts.model === undefined ? {} : { model: opts.model }),
       ...developerInstructions(opts),
-    })) as { thread: { id: string } }
+    }
+    const open = async (body: object): Promise<{ thread: { id: string } }> =>
+      (await rpc.request('thread/start', body)) as { thread: { id: string } }
+    const { started, registered } = await this.owned(opts, rpc, async () => {
+      if (!experimental) return { started: await open(params), registered: false }
+      try {
+        return {
+          started: await open({ ...params, dynamicTools: PROJECT_DYNAMIC_TOOLS }),
+          registered: true,
+        }
+      } catch (error) {
+        if (!refusedTools(error)) throw error
+        return { started: await open(params), registered: false }
+      }
+    })
 
-    const session = new CodexSession(started.thread.id, rpc, this.approvalTtlMs, this.now)
+    const session = new CodexSession(
+      started.thread.id,
+      rpc,
+      this.approvalTtlMs,
+      this.now,
+      opts.project
+    )
+    if (opts.project !== undefined && !registered) session.announce('projectToolsUnavailable')
     // Not awaited: the header can fill a moment late, but a session must not
     // wait on an account lookup to open.
     void session.readLimits()
@@ -601,15 +711,20 @@ export class CodexAdapter implements AgentAdapter {
   }
 
   async resume(sessionRef: string, opts: SessionOpts): Promise<AgentSession> {
-    const rpc = await this.handshake()
-    await rpc.request('thread/resume', {
-      threadId: sessionRef,
-      cwd: opts.cwd,
-      approvalPolicy: 'on-request',
-      sandbox: toSandboxMode(opts.sandbox),
-      ...developerInstructions(opts),
-    })
-    const session = new CodexSession(sessionRef, rpc, this.approvalTtlMs, this.now)
+    const { rpc, experimental } = await this.connect(opts)
+    await this.owned(opts, rpc, () =>
+      rpc.request('thread/resume', {
+        threadId: sessionRef,
+        cwd: opts.cwd,
+        approvalPolicy: 'on-request',
+        sandbox: toSandboxMode(opts.sandbox),
+        ...developerInstructions(opts),
+      })
+    )
+    const session = new CodexSession(sessionRef, rpc, this.approvalTtlMs, this.now, opts.project)
+    if (opts.project !== undefined) {
+      session.announce(experimental ? 'projectToolsUnconfirmed' : 'projectToolsUnavailable')
+    }
     void session.readLimits()
     return this.track(session)
   }
@@ -639,23 +754,34 @@ export class CodexAdapter implements AgentAdapter {
     if (opts.inherits === 'nothing') {
       throw new Error('codex cannot fork without the user configuration')
     }
-    const rpc = await this.handshake()
-    const forked = (await rpc.request('thread/fork', {
-      threadId: sessionRef,
-      /*
-       * Ephemeral unless the caller wants the branch kept. `thread/fork` loads
-       * the thread from disk, so an ephemeral fork is also a fork nothing can
-       * fork again — which is why promoting an aside forks its parent rather
-       * than the aside itself.
-       */
-      ephemeral: opts.persist !== true,
-      cwd: opts.cwd,
-      approvalPolicy: 'on-request',
-      sandbox: toSandboxMode(opts.sandbox),
-      ...(opts.model === undefined ? {} : { model: opts.model }),
-    })) as { thread: { id: string } }
+    const { rpc, experimental } = await this.connect(opts)
+    const forked = (await this.owned(opts, rpc, () =>
+      rpc.request('thread/fork', {
+        threadId: sessionRef,
+        /*
+         * Ephemeral unless the caller wants the branch kept. `thread/fork` loads
+         * the thread from disk, so an ephemeral fork is also a fork nothing can
+         * fork again — which is why promoting an aside forks its parent rather
+         * than the aside itself.
+         */
+        ephemeral: opts.persist !== true,
+        cwd: opts.cwd,
+        approvalPolicy: 'on-request',
+        sandbox: toSandboxMode(opts.sandbox),
+        ...(opts.model === undefined ? {} : { model: opts.model }),
+      })
+    )) as { thread: { id: string } }
 
-    const session = new CodexSession(forked.thread.id, rpc, this.approvalTtlMs, this.now)
+    const session = new CodexSession(
+      forked.thread.id,
+      rpc,
+      this.approvalTtlMs,
+      this.now,
+      opts.project
+    )
+    if (opts.project !== undefined) {
+      session.announce(experimental ? 'projectToolsUnconfirmed' : 'projectToolsUnavailable')
+    }
     return this.track(session)
   }
 
@@ -690,7 +816,73 @@ export class CodexAdapter implements AgentAdapter {
     return this.resolving
   }
 
+  private probeVersion(file: string, args: readonly string[]): Promise<VersionProbe> {
+    const key = JSON.stringify([file, ...args])
+    const current = this.latestProbe
+    if (current?.key === key) {
+      if (current.doneAt === null) return current.result
+      const age = this.now() - current.doneAt
+      if (age >= 0 && age < VERSION_PROBE_TTL_MS) return current.result
+    }
+    const result = run(file, [...args, '--version'], { timeout: 10_000 }).then(
+      ({ stdout }): VersionProbe => {
+        const version = /\d+\.\d+\.\d+[\w.-]*/.exec(stdout.trim())?.[0]
+        return version === undefined
+          ? { reason: `could not parse version from "${stdout.trim()}"` }
+          : { version }
+      },
+      (error: unknown): VersionProbe => ({
+        reason: error instanceof Error ? error.message : String(error),
+      })
+    )
+    const entry: VersionProbeEntry = { key, result, doneAt: null }
+    this.latestProbe = entry
+    void result.then((outcome) => {
+      if (this.latestProbe !== entry) return
+      if ('version' in outcome) entry.doneAt = this.now()
+      else this.latestProbe = undefined
+    })
+    return result
+  }
+
+  private async connect(
+    opts: SessionOpts
+  ): Promise<{ readonly rpc: JsonRpcClient; readonly experimental: boolean }> {
+    if (opts.project === undefined) return { rpc: await this.handshake(), experimental: false }
+    const rpc = await this.spawnClient()
+    try {
+      await this.initialize(rpc, EXPERIMENTAL_CAPABILITIES)
+      return { rpc, experimental: true }
+    } catch (error) {
+      rpc.close('initialize failed')
+      if (!refusedCapability(error)) throw error
+    }
+    const stable = await this.spawnClient()
+    await this.owned(opts, stable, () => this.initialize(stable, {}))
+    return { rpc: stable, experimental: false }
+  }
+
+  private async owned<T>(
+    opts: SessionOpts,
+    rpc: JsonRpcClient,
+    open: () => Promise<T>
+  ): Promise<T> {
+    if (opts.project === undefined) return open()
+    try {
+      return await open()
+    } catch (error) {
+      rpc.close('could not open the thread')
+      throw error
+    }
+  }
+
   private async handshake(): Promise<JsonRpcClient> {
+    const rpc = await this.spawnClient()
+    await this.initialize(rpc, {})
+    return rpc
+  }
+
+  private async spawnClient(): Promise<JsonRpcClient> {
     await this.resolveCommandOnce()
 
     /*
@@ -709,14 +901,19 @@ export class CodexAdapter implements AgentAdapter {
       )
     }
 
-    const rpc = new JsonRpcClient({ transport: this.createTransport() })
+    return new JsonRpcClient({ transport: this.createTransport() })
+  }
+
+  private async initialize(
+    rpc: JsonRpcClient,
+    capabilities: Readonly<Record<string, boolean>>
+  ): Promise<void> {
     // The server rejects everything sent before this completes.
     await rpc.request('initialize', {
       clientInfo: { name: 'chorus', title: 'Chorus', version: '0.0.0' },
-      capabilities: {},
+      capabilities,
     })
     rpc.notify('initialized', {})
-    return rpc
   }
 
   private track(session: CodexSession): CodexSession {

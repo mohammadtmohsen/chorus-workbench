@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto'
-import type { TrafficSourceShape } from '../shared/ipc.js'
+import { terminalRefKey, type TrafficSourceShape } from '../shared/ipc.js'
 import {
   BODY_PAGE,
   TRAFFIC_ENV_NAME,
@@ -73,6 +73,8 @@ export interface ProjectTrafficDeps {
   readonly remember: (projectId: string, config: ProjectTrafficConfig) => void
   readonly address: () => string | null
   readonly capture?: number
+  readonly wantsReady?: (projectId: string) => boolean
+  readonly localProject?: (projectId: string) => boolean
 }
 
 interface Entry {
@@ -90,10 +92,25 @@ interface Entry {
 const isAddressInUse = (error: unknown): boolean =>
   typeof error === 'object' && error !== null && (error as { code?: string }).code === 'EADDRINUSE'
 
+type ReadyConfig = ProjectTrafficConfig & { readonly origin: string; readonly envVar: string }
+
+const readies = (config: ProjectTrafficConfig | null): config is ReadyConfig => {
+  if (config === null) return false
+  return config.origin !== null && config.envVar !== null && TRAFFIC_ENV_NAME.test(config.envVar)
+}
+
+const RELINQUISHED: Partial<ProjectTrafficState> = {
+  capturing: false,
+  port: null,
+  address: null,
+  forwardedDevices: 0,
+}
+
 export function terminalEnvOf(state: ProjectTrafficState | null): WorkbenchTerminalEnv | null {
-  if (state === null || !state.capturing || state.port === null) return null
-  if (state.envVar === null || !TRAFFIC_ENV_NAME.test(state.envVar)) return null
-  return { name: state.envVar, value: `http://${LOOPBACK}:${String(state.port)}` }
+  if (state === null) return null
+  const { port, envVar } = state
+  if (port === null || envVar === null || !TRAFFIC_ENV_NAME.test(envVar)) return null
+  return { name: envVar, value: `http://${LOOPBACK}:${String(port)}` }
 }
 
 export class ProjectTrafficRegistry {
@@ -166,98 +183,100 @@ export class ProjectTrafficRegistry {
       readonly access?: TrafficAccess | undefined
       readonly envVar?: string | null | undefined
     }
-  ): ProjectTrafficState {
+  ): Promise<ProjectTrafficState> {
     const entry = this.entry(projectId)
-    const movesOrigin = config.origin !== undefined && config.origin !== entry.config?.origin
-    const movesPort = config.port !== undefined && config.port !== entry.config?.port
-    /*
-     * `access` is guarded with the other two even though it needs no teardown to
-     * apply. It is read once, in `start`, to choose the bind host, and nothing
-     * rebinds the socket afterwards — so accepting it mid-capture would leave the
-     * panel showing "Anything on this network" beside a listener still bound to
-     * `127.0.0.1`, and a person whose phone cannot reach it with no statement on
-     * screen that the change waits for a restart. Refusing says the same thing
-     * the other two say: stop, change it, start again.
-     */
-    const movesAccess = config.access !== undefined && config.access !== entry.config?.access
-    if (entry.service !== null && (movesOrigin || movesPort || movesAccess)) {
-      return this.publish(entry, { failure: 'capturing' })
-    }
-    const next: ProjectTrafficConfig = {
-      origin: config.origin === undefined ? (entry.config?.origin ?? null) : config.origin,
-      port: config.port === undefined ? (entry.config?.port ?? null) : config.port,
-      access: config.access ?? entry.config?.access ?? DEFAULT_ACCESS,
-      envVar: config.envVar === undefined ? (entry.config?.envVar ?? null) : config.envVar,
-    }
-    this.deps.remember(projectId, next)
-    entry.config = next
-    return this.publish(entry, { failure: null })
+    return this.serialize(entry, async () => {
+      if (this.gone(entry)) return entry.state
+      const movesOrigin = config.origin !== undefined && config.origin !== entry.config?.origin
+      const movesPort = config.port !== undefined && config.port !== entry.config?.port
+      /*
+       * `access` is guarded with the other two even though it needs no teardown to
+       * apply. It is read once, in `start`, to choose the bind host, and nothing
+       * rebinds the socket afterwards — so accepting it mid-capture would leave the
+       * panel showing "Anything on this network" beside a listener still bound to
+       * `127.0.0.1`, and a person whose phone cannot reach it with no statement on
+       * screen that the change waits for a restart. Refusing says the same thing
+       * the other two say: stop, change it, start again.
+       */
+      const movesAccess = config.access !== undefined && config.access !== entry.config?.access
+      const service = entry.service
+      const recording = service?.isRecording() ?? false
+      if (recording && (movesOrigin || movesPort || movesAccess)) {
+        return this.publish(entry, { failure: 'capturing' })
+      }
+      const next: ProjectTrafficConfig = {
+        origin: config.origin === undefined ? (entry.config?.origin ?? null) : config.origin,
+        port: config.port === undefined ? (entry.config?.port ?? null) : config.port,
+        access: config.access ?? entry.config?.access ?? DEFAULT_ACCESS,
+        envVar: config.envVar === undefined ? (entry.config?.envVar ?? null) : config.envVar,
+      }
+      this.deps.remember(projectId, next)
+      entry.config = next
+      if (service === null) {
+        if (this.forwards(projectId, next) && this.wants(projectId)) {
+          return this.listen(entry, next, next.origin, false)
+        }
+        return this.publish(entry, { failure: null })
+      }
+      if (recording) return this.publish(entry, { failure: null })
+      if (!this.forwards(projectId, next) || movesPort || movesAccess) {
+        await this.shut(entry, service)
+        if (this.gone(entry)) return entry.state
+        if (this.forwards(projectId, next)) return this.listen(entry, next, next.origin, false)
+        return this.publish(entry, { ...RELINQUISHED, failure: null })
+      }
+      if (movesOrigin) service.setOrigin(next.origin)
+      return this.publish(entry, { failure: null })
+    })
+  }
+
+  prepare(projectId: string): Promise<ProjectTrafficState> {
+    const entry = this.entry(projectId)
+    return this.serialize(entry, async () => {
+      if (this.gone(entry) || entry.service !== null) return entry.state
+      const config = this.deps.config(projectId) ?? entry.config
+      entry.config = config
+      if (!this.forwards(projectId, config)) return entry.state
+      return this.listen(entry, config, config.origin, false)
+    })
   }
 
   start(projectId: string): Promise<ProjectTrafficState> {
     const entry = this.entry(projectId)
     return this.serialize(entry, async () => {
-      if (entry.service !== null) return entry.state
+      if (this.gone(entry)) return entry.state
+      const ready = entry.service
+      if (ready !== null) {
+        if (ready.isRecording()) return entry.state
+        ready.reset(true)
+        this.renew(entry)
+        return this.publish(entry, { capturing: true, failure: null })
+      }
 
       const config = this.deps.config(projectId) ?? entry.config
       entry.config = config
       if (config === null) return this.publish(entry, { failure: 'unknown-project' })
       if (config.origin === null) return this.publish(entry, { failure: 'no-origin' })
-
-      // The host is the access choice, not a probe: binding the real listener
-      // where it will actually serve is the only availability test the plan
-      // allows, and `0.0.0.0` is never offered to a person as an address.
-      const host = config.access === 'lan' ? EVERY_INTERFACE : LOOPBACK
-      const wanted = config.port ?? this.deps.nextPort(projectId)
-
-      const service = new TrafficService({
-        origin: config.origin,
-        capture: this.capture,
-        budget: this.budgetFor(projectId),
-      })
-      let bound: number
-      try {
-        bound = await service.listen(wanted, host)
-      } catch (error) {
-        await service.close()
-        return this.publish(entry, { failure: isAddressInUse(error) ? 'in-use' : 'failed' })
-      }
-
-      if (config.port === null) {
-        try {
-          this.deps.remember(projectId, { ...config, port: bound })
-          entry.config = { ...config, port: bound }
-        } catch {
-          await service.close()
-          return this.publish(entry, { failure: 'failed' })
-        }
-      }
-
-      entry.service = service
-      entry.journal = []
-      entry.seq = 0
-      entry.unsubscribe = service.subscribe((push) => {
-        this.append(entry, push.rows)
-      })
-      service.attach()
-
-      return this.publish(entry, {
-        capturing: true,
-        port: bound,
-        address: this.addressFor(bound, config.access),
-        failure: null,
-      })
+      return this.listen(entry, config, config.origin, true)
     })
   }
 
   stop(projectId: string): Promise<ProjectTrafficState> {
     const entry = this.entry(projectId)
     return this.serialize(entry, async () => {
+      if (this.gone(entry)) return entry.state
+      const forwarding = entry.service
+      if (forwarding !== null && this.forwards(projectId, entry.config)) {
+        forwarding.reset(false)
+        this.dischargeProject(projectId)
+        return this.publish(entry, { capturing: false, failure: null })
+      }
       const service = entry.service
       entry.service = null
       entry.unsubscribe?.()
       entry.unsubscribe = null
       if (service !== null) await service.close()
+      if (this.gone(entry)) return entry.state
       /*
        * The retained bytes go back, and they have to be given back here rather
        * than left to the service.
@@ -292,7 +311,8 @@ export class ProjectTrafficRegistry {
     const entry = this.entry(projectId)
     // Forwarding keeps going; only what was retained is released. The service
     // survives the clear, so its socket and its tunnels are untouched.
-    entry.service?.clearCaptures()
+    const service = entry.service
+    service?.reset(service.isRecording())
     entry.journal = []
     entry.seq = 0
     entry.captureId = randomUUID()
@@ -442,7 +462,7 @@ export class ProjectTrafficRegistry {
     const service = entry?.service ?? null
     if (service === null) return
     const chosen = entry?.state.source
-    if (chosen?.kind !== 'terminal' || chosen.ref.id !== ref.id) return
+    if (chosen?.kind !== 'terminal' || terminalRefKey(chosen.ref) !== terminalRefKey(ref)) return
     service.logLine(ref, line, exit)
   }
 
@@ -451,7 +471,7 @@ export class ProjectTrafficRegistry {
     for (const entry of this.entries.values()) {
       const chosen = entry.state.source
       if (chosen.kind !== 'terminal') continue
-      if (chosen.ref.id !== ref.id || chosen.ref.scope !== ref.scope) continue
+      if (terminalRefKey(chosen.ref) !== terminalRefKey(ref)) continue
       this.logLine(entry.projectId, ref, line, exit)
       return
     }
@@ -473,13 +493,14 @@ export class ProjectTrafficRegistry {
     const entry = this.entries.get(projectId)
     if (entry === undefined) return
     this.entries.delete(projectId)
-    this.dischargeProject(projectId)
-    if (this.logcatOwner === projectId) this.logcatOwner = null
     entry.unsubscribe?.()
     entry.unsubscribe = null
     const service = entry.service
     entry.service = null
-    if (service !== null) await service.close()
+    const closing = service?.close()
+    this.dischargeProject(projectId)
+    if (this.logcatOwner === projectId) this.logcatOwner = null
+    await closing
   }
 
   async shutdown(): Promise<void> {
@@ -622,6 +643,102 @@ export class ProjectTrafficRegistry {
     const next = entry.queue.then(run, run)
     entry.queue = next.catch(() => undefined)
     return next
+  }
+
+  private async listen(
+    entry: Entry,
+    config: ProjectTrafficConfig,
+    origin: string,
+    recording: boolean
+  ): Promise<ProjectTrafficState> {
+    const projectId = entry.projectId
+    // The host is the access choice, not a probe: binding the real listener
+    // where it will actually serve is the only availability test the plan
+    // allows, and `0.0.0.0` is never offered to a person as an address.
+    const host = config.access === 'lan' ? EVERY_INTERFACE : LOOPBACK
+
+    const service = new TrafficService({
+      origin,
+      capture: this.capture,
+      budget: this.budgetFor(projectId),
+      recording,
+    })
+    let bound: number
+    try {
+      const wanted = config.port ?? this.deps.nextPort(projectId)
+      bound = await service.listen(wanted, host)
+    } catch (error) {
+      await service.close()
+      if (this.gone(entry)) return entry.state
+      return this.publish(entry, {
+        ...RELINQUISHED,
+        failure: isAddressInUse(error) ? 'in-use' : 'failed',
+      })
+    }
+    if (this.gone(entry)) {
+      await service.close()
+      return entry.state
+    }
+
+    if (config.port === null) {
+      try {
+        this.deps.remember(projectId, { ...config, port: bound })
+        entry.config = { ...config, port: bound }
+      } catch {
+        await service.close()
+        if (this.gone(entry)) return entry.state
+        return this.publish(entry, { ...RELINQUISHED, failure: 'failed' })
+      }
+    }
+
+    entry.service = service
+    entry.unsubscribe = service.subscribe((push) => {
+      this.append(entry, push.rows)
+    })
+    service.attach()
+    if (recording) this.renew(entry)
+
+    return this.publish(entry, {
+      capturing: recording,
+      port: bound,
+      address: this.addressFor(bound, config.access),
+      failure: null,
+    })
+  }
+
+  private renew(entry: Entry): void {
+    entry.journal = []
+    entry.seq = 0
+    entry.captureId = randomUUID()
+    this.emit({
+      kind: 'reset',
+      projectId: entry.projectId,
+      captureId: entry.captureId,
+      seq: 0,
+      reason: 'restarted',
+    })
+  }
+
+  private async shut(entry: Entry, service: TrafficService): Promise<void> {
+    entry.service = null
+    entry.unsubscribe?.()
+    entry.unsubscribe = null
+    entry.state = { ...entry.state, ...RELINQUISHED }
+    const closing = service.close()
+    this.dischargeProject(entry.projectId)
+    await closing
+  }
+
+  private wants(projectId: string): boolean {
+    return this.deps.wantsReady?.(projectId) ?? false
+  }
+
+  private forwards(projectId: string, config: ProjectTrafficConfig | null): config is ReadyConfig {
+    return (this.deps.localProject?.(projectId) ?? false) && readies(config)
+  }
+
+  private gone(entry: Entry): boolean {
+    return this.entries.get(entry.projectId) !== entry
   }
 
   /**

@@ -26,6 +26,8 @@ export function money(usd: number): string {
   return `$${Math.round(usd).toLocaleString()}`
 }
 
+const clockFormats = new Map<string | undefined, Intl.DateTimeFormat>()
+
 /**
  * The clock time a message carries, in the reader's own conventions.
  *
@@ -37,9 +39,17 @@ export function money(usd: number): string {
  * locale is asserting against whatever CI happens to be set to.
  */
 export function clockTime(at: number, locale?: string): string {
-  return new Intl.DateTimeFormat(locale, { hour: 'numeric', minute: '2-digit' }).format(
-    new Date(at)
-  )
+  let format = clockFormats.get(locale)
+  if (format === undefined) {
+    format = new Intl.DateTimeFormat(locale, { hour: 'numeric', minute: '2-digit' })
+    if (clockFormats.size === 0) {
+      queueMicrotask(() => {
+        clockFormats.clear()
+      })
+    }
+    clockFormats.set(locale, format)
+  }
+  return format.format(new Date(at))
 }
 
 /**

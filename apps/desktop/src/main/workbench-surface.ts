@@ -49,7 +49,19 @@ import {
   WORKBENCH_URL_CHANNEL,
   WORKBENCH_USER_SETTINGS_READ_CHANNEL,
   WORKBENCH_USER_SETTINGS_WRITE_CHANNEL,
+  WORKBENCH_LAYOUT_CHANNEL,
+  WORKBENCH_ACTIVITY_BAR_REPORT_CHANNEL,
+  WORKBENCH_ACTIVITY_BAR_PUSH_CHANNEL,
+  WORKBENCH_ROW_REQUEST_CHANNEL,
+  WORKBENCH_ROW_REVEAL_PUSH_CHANNEL,
+  WORKBENCH_ROW_SCROLL_REQUEST_CHANNEL,
+  WORKBENCH_ROW_SCROLL_PUSH_CHANNEL,
+  WorkbenchActivityBarWidth,
+  WorkbenchRowScrollDelta,
   remotePath,
+  type WorkbenchActivityBarPush,
+  type WorkbenchRowRevealPush,
+  type WorkbenchRowScrollPush,
   type WorkbenchConnection,
   type WorkbenchEditRequest,
   type WorkbenchAskDiffRequest,
@@ -158,6 +170,8 @@ interface Surface {
    */
   owner: WebContents
   state: 'active' | 'handing-off'
+  layoutWidth: number | null
+  activityBarWidth: number
 }
 
 const HANDOFF_EXPIRY_MS = 10_000
@@ -462,9 +476,6 @@ async function mintProjectGrant(
  */
 const editorHidden = new Set<string>()
 const overlayHidden = new Set<WebContents>()
-const coveredHidden = new Set<string>()
-const coverWanted = new Set<string>()
-const lastStills = new Map<string, string>()
 
 /**
  * An overlay hide expires unless the shell keeps saying it is still up.
@@ -521,9 +532,7 @@ function clearOverlayExpiry(caller: WebContents): void {
 
 function applyVisibility(surface: Surface): void {
   surface.view.setVisible(
-    !editorHidden.has(surface.projectRoot) &&
-      !overlayHidden.has(surface.owner) &&
-      !coveredHidden.has(surface.id)
+    !editorHidden.has(surface.projectRoot) && !overlayHidden.has(surface.owner)
   )
 }
 
@@ -639,13 +648,7 @@ async function setSurfacesVisible(
   if (only === undefined) {
     for (const id of ids) {
       const surface = byId.get(id)
-      if (
-        surface === undefined ||
-        editorHidden.has(surface.projectRoot) ||
-        coveredHidden.has(surface.id)
-      ) {
-        continue
-      }
+      if (surface === undefined || editorHidden.has(surface.projectRoot)) continue
       try {
         const image = await surface.view.webContents.capturePage()
         if (!image.isEmpty()) {
@@ -659,8 +662,6 @@ async function setSurfacesVisible(
       }
     }
   }
-  for (const shot of stills) lastStills.set(shot.viewId, shot.dataUrl)
-
   /*
    * Marked and applied after the await. Captures take tens of milliseconds and a
    * pane can close inside that, so `owned` may name a surface that is gone —
@@ -673,31 +674,6 @@ async function setSurfacesVisible(
     if (surface !== undefined) applyVisibility(surface)
   }
   return stills
-}
-
-export async function setSurfaceCovered(
-  caller: WebContents,
-  viewId: string,
-  covered: boolean
-): Promise<string | null> {
-  const surface = ownedSurface(caller, viewId)
-  if (!covered) {
-    coverWanted.delete(viewId)
-    coveredHidden.delete(viewId)
-    applyVisibility(surface)
-    return null
-  }
-  coverWanted.add(viewId)
-  if (surface.view.getVisible()) {
-    const image = await surface.view.webContents.capturePage().catch(() => null)
-    if (image !== null && !image.isEmpty()) {
-      lastStills.set(viewId, `data:image/jpeg;base64,${image.toJPEG(85).toString('base64')}`)
-    }
-  }
-  if (!coverWanted.has(viewId) || byId.get(viewId) !== surface) return null
-  coveredHidden.add(viewId)
-  applyVisibility(surface)
-  return lastStills.get(viewId) ?? null
 }
 
 /**
@@ -1055,6 +1031,8 @@ export async function openSurface(
     view,
     owner,
     state: 'active',
+    layoutWidth: null,
+    activityBarWidth: 0,
   }
   byId.set(id, surface)
   byContents.set(view.webContents, surface)
@@ -1096,6 +1074,9 @@ export async function openSurface(
    */
   view.webContents.on('did-finish-load', () => {
     view.webContents.send(WORKBENCH_CONNECTION_CHANNEL, describe(surface))
+    if (surface.layoutWidth !== null) {
+      view.webContents.send(WORKBENCH_LAYOUT_CHANNEL, surface.layoutWidth)
+    }
   })
 
   if (entry.file !== null) void view.webContents.loadFile(entry.file)
@@ -1217,9 +1198,6 @@ function destroySurface(viewId: string): void {
   byContents.delete(surface.view.webContents)
   byOwner.get(surface.owner)?.delete(viewId)
   stopWatchingFocus(viewId)
-  coveredHidden.delete(viewId)
-  coverWanted.delete(viewId)
-  lastStills.delete(viewId)
   /*
    * Only when this was the project's *last* surface. Two panes on one project
    * share a root, and telling the shell the editor is gone while another is
@@ -1284,7 +1262,12 @@ export function closeSurface(caller: WebContents, viewId: string): void {
   destroySurface(viewId)
 }
 
-export function setSurfaceBounds(caller: WebContents, viewId: string, rect: WorkbenchRect): void {
+export function setSurfaceBounds(
+  caller: WebContents,
+  viewId: string,
+  rect: WorkbenchRect,
+  layoutWidth?: number
+): void {
   /*
    * The renderer measures its placeholder in the shell's own CSS pixels, and a
    * zoomed shell's CSS pixel is not a device pixel. `setBounds` is in device
@@ -1292,12 +1275,35 @@ export function setSurfaceBounds(caller: WebContents, viewId: string, rect: Work
    * asked of every caller.
    */
   const scale = currentScale()
-  ownedSurface(caller, viewId).view.setBounds({
+  const surface = ownedSurface(caller, viewId)
+  surface.view.setBounds({
     x: Math.round(rect.x * scale),
     y: Math.round(rect.y * scale),
     width: Math.round(rect.width * scale),
     height: Math.round(rect.height * scale),
   })
+  if (layoutWidth === undefined || layoutWidth === surface.layoutWidth) return
+  surface.layoutWidth = layoutWidth
+  if (!surface.view.webContents.isDestroyed()) {
+    surface.view.webContents.send(WORKBENCH_LAYOUT_CHANNEL, layoutWidth)
+  }
+}
+
+function pushToOwner(
+  surface: Surface,
+  channel: string,
+  payload: WorkbenchActivityBarPush | WorkbenchRowRevealPush | WorkbenchRowScrollPush
+): void {
+  if (surface.state !== 'active' || surface.owner.isDestroyed()) return
+  surface.owner.send(channel, payload)
+}
+
+function revealRow(surface: Surface): void {
+  pushToOwner(surface, WORKBENCH_ROW_REVEAL_PUSH_CHANNEL, { viewId: surface.id })
+}
+
+function surfaceActivityBar(caller: WebContents, viewId: string): number {
+  return ownedSurface(caller, viewId).activityBarWidth
 }
 
 /** Every open surface, for shutdown. */
@@ -1333,16 +1339,38 @@ export function setDetachedAccessPredicate(
   detachedAccess = predicate
 }
 
-let terminalEnvSource: ((place: WorkbenchPlace) => WorkbenchTerminalEnv | null) | null = null
+export interface WorkbenchTerminalEnvSource {
+  readonly current: (place: WorkbenchPlace) => WorkbenchTerminalEnv | null
+  readonly ensure: (place: WorkbenchPlace) => Promise<WorkbenchTerminalEnv | null>
+}
 
-export function setWorkbenchTerminalEnvSource(
-  source: ((place: WorkbenchPlace) => WorkbenchTerminalEnv | null) | null
-): void {
+let terminalEnvSource: WorkbenchTerminalEnvSource | null = null
+
+export function setWorkbenchTerminalEnvSource(source: WorkbenchTerminalEnvSource | null): void {
   terminalEnvSource = source
 }
 
 function terminalEnvForSurface(surface: Surface): WorkbenchTerminalEnv | null {
-  return terminalEnvSource?.({ host: surface.host, root: surface.projectRoot }) ?? null
+  return terminalEnvSource?.current({ host: surface.host, root: surface.projectRoot }) ?? null
+}
+
+async function ensuredTerminalEnvForSurface(
+  surface: Surface
+): Promise<WorkbenchTerminalEnv | null> {
+  const source = terminalEnvSource
+  if (source === null) return null
+  try {
+    return await source.ensure({ host: surface.host, root: surface.projectRoot })
+  } catch {
+    return null
+  }
+}
+
+export function hasWorkbenchSurface(place: WorkbenchPlace): boolean {
+  for (const surface of byId.values()) {
+    if (surface.host === place.host && surface.projectRoot === place.root) return true
+  }
+  return false
 }
 
 export function refreshWorkbenchTerminalEnv(): void {
@@ -1409,16 +1437,17 @@ export function registerWorkbenchHandlers(
             return { viewId: await openSurface(event.sender, target, devServerUrl) }
           }
           case 'workbench:setBounds': {
-            const { viewId, rect } = parsedRequest.data as { viewId: string; rect: WorkbenchRect }
-            setSurfaceBounds(event.sender, viewId, rect)
+            const { viewId, rect, layoutWidth } = parsedRequest.data as {
+              viewId: string
+              rect: WorkbenchRect
+              layoutWidth?: number
+            }
+            setSurfaceBounds(event.sender, viewId, rect, layoutWidth)
             return { ok: true }
           }
-          case 'workbench:setCovered': {
-            const { viewId, covered } = parsedRequest.data as {
-              viewId: string
-              covered: boolean
-            }
-            return { still: await setSurfaceCovered(event.sender, viewId, covered) }
+          case 'workbench:activityBar': {
+            const { viewId } = parsedRequest.data as { viewId: string }
+            return { width: surfaceActivityBar(event.sender, viewId) }
           }
           case 'workbench:close': {
             const { viewId } = parsedRequest.data as { viewId: string }
@@ -1475,7 +1504,7 @@ export function registerWorkbenchHandlers(
   ipcMain.handle(WORKBENCH_TERMINAL_ENV_CHANNEL, (event) => {
     const surface = byContents.get(event.sender)
     if (surface === undefined || !fromMainFrame(event)) throw new Error('unknown workbench surface')
-    return terminalEnvForSurface(surface)
+    return ensuredTerminalEnvForSurface(surface)
   })
 
   /*
@@ -1735,6 +1764,35 @@ export function registerWorkbenchHandlers(
     onContext?.({ host: surface.host, projectRoot: surface.projectRoot, context: parsed.data })
   })
 
+  ipcMain.on(WORKBENCH_ACTIVITY_BAR_REPORT_CHANNEL, (event, raw: unknown) => {
+    const surface = byContents.get(event.sender)
+    if (surface === undefined) return
+    const parsed = WorkbenchActivityBarWidth.safeParse(raw)
+    if (!parsed.success || parsed.data === surface.activityBarWidth) return
+    surface.activityBarWidth = parsed.data
+    pushToOwner(surface, WORKBENCH_ACTIVITY_BAR_PUSH_CHANNEL, {
+      viewId: surface.id,
+      width: parsed.data,
+    })
+  })
+
+  ipcMain.on(WORKBENCH_ROW_REQUEST_CHANNEL, (event) => {
+    const surface = byContents.get(event.sender)
+    if (surface === undefined) return
+    revealRow(surface)
+  })
+
+  ipcMain.on(WORKBENCH_ROW_SCROLL_REQUEST_CHANNEL, (event, raw: unknown) => {
+    const surface = byContents.get(event.sender)
+    if (surface === undefined) return
+    const parsed = WorkbenchRowScrollDelta.safeParse(raw)
+    if (!parsed.success || parsed.data === 0) return
+    pushToOwner(surface, WORKBENCH_ROW_SCROLL_PUSH_CHANNEL, {
+      viewId: surface.id,
+      delta: parsed.data,
+    })
+  })
+
   /*
    * The other half of `requestWorkbenchEdit` — Phase 6d.
    *
@@ -1866,6 +1924,7 @@ export async function requestWorkbenchAskDiff(
       settle({ requestId, ok: false, message: 'The editor did not answer.' })
     }, EDIT_TIMEOUT_MS)
     pendingAskDiffs.set(requestId, settle)
+    if (request.close !== true) revealRow(surface)
     surface.view.webContents.send(WORKBENCH_ASK_DIFF_CHANNEL, { ...request, requestId })
   })
 }
@@ -1912,6 +1971,7 @@ export async function requestWorkbenchReveal(
       settle({ requestId, ok: false, message: 'The editor did not answer.' })
     }, 5_000)
     pendingReveals.set(requestId, settle)
+    revealRow(surface)
     surface.view.webContents.send(WORKBENCH_REVEAL_CHANNEL, { ...target, requestId })
   })
 }

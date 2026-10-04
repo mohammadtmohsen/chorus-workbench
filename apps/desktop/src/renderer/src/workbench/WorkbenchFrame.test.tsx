@@ -1,8 +1,15 @@
 /** @vitest-environment jsdom */
 import { act, cleanup, render } from '@testing-library/react'
 import { afterEach, beforeAll, describe, expect, it } from 'vitest'
-import type { WorkbenchRect, WorkbenchShellApi } from '../../../shared/workbench-ipc.js'
-import { WorkbenchFrame } from './WorkbenchFrame.js'
+import type {
+  WorkbenchActivityBarPush,
+  WorkbenchRect,
+  WorkbenchRowRevealPush,
+  WorkbenchRowScrollPush,
+  WorkbenchShellApi,
+  WorkbenchShellRequest,
+} from '../../../shared/workbench-ipc.js'
+import { WorkbenchFrame, type WorkbenchGeometry } from './WorkbenchFrame.js'
 
 /**
  * One rejection, two meanings, and the error cannot tell them apart.
@@ -128,7 +135,10 @@ interface Bridge {
   readonly closeWorkbench: WorkbenchShellApi['closeWorkbench']
   readonly setWorkbenchBounds: WorkbenchShellApi['setWorkbenchBounds']
   readonly setWorkbenchVisible: WorkbenchShellApi['setWorkbenchVisible']
-  readonly setWorkbenchCovered: WorkbenchShellApi['setWorkbenchCovered']
+  readonly readWorkbenchActivityBar?: WorkbenchShellApi['readWorkbenchActivityBar']
+  readonly onWorkbenchActivityBar?: WorkbenchShellApi['onWorkbenchActivityBar']
+  readonly onWorkbenchRowReveal?: WorkbenchShellApi['onWorkbenchRowReveal']
+  readonly onWorkbenchRowScroll?: WorkbenchShellApi['onWorkbenchRowScroll']
 }
 
 function install(bridge: Bridge): void {
@@ -220,7 +230,6 @@ describe('WorkbenchFrame bounds reporting', () => {
       // region does not go black. Nothing here reads them, and returning none
       // is the honest answer for a bridge that never hides anything.
       setWorkbenchVisible: () => Promise.resolve({ ok: true, stills: [] }),
-      setWorkbenchCovered: () => Promise.resolve({ still: null }),
     })
 
     render(
@@ -256,7 +265,6 @@ describe('WorkbenchFrame bounds reporting', () => {
       // region does not go black. Nothing here reads them, and returning none
       // is the honest answer for a bridge that never hides anything.
       setWorkbenchVisible: () => Promise.resolve({ ok: true, stills: [] }),
-      setWorkbenchCovered: () => Promise.resolve({ still: null }),
     })
 
     const { unmount } = render(
@@ -307,7 +315,6 @@ describe('WorkbenchFrame bounds tracking', () => {
       // region does not go black. Nothing here reads them, and returning none
       // is the honest answer for a bridge that never hides anything.
       setWorkbenchVisible: () => Promise.resolve({ ok: true, stills: [] }),
-      setWorkbenchCovered: () => Promise.resolve({ still: null }),
     }
   }
 
@@ -399,261 +406,286 @@ describe('WorkbenchFrame bounds tracking', () => {
   })
 })
 
-describe('WorkbenchFrame coverage', () => {
-  function deferred<T>(): { readonly promise: Promise<T>; readonly settle: (value: T) => void } {
-    let settle: (value: T) => void = () => {
-      throw new Error('the promise executor did not run')
-    }
-    const promise = new Promise<T>((resolve) => {
-      settle = resolve
-    })
-    return { promise, settle }
+type BoundsRequest = WorkbenchShellRequest<'workbench:setBounds'>
+
+function paneBridge(
+  read: () => Promise<{ width: number }> = () => Promise.resolve({ width: 0 })
+): {
+  readonly bridge: Bridge
+  readonly sent: BoundsRequest[]
+  readonly opened: string[]
+  readonly barListeners: Set<(push: WorkbenchActivityBarPush) => void>
+  readonly rowListeners: Set<(push: WorkbenchRowRevealPush) => void>
+  readonly scrollListeners: Set<(push: WorkbenchRowScrollPush) => void>
+} {
+  const sent: BoundsRequest[] = []
+  const opened: string[] = []
+  const barListeners = new Set<(push: WorkbenchActivityBarPush) => void>()
+  const rowListeners = new Set<(push: WorkbenchRowRevealPush) => void>()
+  const scrollListeners = new Set<(push: WorkbenchRowScrollPush) => void>()
+  const bridge: Bridge = {
+    openWorkbench: () => {
+      opened.push(VIEW)
+      return Promise.resolve({ viewId: VIEW })
+    },
+    closeWorkbench: () => Promise.resolve({ ok: true }),
+    setWorkbenchBounds: (request) => {
+      sent.push(request)
+      return Promise.resolve({ ok: true })
+    },
+    setWorkbenchVisible: () => Promise.resolve({ ok: true, stills: [] }),
+    readWorkbenchActivityBar: read,
+    onWorkbenchActivityBar: (listener) => {
+      barListeners.add(listener)
+      return () => {
+        barListeners.delete(listener)
+      }
+    },
+    onWorkbenchRowReveal: (listener) => {
+      rowListeners.add(listener)
+      return () => {
+        rowListeners.delete(listener)
+      }
+    },
+    onWorkbenchRowScroll: (listener) => {
+      scrollListeners.add(listener)
+      return () => {
+        scrollListeners.delete(listener)
+      }
+    },
   }
+  return { bridge, sent, opened, barListeners, rowListeners, scrollListeners }
+}
 
-  const STILL = 'data:image/jpeg;base64,covered'
-
-  it('asks main to cover the surface and paints the still it gets back', async () => {
-    const calls: { viewId: string; covered: boolean }[] = []
-    const target = { grant: freshGrant() }
-    const onFailed = (): void => undefined
-
-    install({
-      openWorkbench: () => Promise.resolve({ viewId: VIEW }),
-      closeWorkbench: () => Promise.resolve({ ok: true }),
-      setWorkbenchBounds: () => Promise.resolve({ ok: true }),
-      setWorkbenchVisible: () => Promise.resolve({ ok: true, stills: [] }),
-      setWorkbenchCovered: (request) => {
-        calls.push(request)
-        return Promise.resolve({ still: STILL })
+describe('WorkbenchFrame in a pane row', () => {
+  it('scrolls only its own visible row and removes its listener on hide or unmount', async () => {
+    const pane = paneBridge()
+    const deltas: number[] = []
+    const props = {
+      target: { grant: freshGrant() },
+      projectRoot: '/tmp/project',
+      onScrollRow: (delta: number): void => {
+        deltas.push(delta)
       },
-    })
-
-    const { container } = render(
-      <WorkbenchFrame target={target} projectRoot="/tmp/project" covered onFailed={onFailed} />
-    )
+      onFailed: (): void => undefined,
+    }
+    install(pane.bridge)
+    const { rerender, unmount } = render(<WorkbenchFrame {...props} />)
     await settle()
 
-    expect(calls).toEqual([{ viewId: VIEW, covered: true }])
-    const image = container.querySelector('.workbench-still')
-    expect(image?.getAttribute('src')).toBe(STILL)
-    expect(image?.getAttribute('data-cover')).toBe('true')
+    for (const listener of pane.scrollListeners) listener({ viewId: 'another-view', delta: 800 })
+    for (const listener of pane.scrollListeners) listener({ viewId: VIEW, delta: 120 })
+    for (const listener of pane.scrollListeners) listener({ viewId: VIEW, delta: -40 })
+    expect(deltas).toEqual([120, -40])
+
+    rerender(<WorkbenchFrame {...props} hidden />)
+    await settle()
+    expect(pane.scrollListeners.size).toBe(0)
+
+    rerender(<WorkbenchFrame {...props} />)
+    await settle()
+    expect(pane.scrollListeners.size).toBe(1)
+    unmount()
+    expect(pane.scrollListeners.size).toBe(0)
   })
 
-  it('keeps painting the still until the uncover resolves, then drops it', async () => {
-    const calls: { viewId: string; covered: boolean }[] = []
-    const uncover = deferred<{ still: string | null }>()
-    const target = { grant: freshGrant() }
-    const onFailed = (): void => undefined
+  const RECT: WorkbenchRect = { x: 12, y: 40, width: 600, height: 400 }
 
-    install({
-      openWorkbench: () => Promise.resolve({ viewId: VIEW }),
-      closeWorkbench: () => Promise.resolve({ ok: true }),
-      setWorkbenchBounds: () => Promise.resolve({ ok: true }),
-      setWorkbenchVisible: () => Promise.resolve({ ok: true, stills: [] }),
-      setWorkbenchCovered: (request) => {
-        calls.push(request)
-        return request.covered ? Promise.resolve({ still: STILL }) : uncover.promise
-      },
-    })
+  it('reports the geometry it is given, and only when the rectangle or layout width changes', async () => {
+    const pane = paneBridge()
+    let current: WorkbenchGeometry | null = { rect: RECT, layoutWidth: 900 }
+    install(pane.bridge)
 
-    const { container, rerender } = render(
-      <WorkbenchFrame target={target} projectRoot="/tmp/project" covered onFailed={onFailed} />
+    render(
+      <WorkbenchFrame
+        target={{ grant: freshGrant() }}
+        projectRoot="/tmp/project"
+        geometry={() => current}
+        onFailed={(): void => undefined}
+      />
     )
     await settle()
-    expect(container.querySelector('.workbench-still')?.getAttribute('data-cover')).toBe('true')
+    expect(pane.sent).toEqual([{ viewId: VIEW, rect: RECT, layoutWidth: 900 }])
+
+    current = { rect: RECT, layoutWidth: 1_100 }
+    drawFrame()
+    drawFrame()
+    current = { rect: { ...RECT, width: 300 }, layoutWidth: 1_100 }
+    drawFrame()
+
+    expect(pane.sent).toEqual([
+      { viewId: VIEW, rect: RECT, layoutWidth: 900 },
+      { viewId: VIEW, rect: RECT, layoutWidth: 1_100 },
+      { viewId: VIEW, rect: { ...RECT, width: 300 }, layoutWidth: 1_100 },
+    ])
+  })
+
+  it('waits for a geometry it cannot measure yet, and sends no layout width it does not have', async () => {
+    const pane = paneBridge()
+    let current: WorkbenchGeometry | null = null
+    install(pane.bridge)
+
+    render(
+      <WorkbenchFrame
+        target={{ grant: freshGrant() }}
+        projectRoot="/tmp/project"
+        geometry={() => current}
+        onFailed={(): void => undefined}
+      />
+    )
+    await settle()
+    expect(pane.sent).toEqual([])
+
+    current = { rect: RECT, layoutWidth: undefined }
+    drawFrame()
+
+    expect(pane.sent).toEqual([{ viewId: VIEW, rect: RECT }])
+    expect(pane.sent[0]).not.toHaveProperty('layoutWidth')
+  })
+
+  it('reads a replaced geometry on the next frame without opening the surface again', async () => {
+    const pane = paneBridge()
+    const target = { grant: freshGrant() }
+    install(pane.bridge)
+
+    const { rerender } = render(
+      <WorkbenchFrame
+        target={target}
+        projectRoot="/tmp/project"
+        geometry={() => ({ rect: RECT, layoutWidth: 900 })}
+        onFailed={(): void => undefined}
+      />
+    )
+    await settle()
 
     rerender(
       <WorkbenchFrame
         target={target}
         projectRoot="/tmp/project"
-        covered={false}
-        onFailed={onFailed}
+        geometry={() => ({ rect: { ...RECT, x: 40 }, layoutWidth: 900 })}
+        onFailed={(): void => undefined}
+      />
+    )
+    drawFrame()
+
+    expect(pane.opened).toEqual([VIEW])
+    expect(pane.sent.at(-1)).toEqual({ viewId: VIEW, rect: { ...RECT, x: 40 }, layoutWidth: 900 })
+  })
+
+  it('pins the overlay still to the rectangle the native view was last given', async () => {
+    const pane = paneBridge()
+    install(pane.bridge)
+
+    const { container } = render(
+      <WorkbenchFrame
+        target={{ grant: freshGrant() }}
+        projectRoot="/tmp/project"
+        geometry={() => ({ rect: RECT, layoutWidth: 900 })}
+        onFailed={(): void => undefined}
       />
     )
     await settle()
 
-    expect(calls).toEqual([
-      { viewId: VIEW, covered: true },
-      { viewId: VIEW, covered: false },
-    ])
-    expect(container.querySelector('.workbench-still')?.getAttribute('data-cover')).toBe('true')
+    const surface = surfaceOf(container) as HTMLElement
+    expect(surface.style.getPropertyValue('--native-x')).toBe('12px')
+    expect(surface.style.getPropertyValue('--native-y')).toBe('40px')
+    expect(surface.style.getPropertyValue('--native-width')).toBe('600px')
+    expect(surface.style.getPropertyValue('--native-height')).toBe('400px')
+  })
 
+  it('takes the cached activity bar width when no push has come first', async () => {
+    const pane = paneBridge(() => Promise.resolve({ width: 48 }))
+    const widths: number[] = []
+    install(pane.bridge)
+
+    render(
+      <WorkbenchFrame
+        target={{ grant: freshGrant() }}
+        projectRoot="/tmp/project"
+        onActivityBar={(width) => {
+          widths.push(width)
+        }}
+        onFailed={(): void => undefined}
+      />
+    )
+    await settle()
+
+    expect(widths).toEqual([48])
+  })
+
+  it('lets a push that arrives first win over a read that answers late', async () => {
+    let answer: (value: { width: number }) => void = () => {
+      throw new Error('the promise executor did not run')
+    }
+    const late = new Promise<{ width: number }>((resolve) => {
+      answer = resolve
+    })
+    const pane = paneBridge(() => late)
+    const widths: number[] = []
+    install(pane.bridge)
+
+    render(
+      <WorkbenchFrame
+        target={{ grant: freshGrant() }}
+        projectRoot="/tmp/project"
+        onActivityBar={(width) => {
+          widths.push(width)
+        }}
+        onFailed={(): void => undefined}
+      />
+    )
+    await settle()
+
+    for (const listener of pane.barListeners) listener({ viewId: 'another-view', width: 99 })
+    for (const listener of pane.barListeners) listener({ viewId: VIEW, width: 36 })
     await act(async () => {
-      uncover.settle({ still: null })
+      answer({ width: 48 })
       await Promise.resolve()
     })
     await settle()
 
-    expect(container.querySelector('.workbench-still')).toBeNull()
+    expect(widths).toEqual([36])
   })
 
-  it('says nothing about coverage while the frame is hidden', async () => {
-    const calls: { viewId: string; covered: boolean }[] = []
+  it('reveals its row only for its own surface, and stops listening when hidden or gone', async () => {
+    const pane = paneBridge()
+    const target = { grant: freshGrant() }
+    let revealed = 0
+    const onRevealRow = (): void => {
+      revealed += 1
+    }
+    install(pane.bridge)
 
-    install({
-      openWorkbench: () => Promise.resolve({ viewId: VIEW }),
-      closeWorkbench: () => Promise.resolve({ ok: true }),
-      setWorkbenchBounds: () => Promise.resolve({ ok: true }),
-      setWorkbenchVisible: () => Promise.resolve({ ok: true, stills: [] }),
-      setWorkbenchCovered: (request) => {
-        calls.push(request)
-        return Promise.resolve({ still: null })
-      },
-    })
-
-    render(
+    const { rerender, unmount } = render(
       <WorkbenchFrame
-        target={{ grant: freshGrant() }}
+        target={target}
+        projectRoot="/tmp/project"
+        onActivityBar={(): void => undefined}
+        onRevealRow={onRevealRow}
+        onFailed={(): void => undefined}
+      />
+    )
+    await settle()
+
+    for (const listener of pane.rowListeners) listener({ viewId: 'another-view' })
+    for (const listener of pane.rowListeners) listener({ viewId: VIEW })
+    expect(revealed).toBe(1)
+
+    rerender(
+      <WorkbenchFrame
+        target={target}
         projectRoot="/tmp/project"
         hidden
-        covered
+        onActivityBar={(): void => undefined}
+        onRevealRow={onRevealRow}
         onFailed={(): void => undefined}
       />
     )
     await settle()
+    expect(pane.rowListeners.size).toBe(0)
+    expect(pane.barListeners.size).toBe(1)
 
-    expect(calls).toEqual([])
-  })
-
-  it('reports the rectangle before it raises the editor back into view', async () => {
-    const log: string[] = []
-    const target = { grant: freshGrant() }
-    const onFailed = (): void => undefined
-
-    install({
-      openWorkbench: () => Promise.resolve({ viewId: VIEW }),
-      closeWorkbench: () => Promise.resolve({ ok: true }),
-      setWorkbenchBounds: () => {
-        log.push('bounds')
-        return Promise.resolve({ ok: true })
-      },
-      setWorkbenchVisible: () => Promise.resolve({ ok: true, stills: [] }),
-      setWorkbenchCovered: () => {
-        log.push('covered')
-        return Promise.resolve({ still: null })
-      },
-    })
-
-    const { rerender } = render(
-      <WorkbenchFrame target={target} projectRoot="/tmp/project" covered onFailed={onFailed} />
-    )
-    await settle()
-
-    const before = log.length
-    rerender(
-      <WorkbenchFrame
-        target={target}
-        projectRoot="/tmp/project"
-        covered={false}
-        onFailed={onFailed}
-      />
-    )
-    await settle()
-
-    expect(log.slice(before, before + 2)).toEqual(['bounds', 'covered'])
-  })
-
-  it('asks for the cover on a fresh mount without reporting a rectangle first', async () => {
-    const log: string[] = []
-
-    install({
-      openWorkbench: () => Promise.resolve({ viewId: VIEW }),
-      closeWorkbench: () => Promise.resolve({ ok: true }),
-      setWorkbenchBounds: () => {
-        log.push('bounds')
-        return Promise.resolve({ ok: true })
-      },
-      setWorkbenchVisible: () => Promise.resolve({ ok: true, stills: [] }),
-      setWorkbenchCovered: () => {
-        log.push('covered')
-        return Promise.resolve({ still: null })
-      },
-    })
-
-    render(
-      <WorkbenchFrame
-        target={{ grant: freshGrant() }}
-        projectRoot="/tmp/project"
-        covered
-        onFailed={(): void => undefined}
-      />
-    )
-    await settle()
-
-    expect(log[0]).toBe('covered')
-    expect(log).toContain('bounds')
-  })
-
-  it('keeps reporting the rectangle while the surface is covered', async () => {
-    const sent: WorkbenchRect[] = []
-
-    install({
-      openWorkbench: () => Promise.resolve({ viewId: VIEW }),
-      closeWorkbench: () => Promise.resolve({ ok: true }),
-      setWorkbenchBounds: ({ rect }) => {
-        sent.push(rect)
-        return Promise.resolve({ ok: true })
-      },
-      setWorkbenchVisible: () => Promise.resolve({ ok: true, stills: [] }),
-      setWorkbenchCovered: () => Promise.resolve({ still: null }),
-    })
-
-    const { container } = render(
-      <WorkbenchFrame
-        target={{ grant: freshGrant() }}
-        projectRoot="/tmp/project"
-        covered
-        onFailed={(): void => undefined}
-      />
-    )
-    const surface = surfaceOf(container)
-    let rect: WorkbenchRect = { x: 0, y: 0, width: 400, height: 600 }
-    measures(surface, () => rect)
-    await settle()
-
-    rect = { x: 0, y: 0, width: 100, height: 600 }
-    drawFrame()
-
-    expect(sent.at(-1)).toEqual(measured(surface))
-  })
-
-  it('shows the hint while covered with no picture, and drops it once there is one', async () => {
-    let answer: { still: string | null } = { still: null }
-    const target = { grant: freshGrant() }
-    const onFailed = (): void => undefined
-
-    install({
-      openWorkbench: () => Promise.resolve({ viewId: VIEW }),
-      closeWorkbench: () => Promise.resolve({ ok: true }),
-      setWorkbenchBounds: () => Promise.resolve({ ok: true }),
-      setWorkbenchVisible: () => Promise.resolve({ ok: true, stills: [] }),
-      setWorkbenchCovered: () => Promise.resolve(answer),
-    })
-
-    const { container, rerender } = render(
-      <WorkbenchFrame target={target} projectRoot="/tmp/project" covered onFailed={onFailed} />
-    )
-    await settle()
-    expect(container.querySelector('.workbench-covered-hint')).not.toBeNull()
-
-    rerender(
-      <WorkbenchFrame
-        target={target}
-        projectRoot="/tmp/project"
-        covered={false}
-        onFailed={onFailed}
-      />
-    )
-    await settle()
-    expect(container.querySelector('.workbench-covered-hint')).toBeNull()
-
-    answer = { still: STILL }
-    rerender(
-      <WorkbenchFrame target={target} projectRoot="/tmp/project" covered onFailed={onFailed} />
-    )
-    await settle()
-
-    expect(container.querySelector('.workbench-covered-hint')).toBeNull()
-    expect(container.querySelector('.workbench-still')?.getAttribute('data-cover')).toBe('true')
+    unmount()
+    expect(pane.barListeners.size).toBe(0)
   })
 })

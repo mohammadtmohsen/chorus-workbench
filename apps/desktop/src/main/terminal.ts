@@ -1,5 +1,5 @@
 import { SerializeAddon } from '@xterm/addon-serialize'
-import { Terminal } from '@xterm/headless'
+import { Terminal, type IBufferLine } from '@xterm/headless'
 import { basename } from 'node:path'
 import type * as NodePty from 'node-pty'
 import { resolveShell, type ShellChoice } from './shell.js'
@@ -43,11 +43,28 @@ import { resolveShell, type ShellChoice } from './shell.js'
 export type TerminalRef =
   | { readonly scope: 'global'; readonly id: string }
   | { readonly scope: 'session'; readonly conversationId: string; readonly id: string }
+  | { readonly scope: 'project'; readonly projectId: string; readonly id: 'run' }
+  | { readonly scope: 'shell'; readonly projectId: string; readonly id: string }
+
+export type ProjectTerminalRef = Extract<TerminalRef, { readonly scope: 'project' }>
+
+export interface LaunchSpec {
+  readonly cwd: string
+  readonly env: NodeJS.ProcessEnv
+  readonly file: string
+  readonly args: readonly string[]
+  readonly generation: number
+}
+
+export type LaunchResult =
+  | { readonly kind: 'launched'; readonly pid: number }
+  | { readonly kind: 'refused'; readonly reason: 'live-run' }
 
 /** What a caller gets back for mounting a view. */
 export interface TerminalAttachment {
   /** Supersedes any previous attachment. Everything after this carries it. */
   readonly epoch: number
+  readonly generation: number
   /** The screen, as escape sequences — not a suffix of raw output. */
   readonly snapshot: string
   /** The last sequence number the snapshot includes. */
@@ -136,6 +153,7 @@ export type TerminalPush =
       readonly kind: 'data'
       readonly ref: TerminalRef
       readonly epoch: number
+      readonly generation: number
       readonly seq: number
       readonly data: string
     }
@@ -143,7 +161,13 @@ export type TerminalPush =
       readonly kind: 'exit'
       readonly ref: TerminalRef
       readonly epoch: number
+      readonly generation: number
       readonly code: number
+    }
+  | {
+      readonly kind: 'replaced'
+      readonly ref: TerminalRef
+      readonly generation: number
     }
 
 /**
@@ -180,11 +204,12 @@ export type TerminalEvent =
   | { readonly kind: 'data'; readonly data: string }
   | { readonly kind: 'exit'; readonly code: number }
 
-export type TerminalTap = (ref: TerminalRef, event: TerminalEvent) => void
+export type TerminalTap = (ref: TerminalRef, event: TerminalEvent, generation: number) => void
 
 export interface TerminalServiceOptions {
   /** Where a terminal for this ref should open. */
-  readonly cwdFor: (ref: TerminalRef) => string
+  readonly cwdFor: (ref: TerminalRef) => string | null
+  readonly envFor?: (ref: TerminalRef) => NodeJS.ProcessEnv
   readonly spawn?: PtySpawner
   readonly env?: NodeJS.ProcessEnv
   readonly scrollback?: number
@@ -248,6 +273,7 @@ interface Session {
   readonly mirror: Terminal
   readonly serializer: SerializeAddon
   readonly shellName: string
+  readonly generation: number
   epoch: number
   attached: boolean
   seq: number
@@ -266,6 +292,13 @@ interface Session {
   exitCode: number | null
   cols: number
   rows: number
+}
+
+function usedColumns(line: IBufferLine, next: IBufferLine): number {
+  const end = line.length - 1
+  const tail = line.getCell(end)
+  const padded = tail?.getCode() === 0 && tail.getWidth() === 1 && next.getCell(0)?.getWidth() === 2
+  return padded ? end : line.length
 }
 
 export class TerminalService {
@@ -287,10 +320,16 @@ export class TerminalService {
    */
   private readonly globals = new Map<string, Session>()
   private readonly bySession = new Map<string, Map<string, Session>>()
+  private readonly byProject = new Map<string, Session>()
+  private readonly byShell = new Map<string, Map<string, Session>>()
+  private readonly shellsRemoved = new Set<string>()
+  private shellsClosed = false
+  private epochs = 0
   private readonly listeners = new Set<(push: TerminalPush) => void>()
   private readonly taps = new Set<TerminalTap>()
 
-  private readonly cwdFor: (ref: TerminalRef) => string
+  private readonly cwdFor: (ref: TerminalRef) => string | null
+  private readonly envFor: ((ref: TerminalRef) => NodeJS.ProcessEnv) | undefined
   private readonly spawner: PtySpawner
   private readonly env: NodeJS.ProcessEnv
   private readonly scrollback: number
@@ -300,6 +339,7 @@ export class TerminalService {
 
   constructor(options: TerminalServiceOptions) {
     this.cwdFor = options.cwdFor
+    this.envFor = options.envFor
     this.platform = options.platform ?? process.platform
     this.shell = options.shell
     this.spawner = options.spawn ?? nodePty
@@ -333,9 +373,13 @@ export class TerminalService {
   async attach(
     ref: TerminalRef,
     size?: { cols: number; rows: number }
-  ): Promise<TerminalAttachment> {
-    const session = this.find(ref) ?? this.open(ref, size)
-    if (size !== undefined) this.applySize(session, size.cols, size.rows)
+  ): Promise<TerminalAttachment | null> {
+    const found = this.find(ref)
+    if (found === null && ref.scope === 'project') return null
+    if (found === null && ref.scope === 'shell' && !this.shellOpens(ref.projectId)) return null
+    const session = found ?? this.open(ref, size)
+    if (session === null) return null
+    if (size !== undefined && !session.exited) this.applySize(session, size.cols, size.rows)
 
     /*
      * Wait for the mirror before serializing, or the snapshot is behind `seq`.
@@ -351,6 +395,7 @@ export class TerminalService {
      * atomic without pausing the shell.
      */
     await this.settled(session)
+    if (this.find(ref) !== session) return null
 
     /*
      * Anything queued for the previous view is already in the mirror, so it is
@@ -362,11 +407,13 @@ export class TerminalService {
       session.flush = null
     }
 
-    session.epoch += 1
+    this.epochs += 1
+    session.epoch = this.epochs
     session.attached = true
     session.ackedSeq = session.seq
     return {
       epoch: session.epoch,
+      generation: session.generation,
       snapshot: session.serializer.serialize(),
       seq: session.seq,
       cols: session.cols,
@@ -462,9 +509,62 @@ export class TerminalService {
   dispose(ref: TerminalRef): void {
     const session = this.find(ref)
     if (session === null) return
-    this.forget(ref)
-    session.mirror.dispose()
+    if (ref.scope === 'shell') {
+      if (!session.exited) session.pty.kill()
+      this.retire(session)
+      return
+    }
+    this.retire(session)
     if (!session.exited) session.pty.kill()
+  }
+
+  launch(ref: ProjectTerminalRef, spec: LaunchSpec): LaunchResult {
+    const previous = this.find(ref)
+    if (previous !== null && !previous.exited) return { kind: 'refused', reason: 'live-run' }
+    if (previous !== null) this.retire(previous)
+    const session = this.spawnSession(
+      ref,
+      { file: spec.file, args: spec.args, cwd: spec.cwd, env: spec.env },
+      { cols: previous?.cols ?? DEFAULT_COLS, rows: previous?.rows ?? DEFAULT_ROWS },
+      spec.generation
+    )
+    this.emit({ kind: 'replaced', ref, generation: spec.generation })
+    return { kind: 'launched', pid: session.pty.pid }
+  }
+
+  interrupt(ref: ProjectTerminalRef, generation: number): boolean {
+    const session = this.find(ref)
+    if (session === null || session.generation !== generation || session.exited) return false
+    session.pty.write('\x03')
+    return true
+  }
+
+  readText(ref: ProjectTerminalRef, maxLines: number, maxBytes: number): string | null {
+    const session = this.find(ref)
+    if (session === null) return null
+    const buffer = session.mirror.buffer.active
+    const lines: string[] = []
+    for (let row = 0; row < buffer.length; row += 1) {
+      const line = buffer.getLine(row)
+      if (line === undefined) continue
+      const next = buffer.getLine(row + 1)
+      const text =
+        next?.isWrapped === true
+          ? line.translateToString(false, 0, usedColumns(line, next))
+          : line.translateToString(true)
+      const last = lines.length - 1
+      if (line.isWrapped && last >= 0) lines[last] = `${lines[last] ?? ''}${text}`
+      else lines.push(text)
+    }
+    while (lines.length > 0 && lines[lines.length - 1] === '') lines.pop()
+    const count = Math.max(0, Math.floor(maxLines))
+    const kept = lines.slice(Math.max(0, lines.length - count)).join('\n')
+    const bytes = Buffer.from(kept, 'utf8')
+    const limit = Math.max(0, Math.floor(maxBytes))
+    if (bytes.length <= limit) return kept
+    let start = bytes.length - limit
+    while (start < bytes.length && ((bytes[start] ?? 0) & 0xc0) === 0x80) start += 1
+    return bytes.subarray(start).toString('utf8')
   }
 
   /**
@@ -504,24 +604,92 @@ export class TerminalService {
     }
   }
 
+  refuseShells(projectId: string): void {
+    this.shellsRemoved.add(projectId)
+  }
+
+  disposeShells(projectId: string): void {
+    this.refuseShells(projectId)
+    this.killShells([projectId])
+  }
+
   /** Quit. Everything, including the global ones. */
   close(): void {
+    this.shellsClosed = true
     for (const conversationId of [...this.bySession.keys()]) {
       this.disposeSession(conversationId)
     }
     for (const id of [...this.globals.keys()]) {
       this.dispose({ scope: 'global', id })
     }
+    for (const projectId of [...this.byProject.keys()]) {
+      this.dispose({ scope: 'project', projectId, id: 'run' })
+    }
+    this.killShells([...this.byShell.keys()])
+  }
+
+  private shellOpens(projectId: string): boolean {
+    return !this.shellsClosed && !this.shellsRemoved.has(projectId)
+  }
+
+  private killShells(projectIds: readonly string[]): void {
+    const failures: unknown[] = []
+    for (const projectId of projectIds) {
+      for (const id of [...(this.byShell.get(projectId)?.keys() ?? [])]) {
+        try {
+          this.dispose({ scope: 'shell', projectId, id })
+        } catch (error) {
+          failures.push(error)
+        }
+      }
+    }
+    if (failures.length > 0) throw failures[0]
   }
 
   private find(ref: TerminalRef): Session | null {
-    if (ref.scope === 'global') return this.globals.get(ref.id) ?? null
-    return this.bySession.get(ref.conversationId)?.get(ref.id) ?? null
+    switch (ref.scope) {
+      case 'global':
+        return this.globals.get(ref.id) ?? null
+      case 'session':
+        return this.bySession.get(ref.conversationId)?.get(ref.id) ?? null
+      case 'project':
+        return this.byProject.get(ref.projectId) ?? null
+      case 'shell':
+        return this.byShell.get(ref.projectId)?.get(ref.id) ?? null
+    }
+  }
+
+  private retire(session: Session): void {
+    this.forget(session.ref)
+    if (session.flush !== null) {
+      session.flush()
+      session.flush = null
+    }
+    session.outbox.length = 0
+    for (const resolve of session.drained.splice(0)) resolve()
+    if (session.pending === 0) {
+      session.mirror.dispose()
+      return
+    }
+    session.drained.push(() => {
+      session.mirror.dispose()
+    })
   }
 
   private forget(ref: TerminalRef): void {
     if (ref.scope === 'global') {
       this.globals.delete(ref.id)
+      return
+    }
+    if (ref.scope === 'project') {
+      this.byProject.delete(ref.projectId)
+      return
+    }
+    if (ref.scope === 'shell') {
+      const shells = this.byShell.get(ref.projectId)
+      if (shells === undefined) return
+      shells.delete(ref.id)
+      if (shells.size === 0) this.byShell.delete(ref.projectId)
       return
     }
     const inner = this.bySession.get(ref.conversationId)
@@ -550,16 +718,36 @@ export class TerminalService {
     session.pty.resize(safeCols, safeRows)
   }
 
-  private open(ref: TerminalRef, size?: { cols: number; rows: number }): Session {
+  private open(ref: TerminalRef, size?: { cols: number; rows: number }): Session | null {
+    const cwd = this.cwdFor(ref)
+    if (cwd === null) return null
     const shell = this.shell ?? resolveShell(this.env, this.platform)
-    const cols = size?.cols ?? DEFAULT_COLS
-    const rows = size?.rows ?? DEFAULT_ROWS
+    return this.spawnSession(
+      ref,
+      { file: shell.file, args: shell.args, cwd, env: this.envFor?.(ref) ?? this.env },
+      { cols: size?.cols ?? DEFAULT_COLS, rows: size?.rows ?? DEFAULT_ROWS },
+      0
+    )
+  }
+
+  private spawnSession(
+    ref: TerminalRef,
+    command: {
+      readonly file: string
+      readonly args: readonly string[]
+      readonly cwd: string
+      readonly env: NodeJS.ProcessEnv
+    },
+    size: { readonly cols: number; readonly rows: number },
+    generation: number
+  ): Session {
+    const { cols, rows } = size
 
     const pty = this.spawner({
-      file: shell.file,
-      args: shell.args,
-      cwd: this.cwdFor(ref),
-      env: this.env,
+      file: command.file,
+      args: command.args,
+      cwd: command.cwd,
+      env: command.env,
       cols,
       rows,
     })
@@ -578,7 +766,8 @@ export class TerminalService {
       pty,
       mirror,
       serializer,
-      shellName: basename(shell.file),
+      shellName: basename(command.file),
+      generation,
       epoch: 0,
       attached: false,
       seq: 0,
@@ -595,6 +784,7 @@ export class TerminalService {
     }
 
     pty.onData((data) => {
+      if (this.find(ref) !== session) return
       this.absorb(session, data)
     })
     pty.onExit(({ exitCode }) => {
@@ -605,18 +795,35 @@ export class TerminalService {
        * nobody, and a later `attach` is the only chance to say it happened.
        */
       session.exitCode = exitCode
+      if (this.find(ref) !== session) return
       // Whatever it wrote on the way out goes first, or the last line of a
       // failing command is lost behind the notice that it failed.
       this.drain(session)
-      this.emit({ kind: 'exit', ref, epoch: session.epoch, code: exitCode })
-      for (const listener of this.taps) listener(ref, { kind: 'exit', code: exitCode })
+      this.emit({ kind: 'exit', ref, epoch: session.epoch, generation, code: exitCode })
+      for (const listener of this.taps) {
+        listener(ref, { kind: 'exit', code: exitCode }, generation)
+      }
     })
 
-    if (ref.scope === 'global') this.globals.set(ref.id, session)
-    else {
-      const inner = this.bySession.get(ref.conversationId) ?? new Map<string, Session>()
-      inner.set(ref.id, session)
-      this.bySession.set(ref.conversationId, inner)
+    switch (ref.scope) {
+      case 'global':
+        this.globals.set(ref.id, session)
+        break
+      case 'session': {
+        const inner = this.bySession.get(ref.conversationId) ?? new Map<string, Session>()
+        inner.set(ref.id, session)
+        this.bySession.set(ref.conversationId, inner)
+        break
+      }
+      case 'project':
+        this.byProject.set(ref.projectId, session)
+        break
+      case 'shell': {
+        const shells = this.byShell.get(ref.projectId) ?? new Map<string, Session>()
+        shells.set(ref.id, session)
+        this.byShell.set(ref.projectId, shells)
+        break
+      }
     }
     return session
   }
@@ -643,7 +850,9 @@ export class TerminalService {
       this.schedule(session)
     }
     this.pace(session)
-    for (const listener of this.taps) listener(session.ref, { kind: 'data', data })
+    for (const listener of this.taps) {
+      listener(session.ref, { kind: 'data', data }, session.generation)
+    }
   }
 
   /**
@@ -702,6 +911,7 @@ export class TerminalService {
       kind: 'data',
       ref: session.ref,
       epoch: session.epoch,
+      generation: session.generation,
       seq: session.seq,
       data,
     })

@@ -453,6 +453,8 @@ export const ChorusEventPayload = z.discriminatedUnion('type', [
         'staleEditPreview',
         'contextCarried',
         'nearCompaction',
+        'projectToolsUnavailable',
+        'projectToolsUnconfirmed',
       ])
       .optional(),
     detail: z.string().nullable(),

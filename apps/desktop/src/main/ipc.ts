@@ -385,6 +385,18 @@ export function buildHandlers(
         ...(request.continueFrom === undefined ? {} : { continueFrom: request.continueFrom }),
       }),
 
+    'conversation:begin': (request: IpcRequest<'conversation:begin'>) =>
+      Promise.resolve(
+        runtime.beginConversation({
+          projectId: request.projectId,
+          ...(request.profileId === undefined ? {} : { profileId: request.profileId }),
+          ...(request.continueFrom === undefined ? {} : { continueFrom: request.continueFrom }),
+        })
+      ),
+
+    'conversation:awaitStart': (request: IpcRequest<'conversation:awaitStart'>) =>
+      runtime.awaitStart(request.conversationId),
+
     'conversation:send': async (request: IpcRequest<'conversation:send'>) => {
       const { targets } = await runtime.send(request.conversationId, request.text, request.intent)
       // Copied out of the readonly domain type; the IPC boundary is plain JSON.

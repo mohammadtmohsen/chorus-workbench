@@ -1,3 +1,4 @@
+import { TRAFFIC_ENV_NAME } from '../../../shared/traffic-ipc.js'
 import type { WorkbenchTerminalEnv } from '../../../shared/workbench-ipc.js'
 
 export type TerminalEnvMemory = Readonly<Record<string, string | null>>
@@ -41,10 +42,7 @@ export function overlayTerminalEnv(
   owned: OwnedTerminalEnv | null,
   next: WorkbenchTerminalEnv | null
 ): { readonly memory: TerminalEnvMemory | undefined; readonly owned: OwnedTerminalEnv | null } {
-  const releasing =
-    owned !== null && memory !== undefined && memory[owned.env.name] === owned.env.value
-      ? owned
-      : null
+  const releasing = owned !== null && memory?.[owned.env.name] === owned.env.value ? owned : null
   const entries: Record<string, string | null> = Object.fromEntries(
     Object.entries(memory ?? {}).filter(([name]) => name !== releasing?.env.name)
   )
@@ -57,8 +55,114 @@ export function overlayTerminalEnv(
   return { memory: { ...entries, [next.name]: next.value }, owned: { env: next, shadowed } }
 }
 
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === 'object' && value !== null && !Array.isArray(value)
+
+const isList = (value: unknown): value is readonly unknown[] => Array.isArray(value)
+
+const parseJson = (raw: string): unknown => {
+  try {
+    const parsed: unknown = JSON.parse(raw)
+    return parsed
+  } catch {
+    return undefined
+  }
+}
+
+const sameEntries = (a: Record<string, unknown>, b: Record<string, unknown>): boolean => {
+  const names = Object.keys(a)
+  return (
+    names.length === Object.keys(b).length &&
+    names.every((name) => Object.hasOwn(b, name) && b[name] === a[name])
+  )
+}
+
+const ISSUED_VERSION = 1
+
+const wasIssued = (
+  issued: readonly WorkbenchTerminalEnv[],
+  name: string,
+  value: unknown
+): boolean => issued.some((pair) => pair.name === name && pair.value === value)
+
+export function issueTerminalEnv(
+  issued: readonly WorkbenchTerminalEnv[],
+  env: WorkbenchTerminalEnv
+): readonly WorkbenchTerminalEnv[] {
+  if (wasIssued(issued, env.name, env.value)) return issued
+  return [...issued, { name: env.name, value: env.value }]
+}
+
+export function parseIssuedTerminalEnv(raw: string | undefined): readonly WorkbenchTerminalEnv[] {
+  const parsed = raw === undefined ? undefined : parseJson(raw)
+  if (!isRecord(parsed) || parsed['version'] !== ISSUED_VERSION) return []
+  const pairs = parsed['pairs']
+  if (!isList(pairs)) return []
+  let issued: readonly WorkbenchTerminalEnv[] = []
+  for (const pair of pairs) {
+    if (!isRecord(pair)) continue
+    const name = pair['name']
+    const value = pair['value']
+    if (typeof name !== 'string' || typeof value !== 'string') continue
+    if (!TRAFFIC_ENV_NAME.test(name)) continue
+    issued = issueTerminalEnv(issued, { name, value })
+  }
+  return issued
+}
+
+export function serializeIssuedTerminalEnv(issued: readonly WorkbenchTerminalEnv[]): string {
+  return JSON.stringify({
+    version: ISSUED_VERSION,
+    pairs: issued.map(({ name, value }) => ({ name, value })),
+  })
+}
+
+export function retainIssuedTerminalEnv(
+  issued: readonly WorkbenchTerminalEnv[],
+  cleaned: boolean,
+  current: WorkbenchTerminalEnv | null
+): readonly WorkbenchTerminalEnv[] {
+  const kept = cleaned ? [] : issued
+  return current === null ? kept : issueTerminalEnv(kept, current)
+}
+
+export function reviveTerminalEnv(
+  raw: string | undefined,
+  issued: readonly WorkbenchTerminalEnv[],
+  current: WorkbenchTerminalEnv | null
+): { readonly raw: string | undefined; readonly cleaned: boolean } {
+  const parsed = raw === undefined ? undefined : parseJson(raw)
+  if (!isRecord(parsed) || parsed['version'] !== 1) return { raw, cleaned: false }
+  const revived = parsed['state']
+  if (!isList(revived)) return { raw, cleaned: false }
+  let complete = true
+  let changed = false
+  const state: unknown[] = []
+  for (const terminal of revived) {
+    const launch = isRecord(terminal) ? terminal['processLaunchConfig'] : undefined
+    const variables = isRecord(launch) ? launch['env'] : undefined
+    if (!isRecord(terminal) || !isRecord(launch) || !isRecord(variables)) {
+      complete = false
+      state.push(terminal)
+      continue
+    }
+    const next: Record<string, unknown> = Object.fromEntries(
+      Object.entries(variables).filter(([name, value]) => !wasIssued(issued, name, value))
+    )
+    if (current !== null) next[current.name] = current.value
+    if (sameEntries(variables, next)) {
+      state.push(terminal)
+      continue
+    }
+    changed = true
+    state.push({ ...terminal, processLaunchConfig: { ...launch, env: next } })
+  }
+  return { raw: changed ? JSON.stringify({ ...parsed, state }) : raw, cleaned: complete }
+}
+
 let wanted: WorkbenchTerminalEnv | null = null
 let target: TerminalEnvTarget | null = null
+let issue: ((env: WorkbenchTerminalEnv) => void) | null = null
 let pushCount = 0
 let scheduled = false
 let applying = false
@@ -104,7 +208,17 @@ function schedule(): void {
 
 function receive(env: WorkbenchTerminalEnv | null): void {
   wanted = env
+  if (env !== null) issue?.(env)
   apply()
+}
+
+export function currentTerminalEnv(): WorkbenchTerminalEnv | null {
+  return wanted
+}
+
+export function bindIssuedTerminalEnv(record: (env: WorkbenchTerminalEnv) => void): void {
+  issue = record
+  if (wanted !== null) record(wanted)
 }
 
 export async function seedTerminalEnv(): Promise<void> {

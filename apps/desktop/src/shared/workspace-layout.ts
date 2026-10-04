@@ -43,19 +43,13 @@ export type WorkspacePane = z.infer<typeof WorkspacePane>
  */
 export const SIDEBAR_WIDTH = { default: 248, min: 100 } as const
 
-/**
- * How wide Chorus sits beside the workbench in a project pane.
- *
- * No ceiling: the divider goes wherever it is dragged, and squeezing the editor
- * is the person's call to make. One width for every pane rather than one each —
- * panes are a way of seeing several projects at once, and a divider that meant
- * something different in each would make the layout unreadable.
- */
-export const CHORUS_WIDTH = { default: 500, min: 500 } as const
-
-export const EDITOR_WIDTH = { resizeFloor: 400, peek: 61 } as const
+export const EDITOR_WIDTH = { fraction: 0.8 } as const
 
 export const BOX_WIDTH = { default: 500, min: 500 } as const
+
+export const TRAFFIC_WIDTH = { default: 800, min: 800 } as const
+
+export const PROJECT_TERMINAL_WIDTH = { default: 640, min: 480, run: 640, slot: 320 } as const
 
 /**
  * How big a note is, as fractions of the window. Both notes, one set of bounds.
@@ -161,6 +155,14 @@ export const CLOSED_TERMINAL_PANEL: TerminalPanelState = Object.freeze({
 export const TrafficPanelState = z.object({ open: z.boolean(), width: z.number() })
 export type TrafficPanelState = z.infer<typeof TrafficPanelState>
 
+export const MAIN_PROJECT_SHELL = 'main'
+
+export const ProjectTerminalPaneState = z.object({
+  width: z.number(),
+  shells: z.array(TerminalTab).default(() => [{ id: MAIN_PROJECT_SHELL }]),
+})
+export type ProjectTerminalPaneState = z.infer<typeof ProjectTerminalPaneState>
+
 /**
  * How one project arranges its conversations, and it is **the same shape as the
  * workspace's own pane tree**.
@@ -199,42 +201,6 @@ export const WorkspaceSnapshot = z.object({
    * could be resized still parses and simply opens at the width it had.
    */
   sidebarWidth: z.number().default(SIDEBAR_WIDTH.default),
-  /**
-   * The workbench/Chorus divider, **per project**.
-   *
-   * One number for the whole app was the first shape, and it was wrong the
-   * moment two projects could be on screen: dragging the divider in one pane
-   * moved it in every other, because there was only ever one value to move.
-   *
-   * Keyed by project rather than by pane, matching `workbenchHidden`. A pane is
-   * ephemeral — created and destroyed by splits, its id reissued by
-   * `nextPaneId`, and pruned by `reconcileWorkspace` — so a width keyed by one
-   * would be lost every time the arrangement changed. A project is the stable
-   * thing, and carrying its divider between panes is the behaviour somebody
-   * would expect from a setting that belongs to the project.
-   *
-   * Renamed rather than retyped. `chorusWidth` was a `number` in every snapshot
-   * already written, and a schema that expects a record where a number is stored
-   * fails to parse — which, per the warning below, does not lose a *width*, it
-   * loses **every open conversation**. Unknown keys are stripped rather than
-   * rejected, so the old field is simply ignored and each project opens at the
-   * default once.
-   */
-  chorusWidths: z.record(z.string(), z.number()).default({}),
-  /**
-   * Which projects have their workbench hidden, by project id.
-   *
-   * Hidden rather than shown, so the default — an absent key, an empty record, a
-   * project nobody has toggled — is the editor being *on*. That matters more
-   * than symmetry: this is the project-first workbench, and a shape whose empty
-   * value means "no editors anywhere" would open a fresh install with the thing
-   * it is named after switched off.
-   *
-   * Defaulted, under the warning above: a required field here would make
-   * `parseOpenProjects` reject the whole snapshot and lose every open
-   * conversation.
-   */
-  workbenchHidden: z.record(z.string(), z.boolean()).default({}),
   /*
    * Both defaulted, and this is the sharpest trap in the file.
    *
@@ -282,6 +248,8 @@ export const WorkspaceSnapshot = z.object({
    */
   conversationGroups: z.record(z.string(), ConversationArrangement).default({}),
   trafficPanels: z.record(z.string(), TrafficPanelState).default({}),
+  projectTerminals: z.record(z.string(), ProjectTerminalPaneState).default({}),
+  rowScroll: z.record(z.string(), z.number()).default({}),
 })
 export type WorkspaceSnapshot = z.infer<typeof WorkspaceSnapshot>
 
@@ -290,8 +258,8 @@ export type ReturnSlot = z.infer<typeof ReturnSlot>
 
 export const ProjectLayoutSlice = z.object({
   conversationGroups: ConversationArrangement.optional(),
-  chorusWidth: z.number().optional(),
-  workbenchHidden: z.boolean().optional(),
   trafficPanel: TrafficPanelState.optional(),
+  projectTerminal: ProjectTerminalPaneState.optional(),
+  rowScroll: z.number().optional(),
 })
 export type ProjectLayoutSlice = z.infer<typeof ProjectLayoutSlice>

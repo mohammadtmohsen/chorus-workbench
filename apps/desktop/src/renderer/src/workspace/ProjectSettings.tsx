@@ -47,6 +47,7 @@ export function ProjectSettings(props: ProjectSettingsProps): React.JSX.Element 
   const { t } = useTranslation()
   const { setPlanning } = useWorkspaceActions()
   const planning = useEveryPlanning(props.sessions.map((session) => session.conversationId))
+  const starting = props.sessions.some((session) => session.starting === true)
 
   return (
     <div className="session-settings">
@@ -112,6 +113,7 @@ export function ProjectSettings(props: ProjectSettingsProps): React.JSX.Element 
             <button
               type="button"
               className="btn btn--go"
+              disabled={starting}
               onClick={() => {
                 void props.onRelocate()
               }}
@@ -141,6 +143,7 @@ export function ProjectSettings(props: ProjectSettingsProps): React.JSX.Element 
                 aria-selected={selected}
                 data-on={selected}
                 className="profile-option"
+                disabled={starting}
                 onClick={() => {
                   if (selected) return
                   void props.onChooseProfile(profile.id)
@@ -169,7 +172,7 @@ export function ProjectSettings(props: ProjectSettingsProps): React.JSX.Element 
         type="button"
         className="session-settings-plan"
         aria-pressed={planning}
-        disabled={props.sessions.length === 0}
+        disabled={props.sessions.length === 0 || starting}
         title={
           props.sessions.length === 0
             ? t('plan.label')

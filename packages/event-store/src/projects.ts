@@ -87,7 +87,30 @@ export interface Project {
   readonly trafficPort: number | null
   readonly trafficAccess: TrafficAccess
   readonly trafficEnvVar: string | null
+  readonly runCommands: RunCommands | null
 }
+
+export const RunCommand = z.object({
+  id: z.string().min(1).max(64),
+  label: z.string().trim().min(1).max(40),
+  command: z.string().trim().min(1).max(500),
+})
+export type RunCommand = z.infer<typeof RunCommand>
+
+export const RunCommands = z
+  .object({
+    version: z.literal(1),
+    defaultId: z.string().min(1).max(64),
+    commands: z.array(RunCommand).min(1).max(12),
+  })
+  .refine(
+    (value) => new Set(value.commands.map((each) => each.id)).size === value.commands.length,
+    { message: 'command ids must be unique' }
+  )
+  .refine((value) => value.commands.some((each) => each.id === value.defaultId), {
+    message: 'defaultId must name a saved command',
+  })
+export type RunCommands = z.infer<typeof RunCommands>
 
 export const TrafficAccesses = z.enum(['loopback', 'lan'])
 export type TrafficAccess = z.infer<typeof TrafficAccesses>
@@ -318,6 +341,7 @@ interface ProjectRow {
   traffic_env_var: string | null
   traffic_port: number | null
   traffic_access: string
+  run_commands: string | null
 }
 
 function toProject(row: ProjectRow): Project {
@@ -341,7 +365,20 @@ function toProject(row: ProjectRow): Project {
     trafficEnvVar: row.traffic_env_var,
     trafficPort: measure(row.traffic_port),
     trafficAccess: trafficAccessOf(row.traffic_access),
+    runCommands: parseRunCommands(row.run_commands),
   }
+}
+
+function parseRunCommands(raw: string | null): RunCommands | null {
+  if (raw === null) return null
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(raw)
+  } catch {
+    return null
+  }
+  const checked = RunCommands.safeParse(parsed)
+  return checked.success ? checked.data : null
 }
 
 const trafficAccessOf = (raw: string): TrafficAccess => {
@@ -382,7 +419,7 @@ function parseAgentIds(raw: string | null): readonly string[] | null {
   }
 }
 
-const COLUMNS = `id, name, host, root, canonical_root, workspace_file, agent_cwd, permission_profile_id, agent_ids, created_at, last_opened_at, sort_order, notes, note_width, note_height, traffic_origin, traffic_port, traffic_access, traffic_env_var`
+const COLUMNS = `id, name, host, root, canonical_root, workspace_file, agent_cwd, permission_profile_id, agent_ids, created_at, last_opened_at, sort_order, notes, note_width, note_height, traffic_origin, traffic_port, traffic_access, traffic_env_var, run_commands`
 
 /**
  * The project registry — create, find, rename, relocate, forget.
@@ -487,6 +524,7 @@ export class ProjectStore {
         trafficPort: null,
         trafficAccess: DEFAULT_TRAFFIC_ACCESS,
         trafficEnvVar: null,
+        runCommands: null,
       }
     })
 
@@ -734,6 +772,15 @@ export class ProjectStore {
         `UPDATE projects SET note_width = @width, note_height = @height WHERE id = @projectId`
       )
       .run({ width, height, projectId }).changes
+    if (changed === 0) throw new UnknownProjectError(projectId)
+    return this.require(projectId)
+  }
+
+  setRunCommands(projectId: string, commands: RunCommands | null): Project {
+    const value = commands === null ? null : JSON.stringify(RunCommands.parse(commands))
+    const changed = this.db
+      .prepare(`UPDATE projects SET run_commands = @value WHERE id = @projectId`)
+      .run({ value, projectId }).changes
     if (changed === 0) throw new UnknownProjectError(projectId)
     return this.require(projectId)
   }

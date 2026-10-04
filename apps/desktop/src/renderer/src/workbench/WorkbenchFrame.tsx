@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useRef, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import type { WorkbenchRect } from '../../../shared/workbench-ipc.js'
 import { useWorkbenchStill } from '../workspace/overlay.js'
@@ -54,6 +54,25 @@ const measure = (element: HTMLElement): WorkbenchRect => {
     width: Math.round(rect.width),
     height: Math.round(rect.height),
   }
+}
+
+export interface WorkbenchGeometry {
+  readonly rect: WorkbenchRect
+  readonly layoutWidth: number | undefined
+}
+
+const sameGeometry = (left: WorkbenchGeometry, right: WorkbenchGeometry): boolean =>
+  left.layoutWidth === right.layoutWidth &&
+  left.rect.x === right.rect.x &&
+  left.rect.y === right.rect.y &&
+  left.rect.width === right.rect.width &&
+  left.rect.height === right.rect.height
+
+const pin = (element: HTMLElement, rect: WorkbenchRect): void => {
+  element.style.setProperty('--native-x', `${String(rect.x)}px`)
+  element.style.setProperty('--native-y', `${String(rect.y)}px`)
+  element.style.setProperty('--native-width', `${String(rect.width)}px`)
+  element.style.setProperty('--native-height', `${String(rect.height)}px`)
 }
 
 /*
@@ -135,15 +154,16 @@ export function WorkbenchFrame({
   target,
   projectRoot,
   hidden = false,
-  covered = false,
+  geometry,
+  onActivityBar,
+  onRevealRow,
+  onScrollRow,
   onFailed,
 }: {
   readonly target: { readonly grant: string } | { readonly projectId: string }
   /** For the placeholder's label and its test hook. Never sent to main. */
   readonly projectRoot: string
   /**
-   * The Editor switch is off for this project.
-   *
    * **Not an unmount**, which is why this is a prop rather than the caller
    * simply not rendering the frame: unmounting runs the cleanup below, and that
    * closes the surface — a whole `WebContents` destroyed, every open file lost,
@@ -152,16 +172,22 @@ export function WorkbenchFrame({
    * rectangle and nothing inside it reflows.
    */
   readonly hidden?: boolean
-  readonly covered?: boolean
+  readonly geometry?: (host: HTMLElement) => WorkbenchGeometry | null
+  readonly onActivityBar?: (width: number) => void
+  readonly onRevealRow?: () => void
+  readonly onScrollRow?: (delta: number) => void
   readonly onFailed: (message: string) => void
 }): React.JSX.Element {
   const { t } = useTranslation()
   const host = useRef<HTMLDivElement>(null)
   const [viewId, setViewId] = useState<string | null>(null)
-  const [coverStill, setCoverStill] = useState<string | null>(null)
-  const [paintCover, setPaintCover] = useState(false)
-  const overlayStill = useWorkbenchStill(viewId)
-  const still = paintCover ? (coverStill ?? overlayStill) : overlayStill
+  const still = useWorkbenchStill(viewId)
+  const latest = useRef({ geometry, onActivityBar, onRevealRow, onScrollRow })
+  latest.current = { geometry, onActivityBar, onRevealRow, onScrollRow }
+  const pinned = geometry !== undefined
+  const tracksActivityBar = onActivityBar !== undefined
+  const revealsRow = onRevealRow !== undefined
+  const scrollsRow = onScrollRow !== undefined
 
   useEffect(() => {
     /*
@@ -256,32 +282,42 @@ export function WorkbenchFrame({
     }
   }, [viewId, hidden, onFailed])
 
-  useLayoutEffect(() => {
-    if (viewId === null || hidden) return undefined
+  useEffect(() => {
+    if (viewId === null || !tracksActivityBar) return undefined
     let live = true
-    if (covered) setPaintCover(true)
-    const element = host.current
-    if (element !== null && !covered && paintCover) {
-      window.chorus
-        .setWorkbenchBounds({ viewId, rect: measure(element) })
-        .catch((error: unknown) => {
-          if (live) onFailed(error instanceof Error ? error.message : String(error))
-        })
-    }
+    let pushed = false
+    const stop = window.chorus.onWorkbenchActivityBar((push) => {
+      if (push.viewId !== viewId) return
+      pushed = true
+      latest.current.onActivityBar?.(push.width)
+    })
     window.chorus
-      .setWorkbenchCovered({ viewId, covered })
-      .then(({ still: captured }) => {
-        if (!live) return
-        if (!covered) setPaintCover(false)
-        else if (captured !== null) setCoverStill(captured)
+      .readWorkbenchActivityBar({ viewId })
+      .then(({ width }) => {
+        if (live && !pushed) latest.current.onActivityBar?.(width)
       })
       .catch((error: unknown) => {
         if (live) onFailed(error instanceof Error ? error.message : String(error))
       })
     return () => {
       live = false
+      stop()
     }
-  }, [viewId, covered, hidden, onFailed])
+  }, [viewId, tracksActivityBar, onFailed])
+
+  useEffect(() => {
+    if (viewId === null || !revealsRow || hidden) return undefined
+    return window.chorus.onWorkbenchRowReveal((push) => {
+      if (push.viewId === viewId) latest.current.onRevealRow?.()
+    })
+  }, [viewId, revealsRow, hidden])
+
+  useEffect(() => {
+    if (viewId === null || !scrollsRow || hidden) return undefined
+    return window.chorus.onWorkbenchRowScroll((push) => {
+      if (push.viewId === viewId) latest.current.onScrollRow?.(push.delta)
+    })
+  }, [viewId, scrollsRow, hidden])
 
   useEffect(() => {
     const element = host.current
@@ -359,23 +395,24 @@ export function WorkbenchFrame({
      * the next frame reports — and the view keeps the physical rectangle it had,
      * because CSS pixels and the factor move in opposite directions.
      */
-    let last: WorkbenchRect | null = null
+    let last: WorkbenchGeometry | null = null
 
     const report = (): void => {
-      const next = measure(element)
-      if (
-        last !== null &&
-        last.x === next.x &&
-        last.y === next.y &&
-        last.width === next.width &&
-        last.height === next.height
-      ) {
-        return
-      }
+      const read = latest.current.geometry
+      const next =
+        read === undefined ? { rect: measure(element), layoutWidth: undefined } : read(element)
+      if (next === null || (last !== null && sameGeometry(last, next))) return
       last = next
-      window.chorus.setWorkbenchBounds({ viewId, rect: next }).catch((error: unknown) => {
-        if (live) onFailed(error instanceof Error ? error.message : String(error))
-      })
+      if (read !== undefined) pin(element, next.rect)
+      window.chorus
+        .setWorkbenchBounds(
+          next.layoutWidth === undefined
+            ? { viewId, rect: next.rect }
+            : { viewId, rect: next.rect, layoutWidth: next.layoutWidth }
+        )
+        .catch((error: unknown) => {
+          if (live) onFailed(error instanceof Error ? error.message : String(error))
+        })
     }
 
     /*
@@ -423,7 +460,7 @@ export function WorkbenchFrame({
           alt=""
           aria-hidden="true"
           draggable={false}
-          data-cover={paintCover || undefined}
+          data-native={pinned || undefined}
         />
       )}
       {/*
@@ -449,9 +486,6 @@ export function WorkbenchFrame({
         <p className="workbench-pending" role="status">
           {t('workbench.opening')}
         </p>
-      )}
-      {paintCover && still === null && (
-        <p className="workbench-covered-hint">{t('workbench.coveredHint')}</p>
       )}
     </div>
   )
