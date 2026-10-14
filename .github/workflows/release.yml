@@ -13,13 +13,11 @@ name: Release
 # that never started clean.
 #
 # The second is that "release" meant one platform, so a Windows asset was an
-# extra errand nobody would remember. Now the tag is the whole trigger.
+# extra errand nobody would remember.
 #
 # `workflow_dispatch` builds without publishing, which is how you find out the
 # pipeline works without cutting a release to do it.
 on:
-  push:
-    tags: ['v*']
   workflow_dispatch:
     inputs:
       publish_to:
@@ -28,10 +26,15 @@ on:
         type: string
 
 permissions:
-  contents: write
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.publish_to || github.ref }}
+  cancel-in-progress: true
 
 env:
   ELECTRON_SKIP_BINARY_DOWNLOAD: 1
+  PUBLISH_TAG: ${{ inputs.publish_to }}
 
 jobs:
   # Nothing is built until the version is coherent and the gate is green.
@@ -42,18 +45,20 @@ jobs:
   # produces an installer whose filename lies about what is inside it.
   gate:
     name: Gate
-    runs-on: macos-latest
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
     outputs:
       version: ${{ steps.version.outputs.version }}
+      source_sha: ${{ steps.version.outputs.source_sha }}
     steps:
       - uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.publish_to != '' && format('refs/tags/{0}', inputs.publish_to) || github.ref }}
       - uses: pnpm/action-setup@v6
       - uses: actions/setup-node@v6
         with:
           node-version: 22
           cache: pnpm
-      - run: pnpm install --frozen-lockfile
-
       - name: The tag, the root and the app must agree
         id: version
         shell: bash
@@ -65,15 +70,19 @@ jobs:
             exit 1
           fi
           # Only a real tag has something to disagree with.
-          TAG="${GITHUB_REF#refs/tags/}"
-          if [ -n "${{ inputs.publish_to }}" ]; then TAG="${{ inputs.publish_to }}"; fi
-          if [ "${TAG#v}" != "$TAG" ] && [ "${TAG#v}" != "$ROOT" ]; then
+          TAG="$PUBLISH_TAG"
+          if [ -z "$TAG" ] && [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            TAG="${GITHUB_REF#refs/tags/}"
+          fi
+          if [ -n "$TAG" ] && [ "$TAG" != "v$ROOT" ]; then
             echo "::error::tag $TAG does not match version $ROOT"
             exit 1
           fi
           echo "version=$ROOT" >> "$GITHUB_OUTPUT"
+          echo "source_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
           echo "building $ROOT"
 
+      - run: pnpm install --frozen-lockfile
       - run: pnpm run typecheck
       - run: pnpm run lint
       - run: pnpm run format:check
@@ -83,6 +92,7 @@ jobs:
     name: ${{ matrix.label }}
     needs: gate
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
     strategy:
       # One platform failing must not cancel the others. Knowing that Windows
       # built and macOS did not is worth more than one cancelled job.
@@ -141,6 +151,8 @@ jobs:
             verify: verify:package:linux
     steps:
       - uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.gate.outputs.source_sha }}
       - uses: pnpm/action-setup@v6
       - uses: actions/setup-node@v6
         with:
@@ -210,7 +222,7 @@ jobs:
             apps/desktop/release/${{ matrix.artifact }}
             apps/desktop/release/${{ matrix.artifact }}.sha256
           if-no-files-found: error
-          retention-days: 30
+          retention-days: 7
 
       # A second upload rather than a wider path, so `if-no-files-found: error`
       # keeps its meaning for both. Skipped by jobs that name only one.
@@ -222,18 +234,20 @@ jobs:
             apps/desktop/release/${{ matrix.extraArtifact }}
             apps/desktop/release/${{ matrix.extraArtifact }}.sha256
           if-no-files-found: error
-          retention-days: 30
+          retention-days: 7
 
   publish:
     name: Publish the release
-    # Only for a real tag, or a dispatch that named one. A dispatch with neither
-    # has built both installers and uploaded them as artifacts, which is the
-    # point of being able to run this without cutting a release.
-    if: startsWith(github.ref, 'refs/tags/v') || inputs.publish_to != ''
+    if: inputs.publish_to != ''
     needs: [gate, build]
     runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.gate.outputs.source_sha }}
       - uses: actions/download-artifact@v4
         with:
           path: assets
@@ -287,8 +301,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
-          TAG="${{ inputs.publish_to }}"
-          [ -z "$TAG" ] && TAG="${GITHUB_REF#refs/tags/}"
+          TAG="$PUBLISH_TAG"
           if gh release view "$TAG" >/dev/null 2>&1; then
             gh release edit "$TAG" --notes-file notes.md
           else
@@ -305,8 +318,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
-          TAG="${{ inputs.publish_to }}"
-          [ -z "$TAG" ] && TAG="${GITHUB_REF#refs/tags/}"
+          TAG="$PUBLISH_TAG"
           gh release view "$TAG" --json assets \
             --jq '.assets[] | "\(.name)  \(.size) bytes"'
           # Counted per extension rather than as one total. A single total of

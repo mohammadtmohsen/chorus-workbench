@@ -3,7 +3,12 @@ import { join } from 'node:path'
 import { usableTrafficOrigin } from '@chorus/event-store'
 import { agentRecord } from '@chorus/shared'
 import { z } from 'zod'
-import { DEFAULT_TRAFFIC_PORT, normaliseExplainLanguage } from '../shared/ipc.js'
+import {
+  DEFAULT_TRAFFIC_PORT,
+  DEFAULT_TRAFFIC_REQUEST_FRACTION,
+  normaliseExplainLanguage,
+  TrafficRequestFraction,
+} from '../shared/ipc.js'
 
 /**
  * What a new session starts with, remembered between launches.
@@ -116,6 +121,7 @@ export const Settings = z
     theme: z.enum(['system', 'light', 'dark']).default('system'),
     completionProvider: z.enum(['auto', 'deepseek', 'codestral']).default('auto'),
     notifications: z.boolean().default(true),
+    trafficRequestFraction: TrafficRequestFraction.default(DEFAULT_TRAFFIC_REQUEST_FRACTION),
     trafficOrigin: z.string().default(''),
     trafficPort: z.number().int().min(0).max(65535).default(DEFAULT_TRAFFIC_PORT),
   })
@@ -158,6 +164,7 @@ export const DEFAULT_SETTINGS: Settings = {
   // Off: a first launch answers exactly as every launch before this existed.
   completionProvider: 'auto',
   notifications: true,
+  trafficRequestFraction: DEFAULT_TRAFFIC_REQUEST_FRACTION,
   trafficOrigin: '',
   trafficPort: DEFAULT_TRAFFIC_PORT,
 }
@@ -183,6 +190,12 @@ export function readSettings(userDataPath: string): Settings {
   }
   if ('trafficPort' in record && !isPortNumber(record['trafficPort'])) {
     delete record['trafficPort']
+  }
+  if (
+    'trafficRequestFraction' in record &&
+    !TrafficRequestFraction.safeParse(record['trafficRequestFraction']).success
+  ) {
+    delete record['trafficRequestFraction']
   }
 
   const parsed = Settings.safeParse(record)

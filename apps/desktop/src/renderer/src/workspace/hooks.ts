@@ -1,6 +1,14 @@
 import type { IdeContextPush } from '../../../shared/ipc.js'
 import type { RunState } from '../../../shared/run-ipc.js'
-import { useEffect, useLayoutEffect, useMemo, useRef, useState, type RefObject } from 'react'
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  type RefObject,
+} from 'react'
 import { useShallow } from 'zustand/react/shallow'
 import { isAgentId, type AgentId } from '@chorus/shared'
 import { withBackgroundWork, type SessionRowState } from './session-row.js'
@@ -12,6 +20,7 @@ import {
   type TrafficPanelState,
   type WorkspaceLayoutNode,
   type WorkspacePane,
+  type WebTabsState,
 } from '../../../shared/workspace-layout.js'
 import { CLOSED_TRAFFIC, DEFAULT_PROJECT_TERMINAL, leafPaneIds, tabLocation } from './layout.js'
 import {
@@ -49,6 +58,12 @@ import {
 function selectActions(state: WorkspaceStore): WorkspaceActions {
   const {
     hydrate,
+    addWebTab,
+    insertWebTab,
+    closeWebTab,
+    moveWebTab,
+    activateWebTab,
+    showProjects,
     openProject,
     clearConversationUnread,
     seedPendingDecisions,
@@ -56,8 +71,13 @@ function selectActions(state: WorkspaceStore): WorkspaceActions {
     showConversationIn,
     focusConversationGroup,
     adoptConversation,
+    replaceConversation,
+    setEditorWidthFraction,
     setTrafficWidth,
     setProjectTerminalWidth,
+    setTrafficCollapsed,
+    setProjectTerminalCollapsed,
+    setBrowserCollapsed,
     addProjectShell,
     removeProjectShell,
     setRowScroll,
@@ -104,6 +124,12 @@ function selectActions(state: WorkspaceStore): WorkspaceActions {
   } = state
   return {
     hydrate,
+    addWebTab,
+    insertWebTab,
+    closeWebTab,
+    moveWebTab,
+    activateWebTab,
+    showProjects,
     openProject,
     clearConversationUnread,
     seedPendingDecisions,
@@ -111,8 +137,13 @@ function selectActions(state: WorkspaceStore): WorkspaceActions {
     showConversationIn,
     focusConversationGroup,
     adoptConversation,
+    replaceConversation,
+    setEditorWidthFraction,
     setTrafficWidth,
     setProjectTerminalWidth,
+    setTrafficCollapsed,
+    setProjectTerminalCollapsed,
+    setBrowserCollapsed,
     addProjectShell,
     removeProjectShell,
     setRowScroll,
@@ -200,6 +231,14 @@ export function useGlobalTerminal(): TerminalPanelState {
   return useWorkspaceStore((state) => state.globalTerminal)
 }
 
+export function useWebTabs(): WebTabsState {
+  return useWorkspaceStore((state) => state.webTabs)
+}
+
+export function useWebShowing(): boolean {
+  return useWorkspaceStore((state) => state.webTabs.showing)
+}
+
 /**
  * One conversation's panel.
  *
@@ -237,6 +276,22 @@ export function useSidebarWidth(): number {
 export function useTrafficPanel(projectId: string | null): TrafficPanelState {
   return useWorkspaceStore((state) =>
     projectId === null ? CLOSED_TRAFFIC : (state.trafficPanels[projectId] ?? CLOSED_TRAFFIC)
+  )
+}
+
+export function useCollapsedBrowsers(): Readonly<Record<string, boolean>> {
+  return useWorkspaceStore((state) => state.collapsedBrowsers)
+}
+
+export function useEditorWidthFraction(projectId: string | null): number | undefined {
+  return useWorkspaceStore((state) =>
+    projectId === null ? undefined : state.editorWidthFractions[projectId]
+  )
+}
+
+export function useRowScrollOffset(projectId: string | null): number {
+  return useWorkspaceStore((state) =>
+    projectId === null ? 0 : (state.rowScroll[projectId] ?? 0)
   )
 }
 
@@ -289,14 +344,15 @@ export function useRowScroll(
   scroller: RefObject<HTMLElement | null>,
   projectId: string | null,
   settled: boolean,
-  mounted: boolean
-): void {
+  mounted: boolean,
+  origin = 0
+): (projectId: string) => void {
   const restoring = useRef<RowRestore | null>(null)
   useLayoutEffect(() => {
     const row = scroller.current
     if (row === null || projectId === null) return undefined
     const store = useWorkspaceStore.getState()
-    const target = store.rowScroll[projectId] ?? 0
+    const target = Math.max(0, origin + (store.rowScroll[projectId] ?? 0))
     row.scrollLeft = target
     const plan: RowRestore = {
       projectId,
@@ -313,7 +369,7 @@ export function useRowScroll(
       const pending = restoring.current === plan && !plan.touched
       if (pending && (!plan.settled || row.scrollLeft === plan.applied)) return
       if (restoring.current === plan) restoring.current = null
-      store.setRowScroll(projectId, row.scrollLeft)
+      store.setRowScroll(projectId, row.scrollLeft - origin)
     }
     for (const gesture of GESTURES) {
       row.addEventListener(gesture, touch, { capture: true, passive: true })
@@ -324,7 +380,7 @@ export function useRowScroll(
       row.removeEventListener('scroll', save)
       if (restoring.current === plan) restoring.current = null
     }
-  }, [scroller, projectId, mounted])
+  }, [scroller, projectId, mounted, origin])
   useLayoutEffect(() => {
     const row = scroller.current
     const plan = restoring.current
@@ -335,7 +391,11 @@ export function useRowScroll(
       plan.applied = row.scrollLeft
     }
     plan.settled = true
-  }, [scroller, projectId, settled, mounted])
+  }, [scroller, projectId, settled, mounted, origin])
+  return useCallback((id: string): void => {
+    const plan = restoring.current
+    if (plan !== null && plan.projectId === id) plan.touched = true
+  }, [])
 }
 
 export function useTrafficLive(projectId: string | null): boolean {

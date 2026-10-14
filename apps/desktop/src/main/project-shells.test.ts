@@ -24,7 +24,7 @@ let profiling: string | undefined
 
 beforeEach(() => {
   profiling = process.env[PROFILING]
-  delete process.env[PROFILING]
+  Reflect.deleteProperty(process.env, PROFILING)
   spawnRequested.mockClear()
   quit = null
   runtime = ChorusRuntime.open(
@@ -39,7 +39,7 @@ beforeEach(() => {
 
 afterEach(async () => {
   if (profiling === undefined) {
-    delete process.env[PROFILING]
+    Reflect.deleteProperty(process.env, PROFILING)
   } else {
     process.env[PROFILING] = profiling
   }

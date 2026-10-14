@@ -1,12 +1,15 @@
-import { Fragment, useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
-import { createPortal } from 'react-dom'
-import type {
-  KeyboardEvent as ReactKeyboardEvent,
-  PointerEvent as ReactPointerEvent,
-} from 'react'
+import { Fragment, useCallback, useEffect, useId, useLayoutEffect, useRef, useState } from 'react'
+import { createPortal, flushSync } from 'react-dom'
+import type { KeyboardEvent as ReactKeyboardEvent, PointerEvent as ReactPointerEvent } from 'react'
 import { useTranslation } from 'react-i18next'
-import { BOX_WIDTH, type WorkspaceLayoutNode } from '../../../shared/workspace-layout.js'
+import {
+  BOX_WIDTH,
+  EDITOR_WIDTH,
+  TRAFFIC_WIDTH,
+  type WorkspaceLayoutNode,
+} from '../../../shared/workspace-layout.js'
 import type { SessionInfo } from '../Session.js'
+import { BrowserPanel } from '../BrowserPanel.js'
 import { ProjectTerminalPane } from '../ProjectTerminalPane.js'
 import { TrafficPanel, type TrafficTerminalOption } from '../TrafficPanel.js'
 import type { WorkbenchGeometry } from '../workbench/WorkbenchFrame.js'
@@ -18,6 +21,7 @@ import type { ProjectInfo } from './session-row.js'
 import type { ActiveTabDrag } from './useTabDrag.js'
 import {
   clampActivityBar,
+  clampEditorWidth,
   columnWidths,
   columnsOf,
   editorViewport,
@@ -25,24 +29,72 @@ import {
   leafPaneIds,
   projectTerminalMinimum,
   projectTerminalWidth,
+  ROW_DIVIDER_WIDTH,
   ROW_EDGE_INSET,
 } from './layout.js'
 import {
+  useCollapsedBrowsers,
   useConversationGroups,
+  useEditorWidthFraction,
   usePane,
   useProjectRun,
   useProjectTerminalPane,
   useRowScroll,
+  useRowScrollOffset,
   useTrafficLive,
   useTrafficPanel,
   useWorkspaceActions,
 } from './hooks.js'
 import { PaneWorkbench } from './PaneWorkbench.js'
 import { PaneTabStrip } from './PaneTabStrip.js'
-import { routeRowWheel, startRowPush, stepRow, type RowWidths } from './row-drag.js'
+import {
+  routeRowWheel,
+  startEditorResize,
+  startRowPush,
+  stepEditorResize,
+  stepRow,
+  type RowWidths,
+} from './row-drag.js'
 import { useWorkspaceStore } from './store.js'
 
+const COLLAPSED_BROWSER_WIDTH = 100
+const COLLAPSED_TOOL_WIDTH = 100
+
+function EditorResizeDivider(props: {
+  readonly projectId: string
+  readonly width: number
+  readonly windowWidth: number
+  readonly onPointerDown: (event: ReactPointerEvent<HTMLDivElement>) => void
+  readonly onKeyDown: (event: ReactKeyboardEvent<HTMLDivElement>) => void
+  readonly onKeyUp: (event: ReactKeyboardEvent<HTMLDivElement>) => void
+  readonly onReset: () => void
+}): React.JSX.Element {
+  const { t } = useTranslation()
+  const offset = useRowScrollOffset(props.projectId)
+  const width = clampEditorWidth(props.width - offset, props.windowWidth)
+  return (
+    <div
+      className="conversation-sash"
+      data-editor-resize
+      style={{ flexBasis: `${String(ROW_DIVIDER_WIDTH)}px` }}
+      role="separator"
+      aria-orientation="vertical"
+      aria-label={t('workspace.resizeEditor')}
+      aria-valuemin={Math.min(EDITOR_WIDTH.min, props.windowWidth)}
+      aria-valuemax={Math.floor(props.windowWidth * EDITOR_WIDTH.maxFraction)}
+      aria-valuenow={width}
+      tabIndex={0}
+      onPointerDown={props.onPointerDown}
+      onKeyDown={props.onKeyDown}
+      onKeyUp={props.onKeyUp}
+      onDoubleClick={props.onReset}
+    />
+  )
+}
+
 export interface LayoutViewProps {
+  readonly webTabsPaneId?: string | null
+  readonly webShowing?: boolean
   readonly node: WorkspaceLayoutNode
   readonly path: readonly number[]
   readonly sessions: ReadonlyMap<string, SessionInfo>
@@ -92,6 +144,7 @@ export function EditorPane(
   props: LayoutViewProps & { readonly paneId: string }
 ): React.JSX.Element {
   const { t } = useTranslation()
+  const webShowing = props.webShowing === true
   const pane = usePane(props.paneId)
   /*
    * The workbench failure message moved down into `PaneWorkbench`, which holds
@@ -117,22 +170,27 @@ export function EditorPane(
   const content = useRef<HTMLDivElement>(null)
   const scroller = useRef<HTMLDivElement>(null)
   const trafficBox = useRef<HTMLElement>(null)
+  const terminalBox = useRef<HTMLElement>(null)
   const [runHost, setRunHost] = useState<HTMLDivElement | null>(null)
   const activityBar = useRef<HTMLDivElement>(null)
   const [paneWidth, setPaneWidth] = useState(0)
+  const [rowWidth, setRowWidth] = useState(0)
   const [windowWidth, setWindowWidth] = useState(() => window.innerWidth)
   const [activityBars, setActivityBars] = useState<Readonly<Record<string, number>>>({})
+  const collapsedBrowsers = useCollapsedBrowsers()
   const hasPane = pane !== undefined
   useLayoutEffect(() => {
     const element = content.current
     if (element === null) return undefined
     const measureWidth = (): void => {
       setPaneWidth(element.clientWidth)
+      setRowWidth(scroller.current?.clientWidth ?? 0)
       setWindowWidth(window.innerWidth)
     }
     measureWidth()
     const observer = new ResizeObserver(measureWidth)
     observer.observe(element)
+    if (scroller.current !== null) observer.observe(scroller.current)
     window.addEventListener('resize', measureWidth)
     return () => {
       observer.disconnect()
@@ -143,17 +201,17 @@ export function EditorPane(
     const row = scroller.current
     return row === null ? undefined : routeRowWheel(row)
   }, [hasPane])
-  useEffect(() => {
-    const row = scroller.current
-    if (row === null || projectId === null) return
-    const left = useWorkspaceStore.getState().rowScroll[projectId]
-    if (left !== undefined) row.scrollLeft = left
-  }, [projectId, hasPane])
-  const editorWidth = editorWidthIn(windowWidth)
+  const editorFraction = useEditorWidthFraction(projectId)
+  const editorCapacity = clampEditorWidth(windowWidth, windowWidth)
   const barWidth =
-    projectId === null ? 0 : clampActivityBar(activityBars[projectId] ?? 0, editorWidth, paneWidth)
+    projectId === null
+      ? 0
+      : clampActivityBar(activityBars[projectId] ?? 0, editorCapacity, paneWidth)
   const gutterWidth = ROW_EDGE_INSET + barWidth
-  const bodyWidth = Math.max(0, editorWidth - gutterWidth)
+  const availableWidth = rowWidth > 0 ? rowWidth + gutterWidth : paneWidth || windowWidth
+  const editorWidth = editorWidthIn(windowWidth, editorFraction, availableWidth)
+  const rowOrigin = editorCapacity - editorWidth
+  const bodyWidth = Math.max(0, editorCapacity - gutterWidth)
   const geometry = useCallback((host: HTMLElement): WorkbenchGeometry | null => {
     const bar = activityBar.current
     const row = scroller.current
@@ -169,11 +227,13 @@ export function EditorPane(
   }, [])
   const revealRow = (id: string): void => {
     if (id !== projectId) return
+    markRowTouched(id)
     const row = scroller.current
     if (row !== null) row.scrollLeft = 0
   }
   const scrollRow = (id: string, delta: number): void => {
     if (id !== projectId) return
+    markRowTouched(id)
     const row = scroller.current
     if (row !== null) row.scrollLeft += delta
   }
@@ -185,16 +245,24 @@ export function EditorPane(
     if (placed.left >= shown.left && placed.right <= shown.right) return
     row.scrollLeft += placed.left - shown.left
   }
-  const revealTraffic = (): void => {
-    revealInRow(trafficBox.current)
-  }
   const arrangement = useConversationGroups(projectId)
   const traffic = useTrafficPanel(projectId)
   const trafficLive = useTrafficLive(projectId)
   const run = useProjectRun(projectId)
   const terminalPane = useProjectTerminalPane(projectId)
+  const terminalShown = run?.available === true
   const terminalMinimum = projectTerminalMinimum(terminalPane.shells.length)
-  useRowScroll(scroller, projectId, run !== null, hasPane)
+  const trafficCollapsed = traffic.collapsed === true
+  const terminalCollapsed = terminalPane.collapsed === true
+  const trafficWidth = trafficCollapsed
+    ? COLLAPSED_TOOL_WIDTH
+    : Math.max(traffic.width, TRAFFIC_WIDTH.min)
+  const terminalWidth = terminalCollapsed
+    ? COLLAPSED_TOOL_WIDTH
+    : projectTerminalWidth(terminalPane)
+  const browserCollapsed = projectId !== null && collapsedBrowsers[projectId] === true
+  const trafficBodyId = useId()
+  const markRowTouched = useRowScroll(scroller, projectId, run !== null, hasPane, rowOrigin)
   const widths = arrangement === undefined ? [] : columnWidths(arrangement)
   const focusedConversationGroupId = arrangement?.focusedPaneId ?? null
   const activeConversationId =
@@ -207,12 +275,30 @@ export function EditorPane(
     moveConversationBox,
     setConversationWidths,
     resetProjectWidths,
+    setEditorWidthFraction,
+    setRowScroll,
     setTrafficWidth,
     setProjectTerminalWidth,
+    setTrafficCollapsed,
+    setProjectTerminalCollapsed,
+    setBrowserCollapsed,
     addProjectShell,
     removeProjectShell,
   } = useWorkspaceActions()
   const commitLayout = props.onCommitLayout
+  const revealTraffic = (): void => {
+    if (projectId !== null) markRowTouched(projectId)
+    if (
+      projectId !== null &&
+      useWorkspaceStore.getState().trafficPanels[projectId]?.collapsed === true
+    ) {
+      flushSync(() => {
+        setTrafficCollapsed(projectId, false)
+      })
+      commitLayout()
+    }
+    revealInRow(trafficBox.current)
+  }
   /*
    * One drag per pane, not one per app. A conversation cannot leave its project
    * and a project's boxes live in exactly one pane, so there is nothing for a
@@ -235,6 +321,28 @@ export function EditorPane(
     if (projectId === null) return
     startRowPush(event, applyRow(projectId), commitLayout)
   }
+  const applyEditorWidth = (width: number): void => {
+    if (projectId === null || windowWidth <= 0) return
+    setEditorWidthFraction(projectId, width / windowWidth)
+    setRowScroll(projectId, 0)
+    if (scroller.current !== null) scroller.current.scrollLeft = editorCapacity - width
+  }
+  const visibleEditorWidth = (): number =>
+    clampEditorWidth(editorCapacity - (scroller.current?.scrollLeft ?? rowOrigin), windowWidth)
+  const resizeEditor = (event: ReactPointerEvent<HTMLDivElement>): void => {
+    if (projectId === null || event.button !== 0) return
+    markRowTouched(projectId)
+    startEditorResize(event, visibleEditorWidth(), windowWidth, applyEditorWidth, commitLayout)
+  }
+  const nudgeEditor = (event: ReactKeyboardEvent<HTMLDivElement>): void => {
+    stepEditorResize(event, visibleEditorWidth(), windowWidth, (width) => {
+      if (projectId !== null) markRowTouched(projectId)
+      applyEditorWidth(width)
+    })
+  }
+  const commitEditorNudge = (event: ReactKeyboardEvent<HTMLDivElement>): void => {
+    if (['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) commitLayout()
+  }
   const nudgeRow = (event: ReactKeyboardEvent<HTMLDivElement>): void => {
     if (projectId === null) return
     stepRow(event, applyRow(projectId))
@@ -244,10 +352,19 @@ export function EditorPane(
   }
   const resetWidths = (): void => {
     if (projectId === null) return
-    resetProjectWidths(projectId)
+    markRowTouched(projectId)
+    flushSync(() => {
+      resetProjectWidths(projectId)
+      setRowScroll(projectId, 0)
+    })
+    if (scroller.current !== null) {
+      scroller.current.scrollLeft =
+        editorCapacity - editorWidthIn(windowWidth, undefined, availableWidth)
+    }
     commitLayout()
   }
   const addShell = (id: string): string => {
+    setProjectTerminalCollapsed(id, false)
     const shell = addProjectShell(id)
     commitLayout()
     return shell
@@ -298,6 +415,7 @@ export function EditorPane(
       <PaneTabStrip {...props} pane={pane} />
       <div
         className="workspace-pane-content"
+        inert={webShowing}
         data-pane-content
         ref={content}
         /*
@@ -326,7 +444,7 @@ export function EditorPane(
               projectId={projectId}
               /* Only the focused pane's pad answers ⌘⇧N — see the effect that
                  reads this. Four panes are four mounted pads. */
-              active={focused}
+              active={focused && !webShowing}
               conversationId={activeConversationId}
               notes={note?.notes ?? null}
               size={{ width: note?.noteWidth ?? null, height: note?.noteHeight ?? null }}
@@ -381,7 +499,7 @@ export function EditorPane(
                   <PaneWorkbench
                     key={id}
                     projectId={id}
-                    active={id === projectId}
+                    active={id === projectId && !webShowing}
                     projectRoot={
                       [...props.sessions.values()].find((session) => session.projectId === id)
                         ?.cwd ?? ''
@@ -395,12 +513,14 @@ export function EditorPane(
               </div>
             )}
             {projectId !== null && (
-              <div
-                className="conversation-sash"
-                data-fixed
-                role="separator"
-                aria-orientation="vertical"
-                onDoubleClick={resetWidths}
+              <EditorResizeDivider
+                projectId={projectId}
+                width={editorWidth}
+                windowWidth={windowWidth}
+                onPointerDown={resizeEditor}
+                onKeyDown={nudgeEditor}
+                onKeyUp={commitEditorNudge}
+                onReset={resetWidths}
               />
             )}
             {/*
@@ -448,7 +568,7 @@ export function EditorPane(
                       arrangement={arrangement}
                       sessions={conversations}
                       paneId={props.paneId}
-                      paneFocused={focused}
+                      paneFocused={focused && !webShowing}
                       drag={conversationDrag}
                       onSizes={(path, sizes) => {
                         setConversationSizes(projectId, path, sizes)
@@ -474,7 +594,9 @@ export function EditorPane(
                 <section
                   className="traffic-box"
                   ref={trafficBox}
-                  style={{ flex: `0 0 ${String(traffic.width)}px` }}
+                  data-collapsed={trafficCollapsed}
+                  data-min-width={TRAFFIC_WIDTH.min}
+                  style={{ flex: `0 0 ${String(trafficWidth)}px` }}
                 >
                   <div className="conversation-dock">
                     <div className="conversation-dock-tabs">
@@ -487,7 +609,7 @@ export function EditorPane(
                           <span className="conversation-dock-tab-title">
                             {t('traffic.tabTitle')}
                           </span>
-                          {trafficLive && (
+                          {trafficLive && !trafficCollapsed && (
                             <span className="traffic-live">
                               <span className="traffic-live-dot" aria-hidden="true" />
                               {t('traffic.live')}
@@ -496,37 +618,95 @@ export function EditorPane(
                         </span>
                       </div>
                     </div>
+                    <button
+                      type="button"
+                      className="conversation-dock-toggle"
+                      aria-expanded={!trafficCollapsed}
+                      aria-controls={trafficBodyId}
+                      aria-label={trafficCollapsed ? t('traffic.expand') : t('traffic.collapse')}
+                      title={trafficCollapsed ? t('traffic.expand') : t('traffic.collapse')}
+                      onClick={() => {
+                        markRowTouched(projectId)
+                        flushSync(() => {
+                          setTrafficCollapsed(projectId, !trafficCollapsed)
+                        })
+                        if (trafficCollapsed) revealInRow(trafficBox.current)
+                        commitLayout()
+                      }}
+                    >
+                      <span aria-hidden="true">{trafficCollapsed ? '▸' : '◂'}</span>
+                    </button>
                   </div>
-                  <div className="conversation-body">
+                  <div id={trafficBodyId} className="conversation-body" hidden={trafficCollapsed}>
                     <TrafficPanel
                       projectId={projectId}
                       terminals={props.trafficTerminals}
                       run={run}
                       runHost={{ element: runHost, reveal: revealTraffic }}
+                      collapsed={trafficCollapsed}
                     />
                   </div>
                 </section>
+                {terminalShown && (
+                  <>
+                    {rowSash}
+                    <section
+                      className="project-terminal-box"
+                      ref={terminalBox}
+                      data-collapsed={terminalCollapsed}
+                      data-min-width={terminalMinimum}
+                      style={{ flex: `0 0 ${String(terminalWidth)}px` }}
+                    >
+                      <ProjectTerminalPane
+                        key={projectId}
+                        projectId={projectId}
+                        run={run}
+                        shells={terminalPane.shells}
+                        onAddShell={addShell}
+                        onRemoveShell={removeShell}
+                        onReveal={revealInRow}
+                        collapsed={terminalCollapsed}
+                        onToggleCollapsed={() => {
+                          markRowTouched(projectId)
+                          flushSync(() => {
+                            setProjectTerminalCollapsed(projectId, !terminalCollapsed)
+                          })
+                          if (terminalCollapsed) revealInRow(terminalBox.current)
+                          commitLayout()
+                        }}
+                      />
+                    </section>
+                  </>
+                )}
               </>
             )}
-            {projectId !== null && run?.available === true && (
+            {projectId !== null && (
               <>
                 {rowSash}
                 <section
-                  className="project-terminal-box"
-                  data-min-width={terminalMinimum}
+                  className="browser-box"
+                  data-collapsed={browserCollapsed}
                   style={{
-                    flex: `0 0 ${String(projectTerminalWidth(terminalPane))}px`,
+                    flex: `0 0 ${String(browserCollapsed ? COLLAPSED_BROWSER_WIDTH : rowWidth)}px`,
                   }}
                 >
-                  <ProjectTerminalPane
-                    key={projectId}
-                    projectId={projectId}
-                    run={run}
-                    shells={terminalPane.shells}
-                    onAddShell={addShell}
-                    onRemoveShell={removeShell}
-                    onReveal={revealInRow}
-                  />
+                  {pane.tabs.map((id) => (
+                    <BrowserPanel
+                      key={id}
+                      projectId={id}
+                      active={id === projectId && !webShowing}
+                      collapsed={collapsedBrowsers[id] === true}
+                      scroller={scroller}
+                      markTouched={markRowTouched}
+                      onReveal={revealInRow}
+                      onToggleCollapsed={() => {
+                        flushSync(() => {
+                          setBrowserCollapsed(id, collapsedBrowsers[id] !== true)
+                        })
+                        commitLayout()
+                      }}
+                    />
+                  ))}
                 </section>
               </>
             )}

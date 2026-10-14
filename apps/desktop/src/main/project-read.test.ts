@@ -544,10 +544,10 @@ describe('read_request', () => {
 
   it('holds 32 KiB with headers and metadata counted, and bounds each header', async () => {
     const world = new FakeWorld()
-    const many = Array.from(
-      { length: 150 },
-      (_, index): [string, string] => [`x-header-${String(index)}`, 'v'.repeat(2_000)]
-    )
+    const many = Array.from({ length: 150 }, (_, index): [string, string] => [
+      `x-header-${String(index)}`,
+      'v'.repeat(2_000),
+    ])
     world.store('req-1', {
       detail: {
         url: `http://127.0.0.1:30100/${'u'.repeat(5_000)}`,
@@ -579,10 +579,10 @@ describe('read_request', () => {
     const world = new FakeWorld()
     world.store('req-1', {
       detail: {
-        responseHeaders: Array.from(
-          { length: 120 },
-          (_, index): [string, string] => [`h${String(index)}`, 'v']
-        ),
+        responseHeaders: Array.from({ length: 120 }, (_, index): [string, string] => [
+          `h${String(index)}`,
+          'v',
+        ]),
       },
     })
     const doc = parsed(

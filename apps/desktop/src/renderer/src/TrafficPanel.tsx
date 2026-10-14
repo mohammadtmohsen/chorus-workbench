@@ -1,5 +1,5 @@
 import type { TFunction } from 'i18next'
-import { useCallback, useEffect, useId, useRef, useState } from 'react'
+import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { useTranslation } from 'react-i18next'
 import {
@@ -18,6 +18,7 @@ import type {
 } from '../../shared/run-ipc.js'
 import {
   TRAFFIC_ENV_NAME,
+  isTrafficHost,
   type TrafficFailure,
   type TrafficLegacy,
   type TrafficPush,
@@ -26,13 +27,10 @@ import {
 import { TrafficRequestInspector } from './TrafficRequestInspector.js'
 import {
   filterRows,
-  followsRows,
   isPending,
   outcomeOf,
-  pageOf,
   pathOf,
   statusClassOf,
-  type RowScroll,
   type TrafficOutcome,
 } from './traffic-filter.js'
 import {
@@ -57,6 +55,8 @@ export interface TrafficRunHost {
 const sourceValue = (source: TrafficSourceShape): string =>
   source.kind === 'off' ? '' : source.kind === 'logcat' ? 'logcat' : terminalRefKey(source.ref)
 
+const hostOf = (state: TrafficState): string => state.host ?? state.address?.split(':')[0] ?? ''
+
 const idle: TrafficState = {
   capturing: false,
   port: null,
@@ -80,6 +80,7 @@ export const FAILURE_KEYS: Record<TrafficFailure, string> = {
   'no-origin': 'traffic.noOrigin',
   'ownership-unknown': 'traffic.ownershipUnknown',
   unresolved: 'traffic.unresolved',
+  'invalid-host': 'traffic.hostInvalid',
 }
 
 export const RUN_FAILURE_KEYS: Record<RunFailureShape, string> = {
@@ -125,6 +126,8 @@ const COMMAND_LIMIT = 500
 const LABEL_LIMIT = 40
 const ID_LIMIT = 64
 const VARIABLE_LIMIT = 64
+const DEFAULT_CALL_LIMIT = 10
+const CALL_LIMITS = [DEFAULT_CALL_LIMIT, 20, 50, 100, 200, 1000]
 
 interface RunChoice {
   readonly id: string
@@ -182,9 +185,11 @@ export function TrafficPanel(props: {
   readonly terminals: readonly TrafficTerminalOption[]
   readonly run?: RunState | null
   readonly runHost?: TrafficRunHost
+  readonly collapsed?: boolean | undefined
 }): React.JSX.Element {
   const { t } = useTranslation()
   const { projectId } = props
+  const collapsed = props.collapsed === true
   /*
    * One base for the setup fields' ids. Two panels can be mounted at once — a
    * pane split puts the traffic tab in each — and `htmlFor` takes a string, so
@@ -197,6 +202,9 @@ export function TrafficPanel(props: {
   const [portDraft, setPortDraft] = useState(String(DEFAULT_TRAFFIC_PORT))
   const [originDraft, setOriginDraft] = useState('')
   const [envVarDraft, setEnvVarDraft] = useState('')
+  const [hostDraft, setHostDraft] = useState('')
+  const [hostSaving, setHostSaving] = useState(false)
+  const [addressChanged, setAddressChanged] = useState(false)
   const [filters, setFilters] = useState(DEFAULT_LOGCAT_FILTER)
   const [failure, setFailure] = useState<TrafficFailure | 'action' | 'origin' | null>(null)
   /*
@@ -208,7 +216,7 @@ export function TrafficPanel(props: {
    * taken. Naming the field is what lets it appear under the control it is
    * about, in the hint slot that is already there.
    */
-  const [refusedAt, setRefusedAt] = useState<'origin' | 'port' | 'envVar' | null>(null)
+  const [refusedAt, setRefusedAt] = useState<'origin' | 'port' | 'envVar' | 'host' | null>(null)
   const [selectedSeq, setSelectedSeq] = useState<number | null>(null)
   const [setupOpen, setSetupOpen] = useState(false)
   const [detected, setDetected] = useState<DetectedScriptsShape | null>(null)
@@ -225,83 +233,50 @@ export function TrafficPanel(props: {
   const setupSession = useRef(0)
   const choicesNow = useRef<readonly RunChoice[]>([])
   const selectedNow = useRef<string | null>(null)
+  const hostRequest = useRef<object | null>(null)
+  const advertised = useRef<{ projectId: string; address: string | null; token: number | null }>({
+    projectId,
+    address: null,
+    token: null,
+  })
   const wantedChoice = useRef<RunChoice | null>(null)
   const sendingFor = useRef<object | null>(null)
   const confirmedNow = useRef<RunCommandsShape | null>(props.run?.commands ?? null)
   const variableEdited = useRef(false)
   const [search, setSearch] = useState('')
-  /** Null means the last page, which keeps following as rows arrive. */
-  const [page, setPage] = useState<number | null>(null)
+  const [callLimit, setCallLimit] = useState(DEFAULT_CALL_LIMIT)
 
   const rowsList = useRef<HTMLUListElement>(null)
-  /*
-   * Where the list stood the last time the effect looked, and the answer for a
-   * list nobody has moved since.
-   *
-   * By the time the effect below runs the new row is already in the DOM and
-   * `scrollHeight` has grown by its height, so asking "am I at the bottom"
-   * *then* answers no every single time and the list would never follow at all —
-   * which looks exactly like the feature not being wired up. This is where "was
-   * it at the bottom before this row arrived" comes from.
-   *
-   * Zeros mean "at the bottom": the first run, and the first run after a project
-   * change, both follow — which is where somebody opening the panel wants to be.
-   */
-  const settled = useRef<RowScroll>({ scrollHeight: 0, scrollTop: 0, clientHeight: 0 })
-  /** The newest row's sequence: a new row, as opposed to a pending one rewritten in place. */
-  const newestSeq = stream.rows.at(-1)?.seq ?? null
+  const filtered = filterRows(stream.rows, search)
+  const shown = filtered.slice(-callLimit)
+  const newestSeq = shown.at(-1)?.seq ?? null
+  const newestRequestSeq = shown.findLast((row) => row.source === 'http')?.seq ?? null
+  const currentProcess = props.run?.process
+  const runToken = currentProcess && 'token' in currentProcess ? currentProcess.token : null
+  const runIsBusy = runBusy(props.run ?? null)
+  const advertisedHost = hostOf(capture)
 
-  /*
-   * **The project whose first call has already been selected for the reader.**
-   *
-   * The inspector sits below the list and describes nothing until a row is
-   * chosen, so a started capture used to open on a bare table with the detail
-   * region absent — and then jump to its share of the panel the moment anything
-   * was clicked. Selecting the first call as it arrives removes the click and
-   * the jump together.
-   *
-   * **Once, and against the project rather than against "nothing is selected".**
-   * A guard that re-fired whenever the selection was empty would walk the
-   * inspector through every arriving call, firing a detail read for each.
-   *
-   * Holding the project id also answers the other two transitions without a
-   * second rule: an emptied list clears it, so the next call after a clear is
-   * the first call of a fresh run and gets the same treatment; and a different
-   * project never matches, so its first call is selected too.
-   *
-   * At the transition there is exactly one row, so "the first" and "the newest"
-   * are the same row and there is nothing to choose between — which is what
-   * keeps this from fighting the list's own following of the bottom.
-   */
-  const firstChosenFor = useRef<string | null>(null)
   useEffect(() => {
-    /*
-     * **Rows belonging to another project are not this project's first call.**
-     *
-     * Nothing clears the stream when the project changes — the attach that
-     * replaces it resolves a round trip later — so for that window `rows` is
-     * still the project being left. Reading them here armed the ref against the
-     * *new* project while selecting a stale row, and the reset effect below then
-     * cleared that selection. When the new project's rows finally arrived the
-     * ref already matched and this returned without selecting: switching
-     * projects left an empty inspector, which is the behaviour this exists to
-     * remove.
-     *
-     * Guarding on the stream's own project is what makes that impossible rather
-     * than unlikely. Clearing the ref in the reset effect, or moving that effect
-     * above this one, would both work — and both would hold only while the two
-     * effects stayed in that order, which is what made it fragile to begin with.
-     */
-    if (stream.projectId !== projectId) return
-    const first = stream.rows.find((row) => row.source === 'http')
-    if (first === undefined) {
-      firstChosenFor.current = null
-      return
+    const previous = advertised.current
+    advertised.current = { projectId, address: capture.address, token: runToken }
+    if (previous.projectId !== projectId || previous.token !== runToken || !runIsBusy) {
+      setAddressChanged(false)
+    } else if (
+      previous.address !== null &&
+      capture.address !== null &&
+      previous.address !== capture.address
+    ) {
+      setAddressChanged(true)
     }
-    if (firstChosenFor.current === projectId) return
-    firstChosenFor.current = projectId
-    setSelectedSeq(first.seq)
-  }, [stream.projectId, stream.rows, projectId])
+  }, [projectId, capture.address, runToken, runIsBusy])
+
+  useEffect(() => {
+    setHostDraft(advertisedHost)
+  }, [projectId, advertisedHost])
+
+  useEffect(() => {
+    setSelectedSeq(stream.projectId === projectId ? newestRequestSeq : null)
+  }, [projectId, stream.projectId, stream.captureId, newestRequestSeq])
 
   useEffect(() => {
     setupSession.current += 1
@@ -312,6 +287,8 @@ export function TrafficPanel(props: {
     setRunRefused(false)
     setSavingChoice(null)
     setChoiceRefused(false)
+    hostRequest.current = null
+    setHostSaving(false)
     confirmedNow.current = props.run?.commands ?? null
     setConfirmed(confirmedNow.current)
   }, [projectId])
@@ -324,62 +301,11 @@ export function TrafficPanel(props: {
     }
   }, [projectId])
 
-  // A selection belongs to the project's history, not to the panel: switching
-  // project closes whatever was open rather than describing the wrong one. The
-  // scroll follows the same rule, from the other end — a different project opens
-  // on its newest row, not wherever the last one was left.
-  useEffect(() => {
-    setSelectedSeq(null)
-    settled.current = { scrollHeight: 0, scrollTop: 0, clientHeight: 0 }
-  }, [projectId])
-
-  useEffect(() => {
+  useLayoutEffect(() => {
     const list = rowsList.current
-    if (list === null) return
-    const previous = settled.current
-    /*
-     * **Measured against the height the list had last time, not the height it
-     * has now.**
-     *
-     * The new row is already in the DOM, so `scrollHeight` has grown by its
-     * height — asking "am I at the bottom" against *that* answers no every time
-     * and the list would never follow at all, which looks exactly like the
-     * feature not being wired up. What is asked instead is where the person left
-     * the list, relative to the bottom they could see at the time.
-     *
-     * One rule, and it covers the case that broke the first two attempts: five
-     * rows arriving in a single render. Measuring the grown height made the list
-     * look 115px from a bottom nobody had moved away from, and the following
-     * stopped there — measured, 48px short with those rows already in the DOM.
-     *
-     * This reads no scroll event at all, deliberately. A listener sees the
-     * geometry at the moment the browser fires it, which can be a row or two
-     * after the movement it reports — measured as the following stopping dead at
-     * 1,204px from the bottom with nobody having touched the list.
-     */
-    const atBottom = followsRows(
-      {
-        scrollHeight: previous.scrollHeight,
-        scrollTop: list.scrollTop,
-        clientHeight: list.clientHeight,
-      },
-      page
-    )
-    if (atBottom) {
-      /*
-       * Assigned rather than scrolled smoothly: under a flood a smooth scroll
-       * never catches up and reads as lag rather than as motion. Nothing here
-       * touches focus — the arrow walk owns that, and a scroll that also focused
-       * would fight it.
-       */
-      list.scrollTop = list.scrollHeight
-    }
-    settled.current = {
-      scrollHeight: list.scrollHeight,
-      scrollTop: list.scrollTop,
-      clientHeight: list.clientHeight,
-    }
-  }, [newestSeq, page, projectId])
+    if (list === null || collapsed || stream.projectId !== projectId) return
+    list.scrollTop = list.scrollHeight
+  }, [newestSeq, callLimit, search, projectId, stream.projectId, stream.captureId, collapsed])
 
   useEffect(() => {
     let attachment: TrafficAttachment | null = null
@@ -450,6 +376,7 @@ export function TrafficPanel(props: {
         setPortDraft(String(opened.state.wantedPort ?? DEFAULT_TRAFFIC_PORT))
         setOriginDraft(opened.state.origin ?? '')
         setEnvVarDraft(opened.state.envVar ?? '')
+        setHostDraft(hostOf(opened.state))
         if (opened.state.source.kind === 'logcat') setFilters(opened.state.source.filters)
       })
       .catch(() => {
@@ -614,6 +541,39 @@ export function TrafficPanel(props: {
     [projectId]
   )
 
+  const commitHost = useCallback(
+    (host: string | null): void => {
+      const lifetime = actingFor.current
+      if (lifetime === null || hostRequest.current !== null) return
+      if (host !== null && !isTrafficHost(host)) {
+        setFailure('invalid-host')
+        setRefusedAt('host')
+        return
+      }
+      const request = {}
+      hostRequest.current = request
+      setHostSaving(true)
+      void window.chorus
+        .configureTraffic({ projectId, config: { host } })
+        .then(({ state, failure: refused }) => {
+          if (actingFor.current !== lifetime) return
+          setCapture(state)
+          setFailure(refused)
+          setRefusedAt(refused === null ? null : 'host')
+          setHostDraft(hostOf(state))
+        })
+        .catch(() => {
+          if (actingFor.current === lifetime) setFailure('action')
+        })
+        .finally(() => {
+          if (actingFor.current !== lifetime || hostRequest.current !== request) return
+          hostRequest.current = null
+          setHostSaving(false)
+        })
+    },
+    [projectId]
+  )
+
   const copy = useCallback((text: string): void => {
     void window.chorus.copyText({ text })
   }, [])
@@ -644,7 +604,7 @@ export function TrafficPanel(props: {
   }, [projectId, capture.capturing])
 
   const run = props.run ?? null
-  const managedRun = run !== null && run.available ? run : null
+  const managedRun = run?.available ? run : null
   const busy = runBusy(run)
   const commands = run?.commands ?? null
   const defaultCommand =
@@ -652,7 +612,7 @@ export function TrafficPanel(props: {
       ? null
       : (confirmed.commands.find((each) => each.id === confirmed.defaultId) ?? null)
   const commandsKey = commands === null ? '' : JSON.stringify(commands)
-  const needsSetup = confirmed === null || capture.origin === null || capture.envVar === null
+  const needsSetup = confirmed === null
 
   const setChoices = (next: readonly RunChoice[]): void => {
     choicesNow.current = next
@@ -774,7 +734,7 @@ export function TrafficPanel(props: {
   const commitSetupOrigin = (): void => {
     const origin = originDraft.trim()
     if (origin === '') {
-      setSetupError('run.needOrigin')
+      setSetupError(null)
       return
     }
     commitSetup({ origin })
@@ -783,7 +743,7 @@ export function TrafficPanel(props: {
   const commitSetupVariable = (name: string): void => {
     const variable = name.trim()
     if (variable === '') {
-      setSetupError('run.needVariable')
+      setSetupError(null)
       return
     }
     if (variable.length > VARIABLE_LIMIT || !TRAFFIC_ENV_NAME.test(variable)) {
@@ -842,8 +802,7 @@ export function TrafficPanel(props: {
     const shown = choicesNow.current.find((each) => each.id === selectedNow.current)
     if (
       incoming !== undefined &&
-      shown !== undefined &&
-      incoming.id === shown.id &&
+      incoming.id === shown?.id &&
       incoming.label === shown.label &&
       incoming.command === shown.command
     ) {
@@ -887,7 +846,9 @@ export function TrafficPanel(props: {
         if (lifetime !== null && actingFor.current === lifetime) setRunRefused(false)
       })
       .catch(() => {
-        if (lifetime !== null && actingFor.current === lifetime) setRunRefused(true)
+        if (lifetime === null || actingFor.current !== lifetime) return
+        setRunRefused(true)
+        props.runHost?.reveal()
       })
   }
 
@@ -912,23 +873,13 @@ export function TrafficPanel(props: {
    * already owns, with the faster of the two winning. So the list is not touched
    * here at all.
    *
-   * The page is, and has to be: somebody who had paged back would otherwise be
-   * left on a suppressed follow over an empty list. The selection needs nothing —
-   * it is `stream.rows.find(...)`, so it falls to null on its own when the rows
-   * go. Both of those were checked rather than assumed.
-   *
    * Available whether capture is running or not: clearing what was captured and
    * forwarding what comes next are separate, and `clear()` leaves the socket up.
    */
   const clearCaptured = useCallback((): void => {
-    void window.chorus
-      .clearTraffic({ projectId })
-      .then(() => {
-        setPage(null)
-      })
-      .catch(() => {
-        setFailure('action')
-      })
+    void window.chorus.clearTraffic({ projectId }).catch(() => {
+      setFailure('action')
+    })
   }, [projectId])
 
   const decide = useCallback((keep: boolean): void => {
@@ -949,16 +900,6 @@ export function TrafficPanel(props: {
     unreadable: 'traffic.outcomeUnreadable',
     aborted: 'traffic.outcomeAborted',
     pending: 'traffic.outcomePending',
-  }
-
-  /*
-   * A new question starts at the newest answer — keeping a page number across a
-   * change to the search would show a middle page of a list nobody has looked
-   * at yet.
-   */
-  const searchFor = (next: string): void => {
-    setSearch(next)
-    setPage(null)
   }
 
   /*
@@ -1008,7 +949,8 @@ export function TrafficPanel(props: {
    * "set an address first" — from rendering under a setup field it has nothing
    * to do with, without having to clear `refusedAt` at every other call site.
    */
-  const refusedField = failure === 'capturing' ? refusedAt : null
+  const refusedField =
+    failure === 'invalid-host' ? 'host' : failure === 'capturing' ? refusedAt : null
 
   const outcomeBadge = (row: Extract<TrafficRowShape, { source: 'http' }>): React.JSX.Element => (
     <span className="traffic-outcome" data-outcome={outcomeOf(row)}>
@@ -1058,16 +1000,6 @@ export function TrafficPanel(props: {
     )
   }
 
-  const filtered = filterRows(stream.rows, search)
-  const paged = pageOf(filtered, page)
-  const shown = paged.rows
-
-  const goTo = (index: number): void => {
-    // Landing on the last page resumes following, so a capture that keeps
-    // producing rows does not leave the person behind.
-    setPage(index >= paged.count - 1 ? null : index)
-  }
-
   /*
    * Selection is held by sequence, not by row object.
    *
@@ -1079,7 +1011,7 @@ export function TrafficPanel(props: {
    * something that is no longer listed.
    */
   const selected =
-    selectedSeq === null
+    stream.projectId !== projectId || selectedSeq === null
       ? null
       : (stream.rows.find(
           (row): row is Extract<TrafficRowShape, { source: 'http' }> =>
@@ -1164,9 +1096,7 @@ export function TrafficPanel(props: {
          * answered every time it was pressed.
          */
         disabled={!capture.capturing && capture.origin === null}
-        title={
-          !capture.capturing && capture.origin === null ? t('traffic.noOrigin') : undefined
-        }
+        title={!capture.capturing && capture.origin === null ? t('traffic.noOrigin') : undefined}
         onClick={toggle}
       >
         {indicator}
@@ -1224,20 +1154,15 @@ export function TrafficPanel(props: {
       <header className="traffic-head">
         <span className="traffic-title">{t('traffic.title')}</span>
         <span className="traffic-count">
-          {filtered.length === stream.rows.length
+          {shown.length === stream.rows.length
             ? t('traffic.total', { total: stream.rows.length })
-            : t('traffic.matching', { shown: filtered.length, total: stream.rows.length })}
+            : t('traffic.matching', { shown: shown.length, total: stream.rows.length })}
         </span>
         <span className="traffic-port">
           {capture.address === null
             ? t('traffic.notListening')
             : t('traffic.listeningOn', { host: capture.address })}
         </span>
-        {capture.address !== null && capture.forwardedDevices > 0 && (
-          <span className="traffic-forwarded">
-            {t('traffic.androidForwarded', { count: capture.forwardedDevices })}
-          </span>
-        )}
         {runControls}
       </header>
       {runToggle !== null && runHostElement !== null && createPortal(runToggle, runHostElement)}
@@ -1325,10 +1250,11 @@ export function TrafficPanel(props: {
               {t('run.add')}
             </button>
           </div>
+          <p className="traffic-field-hint">{t('run.captureHint')}</p>
           {capture.origin === null && (
             <div className="traffic-field" data-run-field="origin">
               <label className="traffic-field-name" htmlFor={`${fields}-run-origin`}>
-                {t('traffic.origin')}
+                {t('run.origin')}
               </label>
               <input
                 id={`${fields}-run-origin`}
@@ -1432,6 +1358,78 @@ export function TrafficPanel(props: {
 
       <details className="traffic-setup">
         <summary className="traffic-setup-summary">{t('traffic.setup')}</summary>
+        {capture.address !== null && capture.forwardedDevices > 0 && (
+          <div className="traffic-source-row">
+            <span className="traffic-forwarded">
+              {t('traffic.androidForwarded', { count: capture.forwardedDevices })}
+            </span>
+          </div>
+        )}
+        <div className="traffic-source-row">
+          <div className="traffic-field" data-traffic-field="host">
+            <label className="traffic-field-name" htmlFor={`${fields}-host`}>
+              {t('traffic.hostField')}
+            </label>
+            <div className="traffic-env-row traffic-host-controls">
+              <input
+                id={`${fields}-host`}
+                className="traffic-origin"
+                type="text"
+                spellCheck={false}
+                maxLength={15}
+                aria-describedby={`${fields}-host-hint`}
+                aria-invalid={refusedField === 'host'}
+                value={hostDraft}
+                disabled={capture.access !== 'lan' || hostSaving || stream.projectId !== projectId}
+                onChange={(event) => setHostDraft(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === 'Enter') commitHost(hostDraft.trim() || null)
+                }}
+              />
+              <button
+                type="button"
+                className="traffic-action"
+                disabled={capture.access !== 'lan' || hostSaving || stream.projectId !== projectId}
+                onClick={() => commitHost(hostDraft.trim() || null)}
+              >
+                {t('traffic.applyHost')}
+              </button>
+              <button
+                type="button"
+                className="traffic-action"
+                disabled={capture.access !== 'lan' || hostSaving || stream.projectId !== projectId}
+                onClick={() => commitHost(null)}
+              >
+                {t('traffic.detectHost')}
+              </button>
+            </div>
+            <span
+              className="traffic-field-hint"
+              id={`${fields}-host-hint`}
+              data-refused={refusedField === 'host' ? 'true' : 'false'}
+            >
+              {refusedField === 'host'
+                ? t('traffic.hostInvalid')
+                : capture.access === 'loopback'
+                  ? t('traffic.accessLoopbackHint')
+                  : t(capture.hostOverridden ? 'traffic.hostManualHint' : 'traffic.hostAutoHint')}
+            </span>
+            {addressChanged && (
+              <div className="traffic-env-row traffic-host-controls" role="status">
+                <span className="traffic-field-hint">{t('traffic.hostRestartHint')}</span>
+                {managedRun?.process.kind === 'running' && (
+                  <button
+                    type="button"
+                    className="traffic-action"
+                    onClick={() => act(window.chorus.restartRun({ projectId }))}
+                  >
+                    {t('traffic.restartDev')}
+                  </button>
+                )}
+              </div>
+            )}
+          </div>
+        </div>
         {/*
           A visible label tied to each field, and **the `aria-label` removed
           rather than kept beside it**. Both would leave two names for one
@@ -1633,7 +1631,7 @@ export function TrafficPanel(props: {
             placeholder={t('traffic.searchPlaceholder')}
             value={search}
             onChange={(event) => {
-              searchFor(event.target.value)
+              setSearch(event.target.value)
             }}
             onKeyDown={(event) => {
               /*
@@ -1641,7 +1639,7 @@ export function TrafficPanel(props: {
                * having, for a line. The native control it would also have given
                * was declined — see `.traffic-find-clear`.
                */
-              if (event.key === 'Escape' && search !== '') searchFor('')
+              if (event.key === 'Escape' && search !== '') setSearch('')
             }}
           />
           {/*
@@ -1657,13 +1655,27 @@ export function TrafficPanel(props: {
               data-traffic-clear="search"
               aria-label={t('traffic.clearSearch')}
               onClick={() => {
-                searchFor('')
+                setSearch('')
               }}
             >
               ×
             </button>
           )}
         </span>
+        <select
+          className="traffic-action"
+          aria-label={t('traffic.callLimit')}
+          value={callLimit}
+          onChange={(event) => {
+            setCallLimit(Number(event.target.value))
+          }}
+        >
+          {CALL_LIMITS.map((limit) => (
+            <option key={limit} value={limit}>
+              {t('traffic.lastCalls', { limit })}
+            </option>
+          ))}
+        </select>
         {/*
           The capture's Clear, out of the header and down beside the field.
 
@@ -1688,34 +1700,6 @@ export function TrafficPanel(props: {
         </button>
       </div>
 
-      {paged.count > 1 && (
-        <div className="traffic-source-row">
-          <button
-            type="button"
-            className="traffic-action"
-            disabled={paged.index === 0}
-            onClick={() => {
-              goTo(paged.index - 1)
-            }}
-          >
-            {t('traffic.older')}
-          </button>
-          <span className="traffic-count">
-            {t('traffic.page', { page: paged.index + 1, pages: paged.count })}
-          </span>
-          <button
-            type="button"
-            className="traffic-action"
-            disabled={page === null || paged.index >= paged.count - 1}
-            onClick={() => {
-              goTo(paged.index + 1)
-            }}
-          >
-            {t('traffic.newer')}
-          </button>
-        </div>
-      )}
-
       {failure !== null && refusedField === null && (
         <p className="traffic-stopped">{failureText(failure)}</p>
       )}
@@ -1727,8 +1711,7 @@ export function TrafficPanel(props: {
         It used to appear only once there were rows *and* something selected, so
         a started capture opened on a table with no detail region and jumped to
         its share of the panel on the first click. The region is now always
-        there, with its own empty state, and the first call selects itself — see
-        `firstChosenFor` above.
+        there, with its own empty state.
 
         Before a capture the guidance still takes the whole panel. Rendering the
         split around it would put a seventy-percent box under a sentence about
@@ -1740,71 +1723,74 @@ export function TrafficPanel(props: {
         guidance
       ) : (
         <div className="traffic-split">
-          {stream.rows.length === 0 ? (
-            guidance
-          ) : filtered.length === 0 ? (
-            <p className="traffic-stopped">{t('traffic.noMatches')}</p>
-          ) : (
-            <ul className="traffic-rows" ref={rowsList} onKeyDown={onRowKeyDown}>
-              {/*
-              The header is a grid item of the list, not a block above it.
+          <div className="traffic-list">
+            {stream.rows.length === 0 ? (
+              guidance
+            ) : filtered.length === 0 ? (
+              <p className="traffic-stopped">{t('traffic.noMatches')}</p>
+            ) : (
+              <ul className="traffic-rows" ref={rowsList} onKeyDown={onRowKeyDown}>
+                {/*
+                The header is a grid item of the list, not a block above it.
 
-              It adopts the same `subgrid` tracks every row does, which is the
-              only reason its columns line up with theirs — a header outside this
-              element would be laid out against the panel's width and drift from
-              the rows the moment a column changed size. `sticky` keeps it there
-              while the list scrolls; without that it is visible only to somebody
-              who has not scrolled yet, which is nobody who needs it.
+                It adopts the same `subgrid` tracks every row does, which is the
+                only reason its columns line up with theirs — a header outside this
+                element would be laid out against the panel's width and drift from
+                the rows the moment a column changed size. `sticky` keeps it there
+                while the list scrolls; without that it is visible only to somebody
+                who has not scrolled yet, which is nobody who needs it.
 
-              No column roles. The rows are buttons wrapping five cells, and a
-              `row` may only contain `cell`s — so marking this up as a table
-              would mean rebuilding focus and selection on `<tr>`, which is the
-              trade this layout was chosen to avoid. The labels are ordinary
-              text, and the first list item a screen reader meets.
-            */}
-              <li className="traffic-head-row">
-                <span className="traffic-head-cell">{t('traffic.columnMethod')}</span>
-                <span className="traffic-head-cell">{t('traffic.columnEndpoint')}</span>
-                <span className="traffic-head-cell">{t('traffic.columnStatus')}</span>
-                <span className="traffic-head-cell">{t('traffic.columnOutcome')}</span>
-                <span className="traffic-head-cell">{t('traffic.columnDetail')}</span>
-              </li>
-              {shown.map((row) => (
-                <li
-                  className={
-                    row.seq === selectedSeq ? 'traffic-row traffic-row--selected' : 'traffic-row'
-                  }
-                  key={row.seq}
-                  data-source={row.source}
-                >
-                  {row.source === 'http' ? (
-                    <button
-                      type="button"
-                      className="traffic-row-button"
-                      aria-pressed={row.seq === selectedSeq}
-                      /* What the arrow walk selects by: the button is the row's box, so it is the row. */
-                      data-seq={row.seq}
-                      /*
-                       * On the row rather than on the status cell, so the endpoint
-                       * can read the same signal the status is coloured by. See
-                       * the rule in `styles.css`.
-                       */
-                      data-class={statusClassOf(row)}
-                      onClick={() => {
-                        setSelectedSeq(row.seq)
-                      }}
-                    >
-                      {bodyOf(row)}
-                    </button>
-                  ) : (
-                    bodyOf(row)
-                  )}
+                No column roles. The rows are buttons wrapping five cells, and a
+                `row` may only contain `cell`s — so marking this up as a table
+                would mean rebuilding focus and selection on `<tr>`, which is the
+                trade this layout was chosen to avoid. The labels are ordinary
+                text, and the first list item a screen reader meets.
+              */}
+                <li className="traffic-head-row">
+                  <span className="traffic-head-cell">{t('traffic.columnMethod')}</span>
+                  <span className="traffic-head-cell">{t('traffic.columnEndpoint')}</span>
+                  <span className="traffic-head-cell">{t('traffic.columnStatus')}</span>
+                  <span className="traffic-head-cell">{t('traffic.columnOutcome')}</span>
+                  <span className="traffic-head-cell">{t('traffic.columnDetail')}</span>
                 </li>
-              ))}
-            </ul>
-          )}
+                {shown.map((row) => (
+                  <li
+                    className={
+                      row.seq === selectedSeq ? 'traffic-row traffic-row--selected' : 'traffic-row'
+                    }
+                    key={row.seq}
+                    data-source={row.source}
+                  >
+                    {row.source === 'http' ? (
+                      <button
+                        type="button"
+                        className="traffic-row-button"
+                        aria-pressed={row.seq === selectedSeq}
+                        /* What the arrow walk selects by: the button is the row's box, so it is the row. */
+                        data-seq={row.seq}
+                        /*
+                         * On the row rather than on the status cell, so the endpoint
+                         * can read the same signal the status is coloured by. See
+                         * the rule in `styles.css`.
+                         */
+                        data-class={statusClassOf(row)}
+                        onClick={() => {
+                          setSelectedSeq(row.seq)
+                        }}
+                      >
+                        {bodyOf(row)}
+                      </button>
+                    ) : (
+                      bodyOf(row)
+                    )}
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
           {selected !== null ? (
             <TrafficRequestInspector
+              key={`${stream.captureId}:${selected.requestId}`}
               projectId={projectId}
               subscriptionId={stream.subscriptionId}
               captureId={stream.captureId}

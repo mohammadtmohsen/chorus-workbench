@@ -207,6 +207,10 @@ export class CodexSession implements AgentSession {
   private ended = false
   private seq = 0
   private currentTurnId: string | null = null
+  private inputQueue: Promise<void> = Promise.resolve()
+  private inputEpoch = 0
+  private turnRevision = 0
+  private interruptedTurnId: string | null = null
   private turnOpen = false
   private lastCompletedTurnId: string | null = null
   private rateLimits: Record<string, unknown> | null = null
@@ -251,7 +255,47 @@ export class CodexSession implements AgentSession {
     })
   }
 
-  async send(input: AgentInput): Promise<void> {
+  send(input: AgentInput): Promise<void> {
+    const epoch = this.inputEpoch
+    const sent = this.inputQueue.then(async () => {
+      if (epoch !== this.inputEpoch) return
+      try {
+        await this.admit(input, 1, epoch)
+      } catch (error) {
+        if (epoch !== this.inputEpoch) return
+        throw error
+      }
+      if (epoch !== this.inputEpoch) await this.interruptCurrentTurn()
+    })
+    this.inputQueue = sent.catch(() => {})
+    return sent
+  }
+
+  private async admit(input: AgentInput, retries = 1, epoch = this.inputEpoch): Promise<void> {
+    if (epoch !== this.inputEpoch) return
+    const turnId = this.currentTurnId
+    if (turnId !== null) {
+      try {
+        await this.rpc.request('turn/steer', {
+          threadId: this.sessionRef,
+          expectedTurnId: turnId,
+          input: [{ type: 'text', text: input.text, text_elements: [] }],
+        })
+      } catch (error) {
+        if (
+          retries > 0 &&
+          error instanceof RpcError &&
+          error.code === INVALID_REQUEST &&
+          this.currentTurnId !== turnId
+        ) {
+          await this.admit(input, retries - 1, epoch)
+          return
+        }
+        throw error
+      }
+      return
+    }
+    const revision = this.turnRevision
     const result = (await this.rpc.request('turn/start', {
       threadId: this.sessionRef,
       // `text_elements` is required and snake_case in an otherwise camelCase
@@ -274,7 +318,9 @@ export class CodexSession implements AgentSession {
       // Per turn, not per session — see `effort`.
       ...(this.effort === null ? {} : { effort: this.effort }),
     })) as { turn?: { id?: string } }
-    this.currentTurnId = result.turn?.id ?? null
+    if (revision === this.turnRevision && result.turn?.id !== this.lastCompletedTurnId) {
+      this.currentTurnId = result.turn?.id ?? null
+    }
   }
 
   /**
@@ -375,12 +421,30 @@ export class CodexSession implements AgentSession {
   }
 
   async interrupt(): Promise<void> {
+    this.inputEpoch += 1
+    const pending = this.inputQueue
+    await this.interruptCurrentTurn()
+    await pending
+  }
+
+  private async interruptCurrentTurn(): Promise<void> {
     if (this.currentTurnId === null) return
+    if (this.interruptedTurnId === this.currentTurnId) return
+    const turnId = this.currentTurnId
+    this.interruptedTurnId = turnId
     // Needs both ids; threadId alone is rejected.
-    await this.rpc.request('turn/interrupt', {
-      threadId: this.sessionRef,
-      turnId: this.currentTurnId,
-    })
+    try {
+      await this.rpc.request('turn/interrupt', { threadId: this.sessionRef, turnId })
+    } catch (error) {
+      if (
+        this.currentTurnId !== turnId &&
+        error instanceof RpcError &&
+        error.code === INVALID_REQUEST
+      )
+        return
+      this.interruptedTurnId = null
+      throw error
+    }
   }
 
   respondToApproval(id: ApprovalId, decision: ApprovalDecision): Promise<void> {
@@ -426,6 +490,8 @@ export class CodexSession implements AgentSession {
 
   private ingest(method: string, params: unknown): void {
     this.rememberItem(params)
+    const threadId = (params as { threadId?: unknown } | null | undefined)?.threadId
+    if (typeof threadId === 'string' && threadId !== this.sessionRef) return
     let payload = params
     const update = (params as { rateLimits?: unknown } | null | undefined)?.rateLimits
     if (method === 'account/rateLimits/updated' && typeof update === 'object' && update !== null) {
@@ -438,10 +504,15 @@ export class CodexSession implements AgentSession {
     )
     if (event === null) return
     if (event.type === 'turn.started') {
+      this.turnRevision += 1
       this.currentTurnId = event.turnRef
       if (this.turnOpen) return
       this.turnOpen = true
     } else if (event.type === 'turn.completed') {
+      if (this.currentTurnId !== null && this.currentTurnId !== event.turnRef) return
+      this.turnRevision += 1
+      this.currentTurnId = null
+      this.interruptedTurnId = null
       this.turnOpen = false
       this.lastCompletedTurnId = event.turnRef
     } else if (!this.turnOpen && opensTurn(method)) {
@@ -769,6 +840,7 @@ export class CodexAdapter implements AgentAdapter {
         approvalPolicy: 'on-request',
         sandbox: toSandboxMode(opts.sandbox),
         ...(opts.model === undefined ? {} : { model: opts.model }),
+        ...developerInstructions(opts),
       })
     )) as { thread: { id: string } }
 

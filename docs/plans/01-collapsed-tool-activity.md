@@ -2,20 +2,20 @@
 
 Status: **implemented 2026-10-01, review corrections applied, runtime NOT VERIFIED.** Reading A approved by the user. **Refined 2026-10-02: thinking shares the activity block. Codex and Claude source reviews completed.** **Corrected 2026-10-02: progress ticks no longer split a group (see "Correction: progress ticks"). Source-reviewed by Codex and Claude, built and installed at `/Applications/Chorus.app`. Runtime NOT VERIFIED.** No tests, separate typecheck, lint or app launch were run. Quit and reopen Chorus to load the correction.
 
-| Deviation / correction | Why |
-| --- | --- |
-| Strings live under `tool.*`, not a top-level `activity` | A top-level `activity` key already holds QuickRail's usage strings; a second one would silently replace it |
-| Summary content wrapped in `<span className="said">` | `.entry` is a grid; without the `said` area the line auto-places beside the mark |
-| Extra CSS: `.turn-head:has(+ .activity)`, rules above and below a group, `changes` card excluded | `<details>` breaks the `.entry + .entry` adjacency; the generic rule out-specified `.entry + .entry--changes { border-top: 0 }` |
-| `TranscriptMessage.activityKey`, set by `prependEvents`, kept by `tool.started` | An older page ending in the same agent's routine steps merged into the first group and changed its key: the open group closed and its rows remounted |
-| Open state is membership over each step's `activity:` key | `moveChangesBelow` lifts the `changes` card out from between two groups when a reply completes, so they merge; the later group's open state now survives |
-| Summary `onClick` stops following when it opens a group | While following, the `ResizeObserver` scrolled to the bottom and carried the clicked summary off-screen |
-| Prepend compensation keys on `view.firstSeq` falling; `lastHeight` kept by the content `ResizeObserver` | It fired on any row-count growth, including live appends, and its height went stale across `<details>` toggles and typing, so the next row or page jumped by the expanded height |
-| Agent, count and failure labels `flex: none; nowrap` | They wrapped mid-phrase in narrow panes; only the latest tool name truncates |
-| Thinking joins the activity block (2026-10-02) | Each block of thinking between calls ended the group. One turn showed four "Show thinking" rows splitting seven calls into four summaries between two replies |
-| `isRoutineStep` renamed `isActivityStep` | It now admits thinking, which is not a routine step. A predicate that changes meaning is renamed in the same change |
-| Zero-call label "Activity", not "Tool activity" | A thinking-only block has no tool in it |
-| Progress ticks are not logged, and old ones are not drawn (2026-10-02) | Each SDK `tool_progress` tick was logged as a `system` notice reading "tool_progress". It ended the group, so one stretch of work showed as 11, 8, 9 and 10 calls with "NOTE: tool_progress" between |
+| Deviation / correction                                                                                  | Why                                                                                                                                                                                                  |
+| ------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Strings live under `tool.*`, not a top-level `activity`                                                 | A top-level `activity` key already holds QuickRail's usage strings; a second one would silently replace it                                                                                           |
+| Summary content wrapped in `<span className="said">`                                                    | `.entry` is a grid; without the `said` area the line auto-places beside the mark                                                                                                                     |
+| Extra CSS: `.turn-head:has(+ .activity)`, rules above and below a group, `changes` card excluded        | `<details>` breaks the `.entry + .entry` adjacency; the generic rule out-specified `.entry + .entry--changes { border-top: 0 }`                                                                      |
+| `TranscriptMessage.activityKey`, set by `prependEvents`, kept by `tool.started`                         | An older page ending in the same agent's routine steps merged into the first group and changed its key: the open group closed and its rows remounted                                                 |
+| Open state is membership over each step's `activity:` key                                               | `moveChangesBelow` lifts the `changes` card out from between two groups when a reply completes, so they merge; the later group's open state now survives                                             |
+| Summary `onClick` stops following when it opens a group                                                 | While following, the `ResizeObserver` scrolled to the bottom and carried the clicked summary off-screen                                                                                              |
+| Prepend compensation keys on `view.firstSeq` falling; `lastHeight` kept by the content `ResizeObserver` | It fired on any row-count growth, including live appends, and its height went stale across `<details>` toggles and typing, so the next row or page jumped by the expanded height                     |
+| Agent, count and failure labels `flex: none; nowrap`                                                    | They wrapped mid-phrase in narrow panes; only the latest tool name truncates                                                                                                                         |
+| Thinking joins the activity block (2026-10-02)                                                          | Each block of thinking between calls ended the group. One turn showed four "Show thinking" rows splitting seven calls into four summaries between two replies                                        |
+| `isRoutineStep` renamed `isActivityStep`                                                                | It now admits thinking, which is not a routine step. A predicate that changes meaning is renamed in the same change                                                                                  |
+| Zero-call label "Activity", not "Tool activity"                                                         | A thinking-only block has no tool in it                                                                                                                                                              |
+| Progress ticks are not logged, and old ones are not drawn (2026-10-02)                                  | Each SDK `tool_progress` tick was logged as a `system` notice reading "tool_progress". It ended the group, so one stretch of work showed as 11, 8, 9 and 10 calls with "NOTE: tool_progress" between |
 
 ## Current / Issue
 
@@ -174,21 +174,21 @@ An older page that continues the first group carries that group's key, so the `<
 ```
 
 ```ts
-  const head = view.messages[0]
-  let joined = rows.length
-  if (head !== undefined && isActivityStep(head)) {
-    for (let at = rows.length - 1; at >= 0; at -= 1) {
-      const row = rows[at]
-      if (row === undefined || row.actor !== head.actor || !isActivityStep(row)) break
-      joined = at
-    }
+const head = view.messages[0]
+let joined = rows.length
+if (head !== undefined && isActivityStep(head)) {
+  for (let at = rows.length - 1; at >= 0; at -= 1) {
+    const row = rows[at]
+    if (row === undefined || row.actor !== head.actor || !isActivityStep(row)) break
+    joined = at
   }
-  const marked =
-    head === undefined || joined === rows.length
-      ? rows
-      : rows.map((row, at) =>
-          at === joined ? { ...row, activityKey: head.activityKey ?? head.key } : row
-        )
+}
+const marked =
+  head === undefined || joined === rows.length
+    ? rows
+    : rows.map((row, at) =>
+        at === joined ? { ...row, activityKey: head.activityKey ?? head.key } : row
+      )
 ```
 
 ```ts
@@ -207,91 +207,95 @@ export interface SessionCarry {
 ```
 
 ```tsx
-  const [openActivity, setOpenActivity] = useState<ReadonlySet<string>>(
-    () => new Set(props.carry?.openActivity ?? [])
-  )
-  const setActivityOpen = useCallback((keys: readonly string[], open: boolean) => {
-    setOpenActivity((current) => {
-      if (keys.some((key) => current.has(key)) === open) return current
-      const next = new Set(current)
-      for (const key of keys) {
-        if (open) next.add(key)
-        else next.delete(key)
-      }
-      return next
-    })
-  }, [])
+const [openActivity, setOpenActivity] = useState<ReadonlySet<string>>(
+  () => new Set(props.carry?.openActivity ?? [])
+)
+const setActivityOpen = useCallback((keys: readonly string[], open: boolean) => {
+  setOpenActivity((current) => {
+    if (keys.some((key) => current.has(key)) === open) return current
+    const next = new Set(current)
+    for (const key of keys) {
+      if (open) next.add(key)
+      else next.delete(key)
+    }
+    return next
+  })
+}, [])
 
-  latest.current = {
-    view,
-    following: following.current,
-    scrollTop: score.current?.scrollTop ?? latest.current.scrollTop,
-    openActivity: [...openActivity],
-  }
+latest.current = {
+  view,
+  following: following.current,
+  scrollTop: score.current?.scrollTop ?? latest.current.scrollTop,
+  openActivity: [...openActivity],
+}
 
-  const rows = useMemo(() => transcriptRows(view.messages), [view.messages])
-  const startOf = (item: TranscriptRow): number => (item.kind === 'entry' ? item.index : item.start)
+const rows = useMemo(() => transcriptRows(view.messages), [view.messages])
+const startOf = (item: TranscriptRow): number => (item.kind === 'entry' ? item.index : item.start)
 
-  const row = (item: TranscriptRow): React.JSX.Element => {
-    if (item.kind === 'entry') return entry(item.message, item.index)
-    const groupKeys = item.steps.map((step) => `activity:${step.activityKey ?? step.key}`)
-    const open = groupKeys.some((key) => openActivity.has(key))
-    return (
-      <details
-        key={item.key}
-        className={`activity entry--${item.actor}`}
-        open={open}
-        onToggle={(event) => {
-          setActivityOpen(groupKeys, event.currentTarget.open)
+const row = (item: TranscriptRow): React.JSX.Element => {
+  if (item.kind === 'entry') return entry(item.message, item.index)
+  const groupKeys = item.steps.map((step) => `activity:${step.activityKey ?? step.key}`)
+  const open = groupKeys.some((key) => openActivity.has(key))
+  return (
+    <details
+      key={item.key}
+      className={`activity entry--${item.actor}`}
+      open={open}
+      onToggle={(event) => {
+        setActivityOpen(groupKeys, event.currentTarget.open)
+      }}
+    >
+      <summary
+        className="entry activity-summary"
+        data-grouped="true"
+        data-headless="true"
+        onClick={() => {
+          if (!open) stopFollowing()
         }}
       >
-        <summary
-          className="entry activity-summary"
-          data-grouped="true"
-          data-headless="true"
-          onClick={() => {
-            if (!open) stopFollowing()
-          }}
-        >
-          <span className="entry-mark" aria-hidden="true">
-            <span className="tick" />
-          </span>
-          <span className="said">
-            <span className="command-summary">
-              <span className="command-caret" aria-hidden="true">
-                {open ? '⌄' : '›'}
-              </span>
-              <span className="activity-agent">{t(`actor.${item.actor}`)}</span>
-              <span className="activity-count">
-                {item.calls === 0
-                  ? t('tool.activity')
-                  : t('tool.activityCalls', { count: item.calls })}
-              </span>
-              {item.failed > 0 && (
-                <span className="activity-failed">
-                  {t('tool.activityFailed', { count: item.failed })}
-                </span>
-              )}
-              {item.latest !== undefined && (
-                <span className="activity-latest">
-                  {item.latest.kind === 'tool' ? item.latest.text : t('tool.shell')}
-                </span>
-              )}
+        <span className="entry-mark" aria-hidden="true">
+          <span className="tick" />
+        </span>
+        <span className="said">
+          <span className="command-summary">
+            <span className="command-caret" aria-hidden="true">
+              {open ? '⌄' : '›'}
             </span>
+            <span className="activity-agent">{t(`actor.${item.actor}`)}</span>
+            <span className="activity-count">
+              {item.calls === 0
+                ? t('tool.activity')
+                : t('tool.activityCalls', { count: item.calls })}
+            </span>
+            {item.failed > 0 && (
+              <span className="activity-failed">
+                {t('tool.activityFailed', { count: item.failed })}
+              </span>
+            )}
+            {item.latest !== undefined && (
+              <span className="activity-latest">
+                {item.latest.kind === 'tool' ? item.latest.text : t('tool.shell')}
+              </span>
+            )}
           </span>
-        </summary>
-        {item.steps.map((message, offset) => entry(message, item.start + offset))}
-      </details>
-    )
-  }
+        </span>
+      </summary>
+      {item.steps.map((message, offset) => entry(message, item.start + offset))}
+    </details>
+  )
+}
 ```
 
 ```tsx
-            {(currentTurn === undefined ? rows : rows.filter((r) => startOf(r) < turnAt)).map(row)}
+{
+  ;(currentTurn === undefined ? rows : rows.filter((r) => startOf(r) < turnAt)).map(row)
+}
 ```
 
 ```tsx
-                {rows.filter((r) => startOf(r) > turnAt).map(row)}
+{
+  rows.filter((r) => startOf(r) > turnAt).map(row)
+}
 ```
 
 `summary` is already in `FOCUS_KEEPS_ITS_OWN`, so a click does not move focus to the composer. `onToggle` has no follow side effect: restoring a tab and toggling a nested `<details>` both fire it.
@@ -299,18 +303,18 @@ export interface SessionCarry {
 The prepend correction, with `lastHeight` moved up beside `pinnedTop` and written by the existing content `ResizeObserver` (`lastHeight.current = height`, before its `following` early return):
 
 ```tsx
-  const lastFirstSeq = useRef(view.firstSeq)
-  useLayoutEffect(() => {
-    const el = score.current
-    const content = transcript.current
-    if (el === null || content === null) return
-    const grew = content.offsetHeight - lastHeight.current
-    const prepended =
-      lastFirstSeq.current > 0 && view.firstSeq < lastFirstSeq.current && !following.current
-    lastHeight.current = content.offsetHeight
-    lastFirstSeq.current = view.firstSeq
-    if (prepended && grew > 0) el.scrollTop += grew
-  }, [view.firstSeq])
+const lastFirstSeq = useRef(view.firstSeq)
+useLayoutEffect(() => {
+  const el = score.current
+  const content = transcript.current
+  if (el === null || content === null) return
+  const grew = content.offsetHeight - lastHeight.current
+  const prepended =
+    lastFirstSeq.current > 0 && view.firstSeq < lastFirstSeq.current && !following.current
+  lastHeight.current = content.offsetHeight
+  lastFirstSeq.current = view.firstSeq
+  if (prepended && grew > 0) el.scrollTop += grew
+}, [view.firstSeq])
 ```
 
 ### `apps/desktop/src/renderer/src/i18n/en.json`
@@ -414,17 +418,17 @@ Other unmapped top-level types still become notices.
 Inside `case 'notice.raised'`, before any row is added or folded:
 
 ```ts
-      if (
-        isAgent(event.actor) &&
-        raw === 'info' &&
-        source === 'system' &&
-        str('text') === 'tool_progress' &&
-        detail === '' &&
-        code === '' &&
-        omitted === 0
-      ) {
-        return
-      }
+if (
+  isAgent(event.actor) &&
+  raw === 'info' &&
+  source === 'system' &&
+  str('text') === 'tool_progress' &&
+  detail === '' &&
+  code === '' &&
+  omitted === 0
+) {
+  return
+}
 ```
 
 `reduceEvents` advances `lastSeq` before `apply`, so a skipped row still moves the high-water mark. `prependEvents` folds pages with the same reducer: an older page ending in ticks joins the head group under its key, and a page of only ticks still moves `firstSeq` (the `rows.length === 0` branch). `isActivityStep`, the database, event schemas and the read path are unchanged.
@@ -478,17 +482,17 @@ sequenceDiagram
 
 ## Verification
 
-| Check | Status |
-| --- | --- |
-| Source and diff review (Claude and Codex, adversarial) | Done, 2026-10-01. No source-level blocker remains |
-| Thinking refinement, source and diff review (Codex and Claude, adversarial) | Done, 2026-10-02. No source-level blocker |
-| Progress-tick correction, source and adversarial review (Codex and Claude) | Done, 2026-10-02. No supported source-level findings. Tests written in `mapping.test.ts` and `transcript.test.ts`, **NOT RUN** |
-| UI acceptance criteria above | **NOT VERIFIED** |
-| Dependency build, desktop build and local packaging | **PASS**, 2026-10-02. `pnpm exec turbo run build '--filter=@chorus/desktop^...'` succeeded for all eight dependencies (seven cache hits). `node build/package-local.mjs` succeeded from `apps/desktop`, building and signing the macOS arm64 bundle. |
-| Local installation | **PASS**, 2026-10-02. `CHORUS_INSTALL_KEEP_RUNNING=1 node build/install-local.mjs` succeeded from `apps/desktop`, including `codesign --verify --deep --strict`. Installed at `/Applications/Chorus.app`; the previous bundle was preserved at `/Applications/Chorus.app.replaced-1790940574041`. |
-| Unit tests, separate typecheck, lint, e2e | **NOT RUN**, by the user's standing instruction |
-| Dev app and packaged app | **NOT VERIFIED** |
-| Event logging, permission engine, orchestrator, event-store, adapters | Untouched: no file outside the renderer changed |
+| Check                                                                       | Status                                                                                                                                                                                                                                                                                            |
+| --------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Source and diff review (Claude and Codex, adversarial)                      | Done, 2026-10-01. No source-level blocker remains                                                                                                                                                                                                                                                 |
+| Thinking refinement, source and diff review (Codex and Claude, adversarial) | Done, 2026-10-02. No source-level blocker                                                                                                                                                                                                                                                         |
+| Progress-tick correction, source and adversarial review (Codex and Claude)  | Done, 2026-10-02. No supported source-level findings. Tests written in `mapping.test.ts` and `transcript.test.ts`, **NOT RUN**                                                                                                                                                                    |
+| UI acceptance criteria above                                                | **NOT VERIFIED**                                                                                                                                                                                                                                                                                  |
+| Dependency build, desktop build and local packaging                         | **PASS**, 2026-10-02. `pnpm exec turbo run build '--filter=@chorus/desktop^...'` succeeded for all eight dependencies (seven cache hits). `node build/package-local.mjs` succeeded from `apps/desktop`, building and signing the macOS arm64 bundle.                                              |
+| Local installation                                                          | **PASS**, 2026-10-02. `CHORUS_INSTALL_KEEP_RUNNING=1 node build/install-local.mjs` succeeded from `apps/desktop`, including `codesign --verify --deep --strict`. Installed at `/Applications/Chorus.app`; the previous bundle was preserved at `/Applications/Chorus.app.replaced-1790940574041`. |
+| Unit tests, separate typecheck, lint, e2e                                   | **NOT RUN**, by the user's standing instruction                                                                                                                                                                                                                                                   |
+| Dev app and packaged app                                                    | **NOT VERIFIED**                                                                                                                                                                                                                                                                                  |
+| Event logging, permission engine, orchestrator, event-store, adapters       | Untouched: no file outside the renderer changed                                                                                                                                                                                                                                                   |
 
 The task-only diff was read against the pre-task copies with:
 
@@ -529,15 +533,33 @@ The `transcript.test.ts` shape, to be written only if the user asks:
 ```ts
 it('files a routine auto-allow under the agent that asked', () => {
   const view = reduceEvents(EMPTY_VIEW, [
-    event('approval.requested', { approvalId: 'a1', kind: 'fileChange', request: {}, expiresAt: 0 }, 'codex'),
-    event('approval.decided', { approvalId: 'a1', outcome: 'allow', decidedBy: 'policy', policyRuleId: 'allow-edits' }),
+    event(
+      'approval.requested',
+      { approvalId: 'a1', kind: 'fileChange', request: {}, expiresAt: 0 },
+      'codex'
+    ),
+    event('approval.decided', {
+      approvalId: 'a1',
+      outcome: 'allow',
+      decidedBy: 'policy',
+      policyRuleId: 'allow-edits',
+    }),
   ])
-  expect(view.messages.at(-1)).toMatchObject({ actor: 'codex', noticeSource: 'policy', level: 'info' })
+  expect(view.messages.at(-1)).toMatchObject({
+    actor: 'codex',
+    noticeSource: 'policy',
+    level: 'info',
+  })
 })
 
 it('keeps the System row when the request is not held', () => {
   const view = reduceEvents(EMPTY_VIEW, [
-    event('approval.decided', { approvalId: 'a1', outcome: 'allow', decidedBy: 'policy', policyRuleId: 'allow-edits' }),
+    event('approval.decided', {
+      approvalId: 'a1',
+      outcome: 'allow',
+      decidedBy: 'policy',
+      policyRuleId: 'allow-edits',
+    }),
   ])
   expect(view.messages.at(-1)?.actor).toBe('system')
 })

@@ -12,17 +12,17 @@ The task's incremental product diff contains two refs, one listener effect, one 
 
 ## Acceptance evidence
 
-| Criterion | Result | Evidence |
-| --- | --- | --- |
+| Criterion                                                                    | Result       | Evidence                                                                                            |
+| ---------------------------------------------------------------------------- | ------------ | --------------------------------------------------------------------------------------------------- |
 | Hands-off streaming follows through shrink/grow and message/tool transitions | NOT VERIFIED | Source review confirms an unarmed scroll cannot take the backward-stop branch; no live reproduction |
-| Multiple agents continue following through completion | NOT VERIFIED | No running-app observation |
-| Wheel and keyboard scrolling pause following | NOT VERIFIED | Existing handlers are unchanged in the baseline diff; not driven |
-| Scrollbar, touch, and selection drags pause following | NOT VERIFIED | Gesture gate reviewed against upstream Chromium routing; installed platform not driven |
-| Returning to the bottom and sending resume following | NOT VERIFIED | Existing paths are unchanged; not driven |
-| Following and parked panes behave correctly after remount | NOT VERIFIED | Carry and restore paths are unchanged; split-scroll probe not run |
-| Release, cancellation, blur, and unmount clean up the gesture | NOT VERIFIED | Listener removal and frame cancellation reviewed in source; lifecycle not exercised |
-| Preserve pre-existing working-tree edits and limit product scope | PASS | Incremental baseline diff contains only the agreed gesture unit |
-| Integrated code and independent adversarial review | PASS | Codex inspected actual source and diff; Claude reported no supported blocking finding |
+| Multiple agents continue following through completion                        | NOT VERIFIED | No running-app observation                                                                          |
+| Wheel and keyboard scrolling pause following                                 | NOT VERIFIED | Existing handlers are unchanged in the baseline diff; not driven                                    |
+| Scrollbar, touch, and selection drags pause following                        | NOT VERIFIED | Gesture gate reviewed against upstream Chromium routing; installed platform not driven              |
+| Returning to the bottom and sending resume following                         | NOT VERIFIED | Existing paths are unchanged; not driven                                                            |
+| Following and parked panes behave correctly after remount                    | NOT VERIFIED | Carry and restore paths are unchanged; split-scroll probe not run                                   |
+| Release, cancellation, blur, and unmount clean up the gesture                | NOT VERIFIED | Listener removal and frame cancellation reviewed in source; lifecycle not exercised                 |
+| Preserve pre-existing working-tree edits and limit product scope             | PASS         | Incremental baseline diff contains only the agreed gesture unit                                     |
+| Integrated code and independent adversarial review                           | PASS         | Codex inspected actual source and diff; Claude reported no supported blocking finding               |
 
 ## Commands and checks
 

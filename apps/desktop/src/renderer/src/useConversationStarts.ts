@@ -52,7 +52,7 @@ export interface ConversationStartsDeps {
   readonly revision: RefObject<number>
   readonly closedIds: RefObject<Set<string>>
   readonly updateSessions: (change: (current: SessionInfo[]) => SessionInfo[]) => void
-  readonly finishEnd: (conversationId: string) => void
+  readonly finishEnd: (conversationId: string) => Promise<void>
   readonly refreshProjects: () => Promise<unknown>
   readonly reportError: (error: unknown) => void
   readonly clearError: () => void
@@ -60,6 +60,19 @@ export interface ConversationStartsDeps {
 }
 
 type StartOutcome = IpcResponse<'conversation:awaitStart'>
+
+interface PendingRestart {
+  readonly source: string
+  readonly projectId: string
+  cancelled: boolean
+  replacement: string | null
+  closed: Promise<void> | null
+  begun: Promise<void>
+}
+
+function forget(restarts: Map<string, PendingRestart>, record: PendingRestart): void {
+  if (restarts.get(record.source) === record) restarts.delete(record.source)
+}
 
 const sameAgents = (a: readonly string[], b: readonly string[]): boolean =>
   a.length === b.length && a.every((agent, index) => agent === b[index])
@@ -75,6 +88,8 @@ export function advanceSession(session: SessionInfo, latest: SessionInfo): Sessi
 export function useConversationStarts(deps: ConversationStartsDeps): {
   readonly starting: boolean
   readonly startIn: (projectId: string, options?: StartOptions) => void
+  readonly cancelRestartOf: (source: string) => Promise<void>
+  readonly holdRestarts: (projectId: string) => Promise<() => void>
 } {
   const {
     role,
@@ -91,8 +106,10 @@ export function useConversationStarts(deps: ConversationStartsDeps): {
   } = deps
   const [inFlight, setInFlight] = useState(0)
   const pendingBegins = useRef(0)
-  const replacing = useRef(new Set<string>())
+  const restarts = useRef(new Map<string, PendingRestart>())
+  const heldProjects = useRef(new Map<string, number>())
   const latestRead = useRef(0)
+  const heldRead = useRef(false)
 
   const reconcile = useCallback(() => {
     const apply = (active: readonly SessionInfo[]): void => {
@@ -139,10 +156,15 @@ export function useConversationStarts(deps: ConversationStartsDeps): {
     const read = (): void => {
       const ticket = ++latestRead.current
       const seen = revision.current
+      heldRead.current = false
       window.chorus
         .readActiveSessions()
         .then(({ sessions: active }) => {
           if (ticket !== latestRead.current) return
+          if (pendingBegins.current > 0) {
+            heldRead.current = true
+            return
+          }
           if (seen !== revision.current) {
             read()
             return
@@ -157,7 +179,7 @@ export function useConversationStarts(deps: ConversationStartsDeps): {
   useEffect(() => window.chorus.onConversationsChanged(reconcile), [reconcile])
 
   const settle = useCallback(
-    (conversationId: string, outcome: StartOutcome, source: string | undefined) => {
+    (conversationId: string, outcome: StartOutcome, restart: PendingRestart | undefined) => {
       const open = (id: string): boolean =>
         sessionsRef.current.some((session) => session.conversationId === id)
       if (outcome.status !== 'ready') {
@@ -173,6 +195,12 @@ export function useConversationStarts(deps: ConversationStartsDeps): {
         return
       }
       if (!open(conversationId)) return
+      if (restart !== undefined && (restart.cancelled || !open(restart.source))) {
+        restart.cancelled = true
+        restart.closed = finishEnd(conversationId)
+        reconcile()
+        return
+      }
       const ready = { participants: outcome.conversation.participants, starting: false }
       updateSessions((current) =>
         current.map((session) =>
@@ -181,10 +209,21 @@ export function useConversationStarts(deps: ConversationStartsDeps): {
             : session
         )
       )
-      // `finishEnd` and not `endNow`: restart has already asked its own
-      // question by the time this runs, and asking again would be two
-      // dialogs for one gesture.
-      if (source !== undefined && open(source)) finishEnd(source)
+      if (restart !== undefined) {
+        forget(restarts.current, restart)
+        const store = useWorkspaceStore.getState()
+        const { projectId, source } = restart
+        if (
+          !store.replaceConversation(projectId, source, conversationId) &&
+          store.detached[projectId] === undefined
+        ) {
+          store.adoptConversation(projectId, conversationId)
+        }
+        // `finishEnd` and not `endNow`: restart has already asked its own
+        // question by the time this runs, and asking again would be two
+        // dialogs for one gesture.
+        void finishEnd(source)
+      }
       reconcile()
       void refreshProjects()
     },
@@ -194,14 +233,33 @@ export function useConversationStarts(deps: ConversationStartsDeps): {
   const startIn = useCallback(
     (projectId: string, options: StartOptions = {}) => {
       const source = options.replacing
-      if (source !== undefined) {
-        if (replacing.current.has(source)) return
-        replacing.current.add(source)
+      if (
+        source !== undefined &&
+        (restarts.current.has(source) || heldProjects.current.has(projectId))
+      ) {
+        return
       }
+      const restart: PendingRestart | undefined =
+        source === undefined
+          ? undefined
+          : {
+              source,
+              projectId,
+              cancelled: false,
+              replacement: null,
+              closed: null,
+              begun: Promise.resolve(),
+            }
+      if (restart !== undefined) restarts.current.set(restart.source, restart)
       clearError()
       setInFlight((count) => count + 1)
       pendingBegins.current += 1
-      window.chorus
+      const open = (id: string): boolean =>
+        sessionsRef.current.some((session) => session.conversationId === id)
+      const releaseHeldRead = (): void => {
+        if (pendingBegins.current === 0 && heldRead.current) reconcile()
+      }
+      const begin = window.chorus
         .beginConversation({
           projectId,
           profileId,
@@ -210,17 +268,28 @@ export function useConversationStarts(deps: ConversationStartsDeps): {
         .then(
           (begun) => {
             pendingBegins.current -= 1
-            if (closedIds.current.has(begun.conversationId)) return null
-            const exists = sessionsRef.current.some(
-              (session) => session.conversationId === begun.conversationId
-            )
-            if (!exists) updateSessions((current) => [...current, { ...begun, starting: true }])
+            if (closedIds.current.has(begun.conversationId)) {
+              releaseHeldRead()
+              return null
+            }
+            if (restart !== undefined && (restart.cancelled || !open(restart.source))) {
+              restart.cancelled = true
+              restart.closed = finishEnd(begun.conversationId)
+              releaseHeldRead()
+              return null
+            }
+            if (restart !== undefined) restart.replacement = begun.conversationId
+            if (!open(begun.conversationId)) {
+              updateSessions((current) => [...current, { ...begun, starting: true }])
+            }
             const store = useWorkspaceStore.getState()
-            store.openProject(begun.projectId)
-            /* A tab for it, in the focused group. Without this the conversation
-               streams into a project that has nowhere to show it until relaunch. */
-            if (store.detached[begun.projectId] === undefined) {
-              store.adoptConversation(begun.projectId, begun.conversationId)
+            if (restart === undefined) {
+              store.openProject(begun.projectId)
+              /* A tab for it, in the focused group. Without this the conversation
+                 streams into a project that has nowhere to show it until relaunch. */
+              if (store.detached[begun.projectId] === undefined) {
+                store.adoptConversation(begun.projectId, begun.conversationId)
+              }
             }
             store.clearConversationUnread(begun.conversationId)
             reconcile()
@@ -228,21 +297,93 @@ export function useConversationStarts(deps: ConversationStartsDeps): {
           },
           (error: unknown) => {
             pendingBegins.current -= 1
+            releaseHeldRead()
             throw error
           }
         )
+      if (restart !== undefined) {
+        restart.begun = begin.then(
+          () => undefined,
+          () => undefined
+        )
+      }
+      begin
         .then(async (conversationId) => {
           if (conversationId === null) return
-          settle(conversationId, await window.chorus.awaitStart({ conversationId }), source)
+          const outcome = await window.chorus
+            .awaitStart({ conversationId })
+            .catch((error: unknown) => {
+              if (restart !== undefined && open(conversationId)) void finishEnd(conversationId)
+              throw error
+            })
+          settle(conversationId, outcome, restart)
         })
         .catch(reportError)
         .finally(() => {
-          if (source !== undefined) replacing.current.delete(source)
+          if (restart !== undefined) forget(restarts.current, restart)
           setInFlight((count) => count - 1)
         })
     },
-    [profileId, closedIds, sessionsRef, updateSessions, reconcile, settle, reportError, clearError]
+    [
+      profileId,
+      closedIds,
+      sessionsRef,
+      updateSessions,
+      finishEnd,
+      reconcile,
+      settle,
+      reportError,
+      clearError,
+    ]
   )
 
-  return { starting: inFlight > 0, startIn }
+  const cancel = useCallback(
+    (restart: PendingRestart): Promise<void> => {
+      if (!restart.cancelled) {
+        restart.cancelled = true
+        const known = restart.replacement
+        if (known !== null && sessionsRef.current.some((s) => s.conversationId === known)) {
+          restart.closed = finishEnd(known)
+        }
+      }
+      return restart.begun.then(() => restart.closed ?? undefined)
+    },
+    [sessionsRef, finishEnd]
+  )
+
+  const cancelRestartOf = useCallback(
+    (source: string): Promise<void> => {
+      const restart = restarts.current.get(source)
+      return restart === undefined ? Promise.resolve() : cancel(restart)
+    },
+    [cancel]
+  )
+
+  const holdRestarts = useCallback(
+    (projectId: string): Promise<() => void> => {
+      const holds = heldProjects.current
+      holds.set(projectId, (holds.get(projectId) ?? 0) + 1)
+      let released = false
+      const release = (): void => {
+        if (released) return
+        released = true
+        const left = (holds.get(projectId) ?? 1) - 1
+        if (left > 0) holds.set(projectId, left)
+        else holds.delete(projectId)
+      }
+      const pending = [...restarts.current.values()].filter(
+        (restart) => restart.projectId === projectId
+      )
+      return Promise.all(pending.map((restart) => cancel(restart))).then(
+        () => release,
+        (error: unknown) => {
+          release()
+          throw error
+        }
+      )
+    },
+    [cancel]
+  )
+
+  return { starting: inFlight > 0, startIn, cancelRestartOf, holdRestarts }
 }

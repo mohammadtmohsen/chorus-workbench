@@ -2,13 +2,13 @@
 
 ## Status
 
-| Unit | Result |
-| --- | --- |
-| Investigation and plan challenge | Complete by source inspection; `scrollend` commit dropped |
-| U1: row offset persistence | Implemented by Claude; Codex reviewed the actual incremental and integrated diffs, including the corrected `selectActions` contract; authored tests NOT RUN; runtime NOT VERIFIED |
-| Final adversarial review | Claude found F1: the active chat's mount focus can scroll the row after restoration and overwrite the saved offset. No other supported findings |
+| Unit                                              | Result                                                                                                                                                                              |
+| ------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Investigation and plan challenge                  | Complete by source inspection; `scrollend` commit dropped                                                                                                                           |
+| U1: row offset persistence                        | Implemented by Claude; Codex reviewed the actual incremental and integrated diffs, including the corrected `selectActions` contract; authored tests NOT RUN; runtime NOT VERIFIED   |
+| Final adversarial review                          | Claude found F1: the active chat's mount focus can scroll the row after restoration and overwrite the saved offset. No other supported findings                                     |
 | F1 correction: passive re-apply of a saved offset | Implemented by Claude in `EditorPane`; Claude source review found no new supported findings; Codex inspected the actual correction and installed React source; runtime NOT VERIFIED |
-| Delivery | Reviewed local changes complete; tests, typecheck, lint, build and UI verification NOT RUN |
+| Delivery                                          | Reviewed local changes complete; tests, typecheck, lint, build and UI verification NOT RUN                                                                                          |
 
 ## Current / Issue
 
@@ -134,16 +134,16 @@ Authored coverage: `apps/desktop/src/main/open-projects.test.ts`; `apps/desktop/
 
 ### Acceptance criteria
 
-| Criterion | Result | Evidence available |
-| --- | --- | --- |
-| Separate offsets across project switching and reopening | NOT VERIFIED at runtime | Reviewed project-keyed effects, snapshot/hydrate flow and authored independent-offset/reconcile cases |
-| Offset carried through detach and reattach | NOT VERIFIED at runtime | Reviewed `sliceOf`, `mergeSlice`, bootstrap and return paths; authored slice/returned-offset cases |
-| Explicit reveal resets and saves zero | NOT VERIFIED at runtime | Existing `revealRow` is retained; zero accepted by the store; authored zero-offset case |
-| Old snapshots restore all conversations | NOT VERIFIED by execution | Defaulted schema field and updated explicit old-file expectation reviewed |
-| Window/content changes clamp safely | NOT VERIFIED at runtime | DOM assignment uses browser clamping; invalid stored values are filtered; authored invalid-offset cases |
-| Existing widths, arrangement, wheel routing and divider behavior retained | NOT VERIFIED at runtime | Incremental diffs preserve these implementations; existing adjacent coverage read |
-| Mount autofocus does not replace a saved offset | NOT VERIFIED at runtime | Corrected parent passive restore and installed React effect ordering reviewed |
-| New persistence field reaches the written snapshot | PASS by source inspection only | `snapshot` carries `rowScroll`; comparison derives schema keys; existing IPC embeds `WorkspaceSnapshot`; execution case authored but NOT RUN |
+| Criterion                                                                 | Result                         | Evidence available                                                                                                                           |
+| ------------------------------------------------------------------------- | ------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------- |
+| Separate offsets across project switching and reopening                   | NOT VERIFIED at runtime        | Reviewed project-keyed effects, snapshot/hydrate flow and authored independent-offset/reconcile cases                                        |
+| Offset carried through detach and reattach                                | NOT VERIFIED at runtime        | Reviewed `sliceOf`, `mergeSlice`, bootstrap and return paths; authored slice/returned-offset cases                                           |
+| Explicit reveal resets and saves zero                                     | NOT VERIFIED at runtime        | Existing `revealRow` is retained; zero accepted by the store; authored zero-offset case                                                      |
+| Old snapshots restore all conversations                                   | NOT VERIFIED by execution      | Defaulted schema field and updated explicit old-file expectation reviewed                                                                    |
+| Window/content changes clamp safely                                       | NOT VERIFIED at runtime        | DOM assignment uses browser clamping; invalid stored values are filtered; authored invalid-offset cases                                      |
+| Existing widths, arrangement, wheel routing and divider behavior retained | NOT VERIFIED at runtime        | Incremental diffs preserve these implementations; existing adjacent coverage read                                                            |
+| Mount autofocus does not replace a saved offset                           | NOT VERIFIED at runtime        | Corrected parent passive restore and installed React effect ordering reviewed                                                                |
+| New persistence field reaches the written snapshot                        | PASS by source inspection only | `snapshot` carries `rowScroll`; comparison derives schema keys; existing IPC embeds `WorkspaceSnapshot`; execution case authored but NOT RUN |
 
 ### Verification performed
 

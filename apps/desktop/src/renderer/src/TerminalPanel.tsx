@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { shortcutLabel } from './shortcuts.js'
-import type { TerminalRefShape } from '../../shared/ipc.js'
+import type { IpcRequest } from '../../shared/ipc.js'
 import type { TerminalPanelState } from '../../shared/workspace-layout.js'
 import { ConfirmKillTerminal } from './ConfirmKillTerminal.js'
 import { TerminalView } from './TerminalView.js'
@@ -17,7 +17,7 @@ export interface TerminalPanelProps {
   /** This panel's roster. `activeId` is non-null whenever it is open. */
   readonly panel: TerminalPanelState
   /** Builds a ref for one tab. The panel never constructs a scope itself. */
-  readonly refFor: (id: string) => TerminalRefShape
+  readonly refFor: (id: string) => IpcRequest<'terminal:kill'>['ref']
   readonly title: string
   /** Called once on release, not per frame. See the drag below. */
   readonly onHeightChange: (height: number) => void

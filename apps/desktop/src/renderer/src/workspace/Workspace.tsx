@@ -7,16 +7,26 @@ import type { NoteSize } from '../noteSize.js'
 import { useShellOverlay } from './overlay.js'
 import { createPreviewController, ProjectPreviewHost } from './SessionPreview.js'
 import { TerminalPanel } from '../TerminalPanel.js'
-import type { TerminalRefShape } from '../../../shared/ipc.js'
-import { leafPaneIds, resizeBranch, type SplitDirection } from './layout.js'
-import { useGlobalTerminal, useWorkspaceActions, useWorkspaceLayout } from './hooks.js'
+import type { IpcRequest } from '../../../shared/ipc.js'
+import { browserWebCommand } from '../../../shared/browser-ipc.js'
+import { leafPaneIds, resizeBranch, topRightPaneId, type SplitDirection } from './layout.js'
+import { useGlobalTerminal, useWebTabs, useWorkspaceActions, useWorkspaceLayout } from './hooks.js'
 import { EditorPane, type LayoutViewProps } from './EditorPane.js'
 import type { ProjectInfo } from './session-row.js'
 import { countRender } from './render-count.js'
 import { monogramOf, stepSlot } from './session-row.js'
 import { useWorkspaceStore } from './store.js'
 import { useTabDrag, type ActiveTabDrag } from './useTabDrag.js'
-import { primaryAlt, primaryOnly, primaryShift, shortcutLabel } from '../shortcuts.js'
+import {
+  primaryAlt,
+  primaryOnly,
+  primaryShift,
+  runningPlatform,
+  shortcutLabel,
+} from '../shortcuts.js'
+import { WebTabStrip } from './WebTabStrip.js'
+import { WebTabStage } from './WebTabStage.js'
+import { runWebCommand, startWebPages } from './web-pages.js'
 
 /**
  * The shell: a rail of sessions on the left, panes filling the rest.
@@ -143,7 +153,7 @@ function directionalPane(paneId: string, direction: SplitDirection): string | nu
  * `TerminalView`'s effect from tearing down; that reason expired when the effect
  * started depending on the ref's *parts* rather than on the object.
  */
-function globalTerminalRef(id: string): TerminalRefShape {
+function globalTerminalRef(id: string): IpcRequest<'terminal:kill'>['ref'] {
   return { scope: 'global', id }
 }
 
@@ -151,6 +161,7 @@ export function Workspace(props: WorkspaceProps): React.JSX.Element {
   const { t } = useTranslation()
   countRender('Workspace')
   const { layout, focusedPaneId } = useWorkspaceLayout()
+  const webTabs = useWebTabs()
   const {
     placeSession,
     splitWithSession,
@@ -243,6 +254,11 @@ export function Workspace(props: WorkspaceProps): React.JSX.Element {
   const chordUntil = useRef(0)
   const commitRef = useRef(commit)
   commitRef.current = commit
+  useEffect(() => {
+    return startWebPages(() => {
+      commitRef.current()
+    })
+  }, [])
   /*
    * The shortcut effect runs once, so anything it reads from props would be
    * frozen at the first render — a reorder computed against the session list as
@@ -260,6 +276,38 @@ export function Workspace(props: WorkspaceProps): React.JSX.Element {
       const pane = paneId === null ? undefined : state.panes[paneId]
       const activeId = pane?.activeTabId ?? null
       const inTerminal = document.activeElement?.closest('.terminal-panel') != null
+      const command = browserWebCommand(
+        {
+          type: 'keyDown',
+          key: event.key,
+          meta: event.metaKey,
+          control: event.ctrlKey,
+          shift: event.shiftKey,
+          alt: event.altKey,
+          isAutoRepeat: event.repeat,
+          isComposing: event.isComposing,
+        },
+        runningPlatform()
+      )
+      if (
+        command !== null &&
+        (state.webTabs.showing || command === 'new-tab' || command === 'reopen-tab')
+      ) {
+        if (document.activeElement?.closest('.sheet-backdrop') != null) return
+        event.preventDefault()
+        runWebCommand(command)
+        return
+      }
+      if (event.isComposing) return
+      if (
+        state.webTabs.showing &&
+        event.repeat &&
+        (primaryOnly(event) || primaryShift(event)) &&
+        (event.key.toLowerCase() === 't' || event.key.toLowerCase() === 'w')
+      ) {
+        event.preventDefault()
+        return
+      }
 
       if (primaryShift(event) && !event.altKey && event.key.toLowerCase() === 'j') {
         event.preventDefault()
@@ -333,10 +381,12 @@ export function Workspace(props: WorkspaceProps): React.JSX.Element {
           state.addGlobalTerminal()
           return
         }
+        if (state.webTabs.showing) return
         if (activeId === null) return
         state.addSessionTerminal(activeId)
         return
       }
+      if (state.webTabs.showing) return
       if (primaryOnly(event) && event.key.toLowerCase() === 'k' && !inTerminal) {
         event.preventDefault()
         chordUntil.current = performance.now() + 1500
@@ -408,12 +458,12 @@ export function Workspace(props: WorkspaceProps): React.JSX.Element {
         commitRef.current()
         return
       }
-      if (primaryShift(event) && (event.key === '[' || event.key === ']')) {
+      if (command === 'previous-tab' || command === 'next-tab') {
         event.preventDefault()
         if (paneId === null || pane === undefined || pane.tabs.length === 0) return
         const next =
           (Math.max(0, pane.tabs.indexOf(activeId ?? '')) +
-            (event.key === '[' ? -1 : 1) +
+            (command === 'previous-tab' ? -1 : 1) +
             pane.tabs.length) %
           pane.tabs.length
         const id = pane.tabs[next]
@@ -471,34 +521,46 @@ export function Workspace(props: WorkspaceProps): React.JSX.Element {
         consumeSuppressedClick={drag.consumeSuppressedClick}
       />
       <main className="workspace-editor" aria-label="Workspace">
-        {layout === null ? (
-          <EmptyWorkspace />
-        ) : (
-          <LayoutView
-            node={layout}
-            path={[]}
-            sessions={sessions}
-            trafficTerminals={trafficTerminals}
-            focusedPaneId={focusedPaneId}
-            drag={drag.drag}
-            onTabPointerDown={drag.onPointerDown}
-            onStartInProject={props.onStartInProject}
-            onEndConversation={props.onEnd}
-            consumeSuppressedClick={drag.consumeSuppressedClick}
-            onActivate={activateTab}
-            onFocus={focusPane}
-            onClose={closeTab}
-            onReorder={reorderTab}
-            onRename={props.onRename}
-            projects={props.projects}
-            onRenameProject={props.onRenameProject}
-            onSetProjectNotes={props.onSetProjectNotes}
-            onSetProjectNoteSize={props.onSetProjectNoteSize}
-            onSendProjectNoteSelection={props.onSendProjectNoteSelection}
-            onCommitLayout={props.onCommitLayout}
-            renderSession={props.renderSession}
-          />
-        )}
+        <div className="workspace-layout">
+          {layout === null ? (
+            <>
+              <div className="workspace-tab-strip web-tab-strip-empty" role="tablist">
+                <WebTabStrip />
+              </div>
+              <EmptyWorkspace />
+            </>
+          ) : (
+            <LayoutView
+              node={layout}
+              path={[]}
+              sessions={sessions}
+              trafficTerminals={trafficTerminals}
+              focusedPaneId={focusedPaneId}
+              webTabsPaneId={topRightPaneId(layout)}
+              webShowing={webTabs.showing}
+              drag={drag.drag}
+              onTabPointerDown={drag.onPointerDown}
+              onStartInProject={props.onStartInProject}
+              onEndConversation={props.onEnd}
+              consumeSuppressedClick={drag.consumeSuppressedClick}
+              onActivate={activateTab}
+              onFocus={focusPane}
+              onClose={closeTab}
+              onReorder={reorderTab}
+              onRename={props.onRename}
+              projects={props.projects}
+              onRenameProject={props.onRenameProject}
+              onSetProjectNotes={props.onSetProjectNotes}
+              onSetProjectNoteSize={props.onSetProjectNoteSize}
+              onSendProjectNoteSelection={props.onSendProjectNoteSelection}
+              onCommitLayout={props.onCommitLayout}
+              renderSession={props.renderSession}
+            />
+          )}
+          {webTabs.showing && webTabs.activeId !== null && (
+            <WebTabStage key={webTabs.activeId} webTabId={webTabs.activeId} />
+          )}
+        </div>
         {/*
             The global terminal, inside the editor area rather than the shell.
 

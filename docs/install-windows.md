@@ -19,14 +19,14 @@ broken in a way that has nothing to do with Chorus.
 
 ## What is supported
 
-|               |                                                                 |
-| ------------- | --------------------------------------------------------------- |
-| Windows       | 10 and 11, 64-bit                                               |
-| Architecture  | x64 only — ARM64 waits for native hardware to verify it on      |
+|               |                                                                    |
+| ------------- | ------------------------------------------------------------------ |
+| Windows       | 10 and 11, 64-bit                                                  |
+| Architecture  | x64 only — ARM64 waits for native hardware to verify it on         |
 | Install scope | Per-machine. The installer asks for administrator; Chorus does not |
-| Shortcuts     | Start Menu. No desktop shortcut unless you ask for one          |
-| Updates       | Download and run the new installer over the old one             |
-| WSL           | Not supported. Agents run as native Windows processes           |
+| Shortcuts     | Start Menu. No desktop shortcut unless you ask for one             |
+| Updates       | Download and run the new installer over the old one                |
+| WSL           | Not supported. Agents run as native Windows processes              |
 
 ## Before you install
 
@@ -137,12 +137,12 @@ These are the paths as observed on a real install, not as inferred from the
 config — the table here previously named `%APPDATA%\Chorus`, which does not
 exist.
 
-|             |                                        |
-| ----------- | -------------------------------------- |
-| Application | `C:\Program Files\Chorus`              |
-| Your data   | `%APPDATA%\@chorus\desktop`            |
+|             |                                          |
+| ----------- | ---------------------------------------- |
+| Application | `C:\Program Files\Chorus`                |
+| Your data   | `%APPDATA%\@chorus\desktop`              |
 | Event log   | `%APPDATA%\@chorus\desktop\chorus.v2.db` |
-| Logs        | `%APPDATA%\@chorus\desktop\logs`       |
+| Logs        | `%APPDATA%\@chorus\desktop\logs`         |
 
 **The event log is every conversation you have had.** It is the source of truth
 and it is append-only. Uninstalling deliberately leaves `%APPDATA%\@chorus`

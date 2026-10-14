@@ -1,29 +1,68 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
-import type { TrafficRowShape } from '../../shared/ipc.js'
 import {
-  BODY_PAGE,
-  type TrafficBodyDescriptor,
-  type TrafficDetail,
-  type TrafficDetailResult,
-} from '../../shared/traffic-ipc.js'
+  DEFAULT_TRAFFIC_REQUEST_FRACTION,
+  MAX_TRAFFIC_REQUEST_FRACTION,
+  MIN_TRAFFIC_REQUEST_FRACTION,
+  type TrafficRowShape,
+} from '../../shared/ipc.js'
+import { BODY_PAGE, type TrafficDetail, type TrafficDetailResult } from '../../shared/traffic-ipc.js'
 import { maskHeaders } from '../../shared/traffic-mask.js'
-import {
-  bodyView,
-  bytesFromBase64,
-  curlCommand,
-  describeBody,
-  formFields,
-  isForm,
-  jsonTree,
-  previewTokens,
-  textOf,
-  treeRows,
-  type JsonNode,
-  type TreeRow,
-  type TreeToken,
-} from './traffic-body.js'
+import { bytesFromBase64, curlCommand, textOf } from './traffic-body.js'
+import { TrafficBody } from './TrafficBody.js'
 import { isPending, statusClassOf } from './traffic-filter.js'
+import { createSignal, useSignal } from './workspace/signal.js'
+
+const bodyLayout = createSignal({ fraction: DEFAULT_TRAFFIC_REQUEST_FRACTION, failed: false })
+let bodyLayoutStarted = false
+let bodyLayoutRevision = 0
+let storedBodyFraction: number | null = null
+
+function receiveBodyFraction(fraction: number): void {
+  bodyLayoutRevision += 1
+  if (fraction === storedBodyFraction) return
+  storedBodyFraction = fraction
+  bodyLayout.set({ fraction, failed: false })
+}
+
+function startBodyLayout(): void {
+  if (bodyLayoutStarted) return
+  bodyLayoutStarted = true
+  const revision = bodyLayoutRevision
+  window.chorus.onSettings((settings) => {
+    receiveBodyFraction(settings.trafficRequestFraction)
+  })
+  void window.chorus
+    .readSettings()
+    .then((settings) => {
+      if (revision === bodyLayoutRevision) receiveBodyFraction(settings.trafficRequestFraction)
+    })
+    .catch(() => undefined)
+}
+
+function changeBodyFraction(fraction: number): void {
+  if (!Number.isFinite(fraction)) return
+  const next = Math.max(MIN_TRAFFIC_REQUEST_FRACTION, Math.min(MAX_TRAFFIC_REQUEST_FRACTION, fraction))
+  if (next === bodyLayout.get().fraction) return
+  bodyLayoutRevision += 1
+  bodyLayout.set({
+    fraction: next,
+    failed: false,
+  })
+}
+
+function saveBodyLayout(): void {
+  const { fraction } = bodyLayout.get()
+  const revision = bodyLayoutRevision
+  void window.chorus
+    .writeSettings({ trafficRequestFraction: fraction })
+    .then((settings) => {
+      if (revision === bodyLayoutRevision) receiveBodyFraction(settings.trafficRequestFraction)
+    })
+    .catch(() => {
+      if (bodyLayout.get().fraction === fraction) bodyLayout.set({ fraction, failed: true })
+    })
+}
 
 /** A capture is held to a megabyte, so this cannot be reached by an honest body. */
 const MAX_BODY_PAGES = 64
@@ -42,15 +81,6 @@ const concat = (chunks: readonly Uint8Array[]): Uint8Array => {
   return whole
 }
 
-const TOKEN_CLASS: Record<TreeToken['kind'], string> = {
-  key: 'tok tok--property',
-  string: 'tok tok--string',
-  number: 'tok tok--number',
-  boolean: 'tok tok--keyword',
-  null: 'tok tok--keyword',
-  punct: 'traffic-punct',
-}
-
 const headerRows = (
   headers: readonly (readonly [string, string])[],
   reveal: boolean
@@ -65,22 +95,112 @@ export function TrafficRequestInspector(props: {
   const { t } = useTranslation()
   const { projectId, subscriptionId, captureId, row } = props
   const pending = isPending(row)
+  const layout = useSignal(bodyLayout)
+  const requestFraction = layout.fraction
+  const requestPaneId = useId()
+  const panesRef = useRef<HTMLDivElement>(null)
+  const resizing = useRef<{
+    pointerId: number
+    startX: number
+    fraction: number
+    width: number
+  } | null>(null)
+  const keyboardResizing = useRef(false)
+  const resizeFrame = useRef<number | null>(null)
+  const queuedFraction = useRef<number | null>(null)
+  const [dragging, setDragging] = useState(false)
+
+  const flushResize = useCallback((): void => {
+    if (resizeFrame.current !== null) cancelAnimationFrame(resizeFrame.current)
+    resizeFrame.current = null
+    const fraction = queuedFraction.current
+    queuedFraction.current = null
+    if (fraction !== null) changeBodyFraction(fraction)
+  }, [])
+
+  useEffect(() => {
+    startBodyLayout()
+    return () => {
+      flushResize()
+      const active = resizing.current
+      resizing.current = null
+      if (
+        keyboardResizing.current ||
+        (active !== null && active.fraction !== bodyLayout.get().fraction)
+      ) {
+        saveBodyLayout()
+      }
+    }
+  }, [flushResize])
+
+  const startResize = (event: React.PointerEvent<HTMLDivElement>): void => {
+    if (event.button !== 0 || resizing.current !== null) return
+    const panes = panesRef.current
+    if (panes === null) return
+    const width =
+      panes.getBoundingClientRect().width - event.currentTarget.getBoundingClientRect().width
+    if (width <= 0) return
+    event.preventDefault()
+    event.currentTarget.setPointerCapture(event.pointerId)
+    const fraction = bodyLayout.get().fraction
+    changeBodyFraction(fraction)
+    resizing.current = { pointerId: event.pointerId, startX: event.clientX, fraction, width }
+    setDragging(true)
+  }
+
+  const moveResize = (event: React.PointerEvent<HTMLDivElement>): void => {
+    const active = resizing.current
+    if (active === null || active.pointerId !== event.pointerId) return
+    queuedFraction.current = active.fraction + (event.clientX - active.startX) / active.width
+    resizeFrame.current ??= requestAnimationFrame(flushResize)
+  }
+
+  const finishResize = (event: React.PointerEvent<HTMLDivElement>): void => {
+    const active = resizing.current
+    if (active === null || active.pointerId !== event.pointerId) return
+    flushResize()
+    resizing.current = null
+    setDragging(false)
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId)
+    }
+    if (active.fraction !== bodyLayout.get().fraction) saveBodyLayout()
+  }
+
+  const keyResize = (event: React.KeyboardEvent<HTMLDivElement>): void => {
+    const fraction = bodyLayout.get().fraction
+    const step = event.shiftKey ? 0.1 : 0.02
+    const next =
+      event.key === 'ArrowLeft'
+        ? fraction - step
+        : event.key === 'ArrowRight'
+          ? fraction + step
+          : event.key === 'Home'
+            ? MIN_TRAFFIC_REQUEST_FRACTION
+            : event.key === 'End'
+              ? MAX_TRAFFIC_REQUEST_FRACTION
+              : null
+    if (next === null) return
+    event.preventDefault()
+    changeBodyFraction(next)
+    if (fraction !== bodyLayout.get().fraction) keyboardResizing.current = true
+  }
+
+  const finishKeyResize = (): void => {
+    if (!keyboardResizing.current) return
+    keyboardResizing.current = false
+    saveBodyLayout()
+  }
 
   const [detail, setDetail] = useState<TrafficDetail | null>(null)
   const [gone, setGone] = useState<TrafficDetailResult | null>(null)
   const [failure, setFailure] = useState(false)
   const [reveal, setReveal] = useState(false)
   const [chunks, setChunks] = useState<Record<Side, Uint8Array[]>>({ request: [], response: [] })
-  const [representation, setRepresentation] = useState<Record<Side, 'encoded' | 'decoded'>>({
-    request: 'decoded',
-    response: 'decoded',
-  })
   const [loaded, setLoaded] = useState<Record<Side, boolean>>({ request: false, response: false })
-  const [loading, setLoading] = useState<Side | null>(null)
-  const [collapsed, setCollapsed] = useState<ReadonlySet<string>>(new Set())
-  const [focused, setFocused] = useState<string | null>(null)
-  const treeRef = useRef<HTMLDivElement | null>(null)
+  const [loading, setLoading] = useState<Record<Side, boolean>>({ request: false, response: false })
   const readGeneration = useRef(0)
+  const inFlight = useRef<Record<Side, number | null>>({ request: null, response: null })
 
   /*
    * Reveal is for one request and one reading of it. A new selection is a new
@@ -93,19 +213,17 @@ export function TrafficRequestInspector(props: {
 
   useEffect(() => {
     readGeneration.current += 1
+    inFlight.current = { request: null, response: null }
     setChunks({ request: [], response: [] })
     setLoaded({ request: false, response: false })
-    setRepresentation({ request: 'decoded', response: 'decoded' })
-    setLoading(null)
+    setLoading({ request: false, response: false })
     setDetail(null)
     setGone(null)
     setFailure(false)
-  }, [row.requestId, pending])
-
-  useEffect(() => {
-    setCollapsed(new Set())
-    setFocused(null)
-  }, [row.requestId])
+    return () => {
+      readGeneration.current += 1
+    }
+  }, [projectId, captureId, subscriptionId, row.requestId, pending])
 
   useEffect(() => {
     let cancelled = false
@@ -138,14 +256,17 @@ export function TrafficRequestInspector(props: {
   const loadWhole = useCallback(
     (side: Side): void => {
       const generation = readGeneration.current
+      if (inFlight.current[side] === generation) return
+      inFlight.current[side] = generation
       const current = (): boolean => generation === readGeneration.current
       const run = async (): Promise<void> => {
         const parts: Uint8Array[] = []
-        let wants: 'encoded' | 'decoded' = representation[side]
-        setLoading(side)
+        let wants: 'encoded' | 'decoded' = 'decoded'
+        let offset = 0
+        setLoading((state) => ({ ...state, [side]: true }))
 
         for (let page = 0; page < MAX_BODY_PAGES; page++) {
-          const offset = parts.reduce((sum, part) => sum + part.length, 0)
+          if (!current()) return
           const result = await window.chorus.readTrafficBody({
             projectId,
             captureId,
@@ -165,63 +286,69 @@ export function TrafficRequestInspector(props: {
            */
           if (result.kind === 'unsupported' && wants === 'decoded') {
             wants = 'encoded'
-            setRepresentation((current) => ({ ...current, [side]: 'encoded' }))
+            parts.length = 0
+            offset = 0
             continue
           }
           if (result.kind !== 'page') {
             setGone(result)
             setLoaded((current) => ({ ...current, [side]: true }))
-            setLoading(null)
             return
           }
           const part = bytesFromBase64(result.dataBase64)
           if (part.length === 0) break
           parts.push(part)
+          offset += part.length
           if (part.length < BODY_PAGE) break
         }
 
         setChunks((current) => ({ ...current, [side]: parts }))
         setLoaded((current) => ({ ...current, [side]: true }))
-        setLoading(null)
       }
 
-      void run().catch(() => {
-        if (!current()) return
-        setLoading(null)
-        setFailure(true)
-      })
+      void run()
+        .catch(() => {
+          if (current()) setFailure(true)
+        })
+        .finally(() => {
+          if (!current()) return
+          inFlight.current[side] = null
+          setLoading((state) => ({ ...state, [side]: false }))
+        })
     },
-    [projectId, captureId, row.requestId, subscriptionId, representation]
+    [projectId, captureId, row.requestId, subscriptionId]
   )
 
   useEffect(() => {
-    if (detail === null) return
+    if (detail === null || failure || gone !== null) return
     if (!loaded.request) loadWhole('request')
     if (!loaded.response) loadWhole('response')
-  }, [detail, loaded, loadWhole])
+  }, [detail, loaded, loadWhole, failure, gone])
 
   const copy = useCallback((text: string): void => {
     void window.chorus.copyText({ text })
   }, [])
 
-  const bytes = useMemo(
-    () => ({ request: concat(chunks.request), response: concat(chunks.response) }),
-    [chunks]
-  )
-
-  const bodyOf = useCallback(
-    (
-      side: Side
-    ): { descriptor: TrafficBodyDescriptor; text: string; note: string | null } | null => {
-      if (detail === null) return null
-      const descriptor = side === 'request' ? detail.requestBody : detail.responseBody
-      const rendered = bodyView(bytes[side], descriptor, 'formatted')
-      return { descriptor, text: rendered.text, note: rendered.note }
-    },
-    [detail, bytes]
-  )
+  const requestBytes = useMemo(() => concat(chunks.request), [chunks.request])
+  const responseBytes = useMemo(() => concat(chunks.response), [chunks.response])
 
   const goneReason = gone !== null && gone.kind !== 'detail' ? gone.kind : failure ? 'failed' : null
+  const panesOpen = goneReason === null && detail !== null
+
+  useEffect(() => {
+    if (panesOpen) return
+    flushResize()
+    const active = resizing.current
+    resizing.current = null
+    if (active !== null) setDragging(false)
+    if (
+      keyboardResizing.current ||
+      (active !== null && active.fraction !== bodyLayout.get().fraction)
+    ) {
+      keyboardResizing.current = false
+      saveBodyLayout()
+    }
+  }, [panesOpen, flushResize])
 
   const awaitingResponse =
     pending ||
@@ -243,192 +370,18 @@ export function TrafficRequestInspector(props: {
    * the request changes on the keystroke, and only the panes wait.
    */
 
-  const curlOf = (): string =>
-    detail === null
-      ? ''
-      : curlCommand({
-          method: detail.method,
-          url: detail.forwardedUrl === '' ? detail.url : detail.forwardedUrl,
-          headers: detail.forwardedHeaders,
-          body: textOf(bytes.request),
-        })
-
-  const renderBody = (side: Side): React.JSX.Element => {
-    if (side === 'response' && awaitingResponse) {
-      return <p className="traffic-stopped">{t('traffic.waitingForResponse')}</p>
-    }
-    const body = bodyOf(side)
-    if (body === null) return <p className="traffic-stopped">{t('traffic.detailLoading')}</p>
-    const note = describeBody(body.descriptor)
-    const tree = jsonTree(body.text)
-
-    return (
-      <div className="traffic-body-view">
-        <div className="traffic-body-bar">
-          <button
-            type="button"
-            className="traffic-tab"
-            onClick={() => {
-              copy(side === 'request' ? curlOf() : body.text)
-            }}
-          >
-            {side === 'request' ? t('traffic.copyCurl') : t('traffic.copy')}
-          </button>
-        </div>
-
-        {note !== null && <p className="traffic-stopped">{t(`traffic.bodyNote.${note}`)}</p>}
-        {tree === null ? <pre className="traffic-body-text">{body.text}</pre> : renderTree(tree)}
-
-        {loading === side && <p className="traffic-stopped">{t('traffic.detailLoading')}</p>}
-      </div>
-    )
-  }
-
-  const focusPath = (path: string): void => {
-    treeRef.current?.querySelector<HTMLElement>(`[data-path="${CSS.escape(path)}"]`)?.focus()
-  }
-
-  const togglePath = (path: string): void => {
-    setCollapsed((current) => {
-      const next = new Set(current)
-      if (next.has(path)) next.delete(path)
-      else next.add(path)
-      return next
-    })
-  }
-
-  const onTreeKey = (
-    event: React.KeyboardEvent<HTMLDivElement>,
-    rows: readonly TreeRow[],
-    path: string
-  ): void => {
-    const at = rows.findIndex((row) => row.path === path)
-    const row = rows[at]
-    if (row === undefined) return
-
-    const step = (to: number): void => {
-      const target = rows[to]
-      if (target !== undefined) focusPath(target.path)
-    }
-
-    if (event.key === 'ArrowDown') {
-      event.preventDefault()
-      step(at + 1)
-      return
-    }
-    if (event.key === 'ArrowUp') {
-      event.preventDefault()
-      step(at - 1)
-      return
-    }
-    if (event.key === 'Home') {
-      event.preventDefault()
-      step(0)
-      return
-    }
-    if (event.key === 'End') {
-      event.preventDefault()
-      step(rows.length - 1)
-      return
-    }
-    if (event.key === 'ArrowRight') {
-      event.preventDefault()
-      if (!row.expandable) return
-      const child = rows[at + 1]
-      if (!row.expanded) togglePath(path)
-      else if (child !== undefined && child.depth > row.depth) focusPath(child.path)
-      return
-    }
-    if (event.key === 'ArrowLeft') {
-      event.preventDefault()
-      if (row.expandable && row.expanded) {
-        togglePath(path)
-        return
-      }
-      let up = at - 1
-      while (up >= 0 && (rows[up]?.depth ?? 0) >= row.depth) up--
-      if (up >= 0) step(up)
-      return
-    }
-    if ((event.key === 'Enter' || event.key === ' ') && row.expandable) {
-      event.preventDefault()
-      togglePath(path)
-    }
-  }
-
-  const previewSpans = (tokens: readonly TreeToken[]): React.JSX.Element => (
-    <>
-      {tokens.map((token, index) => (
-        <span key={String(index)} className={TOKEN_CLASS[token.kind]}>
-          {token.text}
-        </span>
-      ))}
-    </>
+  const requestCurl = useMemo(
+    () =>
+      detail === null
+        ? ''
+        : curlCommand({
+            method: detail.method,
+            url: detail.forwardedUrl === '' ? detail.url : detail.forwardedUrl,
+            headers: detail.forwardedHeaders,
+            body: textOf(requestBytes),
+          }),
+    [detail, requestBytes]
   )
-
-  const renderTree = (tree: JsonNode): React.JSX.Element => {
-    const rows = treeRows(tree, collapsed)
-    const entries = rows.filter((row) => row.delimiter === null)
-    const indent = (depth: number, twisted: boolean): string =>
-      `calc(var(--step) * 2 + ${String(depth)} * (1.4em + var(--step))${twisted ? ' + 1.4em' : ''})`
-
-    return (
-      <div className="traffic-tree" role="tree" ref={treeRef} aria-label={t('traffic.detailTitle')}>
-        {rows.map((row) =>
-          row.delimiter !== null ? (
-            <div
-              key={row.path}
-              className="traffic-node traffic-delimiter"
-              aria-hidden="true"
-              data-path={row.path}
-              style={{ paddingLeft: indent(row.depth, row.node !== tree) }}
-            >
-              <span className="traffic-punct">{row.delimiter}</span>
-            </div>
-          ) : (
-            <div
-              key={row.path}
-              role="treeitem"
-              aria-level={row.depth + 1}
-              aria-expanded={row.expandable ? row.expanded : undefined}
-              aria-selected={focused === row.path}
-              tabIndex={focused === row.path ? 0 : -1}
-              data-path={row.path}
-              className="traffic-node"
-              style={{ paddingLeft: indent(row.depth, false) }}
-              onClick={() => {
-                focusPath(row.path)
-                if (row.expandable) togglePath(row.path)
-              }}
-              onFocus={() => {
-                setFocused(row.path)
-              }}
-              onKeyDown={(event) => {
-                onTreeKey(event, entries, row.path)
-              }}
-            >
-              <span className="traffic-twisty" aria-hidden="true">
-                {row.expandable ? (row.expanded ? '▾' : '▸') : ''}
-              </span>
-              {row.label !== null && (
-                <>
-                  <span className={TOKEN_CLASS.key}>{row.label}</span>
-                  <span className="traffic-punct">: </span>
-                </>
-              )}
-              {row.node.kind === 'value' ? (
-                <span className={TOKEN_CLASS[row.node.scalar]}>{row.node.text}</span>
-              ) : row.expanded ? (
-                <span className="traffic-punct">{row.node.kind === 'array' ? '[' : '{'}</span>
-              ) : (
-                previewSpans(previewTokens(row.node))
-              )}
-            </div>
-          )
-        )}
-      </div>
-    )
-  }
 
   const pairList = (pairs: readonly (readonly [string, string])[]): React.JSX.Element => (
     <dl className="traffic-headers">
@@ -490,26 +443,37 @@ export function TrafficRequestInspector(props: {
         </span>
       </header>
 
+      {layout.failed && (
+        <p className="traffic-stopped" role="alert">
+          {t('traffic.paneSizesSaveFailed')}
+        </p>
+      )}
+
       {goneReason !== null ? (
         <p className="traffic-stopped">{t(`traffic.gone.${goneReason}`)}</p>
       ) : detail === null ? (
         <p className="traffic-stopped">{t('traffic.detailLoading')}</p>
       ) : (
-        <div className="traffic-panes">
-          <div className="traffic-pane" data-side="request">
+        <div
+          className="traffic-panes"
+          ref={panesRef}
+          style={{
+            gridTemplateColumns: `minmax(0, ${requestFraction}fr) 9px minmax(0, ${1 - requestFraction}fr)`,
+            gap: 0,
+            userSelect: dragging ? 'none' : undefined,
+          }}
+        >
+          <div className="traffic-pane" data-side="request" id={requestPaneId}>
             <h3 className="traffic-label">{t('traffic.tab.request')}</h3>
 
-            {isForm(detail.requestBody.contentType) && bytes.request.length > 0 ? (
-              <div className="traffic-fields">
-                {formFields(textOf(bytes.request)).map(([name, value], index) => (
-                  <p key={`${name}-${String(index)}`}>
-                    <span className="traffic-label">{name}</span>
-                    <span>{value}</span>
-                  </p>
-                ))}
-              </div>
-            ) : null}
-            {renderBody('request')}
+            <TrafficBody
+              side="request"
+              descriptor={detail.requestBody}
+              bytes={requestBytes}
+              waiting={false}
+              loading={loading.request}
+              requestCurl={requestCurl}
+            />
 
             <details className="traffic-fold">
               <summary className="traffic-fold-summary">{t('traffic.headersAndTiming')}</summary>
@@ -596,6 +560,31 @@ export function TrafficRequestInspector(props: {
             </details>
           </div>
 
+          <div
+            className="conversation-sash"
+            role="separator"
+            aria-orientation="vertical"
+            aria-label={t('traffic.resizePanes')}
+            aria-controls={requestPaneId}
+            aria-valuemin={MIN_TRAFFIC_REQUEST_FRACTION * 100}
+            aria-valuemax={MAX_TRAFFIC_REQUEST_FRACTION * 100}
+            aria-valuenow={Math.round(requestFraction * 100)}
+            tabIndex={0}
+            style={{
+              cursor: 'col-resize',
+              touchAction: 'none',
+              borderLeft: '1px solid var(--border-default)',
+            }}
+            onPointerDown={startResize}
+            onPointerMove={moveResize}
+            onPointerUp={finishResize}
+            onPointerCancel={finishResize}
+            onLostPointerCapture={finishResize}
+            onKeyDown={keyResize}
+            onKeyUp={finishKeyResize}
+            onBlur={finishKeyResize}
+          />
+
           <div className="traffic-pane" data-side="response">
             <h3 className="traffic-label">{t('traffic.tab.response')}</h3>
             {/*
@@ -611,7 +600,14 @@ export function TrafficRequestInspector(props: {
                 {t('traffic.transportFailed', { reason: detail.transport })}
               </p>
             )}
-            {renderBody('response')}
+            <TrafficBody
+              side="response"
+              descriptor={detail.responseBody}
+              bytes={responseBytes}
+              waiting={awaitingResponse}
+              loading={loading.response}
+              requestCurl=""
+            />
           </div>
         </div>
       )}

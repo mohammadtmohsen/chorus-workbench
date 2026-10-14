@@ -150,6 +150,13 @@ export function App({ role }: { readonly role: WindowRole }): React.JSX.Element 
     >()
   )
   const closedIds = useRef(new Set<string>())
+  const pendingRestarts = useRef<{
+    readonly cancelRestartOf: (source: string) => Promise<void>
+    readonly holdRestarts: (projectId: string) => Promise<() => void>
+  }>({
+    cancelRestartOf: () => Promise.resolve(),
+    holdRestarts: () => Promise.resolve(() => undefined),
+  })
   const [showingLogs, setShowingLogs] = useState(false)
   const [showingSettings, setShowingSettings] = useState(false)
   const [showingHistory, setShowingHistory] = useState(false)
@@ -557,11 +564,19 @@ export function App({ role }: { readonly role: WindowRole }): React.JSX.Element 
     const projectId = role.projectId
     return window.chorus.onFlushRequest(({ requestId }) => {
       let release = (): void => undefined
-      Promise.all(
-        [...draftReaders.current].map(([conversationId, read]) =>
-          window.chorus.rememberDraft({ conversationId, draft: read() })
+      let releaseRestarts = (): void => undefined
+      pendingRestarts.current
+        .holdRestarts(projectId)
+        .then((held) => {
+          releaseRestarts = held
+        }, fail(setError))
+        .then(() =>
+          Promise.all(
+            [...draftReaders.current].map(([conversationId, read]) =>
+              window.chorus.rememberDraft({ conversationId, draft: read() })
+            )
+          )
         )
-      )
         .then(async () => {
           release = await holdShellCloses(projectId)
           return window.chorus.sendFlushResult({
@@ -571,6 +586,7 @@ export function App({ role }: { readonly role: WindowRole }): React.JSX.Element 
         })
         .finally(() => {
           release()
+          releaseRestarts()
         })
         .catch(fail(setError))
     })
@@ -901,7 +917,8 @@ export function App({ role }: { readonly role: WindowRole }): React.JSX.Element 
    * confirmation, for the same conversation, one after the other.
    */
   const finishEnd = useCallback(
-    (conversationId: string) => {
+    (conversationId: string): Promise<void> => {
+      const cancelling = pendingRestarts.current.cancelRestartOf(conversationId)
       closedIds.current.add(conversationId)
       const ending = sessionsRef.current.find((s) => s.conversationId === conversationId)
       carries.current.delete(conversationId)
@@ -927,15 +944,17 @@ export function App({ role }: { readonly role: WindowRole }): React.JSX.Element 
       if (emptiedProject !== null && role.kind !== 'detached') {
         useWorkspaceStore.getState().removeProject(emptiedProject)
       }
-      window.chorus
-        .closeConversation({ conversationId })
-        .then(() =>
-          emptiedProject !== null && role.kind === 'detached'
-            ? window.chorus.closeEmptyProject({ projectId: emptiedProject })
-            : undefined
-        )
-        .catch(fail(setError))
+      const closed = Promise.all([
+        cancelling,
+        window.chorus.closeConversation({ conversationId }),
+      ]).then(async () => {
+        if (emptiedProject !== null && role.kind === 'detached') {
+          await window.chorus.closeEmptyProject({ projectId: emptiedProject })
+        }
+      })
+      void closed.catch(fail(setError))
       void refreshProjects()
+      return closed
     },
     [updateSessions, refreshProjects, role.kind]
   )
@@ -983,7 +1002,7 @@ export function App({ role }: { readonly role: WindowRole }): React.JSX.Element 
     (conversationId: string) => {
       const losing = wouldLose(conversationId)
       if (losing === null) {
-        finishEnd(conversationId)
+        void finishEnd(conversationId)
         return
       }
       setConfirmingEnd({ conversationId, ...losing })
@@ -1007,7 +1026,7 @@ export function App({ role }: { readonly role: WindowRole }): React.JSX.Element 
   const forgetDetached = useCallback((projectId: string) => {
     detachedVisibility.current.delete(projectId)
   }, [])
-  const { starting, startIn } = useConversationStarts({
+  const { starting, startIn, cancelRestartOf, holdRestarts } = useConversationStarts({
     role,
     profileId: defaults.profileId,
     sessionsRef,
@@ -1020,6 +1039,7 @@ export function App({ role }: { readonly role: WindowRole }): React.JSX.Element 
     clearError,
     forgetDetached,
   })
+  pendingRestarts.current = { cancelRestartOf, holdRestarts }
 
   /*
    * `+` starts in the most recently opened project, which is what the list is
@@ -1067,10 +1087,12 @@ export function App({ role }: { readonly role: WindowRole }): React.JSX.Element 
     (projectId: string) => {
       const title = projects.find((project) => project.id === projectId)?.name ?? projectId
       let release = (): void => undefined
+      let releaseRestarts = (): void => undefined
       window.chorus
         .prepareDetach({ projectId, title })
         .then(async (prepared) => {
           if (!('ticket' in prepared)) return
+          releaseRestarts = await holdRestarts(projectId)
           release = await holdShellCloses(projectId)
           await Promise.all(
             sessionsRef.current
@@ -1100,34 +1122,41 @@ export function App({ role }: { readonly role: WindowRole }): React.JSX.Element 
         })
         .finally(() => {
           release()
+          releaseRestarts()
         })
         .catch(fail(setError))
     },
-    [projects]
+    [projects, holdRestarts]
   )
 
-  const redockProject = useCallback((projectId: string) => {
-    let release = (): void => undefined
-    window.chorus
-      .prepareRedock({ projectId })
-      .then(async (prepared) => {
-        if (!('ticket' in prepared)) return
-        release = await holdShellCloses(projectId)
-        await Promise.all(
-          [...draftReaders.current].map(([conversationId, read]) =>
-            window.chorus.rememberDraft({ conversationId, draft: read() })
+  const redockProject = useCallback(
+    (projectId: string) => {
+      let release = (): void => undefined
+      let releaseRestarts = (): void => undefined
+      window.chorus
+        .prepareRedock({ projectId })
+        .then(async (prepared) => {
+          if (!('ticket' in prepared)) return
+          releaseRestarts = await holdRestarts(projectId)
+          release = await holdShellCloses(projectId)
+          await Promise.all(
+            [...draftReaders.current].map(([conversationId, read]) =>
+              window.chorus.rememberDraft({ conversationId, draft: read() })
+            )
           )
-        )
-        await window.chorus.commitRedock({
-          ticket: prepared.ticket,
-          slice: sliceOf(useWorkspaceStore.getState(), projectId),
+          await window.chorus.commitRedock({
+            ticket: prepared.ticket,
+            slice: sliceOf(useWorkspaceStore.getState(), projectId),
+          })
         })
-      })
-      .finally(() => {
-        release()
-      })
-      .catch(fail(setError))
-  }, [])
+        .finally(() => {
+          release()
+          releaseRestarts()
+        })
+        .catch(fail(setError))
+    },
+    [holdRestarts]
+  )
 
   const openAdopted = useCallback(
     async (project: { readonly id: string; readonly created: boolean }) => {
@@ -1606,7 +1635,7 @@ export function App({ role }: { readonly role: WindowRole }): React.JSX.Element 
           onConfirm={() => {
             const { conversationId } = confirmingEnd
             setConfirmingEnd(null)
-            finishEnd(conversationId)
+            void finishEnd(conversationId)
           }}
         />
       )}

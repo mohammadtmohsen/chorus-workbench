@@ -159,3 +159,43 @@ function writtenIn(el: HTMLElement): string {
   if (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement) return el.value
   return el.isContentEditable ? el.textContent : ''
 }
+
+export type FocusRect = Pick<DOMRectReadOnly, 'left' | 'right' | 'top' | 'bottom'>
+
+const ROUNDING_PX = 1
+
+function fitsAxis(start: number, end: number, clipStart: number, clipEnd: number): boolean {
+  return clipEnd > clipStart && start >= clipStart - ROUNDING_PX && end <= clipEnd + ROUNDING_PX
+}
+
+export function withinFocusClip(
+  target: FocusRect,
+  clip: FocusRect,
+  clipX = true,
+  clipY = true
+): boolean {
+  if (target.right <= target.left || target.bottom <= target.top) return false
+  return (
+    (!clipX || fitsAxis(target.left, target.right, clip.left, clip.right)) &&
+    (!clipY || fitsAxis(target.top, target.bottom, clip.top, clip.bottom))
+  )
+}
+
+export function fullyVisible(el: HTMLElement | null): boolean {
+  if (!el?.isConnected) return false
+  const target = el.getBoundingClientRect()
+  const viewport = { left: 0, top: 0, right: window.innerWidth, bottom: window.innerHeight }
+  if (!withinFocusClip(target, viewport)) return false
+  for (let parent = el.parentElement; parent !== null; parent = parent.parentElement) {
+    const style = getComputedStyle(parent)
+    const clipX = style.overflowX !== 'visible'
+    const clipY = style.overflowY !== 'visible'
+    if (!clipX && !clipY) continue
+    const box = parent.getBoundingClientRect()
+    const left = box.left + parent.clientLeft
+    const top = box.top + parent.clientTop
+    const clip = { left, top, right: left + parent.clientWidth, bottom: top + parent.clientHeight }
+    if (!withinFocusClip(target, clip, clipX, clipY)) return false
+  }
+  return true
+}

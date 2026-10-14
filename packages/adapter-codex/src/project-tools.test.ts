@@ -218,9 +218,7 @@ describe('registering the project tools', () => {
       if (method !== 'initialize') return null
       return attempt === 1 ? refusal(UNKNOWN_CAPABILITY) : refusal('Server is draining')
     })
-    await expect(adapter.start({ ...BASE, project: readerOf(fresh()) })).rejects.toThrow(
-      /draining/
-    )
+    await expect(adapter.start({ ...BASE, project: readerOf(fresh()) })).rejects.toThrow(/draining/)
     expect(connections).toHaveLength(2)
     expect(connections.map((connection) => connection.closed)).toEqual([true, true])
   })

@@ -1,8 +1,8 @@
 import { randomUUID } from 'node:crypto'
 import {
-  BrowserWindow,
   ipcMain,
   screen,
+  type BrowserWindow,
   type IpcMainInvokeEvent,
   type Point,
   type Rectangle,
@@ -23,6 +23,7 @@ import {
 } from '../shared/detached-window-ipc.js'
 import type { ProjectLayoutSlice, ReturnSlot } from '../shared/workspace-layout.js'
 import type { ChorusRuntime } from './runtime.js'
+import { isShellSender, shellWindows } from './shell-windows.js'
 import { beginHandoff, type WorkbenchPlace } from './workbench-surface.js'
 
 export type DetachedState =
@@ -426,13 +427,14 @@ export function registerDetachedWindowHandlers(deps: DetachedWindowDeps): void {
   }
 
   deps.runtime.onConversationsChanged(() => {
-    for (const window of BrowserWindow.getAllWindows()) {
+    for (const window of shellWindows()) {
       if (!window.isDestroyed()) window.webContents.send(CONVERSATIONS_PUSH_CHANNEL)
     }
   })
 
   for (const channel of DETACHED_WINDOW_CHANNELS) {
     ipcMain.handle(channel, async (event, rawRequest: unknown) => {
+      if (!isShellSender(event)) throw new Error(`"${channel}" is only available to Chorus windows`)
       const schema = DETACHED_WINDOW_CONTRACT[channel]
       const parsedRequest = schema.request.safeParse(rawRequest)
       if (!parsedRequest.success) {

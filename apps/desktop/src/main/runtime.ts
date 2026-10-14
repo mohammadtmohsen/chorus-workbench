@@ -125,6 +125,14 @@ import { LogcatService } from './logcat.js'
 import type { WorkspaceSnapshot } from '../shared/workspace-layout.js'
 import { sdkExecutablePath, spawnSpec } from './command.js'
 import { resolveCommand } from './which.js'
+import {
+  isLiveReply,
+  liveMessageAction,
+  liveMessageText,
+  type LiveMessageMode,
+} from '../shared/live-message.js'
+import { LiveReplies } from './live-replies.js'
+import { mainT } from './i18n.js'
 
 /**
  * Wires the domain to real agents inside the main process.
@@ -353,9 +361,19 @@ export interface PromotedConversation {
   readonly unread: number
 }
 
+interface DormantAgent {
+  readonly ref: string | undefined
+  readonly known: boolean
+  readonly seenSeq: number
+  readonly carry: string | undefined
+}
+
 interface ActiveConversation {
   readonly conversationId: string
+  stopEpoch?: number
+  agentStopEpochs?: Map<AgentId, number>
   readonly participants: Map<AgentId, Participant>
+  readonly dormant: Map<AgentId, DormantAgent>
   /** Shared, so a grant given to one agent is not re-asked for the next to join. */
   readonly grants: SessionGrants
   profile: PermissionProfile
@@ -1381,10 +1399,10 @@ export function forwardedFromAside(directive: string, excerpt: string): string {
 /** Long enough for a cold provider start, short enough not to look like a hang. */
 const REOPEN_TIMEOUT_MS = 20_000
 
-function withTimeout<T>(work: Promise<T>, ms: number, message: string): Promise<T> {
+function withTimeout<T>(work: Promise<T>, ms: number, reason: string | Error): Promise<T> {
   return new Promise<T>((resolve, reject) => {
     const timer = setTimeout(() => {
-      reject(new Error(message))
+      reject(reason instanceof Error ? reason : new Error(reason))
     }, ms)
     work.then(
       (value) => {
@@ -1451,6 +1469,7 @@ export class ChorusRuntime {
   private readonly starting = new Map<string, StartingConversation>()
   private readonly failedStarts = new Map<string, string>()
   private readonly startupWork = new Set<Promise<unknown>>()
+  private readonly seating = new WeakMap<ActiveConversation, Map<AgentId, Promise<Participant>>>()
   private closing = false
   /**
    * The restore in flight, so two callers cannot both perform it.
@@ -1598,6 +1617,7 @@ export class ChorusRuntime {
    * decision read back after a restart is one nobody is waiting on.
    */
   private readonly previews = new EditPreviews()
+  private readonly liveReplies: LiveReplies
 
   private constructor(
     readonly store: EventStore,
@@ -1623,8 +1643,10 @@ export class ChorusRuntime {
      * above: that row is *the* note the app keeps, and these are a collection
      * addressed by id, made and deleted one at a time.
      */
-    private readonly keptNotes: KeptNoteStore
+    private readonly keptNotes: KeptNoteStore,
+    private readonly deferRestoredAgents: boolean
   ) {
+    this.liveReplies = new LiveReplies(this.store)
     this.store.subscribe((events) => {
       this.followHandoffs(events)
     })
@@ -1745,7 +1767,8 @@ export class ChorusRuntime {
   static open(
     userDataPath: string,
     log: Logger,
-    adapters?: Map<AgentId, AgentAdapter>
+    adapters?: Map<AgentId, AgentAdapter>,
+    options: { readonly deferRestoredAgents?: boolean } = {}
   ): ChorusRuntime {
     const path = join(userDataPath, DATABASE_FILE)
     const { db, store, recovered } = openOrRecover(path, userDataPath)
@@ -1784,7 +1807,8 @@ export class ChorusRuntime {
       userDataPath,
       projects,
       new AppNoteStore(db),
-      new KeptNoteStore(db)
+      new KeptNoteStore(db),
+      options.deferRestoredAgents ?? false
     )
   }
 
@@ -2198,6 +2222,7 @@ export class ChorusRuntime {
     const conversation: ActiveConversation = {
       conversationId,
       participants: new Map(),
+      dormant: new Map(),
       grants,
       profile,
       projectId: starting.projectId,
@@ -2386,9 +2411,12 @@ export class ChorusRuntime {
   async send(
     conversationId: string,
     text: string,
-    intent?: 'go' | 'collaborate'
+    intent?: 'go' | 'collaborate',
+    mode: LiveMessageMode = 'auto'
   ): Promise<SendResult> {
+    if (this.closing) throw new Error(mainT('live.closed'))
     const conversation = this.require(conversationId)
+    const stopEpoch = conversation.stopEpoch ?? 0
     /*
      * Addressable is the cast, not the live map, and the two differ exactly when
      * something went wrong.
@@ -2410,7 +2438,7 @@ export class ChorusRuntime {
      * agent that will not run. Listing the live ones first keeps the fallback on
      * something that can answer, while a mention still reaches anybody.
      */
-    const live = [...conversation.participants.keys()]
+    const live = this.roster(conversation)
     const liveInRoutingOrder: AgentId[] =
       conversation.lastAddressed === undefined && live.includes('claude')
         ? ['claude', ...live.filter((id) => id !== 'claude')]
@@ -2433,16 +2461,92 @@ export class ChorusRuntime {
 
     if (route.targets.length === 0) throw new Error('No agent is available in this conversation')
 
+    const agentStopEpochs = new Map(
+      route.targets.map((id) => [id, conversation.agentStopEpochs?.get(id) ?? 0])
+    )
+    const wasWorking = route.targets.some((id) => conversation.working.has(id))
+
+    const action =
+      intent !== undefined || team || pair !== null
+        ? 'guide'
+        : liveMessageAction(route.text, mode, wasWorking)
+    const liveText = liveMessageText(route.text)
+    if ((action === 'ask' || action === 'guide') && liveText === '') {
+      throw new Error(mainT('live.empty'))
+    }
+
     const stored = this.store.append({
       conversationId,
       actor: 'user',
-      payload: { type: 'user.message', text: task },
+      payload: { type: 'user.message', text: task, ...(action === 'guide' ? {} : { live: true }) },
     })
     // Null only once the store is closed, which means the app is quitting.
     // Delivering a message the log has no record of would be worse than not.
     if (stored === null) throw new Error('Chorus is shutting down')
     conversation.lastAddressed = route.targets.at(-1)
-    conversation.handoffEpoch += 1
+    if (action === 'guide' || action === 'stop') conversation.handoffEpoch += 1
+
+    if (action === 'status') {
+      const events = this.store.readPage(conversationId, {
+        limit: 100,
+        types: ['agent.message.completed', 'command.started', 'command.completed'],
+      })
+      const completedCommands = new Set(
+        events.flatMap((event) =>
+          event.payload.type === 'command.completed'
+            ? [`${event.actor}:${event.payload.itemRef}`]
+            : []
+        )
+      )
+      for (const agentId of route.targets) {
+        const participant = conversation.participants.get(agentId)
+        const command = conversation.working.has(agentId)
+          ? events.findLast(
+              (event) =>
+                event.actor === agentId &&
+                event.payload.type === 'command.started' &&
+                !completedCommands.has(`${agentId}:${event.payload.itemRef}`)
+            )
+          : undefined
+        const status =
+          participant === undefined
+            ? mainT('live.notRunning', { agent: agentId })
+            : participant.service.pendingApprovals().length > 0
+              ? mainT('live.awaitingApproval', { agent: agentId })
+              : participant.service.pendingQuestions().length > 0
+                ? mainT('live.awaitingAnswer', { agent: agentId })
+                : command?.payload.type === 'command.started'
+                  ? mainT('live.command', {
+                      agent: agentId,
+                      command: command.payload.command.join(' ').slice(0, 400),
+                    })
+                  : mainT(conversation.working.has(agentId) ? 'live.working' : 'live.idle', {
+                      agent: agentId,
+                    })
+        const latest = events.findLast(
+          (event) =>
+            event.actor === agentId &&
+            event.payload.type === 'agent.message.completed' &&
+            !isLiveReply(event.payload.itemRef)
+        )
+        const update =
+          latest?.payload.type === 'agent.message.completed'
+            ? latest.payload.text.slice(0, 800)
+            : ''
+        this.liveNotice(
+          conversationId,
+          update === '' ? status : `${status}\n\n${mainT('live.latest')}\n${update}`
+        )
+      }
+      return { targets: route.targets }
+    }
+    if (action === 'stop') {
+      const addressed = /^\s*@/.test(task)
+      const targets = addressed ? route.targets : this.roster(conversation)
+      this.liveNotice(conversationId, mainT('live.stopping', { agents: targets.join(', ') }))
+      await this.interrupt(conversationId, addressed ? targets : undefined)
+      return { targets }
+    }
 
     /*
      * Logged before the delivery is awaited, and again after it returns.
@@ -2465,9 +2569,14 @@ export class ChorusRuntime {
      * are addressing, not subject, and a namer told "@claude" every message
      * would be reading the routing as part of the topic.
      */
-    this.nameTopic(conversationId, route.text)
+    if (action === 'guide') this.nameTopic(conversationId, liveText)
 
     await this.ensureSeated(conversation, route.targets)
+    if (this.active.get(conversationId) !== conversation) throw new Error(mainT('live.closed'))
+    if ((conversation.stopEpoch ?? 0) !== stopEpoch) return { targets: [] }
+    const targets = route.targets.filter(
+      (id) => (conversation.agentStopEpochs?.get(id) ?? 0) === agentStopEpochs.get(id)
+    )
 
     /*
      * Who is in the room, read **after** seating and not before.
@@ -2477,12 +2586,56 @@ export class ChorusRuntime {
      * before `ensureSeated`, so an agent seated by this very message would be
      * missing from the list the others are handed.
      */
-    const roster = [...conversation.participants.keys()]
+    const roster = this.roster(conversation)
+
+    if (action === 'ask') {
+      const events = this.store.readPage(conversationId, {
+        limit: 300,
+        types: [
+          'user.message',
+          'agent.message.completed',
+          'command.started',
+          'command.completed',
+          'file.change.completed',
+          'plan.updated',
+          'approval.requested',
+          'userinput.requested',
+          'turn.started',
+          'turn.completed',
+          'notice.raised',
+        ],
+      })
+      const context = composeHistory(events, { skip: 0, count: 100 }).slice(-24_000)
+      for (const agentId of targets) {
+        const participant = conversation.participants.get(agentId)
+        const adapter = this.adapters.get(agentId)
+        if (participant === undefined || adapter === undefined) continue
+        this.liveReplies.ask({
+          conversationId,
+          agentId,
+          sourceId: stored.id,
+          adapter,
+          sessionRef: participant.session.sessionRef,
+          opts: { cwd: conversation.cwd },
+          question: liveText,
+          context,
+          onAnswered: (answer) => {
+            if (this.active.get(conversationId)?.participants.get(agentId) !== participant) return
+            const exchange = `A live question was already answered while you worked. Context only, not a new task.\nQuestion: ${liveText.slice(0, 4_000)}\nAnswer: ${answer.slice(0, 12_000)}`
+            participant.seedContext =
+              participant.seedContext === undefined
+                ? exchange
+                : `${participant.seedContext}\n\n${exchange}`.slice(-24_000)
+          },
+        })
+      }
+      return { targets }
+    }
 
     // Filtered rather than optional-chained: `Promise.all` over a list that can
     // contain `undefined` is a silent no-op waiting to happen.
     await Promise.all(
-      route.targets
+      targets
         .map((agentId) => conversation.participants.get(agentId))
         .filter((p) => p !== undefined)
         .map(async (p) => {
@@ -2520,7 +2673,7 @@ export class ChorusRuntime {
               : team
                 ? teamIntroduction(roster, task)
                 : pair === null
-                  ? route.text
+                  ? liveText
                   : collaborationPrompt(pair, task)
           const seeded = p.seedContext === undefined ? body : `${p.seedContext}\n\n${body}`
           delete p.seedContext
@@ -2541,11 +2694,22 @@ export class ChorusRuntime {
           delete p.catchupBudget
         })
     )
-    this.log.info('message delivered', { conversationId, targets: route.targets.join(',') })
+    this.log.info('message delivered', { conversationId, targets: targets.join(',') })
+    if (wasWorking && targets.length > 0) {
+      this.liveNotice(conversationId, mainT('live.guided', { agents: targets.join(', ') }))
+    }
     // Cheap, and it keeps the resume refs current if the app dies without a
     // clean quit.
     this.rememberOpen()
-    return { targets: route.targets }
+    return { targets }
+  }
+
+  private liveNotice(conversationId: string, text: string): void {
+    this.store.append({
+      conversationId,
+      actor: 'system',
+      payload: { type: 'notice.raised', source: 'system', level: 'info', text, detail: null },
+    })
   }
 
   /**
@@ -2641,8 +2805,9 @@ export class ChorusRuntime {
     if (!isAgentId(agentId)) {
       throw new Error('Only an agent can be asked about what it said')
     }
-    const participant = parent.participants.get(agentId)
-    if (participant === undefined) throw new Error(`${agentId} is no longer in this conversation`)
+    if (!this.roster(parent).includes(agentId)) {
+      throw new Error(`${agentId} is no longer in this conversation`)
+    }
 
     const adapter = this.adapters.get(agentId)
     /*
@@ -2661,9 +2826,15 @@ export class ChorusRuntime {
      * reading it.
      */
     const recapping = (request.purpose ?? 'question') === 'recap'
+    let sessionRef = ''
     if (!recapping) {
       if (adapter?.fork === undefined) throw new Error(`${agentId} cannot be forked`)
-      if (participant.session.sessionRef === '') {
+      const participant = await this.seat(parent, agentId)
+      if (this.active.get(request.conversationId) !== parent) {
+        throw new Error('That conversation is not open')
+      }
+      sessionRef = participant.session.sessionRef
+      if (sessionRef === '') {
         throw new Error(`${agentId} has not started a session yet`)
       }
     }
@@ -2761,7 +2932,7 @@ export class ChorusRuntime {
      */
     const history = recapping ? this.store.read(request.conversationId) : []
     const asked = history
-      .filter((e) => e.payload.type === 'user.message')
+      .filter((e) => e.payload.type === 'user.message' && e.payload.live !== true)
       .map((e) =>
         e.payload.type === 'user.message'
           ? parseMentions(e.payload.text, { participants: [...AGENT_IDS] }).text
@@ -2792,7 +2963,7 @@ export class ChorusRuntime {
     if (recapping) {
       forked = await adapter.start(opts)
     } else if (adapter.fork !== undefined) {
-      forked = await adapter.fork(participant.session.sessionRef, {
+      forked = await adapter.fork(sessionRef, {
         ...opts,
         // Decided with the user: the aside inherits the user's configuration,
         // so hooks, skills and CLAUDE.md load exactly as they do in the room.
@@ -3094,8 +3265,19 @@ export class ChorusRuntime {
     const parent = this.active.get(aside.parentId)
     if (parent === undefined) throw new Error('The conversation this came from is no longer open')
     const { agentId } = aside
-    const source = parent.participants.get(agentId)
-    if (source === undefined) throw new Error(`${agentId} is no longer in that conversation`)
+    if (!this.roster(parent).includes(agentId)) {
+      throw new Error(`${agentId} is no longer in that conversation`)
+    }
+    const source = await this.seat(parent, agentId)
+    if (this.active.get(aside.parentId) !== parent) {
+      throw new Error('The conversation this came from is no longer open')
+    }
+    if (this.asides.get(asideId) !== aside) {
+      throw new Error('That aside has ended — ask again to start a new one')
+    }
+    if (this.stillAnswering(asideId)) {
+      throw new Error('Wait for the aside to finish answering, then open it as a conversation')
+    }
     if (source.session.sessionRef === '') {
       throw new Error(`${agentId} has not started a session yet`)
     }
@@ -3167,6 +3349,7 @@ export class ChorusRuntime {
     const conversation: ActiveConversation = {
       conversationId: asideId,
       participants: new Map([[agentId, participant]]),
+      dormant: new Map(),
       grants,
       profile,
       projectId: parent.projectId,
@@ -3294,6 +3477,7 @@ export class ChorusRuntime {
         delete participant.lastReply
         conversation.working.add(from)
       } else if (payload.type === 'agent.message.completed') {
+        if (isLiveReply(payload.itemRef)) continue
         participant.lastReply = { eventId: event.id, text: payload.text }
       } else if (payload.type === 'turn.completed') {
         conversation.working.delete(from)
@@ -3386,7 +3570,7 @@ export class ChorusRuntime {
         withCatchup(
           {
             recipient: handoff.to,
-            participants: [...conversation.participants.keys()],
+            participants: this.roster(conversation),
             events: missed,
             ...(target.catchupBudget === undefined ? {} : { maxTotalChars: target.catchupBudget }),
           },
@@ -3454,6 +3638,7 @@ export class ChorusRuntime {
     this.terminals.disposeSession(conversationId)
 
     await Promise.all([
+      this.liveReplies.cancel(conversationId),
       ...[...conversation.participants.values()].map((p) => p.service.close()),
       ...orphans.map(([, a]) => a.service.close()),
     ])
@@ -3513,7 +3698,7 @@ export class ChorusRuntime {
       if (open !== undefined) {
         restored.push({
           conversationId: entry.conversationId,
-          participants: [...open.participants.keys()],
+          participants: this.roster(open),
           profileId: open.profile.id,
           projectId: open.projectId,
           cwd: open.cwd,
@@ -3542,11 +3727,11 @@ export class ChorusRuntime {
         })
         continue
       }
-      const conversation = await this.reopen(projectId, entry)
+      const conversation = await this.reopen(projectId, entry, this.deferRestoredAgents)
       if (conversation === null) continue
       restored.push({
         conversationId: entry.conversationId,
-        participants: [...conversation.participants.keys()],
+        participants: this.roster(conversation),
         profileId: conversation.profile.id,
         projectId: conversation.projectId,
         cwd: conversation.cwd,
@@ -3567,7 +3752,8 @@ export class ChorusRuntime {
 
   private async reopen(
     projectId: string,
-    entry: OpenConversation
+    entry: OpenConversation,
+    deferAgents = false
   ): Promise<ActiveConversation | null> {
     const profile = profileById(entry.profileId)
     const grants = this.newGrants()
@@ -3580,6 +3766,7 @@ export class ChorusRuntime {
     const conversation: ActiveConversation = {
       conversationId: entry.conversationId,
       participants: new Map(),
+      dormant: new Map(),
       grants,
       profile,
       projectId,
@@ -3592,6 +3779,22 @@ export class ChorusRuntime {
       draft: entry.draft,
       planning: false,
       styleOn: this.defaultStyleOn(),
+    }
+    if (deferAgents) {
+      const restoredSeq = this.store.lastSeq()
+      for (const agentId of AGENT_IDS) {
+        const saved = entry.sessionRefs[agentId]
+        conversation.dormant.set(agentId, {
+          ref: saved === undefined || saved.trim() === '' ? undefined : saved,
+          known: entry.agents.includes(agentId),
+          seenSeq: restoredSeq,
+          carry: undefined,
+        })
+      }
+      this.reseedCarriedContext(conversation)
+      this.active.set(entry.conversationId, conversation)
+      this.onConversations?.()
+      return conversation
     }
     /*
      * The whole cast, not the cast this conversation was saved with.
@@ -3725,6 +3928,9 @@ export class ChorusRuntime {
     for (const participant of conversation.participants.values()) {
       participant.seedContext = carryover
     }
+    for (const [agentId, record] of conversation.dormant) {
+      conversation.dormant.set(agentId, { ...record, carry: carryover })
+    }
   }
 
   /**
@@ -3796,18 +4002,26 @@ export class ChorusRuntime {
       const conversations = byProject.get(c.projectId) ?? []
       conversations.push({
         conversationId: c.conversationId,
-        agents: [...c.participants.keys()],
+        agents: [
+          ...c.participants.keys(),
+          ...[...c.dormant]
+            .filter(([agentId, record]) => record.known && !c.participants.has(agentId))
+            .map(([agentId]) => agentId),
+        ],
         profileId: c.profile.id,
         title: c.title,
         lastSeenSeq: c.lastSeenSeq,
         draft: c.draft,
         // Only real ones: an agent that has not spoken yet has no thread to
         // resume, and writing an empty string down makes it look like it does.
-        sessionRefs: Object.fromEntries(
-          [...c.participants.values()]
+        sessionRefs: Object.fromEntries([
+          ...[...c.dormant].flatMap(([agentId, record]) =>
+            record.ref === undefined ? [] : [[agentId, record.ref] as const]
+          ),
+          ...[...c.participants.values()]
             .filter((p) => p.session.sessionRef.trim() !== '')
-            .map((p) => [p.agentId, p.session.sessionRef])
-        ),
+            .map((p) => [p.agentId, p.session.sessionRef] as const),
+        ]),
       })
       byProject.set(c.projectId, conversations)
     }
@@ -3876,7 +4090,7 @@ export class ChorusRuntime {
   }[] {
     const ready = [...this.active.entries()].map(([conversationId, open]) => ({
       conversationId,
-      participants: [...open.participants.keys()],
+      participants: this.roster(open),
       profileId: open.profile.id,
       projectId: open.projectId,
       cwd: open.cwd,
@@ -4007,7 +4221,7 @@ export class ChorusRuntime {
     if (open !== undefined) {
       return {
         conversationId,
-        participants: [...open.participants.keys()],
+        participants: this.roster(open),
         profileId: open.profile.id,
         projectId: open.projectId,
         cwd: open.cwd,
@@ -4302,7 +4516,7 @@ export class ChorusRuntime {
   openConversations(): { conversationId: string; participants: AgentId[]; cwd: string }[] {
     return [...this.active.values()].map((c) => ({
       conversationId: c.conversationId,
-      participants: [...c.participants.keys()],
+      participants: this.roster(c),
       cwd: c.cwd,
     }))
   }
@@ -4331,8 +4545,9 @@ export class ChorusRuntime {
     for (const agentId of targets) {
       if (conversation.participants.has(agentId)) continue
       try {
-        await this.addParticipant(conversation.conversationId, agentId)
+        await this.seat(conversation, agentId)
       } catch (error) {
+        if (this.closing || this.active.get(conversation.conversationId) !== conversation) return
         const message = error instanceof Error ? error.message : String(error)
         this.log.error('an addressed agent could not be started', undefined, {
           conversationId: conversation.conversationId,
@@ -4357,22 +4572,106 @@ export class ChorusRuntime {
    * actually used, and then cost exactly one turn.
    */
   async addParticipant(conversationId: string, agentId: AgentId): Promise<{ agentId: AgentId }> {
-    const conversation = this.require(conversationId)
-    if (conversation.participants.has(agentId)) return { agentId }
+    await this.seat(this.require(conversationId), agentId)
+    return { agentId }
+  }
 
-    const participant = await this.startParticipant(
+  private roster(conversation: ActiveConversation): AgentId[] {
+    const live = [...conversation.participants.keys()]
+    const dormant = [...conversation.dormant.keys()].filter((agentId) => !live.includes(agentId))
+    return [...live, ...dormant]
+  }
+
+  private seat(conversation: ActiveConversation, agentId: AgentId): Promise<Participant> {
+    const live = conversation.participants.get(agentId)
+    if (live !== undefined) return Promise.resolve(live)
+    const pending = this.seating.get(conversation) ?? new Map<AgentId, Promise<Participant>>()
+    this.seating.set(conversation, pending)
+    const running = pending.get(agentId)
+    if (running !== undefined) return running
+    const work = this.startSeat(conversation, agentId).finally(() => {
+      pending.delete(agentId)
+    })
+    pending.set(agentId, work)
+    this.trackStartup(work)
+    return work
+  }
+
+  private async startSeat(
+    conversation: ActiveConversation,
+    agentId: AgentId
+  ): Promise<Participant> {
+    const { conversationId } = conversation
+    const dormant = conversation.dormant.get(agentId)
+    const timedOut = new Error(
+      `${agentId} did not come back within ${String(Math.round(REOPEN_TIMEOUT_MS / 1000))}s`
+    )
+    let expired = false
+    const stopped = (): boolean =>
+      expired || this.closing || this.active.get(conversationId) !== conversation
+    if (stopped()) throw new Error(STARTUP_CANCELLED)
+    const starting = this.startParticipant(
       agentId,
       conversationId,
       (resuming) => this.sessionOptsFor(conversation, agentId, resuming),
       conversation.profile,
-      conversation.grants
+      conversation.grants,
+      dormant?.ref,
+      dormant?.known ?? false,
+      undefined,
+      stopped
     )
-    participant.seenSeq = 0
-    participant.catchupBudget = JOINING_CATCHUP_CHARS
+    const participant =
+      dormant === undefined
+        ? await starting
+        : await withTimeout(starting, REOPEN_TIMEOUT_MS, timedOut).catch((error: unknown) => {
+            expired = true
+            if (error === timedOut) this.forgetStaleRef(conversation, agentId, dormant)
+            throw error instanceof Error ? error : new Error(String(error))
+          })
+    if (dormant?.ref !== undefined && participant.session.sessionRef === dormant.ref) {
+      participant.seenSeq = dormant.seenSeq
+    } else {
+      participant.seenSeq = 0
+      participant.catchupBudget = JOINING_CATCHUP_CHARS
+    }
+    if (dormant?.carry !== undefined) participant.seedContext = dormant.carry
+    let applied = false
+    try {
+      while (conversation.planning !== applied) {
+        const wanted: boolean = conversation.planning
+        await participant.session.setPermissionMode(wanted ? 'plan' : 'default')
+        applied = wanted
+        if (stopped()) throw new Error(STARTUP_CANCELLED)
+      }
+    } catch (error) {
+      this.closeStarted(participant)
+      throw error instanceof Error ? error : new Error(String(error))
+    }
+    if (stopped()) {
+      this.closeStarted(participant)
+      throw new Error(STARTUP_CANCELLED)
+    }
+    participant.service.setProfile(conversation.profile)
+    conversation.dormant.delete(agentId)
     conversation.participants.set(agentId, participant)
     this.rememberOpen()
-    this.log.info('agent joined', { conversationId, agentId })
-    return { agentId }
+    this.log.info(dormant === undefined ? 'agent joined' : 'restored agent started', {
+      conversationId,
+      agentId,
+    })
+    return participant
+  }
+
+  private forgetStaleRef(
+    conversation: ActiveConversation,
+    agentId: AgentId,
+    stale: DormantAgent
+  ): void {
+    if (this.closing || this.active.get(conversation.conversationId) !== conversation) return
+    if (conversation.dormant.get(agentId) !== stale) return
+    conversation.dormant.set(agentId, { ...stale, ref: undefined })
+    this.rememberOpen()
   }
 
   /*
@@ -5191,9 +5490,23 @@ export class ChorusRuntime {
   }
 
   /** Interrupts every agent mid-turn; the user pressed one Stop button. */
-  async interrupt(conversationId: string): Promise<void> {
+  async interrupt(conversationId: string, agents?: readonly AgentId[]): Promise<void> {
     const conversation = this.require(conversationId)
-    await Promise.all([...conversation.participants.values()].map((p) => p.service.interrupt()))
+    if (agents === undefined) {
+      conversation.stopEpoch = (conversation.stopEpoch ?? 0) + 1
+    } else {
+      conversation.agentStopEpochs ??= new Map()
+      for (const agent of agents) {
+        conversation.agentStopEpochs.set(agent, (conversation.agentStopEpochs.get(agent) ?? 0) + 1)
+      }
+    }
+    conversation.handoffEpoch += 1
+    await Promise.all([
+      this.liveReplies.cancel(conversationId, agents),
+      ...[...conversation.participants.values()]
+        .filter((p) => agents === undefined || agents.includes(p.agentId))
+        .map((p) => p.service.interrupt()),
+    ])
   }
 
   async decideApproval(
@@ -5534,7 +5847,10 @@ export class ChorusRuntime {
       ),
       ...[...this.asides.values()].map((a) => a.service),
     ]
-    await Promise.all(services.map((service) => service.close('shutdown')))
+    await Promise.all([
+      this.liveReplies.cancel(),
+      ...services.map((service) => service.close('shutdown')),
+    ])
     this.asides.clear()
     this.active.clear()
     await Promise.all([...this.adapters.values()].map((a) => a.dispose()))
@@ -5656,6 +5972,7 @@ export class ChorusRuntime {
                 opts: resumeOpts,
               }
             } catch {
+              if (stopped()) throw new Error(STARTUP_CANCELLED)
               // Fresh options on the fallback: this is now a new session, and it
               // should start with what the sheet says new sessions start with.
               const opts = sessionOpts(false)

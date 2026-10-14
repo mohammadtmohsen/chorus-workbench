@@ -173,7 +173,10 @@ const term = (): InstanceType<typeof FakeTerminal> => {
   return current
 }
 
-const queuedText = (): string => term().queue.map((write) => write.data).join('')
+const queuedText = (): string =>
+  term()
+    .queue.map((write) => write.data)
+    .join('')
 
 const drawn = (): string => {
   term().flush()

@@ -1,5 +1,5 @@
-import { BrowserWindow } from 'electron'
 import { SCALE_PUSH_CHANNEL } from '../shared/ipc.js'
+import { shellWindows } from './shell-windows.js'
 
 /**
  * Window zoom, owned by the main process.
@@ -43,7 +43,7 @@ export function onScaleChange(listener: ScaleListener): void {
 }
 
 export function applyScale(scale: number): void {
-  for (const window of BrowserWindow.getAllWindows()) {
+  for (const window of shellWindows()) {
     window.webContents.setZoomFactor(scale)
     // Told, not inferred: the renderer cannot read the zoom factor it is being
     // drawn at, and it is the one that has to say what just happened.

@@ -73,8 +73,9 @@ export function requestShellClose(ref: ShellRef, label: string, remove: RemoveSh
 
 export function answerShellClose(projectId: string, confirmed: boolean): void {
   const close = closes.get(projectId)
-  if (close === undefined || close.answer === null) return
+  if (close === undefined) return
   const answer = close.answer
+  if (answer === null) return
   close.question = null
   close.answer = null
   notify()

@@ -83,6 +83,7 @@ interface Prepared {
   readonly cwd: string
   readonly shell: string
   readonly active: ActiveCommand
+  readonly captureTraffic: boolean
 }
 
 type Outcome = 'gone' | 'present' | 'superseded'
@@ -96,6 +97,7 @@ interface Run {
   readonly projectId: string
   readonly token: number
   readonly active: ActiveCommand
+  readonly captureTraffic: boolean
   readonly exit: Promise<void>
   readonly reportExit: () => void
   cancelled: boolean
@@ -149,10 +151,14 @@ export const runAvailable = (
 
 const quote = (value: string): string => `'${value.replaceAll("'", `'\\''`)}'`
 
-const scriptOf = (redirect: WorkbenchTerminalEnv, command: string): string =>
-  `set +m; export ${redirect.name}=${quote(redirect.value)}; ${command}`
+const scriptOf = (redirect: WorkbenchTerminalEnv | null, command: string): string =>
+  redirect === null
+    ? `set +m; ${command}`
+    : `set +m; export ${redirect.name}=${quote(redirect.value)}; ${command}`
 
 const noop = (): void => undefined
+
+const isCancelled = (cleanup: Cleanup): boolean => cleanup.cancelled
 
 const cancel = (cleanup: Cleanup | null): void => {
   if (cleanup === null) return
@@ -185,9 +191,12 @@ const within = (promise: Promise<void>, ms: number): Promise<void> =>
 const errnoOf = (error: unknown): unknown =>
   typeof error === 'object' && error !== null ? (error as { code?: unknown }).code : undefined
 
+const isDisposed = (entry: Entry): boolean => entry.disposed
+
 const ownedRun = (entry: Entry): Run | null => {
   const run = entry.run
-  return run !== null && run.pgid !== null && !run.gone ? run : null
+  if (run === null) return null
+  return run.pgid !== null && !run.gone ? run : null
 }
 
 function chosen(commands: RunCommands | null, commandId: string | undefined): ActiveCommand | null {
@@ -197,7 +206,12 @@ function chosen(commands: RunCommands | null, commandId: string | undefined): Ac
   return found === undefined ? null : { id: found.id, label: found.label, command: found.command }
 }
 
-function newRun(projectId: string, token: number, active: ActiveCommand): Run {
+function newRun(
+  projectId: string,
+  token: number,
+  active: ActiveCommand,
+  captureTraffic: boolean
+): Run {
   let reportExit: () => void = () => undefined
   const exit = new Promise<void>((resolve) => {
     reportExit = resolve
@@ -206,6 +220,7 @@ function newRun(projectId: string, token: number, active: ActiveCommand): Run {
     projectId,
     token,
     active,
+    captureTraffic,
     exit,
     reportExit,
     cancelled: false,
@@ -392,15 +407,16 @@ export class ProjectRunner {
     project: RunProject | null,
     active: ActiveCommand | null
   ): Prepared | RunFailure {
-    if (project === null || project.host !== LOCAL_HOST) return 'not-local'
+    if (project?.host !== LOCAL_HOST) return 'not-local'
     if (!PLATFORMS.has(this.deps.platform)) return 'unsupported-platform'
     if (active === null) return 'no-command'
-    if (project.trafficOrigin === null || project.trafficOrigin === '') return 'no-origin'
     const variable = project.trafficEnvVar
-    if (variable === null || !TRAFFIC_ENV_NAME.test(variable)) return 'no-variable'
+    if (variable !== null && !TRAFFIC_ENV_NAME.test(variable)) return 'no-variable'
+    const captureTraffic =
+      project.trafficOrigin !== null && project.trafficOrigin !== '' && variable !== null
     const shell = this.deps.shell().file
     if (!SHELLS.has(basename(shell))) return 'unsupported-shell'
-    return { cwd: project.canonicalRoot, shell, active }
+    return { cwd: project.canonicalRoot, shell, active, captureTraffic }
   }
 
   private launchWith(
@@ -414,7 +430,7 @@ export class ProjectRunner {
       return Promise.resolve(this.snapshotOf(entry))
     }
     this.tokens += 1
-    const run = newRun(entry.projectId, this.tokens, prepared.active)
+    const run = newRun(entry.projectId, this.tokens, prepared.active, prepared.captureTraffic)
     entry.run = run
     this.publish(entry, { kind: 'starting', token: run.token, active: run.active })
     const launching: Promise<void> = this.launch(entry, run, prepared).finally(() => {
@@ -425,22 +441,24 @@ export class ProjectRunner {
   }
 
   private async launch(entry: Entry, run: Run, prepared: Prepared): Promise<void> {
-    const { recordingBefore, started } = await this.capture(entry, async () => {
-      const before = this.recording(entry.projectId)
-      if (entry.disposed || run.cancelled) return { recordingBefore: before, started: null }
-      const state = await this.deps.traffic.start(entry.projectId).catch(() => null)
-      return { recordingBefore: before, started: state }
-    })
+    const { recordingBefore, started } = prepared.captureTraffic
+      ? await this.capture(entry, async () => {
+          const before = this.recording(entry.projectId)
+          if (entry.disposed || run.cancelled) return { recordingBefore: before, started: null }
+          const state = await this.deps.traffic.start(entry.projectId).catch(() => null)
+          return { recordingBefore: before, started: state }
+        })
+      : { recordingBefore: false, started: null }
     if (entry.disposed || run.cancelled || entry.run !== run) {
       await this.abandon(entry, run, recordingBefore, started, 'cancelled')
       return
     }
-    if (started === null || !started.capturing || started.port === null) {
+    if (prepared.captureTraffic && (started === null || !started.capturing || started.port === null)) {
       await this.abandon(entry, run, recordingBefore, started, 'capture-failed')
       return
     }
-    const redirect = terminalEnvOf(started)
-    if (redirect === null) {
+    const redirect = started === null ? null : terminalEnvOf(started)
+    if (prepared.captureTraffic && redirect === null) {
       await this.abandon(entry, run, recordingBefore, started, 'no-redirect')
       return
     }
@@ -457,11 +475,12 @@ export class ProjectRunner {
     this.publish(entry, { kind: 'running', token: run.token, active: run.active, pgid: pid })
   }
 
-  private spawn(run: Run, prepared: Prepared, redirect: WorkbenchTerminalEnv): number | null {
+  private spawn(run: Run, prepared: Prepared, redirect: WorkbenchTerminalEnv | null): number | null {
     try {
       const result = this.deps.terminals.launch(runRef(run.projectId), {
         cwd: prepared.cwd,
-        env: { ...this.deps.env(), [redirect.name]: redirect.value },
+        env:
+          redirect === null ? this.deps.env() : { ...this.deps.env(), [redirect.name]: redirect.value },
         file: prepared.shell,
         args: ['-l', '-i', '-c', scriptOf(redirect, run.active.command)],
         generation: run.token,
@@ -491,7 +510,7 @@ export class ProjectRunner {
     const entry = this.entries.get(projectId)
     if (entry === undefined) return
     const run = entry.run
-    if (run === null || run.token !== token || run.exited) return
+    if (run?.token !== token || run.exited) return
     run.exited = true
     run.code = code
     run.reportExit()
@@ -536,16 +555,16 @@ export class ProjectRunner {
     const outcome = await this.escalate(run, STOP, NO_DEADLINE)
     if (outcome === 'superseded' || entry.disposed) return
     if (outcome === 'gone' && !run.exited) await within(run.exit, EXIT_REPORT_MS)
-    if (entry.disposed) return
+    if (isDisposed(entry)) return
     if (outcome === 'gone' && stopping.relaunch !== null) {
       entry.stopping = null
       if (entry.run === run) entry.run = null
       await this.launchWith(entry, this.deps.project(entry.projectId), stopping.relaunch)
       return
     }
-    if (stopping.stopRecording) {
+    if (stopping.stopRecording && run.captureTraffic) {
       await this.capture(entry, () => this.stopTraffic(entry.projectId))
-      if (entry.disposed) return
+      if (isDisposed(entry)) return
     }
     entry.stopping = null
     if (outcome === 'present') {
@@ -647,7 +666,7 @@ export class ProjectRunner {
     const run = ownedRun(entry)
     if (run !== null) {
       const outcome = await this.escalate(run, budget, deadline)
-      if (outcome === 'superseded' || ender.cancelled) return false
+      if (outcome === 'superseded' || isCancelled(ender)) return false
       if (outcome === 'present') {
         this.deps.log.warn('a run outlived its cleanup', {
           projectId: entry.projectId,

@@ -2949,7 +2949,9 @@ body {
 .changes-card {
   grid-area: said;
   min-width: 0;
+  max-height: 320px;
   overflow-x: auto;
+  overflow-y: auto;
   padding: calc(var(--step) * 2) calc(var(--step) * 3);
   border: 1px solid var(--line);
   border-radius: var(--radius);
@@ -2976,7 +2978,7 @@ body {
  */
 .changes-row {
   display: grid;
-  grid-template-columns: 1.5ch 1fr auto;
+  grid-template-columns: 1.5ch 1.5ch 1fr auto;
   align-items: baseline;
   gap: 0 calc(var(--step) * 2);
   font-family: var(--mono);
@@ -2991,12 +2993,26 @@ body {
  * reads down the left edge with the diffs hanging off it.
  */
 .changes-row .tool-patch {
-  grid-column: 2 / -1;
+  grid-column: 3 / -1;
   margin: calc(var(--step) * 0.5) 0 calc(var(--step) * 2);
 }
 
 .changes-row + .changes-row {
   border-top: 1px solid color-mix(in srgb, var(--border-default) 50%, transparent);
+}
+
+.changes-caret {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--text-muted);
+  font: inherit;
+  cursor: pointer;
+}
+
+.changes-caret:hover,
+.changes-caret:focus-visible {
+  color: var(--bone);
 }
 
 .changes-letter {
@@ -4077,6 +4093,28 @@ body {
   font: 14px var(--mono);
   line-height: 1;
   cursor: pointer;
+}
+
+.composer-live-mode {
+  flex: none;
+  max-width: 78px;
+  height: 26px;
+  padding: 0 4px;
+  border: 1px solid var(--border-default);
+  border-radius: 6px;
+  background: var(--bg-control);
+  color: var(--text-muted);
+  font: 12px var(--ui-font);
+  cursor: pointer;
+}
+
+.send--stop + .send {
+  margin-left: 0;
+}
+
+.entry-live-label {
+  color: var(--text-muted);
+  font-size: 11px;
 }
 
 /*
@@ -6164,7 +6202,7 @@ input::placeholder {
    * group with a tab on it. 40px is the tab card plus the 6px it needs to sit
    * proud of the body it belongs to.
    */
-  grid-template-rows: 40px minmax(0, 1fr);
+  grid-template-rows: var(--pane-header, 40px) minmax(0, 1fr);
   width: 100%;
   /*
    * The 6px on the sides is what makes a pane read as bounded. Tried at 0 on
@@ -7286,6 +7324,17 @@ input::placeholder {
   border-bottom: 1px solid var(--border-default);
 }
 
+.traffic-host-controls {
+  align-items: center;
+  flex-wrap: wrap;
+  padding: 0;
+  border-bottom: 0;
+}
+
+.traffic-host-controls > .traffic-origin {
+  flex: 1 1 calc(var(--step) * 30);
+}
+
 /*
  * Two situations share this row: a saved shared connection nobody has decided
  * about, and a view that fell behind the capture. Both are things the panel is
@@ -7318,6 +7367,15 @@ input::placeholder {
   flex: 1 1 auto;
   flex-direction: column;
   min-height: 0;
+}
+
+.traffic-list {
+  flex: 0 0 auto;
+  height: calc(11lh + var(--step) * 23);
+  min-height: 0;
+  overflow: hidden;
+  font-size: 11px;
+  line-height: 1.6;
 }
 
 .traffic-row-button {
@@ -7391,24 +7449,9 @@ input::placeholder {
   box-shadow: inset 2px 0 0 var(--focus-ring);
 }
 
-/*
- * The details are most of what the panel has and stay that way.
- *
- * `1 1 auto` gave them whatever the row list left, which on a tall window is a
- * thin strip with the JSON clipped — the thing this region exists to show.
- * `50vh` answered the window instead, which is the same number only while the
- * panel is the whole window: a pane split down leaves a shorter column, and the
- * details then took more than half of it and the rows went out of sight.
- *
- * Seventy rather than fifty because the two halves are not read the same way:
- * the list is scanned and a dozen rows is usually enough of it, while a body is
- * read and every line the region cannot show is a scroll. The rows keep the
- * remainder rather than a share of their own, so a panel with nothing selected
- * still gives them all of it.
- */
 .traffic-inspector {
   display: flex;
-  flex: 0 0 70%;
+  flex: 1 1 0;
   flex-direction: column;
   min-height: 0;
   overflow: hidden;
@@ -7443,12 +7486,13 @@ input::placeholder {
  * two panes that already have one each.
  */
 .traffic-panes {
-  display: flex;
+  display: grid;
   flex: 1 1 auto;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-rows: minmax(0, 1fr);
   gap: var(--step);
   min-height: 0;
-  overflow-x: auto;
-  overflow-y: hidden;
+  overflow: hidden;
 }
 
 .traffic-pane {
@@ -7471,11 +7515,12 @@ input::placeholder {
    * the narrowest panel this opens at, so a pair of short panes does not scroll
    * when it has no need to.
    */
-  flex: 0 0 auto;
   flex-direction: column;
-  min-width: 200px;
+  min-width: 0;
+  min-height: 0;
   overflow-x: hidden;
   overflow-y: auto;
+  overflow-wrap: anywhere;
 }
 
 .traffic-pane + .traffic-pane {
@@ -7618,7 +7663,7 @@ input::placeholder {
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   font-size: 11px;
   line-height: 1.45;
-  white-space: pre;
+  white-space: pre-wrap;
   tab-size: 2;
 }
 
@@ -7633,7 +7678,7 @@ input::placeholder {
   display: block;
   padding-right: calc(var(--step) * 2);
   outline-offset: -1px;
-  white-space: pre;
+  white-space: pre-wrap;
 }
 
 .traffic-node:focus-visible {
@@ -7656,6 +7701,13 @@ input::placeholder {
   color: var(--text-muted);
   font-size: 11px;
   cursor: pointer;
+}
+
+.traffic-setup {
+  flex: 0 1 auto;
+  min-height: 0;
+  max-height: 50%;
+  overflow-y: auto;
 }
 
 .traffic-headers,
@@ -7737,7 +7789,9 @@ input::placeholder {
  */
 .traffic-rows {
   display: grid;
-  flex: 1 1 auto;
+  height: 100%;
+  grid-template-rows: calc(1lh + var(--step));
+  grid-auto-rows: 1lh;
   /*
    * **`start`, and it is a regression fix rather than a preference.**
    *
@@ -11059,6 +11113,7 @@ input::placeholder {
  */
 .conversation-dock {
   position: relative;
+  -webkit-app-region: no-drag;
   /*
    * Above the transcript, not merely above nothing.
    *
@@ -12575,28 +12630,262 @@ input::placeholder {
   min-width: 500px;
 }
 
-.traffic-box {
-  flex: 0 0 auto;
-  min-width: 800px;
-  display: flex;
-  flex-direction: column;
-  min-height: 0;
-}
-
-.traffic-box .conversation-dock-tab {
-  cursor: default;
-}
-
+.traffic-box,
 .project-terminal-box {
   flex: 0 0 auto;
-  min-width: 480px;
+  min-width: 0;
   display: flex;
   flex-direction: column;
   min-height: 0;
 }
 
+.traffic-box .conversation-dock-tab,
 .project-terminal-box .conversation-dock-tab {
   cursor: default;
+}
+
+.traffic-box[data-collapsed='true'] .conversation-dock-tab-main,
+.project-terminal-box[data-collapsed='true'] .conversation-dock-tab-main {
+  padding: 0;
+}
+
+.traffic-box .conversation-body[hidden],
+.project-terminal-box .conversation-body[hidden] {
+  display: none;
+}
+
+.browser-box {
+  flex: 0 0 auto;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+}
+
+.browser-box .conversation-dock-tab {
+  cursor: default;
+}
+
+.browser-panel {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+}
+
+.browser-panel[hidden] {
+  display: none;
+}
+
+.conversation-body > .browser-toolbar,
+.conversation-body > .browser-favorites,
+.conversation-body > .browser-notice,
+.conversation-body > .browser-prompt,
+.conversation-body > .browser-chooser {
+  display: flex;
+  flex: 0 0 auto;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: calc(var(--step) * 1.5);
+  min-width: 0;
+  padding: calc(var(--step) * 1.5) calc(var(--step) * 2);
+  color: var(--text-secondary);
+  font-size: 12px;
+  border-bottom: 1px solid var(--border-default);
+}
+
+.conversation-body > .browser-favorites {
+  gap: var(--step);
+  max-height: 72px;
+  overflow-y: auto;
+}
+
+.conversation-body > .browser-prompt,
+.conversation-body > .browser-chooser {
+  max-height: 160px;
+  overflow-y: auto;
+}
+
+.browser-button {
+  flex: 0 0 auto;
+  min-width: 26px;
+  height: 26px;
+  padding: 0 var(--step);
+  color: var(--text-primary);
+  font: inherit;
+  font-size: 13px;
+  line-height: 1;
+  background: var(--bg-control);
+  border: 1px solid var(--border-default);
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.browser-button--text {
+  padding: 0 calc(var(--step) * 2);
+  font-size: 11px;
+}
+
+.browser-button:disabled {
+  color: var(--text-disabled);
+  cursor: default;
+}
+
+.browser-button:focus-visible,
+.browser-address-input:focus-visible,
+.browser-favorite-open:focus-visible,
+.browser-favorite-remove:focus-visible,
+.browser-still:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 1px;
+}
+
+.browser-address {
+  display: flex;
+  flex: 1 1 200px;
+  min-width: 120px;
+}
+
+.browser-address-input {
+  flex: 1 1 auto;
+  min-width: 0;
+  height: 26px;
+  padding: 0 calc(var(--step) * 2);
+  color: var(--text-primary);
+  font-family: var(--mono);
+  font-size: 12px;
+  background: var(--bg-canvas);
+  border: 1px solid var(--border-default);
+  border-radius: 6px;
+}
+
+.browser-address-input::placeholder {
+  color: var(--text-placeholder);
+}
+
+.browser-favorite {
+  display: inline-flex;
+  align-items: center;
+  max-width: 220px;
+  overflow: hidden;
+  background: var(--bg-control);
+  border: 1px solid var(--border-default);
+  border-radius: 999px;
+}
+
+.browser-favorite-open {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--step);
+  min-width: 0;
+  padding: var(--step) var(--step) var(--step) calc(var(--step) * 2);
+  color: var(--text-primary);
+  font: inherit;
+  font-size: 11px;
+  background: transparent;
+  border: 0;
+  cursor: pointer;
+}
+
+.browser-favorite-icon,
+.browser-favorite-letter {
+  flex: 0 0 auto;
+  width: 14px;
+  height: 14px;
+}
+
+.browser-favorite-letter {
+  display: inline-grid;
+  place-items: center;
+  color: var(--text-primary);
+  font-size: 9px;
+  font-weight: 600;
+  background: var(--bg-surface);
+  border-radius: 3px;
+}
+
+.browser-favorite-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.browser-favorite-remove {
+  flex: 0 0 auto;
+  padding: var(--step) calc(var(--step) * 2);
+  color: var(--text-muted);
+  font: inherit;
+  font-size: 11px;
+  background: transparent;
+  border: 0;
+  cursor: pointer;
+}
+
+.browser-favorite-remove:hover {
+  color: var(--text-primary);
+}
+
+.browser-prompt-text,
+.browser-chooser-title {
+  color: var(--text-primary);
+  overflow-wrap: anywhere;
+}
+
+.browser-chooser-never,
+.browser-account {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--step);
+}
+
+.browser-account-name {
+  color: var(--text-primary);
+  font-family: var(--mono);
+  overflow-wrap: anywhere;
+}
+
+.browser-help {
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+.browser-body {
+  position: relative;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: hidden;
+  background: var(--bg-canvas);
+}
+
+.browser-still {
+  position: absolute;
+  inset: 0;
+  padding: 0;
+  background: transparent;
+  border: 0;
+  cursor: pointer;
+}
+
+.browser-placeholder {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: calc(var(--step) * 2);
+  max-width: 560px;
+  padding: calc(var(--step) * 6);
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+
+.browser-placeholder p {
+  margin: 0;
+}
+
+.browser-placeholder-title {
+  color: var(--text-primary);
+  font-size: 13px;
+  font-weight: 600;
 }
 
 .project-terminal-state {
@@ -12623,6 +12912,7 @@ input::placeholder {
 .project-terminal-slots {
   display: flex;
   flex: 1 1 auto;
+  flex-direction: column;
   min-height: 0;
 }
 
@@ -12634,12 +12924,8 @@ input::placeholder {
   min-height: 0;
 }
 
-.project-terminal-slot--run {
-  min-width: 640px;
-}
-
 .project-terminal-slot + .project-terminal-slot {
-  border-left: 1px solid var(--border-default);
+  border-top: 1px solid var(--border-default);
 }
 
 .project-terminal-slot-head {
@@ -13078,7 +13364,8 @@ input::placeholder {
  * overflow is on the tabs.
  */
 /* Sits on the strip's baseline with the tabs, one pixel clear of the border. */
-.conversation-dock-add {
+.conversation-dock-add,
+.conversation-dock-toggle {
   flex: none;
   width: 24px;
   height: 24px;
@@ -13094,7 +13381,9 @@ input::placeholder {
 }
 
 .conversation-dock-add:hover,
-.conversation-dock-add:focus-visible {
+.conversation-dock-add:focus-visible,
+.conversation-dock-toggle:hover,
+.conversation-dock-toggle:focus-visible {
   border-color: var(--border-default);
   color: var(--text-primary);
 }
@@ -13727,4 +14016,291 @@ input::placeholder {
 
 .toast-reply::placeholder {
   color: var(--text-placeholder);
+}
+
+.workspace-layout {
+  --pane-header: 40px;
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+}
+
+.workspace-layout > .split-branch,
+.workspace-layout > .workspace-pane,
+.workspace-layout > .workspace-empty {
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+.web-tab-group {
+  display: flex;
+  align-items: center;
+  flex: 0 1 70%;
+  min-width: 36px;
+  max-width: 70%;
+  height: var(--pane-header, 40px);
+  -webkit-app-region: no-drag;
+}
+
+.web-tab-strip-empty {
+  flex: 0 0 var(--pane-header);
+  justify-content: flex-end;
+}
+
+.web-tab-strip-empty .web-tab-group {
+  max-width: 100%;
+}
+
+.web-tab-divider {
+  flex: 0 0 1px;
+  height: 22px;
+  margin: 0 calc(var(--step) * 2);
+  background: var(--border-default);
+}
+
+.web-tabs {
+  position: relative;
+  display: flex;
+  flex: 1 1 auto;
+  align-items: center;
+  min-width: 0;
+  overflow: clip;
+}
+
+.web-tab {
+  display: flex;
+  flex: 1 1 0;
+  align-items: center;
+  min-width: 0;
+  height: 32px;
+  overflow: clip;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  color: var(--text-secondary);
+}
+
+.web-tab[data-dragging='true'] {
+  z-index: 1;
+  opacity: 0.85;
+  background: var(--bg-canvas);
+  box-shadow: 0 2px 8px rgb(0 0 0 / 20%);
+}
+
+.web-tab-insertion {
+  position: absolute;
+  z-index: 2;
+  top: 4px;
+  bottom: 4px;
+  width: 2px;
+  border-radius: 1px;
+  background: var(--accent-text);
+  pointer-events: none;
+}
+
+.web-tab[data-active='true'] {
+  border-color: var(--accent-text);
+  color: var(--text-primary);
+  background: var(--bg-canvas);
+}
+
+.web-tab-main,
+.web-tab-close,
+.web-tab-add {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  height: 28px;
+  padding: 0 calc(var(--step) * 2);
+  border: 0;
+  border-radius: 6px;
+  color: inherit;
+  background: transparent;
+  font: 12px var(--ui-font);
+  cursor: pointer;
+}
+
+.web-tab-main {
+  justify-content: flex-start;
+  flex: 1 1 auto;
+  gap: calc(var(--step) * 2);
+  min-width: 0;
+  overflow: hidden;
+  touch-action: none;
+  user-select: none;
+}
+
+.web-tab-close {
+  width: 26px;
+  padding: 0;
+  font-size: 16px;
+}
+
+.web-tabs[data-compact='true'] .web-tab-main {
+  justify-content: center;
+  gap: 0;
+  padding: 0;
+}
+
+.web-tabs[data-compact='true'] .web-tab-title,
+.web-tabs[data-compact='true'] .web-tab-close {
+  display: none;
+}
+
+.web-tabs[data-compact='true'] .web-tab-icon,
+.web-tabs[data-compact='true'] .web-tab-spinner {
+  flex: 0 1 16px;
+  min-width: 0;
+}
+
+.web-tab-add {
+  width: 32px;
+  margin-left: var(--step);
+  color: var(--text-primary);
+  font-size: 20px;
+}
+
+.web-tab-main:hover,
+.web-tab-close:hover,
+.web-tab-add:hover:not(:disabled) {
+  background: var(--bg-control);
+}
+
+.web-tab-add:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.web-tab-main:focus-visible,
+.web-tab-close:focus-visible,
+.web-tab-add:focus-visible {
+  outline: 1px solid var(--accent-text);
+  outline-offset: -1px;
+}
+
+.web-tab-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.web-tab-icon,
+.web-tab-spinner {
+  flex: 0 0 16px;
+  width: 16px;
+  height: 16px;
+}
+
+svg.web-tab-icon {
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.5;
+}
+
+.web-tab-spinner {
+  border: 2px solid var(--border-default);
+  border-top-color: var(--accent-text);
+  border-radius: 50%;
+  animation: web-tab-spin 0.8s linear infinite;
+}
+
+@keyframes web-tab-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.web-stage {
+  position: absolute;
+  z-index: 4;
+  inset: var(--pane-header) 0 0;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  border: 1px solid var(--border-default);
+  border-radius: 10px;
+  background: var(--bg-canvas);
+}
+
+.web-stage-toolbar,
+.web-stage-find,
+.web-stage-notice,
+.web-stage > .browser-prompt,
+.web-stage > .browser-chooser {
+  display: flex;
+  flex: 0 0 auto;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: calc(var(--step) * 1.5);
+  min-width: 0;
+  padding: calc(var(--step) * 1.5) calc(var(--step) * 2);
+  border-bottom: 1px solid var(--border-default);
+  color: var(--text-secondary);
+  font: 12px var(--ui-font);
+}
+
+.browser-password-button {
+  display: contents;
+}
+
+.web-stage > .browser-prompt,
+.web-stage > .browser-chooser {
+  max-height: 160px;
+  overflow-y: auto;
+}
+
+.web-stage-find input {
+  flex: 1 1 auto;
+  min-width: 80px;
+  max-width: 320px;
+}
+
+.web-stage-downloads {
+  flex: 0 0 auto;
+  max-height: 180px;
+  padding: calc(var(--step) * 2);
+  overflow-y: auto;
+  border-bottom: 1px solid var(--border-default);
+  color: var(--text-secondary);
+  font: 12px var(--ui-font);
+}
+
+.web-stage-download {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: calc(var(--step) * 2);
+  padding: var(--step) 0;
+}
+
+.web-stage-download-name {
+  flex: 1 1 140px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.web-stage-body {
+  position: relative;
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
+  margin: 3px;
+  overflow: hidden;
+}
+
+.web-stage-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: calc(var(--step) * 2);
+  width: 100%;
+  height: 100%;
+  color: var(--text-muted);
+  font: 14px var(--ui-font);
 }

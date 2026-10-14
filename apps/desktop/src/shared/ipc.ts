@@ -3,6 +3,7 @@ import { z } from 'zod'
 import { NOTE_SIZE, WorkspaceSnapshot } from './workspace-layout.js'
 import type { WorkbenchShellApi } from './workbench-ipc.js'
 import type { DetachedWindowApi } from './detached-window-ipc.js'
+import type { BrowserApi } from './browser-ipc.js'
 import type { RunApi } from './run-ipc.js'
 import type { TrafficApi } from './traffic-ipc.js'
 
@@ -111,6 +112,14 @@ export function normaliseExplainLanguage(raw: string): string {
   return raw.replace(/\s+/g, ' ').trim().slice(0, MAX_EXPLAIN_LANGUAGE)
 }
 
+export const DEFAULT_TRAFFIC_REQUEST_FRACTION = 0.5
+export const MIN_TRAFFIC_REQUEST_FRACTION = 0.1
+export const MAX_TRAFFIC_REQUEST_FRACTION = 0.9
+export const TrafficRequestFraction = z
+  .number()
+  .min(MIN_TRAFFIC_REQUEST_FRACTION)
+  .max(MAX_TRAFFIC_REQUEST_FRACTION)
+
 /**
  * What main hands back: the stored settings, plus what it will say about the
  * credentials it holds.
@@ -154,6 +163,7 @@ export const SettingsShape = z.object({
   theme: z.enum(['system', 'light', 'dark']).default('system'),
   completionProvider: z.enum(['auto', 'deepseek', 'codestral']).default('auto'),
   notifications: z.boolean().default(true),
+  trafficRequestFraction: TrafficRequestFraction.default(DEFAULT_TRAFFIC_REQUEST_FRACTION),
   trafficOrigin: z.string().default(''),
 })
 
@@ -715,6 +725,7 @@ export const IPC_CONTRACT = {
        * could name any intent can only choose between the ones main knows.
        */
       intent: z.enum(['go', 'collaborate']).optional(),
+      mode: z.enum(['auto', 'ask', 'guide']).optional(),
     }),
     /** Which agents the mention router picked, so the UI can show it. */
     response: z.object({ targets: z.array(AgentIdSchema) }),
@@ -1741,13 +1752,18 @@ export const IPC_CONTRACT = {
   },
   /** A patch: sending only what changed keeps one field from clobbering another. */
   'settings:write': {
-    /*
-     * `.partial()` only reaches the top level, so the per-agent maps would still
-     * demand both agents — and a caller setting one agent's model would have to
-     * send the other's too, which is how the value gets clobbered in the first
-     * place. Their fields are optional here, and main merges a level deeper.
-     */
-    request: SettingsShape.partial().extend({
+    request: z.object({
+      cwd: z.string().optional(),
+      profileId: z.string().optional(),
+      model: z.string().optional(),
+      effortLevel: z.string().optional(),
+      explainLanguage: z.string().transform(normaliseExplainLanguage).optional(),
+      styleOnByDefault: z.boolean().optional(),
+      theme: z.enum(['system', 'light', 'dark']).optional(),
+      completionProvider: z.enum(['auto', 'deepseek', 'codestral']).optional(),
+      notifications: z.boolean().optional(),
+      trafficRequestFraction: TrafficRequestFraction.optional(),
+      trafficOrigin: z.string().optional(),
       models: z
         .object(agentRecord(() => z.string()))
         .partial()
@@ -2307,7 +2323,8 @@ export function isIpcChannel(value: string): value is IpcChannel {
  * channels are not in `IPC_CONTRACT` — they are answered by a registrar that
  * validates `event.sender`. The shape belongs beside the channels it names.
  */
-export interface ChorusApi extends WorkbenchShellApi, DetachedWindowApi, TrafficApi, RunApi {
+export interface ChorusApi
+  extends WorkbenchShellApi, DetachedWindowApi, TrafficApi, RunApi, BrowserApi {
   readonly getAppInfo: () => Promise<AppInfo>
   /** Asks; the answer arrives on `onLimits`. */
   readonly refreshLimits: () => Promise<{ ok: true }>

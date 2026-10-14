@@ -3,6 +3,7 @@ import { terminalRefKey, type TrafficSourceShape } from '../shared/ipc.js'
 import {
   BODY_PAGE,
   TRAFFIC_ENV_NAME,
+  isTrafficHost,
   type TrafficAccess,
   type TrafficDetail,
   type TrafficFailure,
@@ -29,6 +30,7 @@ const DEFAULT_ACCESS: TrafficAccess = 'lan'
 
 const BYTES_PER_PROJECT = 16 * 1_024 * 1_024
 const BYTES_OVERALL = 64 * 1_024 * 1_024
+const ADDRESS_REFRESH_MS = 5_000
 
 export interface ProjectTrafficConfig {
   readonly origin: string | null
@@ -42,6 +44,8 @@ export interface ProjectTrafficState {
   readonly port: number | null
   readonly wantedPort: number | null
   readonly address: string | null
+  readonly host?: string | null
+  readonly hostOverridden?: boolean
   readonly origin: string | null
   readonly access: TrafficAccess
   readonly envVar: string | null
@@ -80,6 +84,7 @@ export interface ProjectTrafficDeps {
 interface Entry {
   readonly projectId: string
   config: ProjectTrafficConfig | null
+  hostOverride: string | null
   service: TrafficService | null
   unsubscribe: (() => void) | null
   journal: TrafficRow[]
@@ -108,9 +113,13 @@ const RELINQUISHED: Partial<ProjectTrafficState> = {
 
 export function terminalEnvOf(state: ProjectTrafficState | null): WorkbenchTerminalEnv | null {
   if (state === null) return null
-  const { port, envVar } = state
+  const { port, envVar, access, address } = state
   if (port === null || envVar === null || !TRAFFIC_ENV_NAME.test(envVar)) return null
-  return { name: envVar, value: `http://${LOOPBACK}:${String(port)}` }
+  const reachable =
+    access === 'lan' && address !== null && !address.startsWith(`${EVERY_INTERFACE}:`)
+      ? address
+      : `${LOOPBACK}:${String(port)}`
+  return { name: envVar, value: `http://${reachable}` }
 }
 
 export class ProjectTrafficRegistry {
@@ -130,6 +139,7 @@ export class ProjectTrafficRegistry {
   private readonly charges = new Map<string, { readonly projectId: string; bytes: number }>()
   private readonly projectBytes = new Map<string, number>()
   private totalBytes = 0
+  private addressRefresh: ReturnType<typeof setInterval> | null = null
 
   constructor(deps: ProjectTrafficDeps) {
     this.deps = deps
@@ -181,12 +191,16 @@ export class ProjectTrafficRegistry {
       readonly origin?: string | null | undefined
       readonly port?: number | null | undefined
       readonly access?: TrafficAccess | undefined
+      readonly host?: string | null | undefined
       readonly envVar?: string | null | undefined
     }
   ): Promise<ProjectTrafficState> {
     const entry = this.entry(projectId)
     return this.serialize(entry, async () => {
       if (this.gone(entry)) return entry.state
+      if (config.host !== undefined && config.host !== null && !isTrafficHost(config.host)) {
+        return this.publish(entry, { failure: 'invalid-host' })
+      }
       const movesOrigin = config.origin !== undefined && config.origin !== entry.config?.origin
       const movesPort = config.port !== undefined && config.port !== entry.config?.port
       /*
@@ -212,6 +226,7 @@ export class ProjectTrafficRegistry {
       }
       this.deps.remember(projectId, next)
       entry.config = next
+      if (config.host !== undefined) entry.hostOverride = config.host
       if (service === null) {
         if (this.forwards(projectId, next) && this.wants(projectId)) {
           return this.listen(entry, next, next.origin, false)
@@ -247,7 +262,7 @@ export class ProjectTrafficRegistry {
       if (this.gone(entry)) return entry.state
       const ready = entry.service
       if (ready !== null) {
-        if (ready.isRecording()) return entry.state
+        if (ready.isRecording()) return this.publish(entry, { failure: null })
         ready.reset(true)
         this.renew(entry)
         return this.publish(entry, { capturing: true, failure: null })
@@ -493,6 +508,7 @@ export class ProjectTrafficRegistry {
     const entry = this.entries.get(projectId)
     if (entry === undefined) return
     this.entries.delete(projectId)
+    this.watchAddresses()
     entry.unsubscribe?.()
     entry.unsubscribe = null
     const service = entry.service
@@ -521,9 +537,37 @@ export class ProjectTrafficRegistry {
    * could reach this listener, so the uncopyable address is not the thing that
    * is wrong with it — and it is not a state a laptop on Wi-Fi reaches.
    */
-  private addressFor(port: number, access: TrafficAccess): string {
-    if (access === 'loopback') return `${LOOPBACK}:${String(port)}`
-    return `${this.deps.address() ?? EVERY_INTERFACE}:${String(port)}`
+  private hostFor(entry: Entry, access: TrafficAccess): string | null {
+    return access === 'loopback' ? LOOPBACK : (entry.hostOverride ?? this.deps.address())
+  }
+
+  private addressFor(port: number, access: TrafficAccess, entry: Entry): string {
+    return `${this.hostFor(entry, access) ?? EVERY_INTERFACE}:${String(port)}`
+  }
+
+  refreshAddresses(): void {
+    for (const entry of this.entries.values()) {
+      if (entry.service === null || entry.state.access !== 'lan' || entry.hostOverride !== null)
+        continue
+      const host = this.hostFor(entry, entry.state.access)
+      const address =
+        entry.state.port === null ? null : `${host ?? EVERY_INTERFACE}:${String(entry.state.port)}`
+      if (entry.state.host !== host || entry.state.address !== address) this.publish(entry, {})
+    }
+  }
+
+  private watchAddresses(): void {
+    const needed = [...this.entries.values()].some(
+      (entry) =>
+        entry.service !== null && entry.config?.access === 'lan' && entry.hostOverride === null
+    )
+    if (!needed && this.addressRefresh !== null) {
+      clearInterval(this.addressRefresh)
+      this.addressRefresh = null
+    } else if (needed && this.addressRefresh === null) {
+      this.addressRefresh = setInterval(() => this.refreshAddresses(), ADDRESS_REFRESH_MS)
+      this.addressRefresh.unref()
+    }
   }
 
   private budgetFor(projectId: string): CaptureBudget {
@@ -616,6 +660,7 @@ export class ProjectTrafficRegistry {
     const entry: Entry = {
       projectId,
       config: this.deps.config(projectId),
+      hostOverride: null,
       service: null,
       unsubscribe: null,
       journal: [],
@@ -626,6 +671,8 @@ export class ProjectTrafficRegistry {
         port: null,
         wantedPort: null,
         address: null,
+        host: this.deps.config(projectId)?.access === 'loopback' ? LOOPBACK : this.deps.address(),
+        hostOverridden: false,
         origin: this.deps.config(projectId)?.origin ?? null,
         access: this.deps.config(projectId)?.access ?? DEFAULT_ACCESS,
         envVar: this.deps.config(projectId)?.envVar ?? null,
@@ -701,7 +748,7 @@ export class ProjectTrafficRegistry {
     return this.publish(entry, {
       capturing: recording,
       port: bound,
-      address: this.addressFor(bound, config.access),
+      address: this.addressFor(bound, config.access, entry),
       failure: null,
     })
   }
@@ -802,6 +849,9 @@ export class ProjectTrafficRegistry {
 
   private publish(entry: Entry, patch: Partial<ProjectTrafficState>): ProjectTrafficState {
     const config = entry.config
+    const access = config?.access ?? entry.state.access
+    const host = this.hostFor(entry, access)
+    const port = patch.port === undefined ? entry.state.port : patch.port
     entry.state =
       config === null
         ? { ...entry.state, ...patch }
@@ -813,6 +863,13 @@ export class ProjectTrafficRegistry {
             envVar: config.envVar,
             wantedPort: config.port,
           }
+    entry.state = {
+      ...entry.state,
+      host,
+      hostOverridden: entry.hostOverride !== null,
+      address: port === null ? null : `${host ?? EVERY_INTERFACE}:${String(port)}`,
+    }
+    this.watchAddresses()
     this.emitState(entry.projectId, entry.state)
     return entry.state
   }

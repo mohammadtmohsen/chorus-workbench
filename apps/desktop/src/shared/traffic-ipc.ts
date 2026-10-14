@@ -25,6 +25,7 @@ export const TrafficFailure = z.enum([
   'no-origin',
   'ownership-unknown',
   'unresolved',
+  'invalid-host',
 ])
 export type TrafficFailure = z.infer<typeof TrafficFailure>
 
@@ -40,11 +41,18 @@ export type TrafficLegacy = z.infer<typeof TrafficLegacy>
 
 export const TRAFFIC_ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/
 
+const TRAFFIC_IPV4 =
+  /^(?:(?:25[0-5]|2[0-4]\d|1\d{2}|[1-9]?\d)\.){3}(?:25[0-5]|2[0-4]\d|1\d{2}|[1-9]?\d)$/
+
+export const isTrafficHost = (value: string): boolean =>
+  TRAFFIC_IPV4.test(value) && value !== '0.0.0.0'
+
 export const TrafficConfig = z
   .object({
     origin: z.string().nullable().optional(),
     port: z.number().int().min(0).max(65_535).nullable().optional(),
     access: TrafficAccesses.optional(),
+    host: z.string().refine(isTrafficHost).nullable().optional(),
     envVar: z.string().max(64).regex(TRAFFIC_ENV_NAME).nullable().optional(),
   })
   .strict()
@@ -54,6 +62,8 @@ export const TrafficState = z.object({
   port: z.number().int().nullable(),
   wantedPort: z.number().int().nullable(),
   address: z.string().nullable(),
+  host: z.string().nullable().optional(),
+  hostOverridden: z.boolean().optional(),
   origin: z.string().nullable(),
   access: TrafficAccesses,
   envVar: z.string().nullable(),

@@ -131,7 +131,8 @@ describe('historical collaboration messages', () => {
     ['appended', APPENDED],
     ['early appended', APPENDED_EARLY],
   ])('recovers the typed text from the %s prompt, keeping context and paths', (_, template) => {
-    const extra = "\n\nEditor context: `src/a.ts:3` `v1`\n\n```ts\nconst a = 1\n```\n\n'/tmp/image one.png'"
+    const extra =
+      "\n\nEditor context: `src/a.ts:3` `v1`\n\n```ts\nconst a = 1\n```\n\n'/tmp/image one.png'"
     expect(originalCollaborationText(appended(template))).toBe(TYPED)
     expect(originalCollaborationText(appended(template) + extra)).toBe(TYPED + extra)
   })

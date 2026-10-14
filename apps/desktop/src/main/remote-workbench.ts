@@ -333,10 +333,7 @@ export function parseReapCandidates(stdout: string): readonly ReapCandidate[] {
     const kind = kindText as ReapKind
     const candidate = { pid: Number(pidText), parentPid: Number(parentText), kind }
     const held = byPid.get(candidate.pid)
-    if (
-      held === undefined ||
-      REAP_PRECEDENCE.indexOf(kind) < REAP_PRECEDENCE.indexOf(held.kind)
-    ) {
+    if (held === undefined || REAP_PRECEDENCE.indexOf(kind) < REAP_PRECEDENCE.indexOf(held.kind)) {
       byPid.set(candidate.pid, candidate)
     }
   }

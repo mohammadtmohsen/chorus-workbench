@@ -29,6 +29,7 @@ import { createSignal, useSignal } from './signal.js'
  * views while the outer one is still up. Only the last one out restores them.
  */
 let depth = 0
+const overlayActive = createSignal(false)
 
 /**
  * The still to paint per surface, by view id.
@@ -173,17 +174,23 @@ export function useShellOverlay(active = true): void {
     if (!active) return undefined
     depth += 1
     if (depth === 1) {
+      overlayActive.set(true)
       hide()
       startHeartbeat()
     }
     return () => {
       depth -= 1
       if (depth === 0) {
+        overlayActive.set(false)
         stopHeartbeat()
         show()
       }
     }
   }, [active])
+}
+
+export function useShellOverlayActive(): boolean {
+  return useSignal(overlayActive)
 }
 
 /** What one surface should paint in place of itself, or null for the real view. */

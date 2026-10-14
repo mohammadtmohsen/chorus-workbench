@@ -93,19 +93,19 @@ Code and complete diff review are authorized. Tests, typecheck, lint, builds, ap
 
 Implemented locally. Codex inspected the complete product/driver diff. Claude performed an adversarial source review. The confirmed cross-project draft/failure regression was corrected with the project guard and reviewed again with no further supported findings.
 
-| Acceptance criterion | Status | Evidence |
-| --- | --- | --- |
-| Capture control beside the traffic-view control, existing panel control retained | PASS by source inspection | `EditorPane` header JSX; unchanged `TrafficPanel` action JSX |
-| Hollow off / filled red on, localized action labels, `aria-pressed` | PASS by source inspection | Existing `trafficLive` feed; `data-capturing`; icon CSS; existing i18n keys |
-| Start/stop the clicked project with the panel closed | NOT VERIFIED at runtime | Code reviewed: `toggleCapture` uses existing start/stop IPC without attaching a new subscription |
-| Failed Start opens a closed panel without closing an open panel | NOT VERIFIED at runtime | Code reviewed: pinned project id and response-time store read in `toggleCapture` |
-| Rejected IPC visibly reports for its project | NOT VERIFIED at runtime | Code reviewed: project-tagged local failure and translated `role="alert"` notice |
-| Initial/pushed capture errors synchronize; configuration refusals stay with their fields | NOT VERIFIED at runtime | Code reviewed: guarded state branch, attach failure adoption, preserved field handlers |
-| Assigned port synchronizes without ordinary pushes overwriting drafts | NOT VERIFIED at runtime | Code reviewed: port-draft effect depends only on committed `capture.wantedPort`; push state is project-guarded |
-| Existing driver selectors still target the panel action | PASS by source inspection | Both Start selectors scoped to `.traffic-panel` |
-| Reduced-motion preference disables the new pulse | PASS by source inspection | Media rule uses the same specificity as the animated selector |
-| Runtime behavior and visual appearance | NOT VERIFIED | No app launch, UI driver, screenshot, or runtime harness authorized |
-| Typecheck, lint, formatting, tests, build | NOT VERIFIED | Not run under the explicit repository testing restriction |
+| Acceptance criterion                                                                     | Status                    | Evidence                                                                                                       |
+| ---------------------------------------------------------------------------------------- | ------------------------- | -------------------------------------------------------------------------------------------------------------- |
+| Capture control beside the traffic-view control, existing panel control retained         | PASS by source inspection | `EditorPane` header JSX; unchanged `TrafficPanel` action JSX                                                   |
+| Hollow off / filled red on, localized action labels, `aria-pressed`                      | PASS by source inspection | Existing `trafficLive` feed; `data-capturing`; icon CSS; existing i18n keys                                    |
+| Start/stop the clicked project with the panel closed                                     | NOT VERIFIED at runtime   | Code reviewed: `toggleCapture` uses existing start/stop IPC without attaching a new subscription               |
+| Failed Start opens a closed panel without closing an open panel                          | NOT VERIFIED at runtime   | Code reviewed: pinned project id and response-time store read in `toggleCapture`                               |
+| Rejected IPC visibly reports for its project                                             | NOT VERIFIED at runtime   | Code reviewed: project-tagged local failure and translated `role="alert"` notice                               |
+| Initial/pushed capture errors synchronize; configuration refusals stay with their fields | NOT VERIFIED at runtime   | Code reviewed: guarded state branch, attach failure adoption, preserved field handlers                         |
+| Assigned port synchronizes without ordinary pushes overwriting drafts                    | NOT VERIFIED at runtime   | Code reviewed: port-draft effect depends only on committed `capture.wantedPort`; push state is project-guarded |
+| Existing driver selectors still target the panel action                                  | PASS by source inspection | Both Start selectors scoped to `.traffic-panel`                                                                |
+| Reduced-motion preference disables the new pulse                                         | PASS by source inspection | Media rule uses the same specificity as the animated selector                                                  |
+| Runtime behavior and visual appearance                                                   | NOT VERIFIED              | No app launch, UI driver, screenshot, or runtime harness authorized                                            |
+| Typecheck, lint, formatting, tests, build                                                | NOT VERIFIED              | Not run under the explicit repository testing restriction                                                      |
 
 Verification commands included `git diff --stat`, `git status --short`, and the complete scoped diff:
 

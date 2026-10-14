@@ -186,6 +186,7 @@ export default defineConfig({
         input: {
           index: resolve(__dirname, 'src/preload/index.ts'),
           workbench: resolve(__dirname, 'src/preload/workbench.ts'),
+          browser: resolve(__dirname, 'src/preload/browser.ts'),
         },
         /*
          * And the output has to be restated too, which the preflight did not

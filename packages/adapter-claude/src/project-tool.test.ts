@@ -58,16 +58,23 @@ async function optionsFor(opts: SessionOpts, how: Opened = 'start'): Promise<Opt
   return captured
 }
 
-const ask = (options: Options, name: string): Promise<PermissionResult> => {
+const ask = (options: Options, name: string): Promise<PermissionResult | null> => {
   const canUseTool = options.canUseTool
   if (canUseTool === undefined) throw new Error('no permission callback')
-  return canUseTool(name, { lines: 5 }, {
-    signal: new AbortController().signal,
-    toolUseID: `tu-${name}`,
-  } as never)
+  return canUseTool(
+    name,
+    { lines: 5 },
+    {
+      signal: new AbortController().signal,
+      toolUseID: `tu-${name}`,
+      requestId: `request-${name}`,
+    }
+  )
 }
 
-const settledWithin = (result: Promise<PermissionResult>): Promise<PermissionResult | 'pending'> =>
+const settledWithin = (
+  result: Promise<PermissionResult | null>
+): Promise<PermissionResult | null | 'pending'> =>
   Promise.race([
     result,
     new Promise<'pending'>((resolve) => {
@@ -137,7 +144,10 @@ describe('the tool handlers', () => {
   const handler = (asked: Asked, name: string) => {
     const found = projectTools(readerOf(asked)).find((each) => each.name === name)
     if (found === undefined) throw new Error(`no ${name}`)
-    return found.handler as (args: unknown, extra: unknown) => ReturnType<typeof found.handler>
+    return found.handler as (
+      args: unknown,
+      extra: unknown
+    ) => ReturnType<NonNullable<typeof found>['handler']>
   }
 
   it('reads through the session reader with the defaults applied', async () => {

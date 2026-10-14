@@ -22,11 +22,11 @@ flowchart LR
     Panel[TrafficPanel.tsx envLine<br/>envVar = copyable text only] -. "Copy the line below into this variable" .-> Env
 ```
 
-| Project (installed profile) | File | Line that points at Chorus | Origin without it |
-|---|---|---|---|
-| MOBILE `~/code/tpa/tpa-mobile` | `.env` | `EXPO_PUBLIC_API_BASE_URL=http://127.0.0.1:30100` | `src/config/api.ts:3` fallback `http://88.99.104.107:30081` |
-| TPA-2 `~/code/tpa/tpa-web-2` | `.env.local` | `JAVA_API_DEV_BASE_URL=http://127.0.0.1:30102` | `JAVA_API_BASE_URL` in the same file |
-| TPA-1 `~/code/tpa/tpa-web-1` | `.env.local` | `JAVA_API_DEV_BASE_URL=…30101`, never read by its source | unaffected, left as is |
+| Project (installed profile)    | File         | Line that points at Chorus                               | Origin without it                                           |
+| ------------------------------ | ------------ | -------------------------------------------------------- | ----------------------------------------------------------- |
+| MOBILE `~/code/tpa/tpa-mobile` | `.env`       | `EXPO_PUBLIC_API_BASE_URL=http://127.0.0.1:30100`        | `src/config/api.ts:3` fallback `http://88.99.104.107:30081` |
+| TPA-2 `~/code/tpa/tpa-web-2`   | `.env.local` | `JAVA_API_DEV_BASE_URL=http://127.0.0.1:30102`           | `JAVA_API_BASE_URL` in the same file                        |
+| TPA-1 `~/code/tpa/tpa-web-1`   | `.env.local` | `JAVA_API_DEV_BASE_URL=…30101`, never read by its source | unaffected, left as is                                      |
 
 Expo decides what "restore" has to mean. In development the client reads `process.env.EXPO_PUBLIC_*` through `expo/virtual/env` (`babel-preset-expo/build/plugins/inline-env-vars.js:47-56`, enabled for app code by `common.js:169-177`). That module's dev body is `{ ...process.env, ...dotEnvFiles }` (`@expo/metro-config/build/transform-worker/transform-worker.js` ~150-158). **A key present in `.env` beats any value in the dev server's environment**, so the redirect line is deleted rather than rewritten to the origin. Next is the other way round: `@next/env` `processEnv` only fills keys absent from the initial `process.env`.
 
@@ -120,11 +120,11 @@ export function terminalEnvOf(state: ProjectTrafficState | null): WorkbenchTermi
 ### `apps/desktop/src/main/runtime.ts`
 
 ```ts
-    this.traffic.subscribe((push) => {
-      if (push.kind !== 'state') return
-      this.adbReverse.sync(this.traffic.capturingPorts())
-      refreshWorkbenchTerminalEnv()
-    })
+this.traffic.subscribe((push) => {
+  if (push.kind !== 'state') return
+  this.adbReverse.sync(this.traffic.capturingPorts())
+  refreshWorkbenchTerminalEnv()
+})
 ```
 
 ```ts
@@ -172,11 +172,11 @@ function fromMainFrame(event: IpcMainInvokeEvent): boolean {
 ```
 
 ```ts
-  ipcMain.handle(WORKBENCH_TERMINAL_ENV_CHANNEL, (event) => {
-    const surface = byContents.get(event.sender)
-    if (surface === undefined || !fromMainFrame(event)) throw new Error('unknown workbench surface')
-    return terminalEnvForSurface(surface)
-  })
+ipcMain.handle(WORKBENCH_TERMINAL_ENV_CHANNEL, (event) => {
+  const surface = byContents.get(event.sender)
+  if (surface === undefined || !fromMainFrame(event)) throw new Error('unknown workbench surface')
+  return terminalEnvForSurface(surface)
+})
 ```
 
 `processId` plus `frameToken` rather than object identity. Electron documents `WebFrameMain.frameToken` as uniquely identifying a frame within its renderer process (`electron.d.ts` ~18977), so the pair identifies one frame.
@@ -184,8 +184,8 @@ function fromMainFrame(event: IpcMainInvokeEvent): boolean {
 ### `apps/desktop/src/main/index.ts`
 
 ```ts
-  registerWorkbenchHandlers(devServerUrl, (projectId) => opened.projects.workbenchTarget(projectId))
-  setWorkbenchTerminalEnvSource((place) => opened.terminalEnvFor(place))
+registerWorkbenchHandlers(devServerUrl, (projectId) => opened.projects.workbenchTarget(projectId))
+setWorkbenchTerminalEnvSource((place) => opened.terminalEnvFor(place))
 ```
 
 ### `apps/desktop/src/preload/workbench.ts`
@@ -314,28 +314,28 @@ stateDiagram-v2
 ### `apps/desktop/src/renderer/src/workbench/entry.ts`
 
 ```ts
-  await seedWindowFocus()
-  await seedTerminalEnv()
+await seedWindowFocus()
+await seedTerminalEnv()
 ```
 
 ```ts
-  await initialize(services, container, options, env)
+await initialize(services, container, options, env)
 
-  const configuration = await getService(IConfigurationService)
-  const terminalLogs = await getService(ILogService)
-  bindTerminalEnv({
-    read: (key) => configuration.inspect<TerminalEnvMemory>(key).memoryValue,
-    write: (key, memory) => configuration.updateValue(key, memory, ConfigurationTarget.MEMORY),
-    watch: (listener) => {
-      configuration.onDidChangeConfiguration((event) => {
-        listener((key) => event.affectsConfiguration(key))
-      })
-    },
-    fail: (error) => {
-      const detail = error instanceof Error ? (error.stack ?? error.message) : String(error)
-      terminalLogs.error(`Chorus: capture terminal environment could not be applied — ${detail}`)
-    },
-  })
+const configuration = await getService(IConfigurationService)
+const terminalLogs = await getService(ILogService)
+bindTerminalEnv({
+  read: (key) => configuration.inspect<TerminalEnvMemory>(key).memoryValue,
+  write: (key, memory) => configuration.updateValue(key, memory, ConfigurationTarget.MEMORY),
+  watch: (listener) => {
+    configuration.onDidChangeConfiguration((event) => {
+      listener((key) => event.affectsConfiguration(key))
+    })
+  },
+  fail: (error) => {
+    const detail = error instanceof Error ? (error.stack ?? error.message) : String(error)
+    terminalLogs.error(`Chorus: capture terminal environment could not be applied — ${detail}`)
+  },
+})
 ```
 
 ### `apps/desktop/src/renderer/src/i18n/en.json`
@@ -350,11 +350,11 @@ Conditional in wording rather than in rendering. `TrafficPanel` knows the variab
 
 ### Tests — written, NOT RUN
 
-| File | What fails if the regression returns |
-|---|---|
-| `main/project-traffic.test.ts` | loopback value only while capturing; rename followed; stop clears; a legacy `MY VAR` or `null` name hands over nothing |
-| `main/workbench-surface.test.ts` | each surface answered about its own project from the sender; the shell, a non-main frame and a `null` frame are refused; a refresh pushes every surface its own answer; no source means `null` |
-| `preload/workbench.test.ts` | channel spelled the same as the shared constant; exactly 27 exposed methods; malformed payloads become `null`; pushes reach the subscriber checked |
+| File                                              | What fails if the regression returns                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| ------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `main/project-traffic.test.ts`                    | loopback value only while capturing; rename followed; stop clears; a legacy `MY VAR` or `null` name hands over nothing                                                                                                                                                                                                                                                                                                                                                                                                                |
+| `main/workbench-surface.test.ts`                  | each surface answered about its own project from the sender; the shell, a non-main frame and a `null` frame are refused; a refresh pushes every surface its own answer; no source means `null`                                                                                                                                                                                                                                                                                                                                        |
+| `preload/workbench.test.ts`                       | channel spelled the same as the shared constant; exactly 27 exposed methods; malformed payloads become `null`; pushes reach the subscriber checked                                                                                                                                                                                                                                                                                                                                                                                    |
 | NEW `renderer/src/workbench/terminal-env.test.ts` | other memory entries kept; shadowed value restored; rename drops only the old key; someone else's value not taken back; stale pull loses to a push; failed write logged and retried, not recorded; override re-applied on all three keys after a memory reset and released again on Stop; a pre-reset shadow is not restored into the reset layer; a Stop before the queued reapply wins; a rename after a reset leaves only the new name; own change events neither re-shadow nor re-write; a read-back that disagrees does not loop |
 
 `FakeWebContents` in `workbench-surface.test.ts` gained a `mainFrame`, and the `beforeEach` there resets the source.
@@ -365,10 +365,10 @@ Completed by Codex after integrated source review and filesystem escalation. Onl
 
 Private backups: `/private/tmp/chorus-capture-baseline-j8hxte9i/env-backups-ttcg0mrl`. Files have mode 0600 inside a mode-0700 directory. Restoration command: `python3 /private/tmp/chorus-capture-baseline-j8hxte9i/restore-env.py`. Exit status: 0.
 
-| File | Delete | Leaves |
-|---|---|---|
-| `~/code/tpa/tpa-mobile/.env` | `EXPO_PUBLIC_API_BASE_URL=http://127.0.0.1:30100` | `src/config/api.ts` fallback → origin |
-| `~/code/tpa/tpa-web-2/.env.local` | `JAVA_API_DEV_BASE_URL=http://127.0.0.1:30102` | `JAVA_API_BASE_URL` → origin |
+| File                              | Delete                                            | Leaves                                |
+| --------------------------------- | ------------------------------------------------- | ------------------------------------- |
+| `~/code/tpa/tpa-mobile/.env`      | `EXPO_PUBLIC_API_BASE_URL=http://127.0.0.1:30100` | `src/config/api.ts` fallback → origin |
+| `~/code/tpa/tpa-web-2/.env.local` | `JAVA_API_DEV_BASE_URL=http://127.0.0.1:30102`    | `JAVA_API_BASE_URL` → origin          |
 
 ## Delivery record
 
@@ -376,16 +376,16 @@ The confirmed cause was a permanent project env redirect to a Chorus proxy whose
 
 Meaningful files are the main traffic mapper and runtime, workbench surface and bootstrap, shared traffic/workbench contracts, workbench preload, renderer `terminal-env.ts` and `entry.ts`, translated Traffic guidance, and four regression test files. The complete source change is recorded above. The task-only diff is `/private/tmp/chorus-capture-baseline-j8hxte9i/final-task.patch`; it excludes the working tree's pre-existing changes.
 
-| Acceptance criterion | Result | Evidence |
-|---|---|---|
-| Remove the two active permanent proxy redirects, preserving other env data | PASS | Both files were written successfully and compared byte-for-byte with their private backups after removing only the selected line. |
-| Normal fresh dev starts reach the original backend independently of Chorus | NOT VERIFIED | Original configuration and fallback were source-reviewed; neither dev server was launched. |
-| Capture sets the configured URL in fresh local project terminals | NOT VERIFIED | Routing and installed terminal configuration source were reviewed; no running terminal was observed. |
-| Stop, rename and project disposal remove only Chorus's override | NOT VERIFIED | Source review and written, unrun regression tests. Existing shells still require a fresh terminal. |
-| Other projects and remote hosts do not inherit the override | NOT VERIFIED | Owned-surface resolver and local-host guard reviewed; isolation tests are unrun. |
-| A surface opened during capture gets current state | NOT VERIFIED | Initial pull and stale-pull guard reviewed; no app launch. |
-| Existing terminal settings survive, including configuration reload | NOT VERIFIED | MEMORY overlay, reload listener and re-entrancy guard reviewed; regression tests are unrun. |
-| Start/Stop require no persistent env or editor-settings edits | PASS, source scope | Capture writes only ConfigurationTarget.MEMORY. The separate, one-time env restoration is recorded above. |
+| Acceptance criterion                                                       | Result             | Evidence                                                                                                                          |
+| -------------------------------------------------------------------------- | ------------------ | --------------------------------------------------------------------------------------------------------------------------------- |
+| Remove the two active permanent proxy redirects, preserving other env data | PASS               | Both files were written successfully and compared byte-for-byte with their private backups after removing only the selected line. |
+| Normal fresh dev starts reach the original backend independently of Chorus | NOT VERIFIED       | Original configuration and fallback were source-reviewed; neither dev server was launched.                                        |
+| Capture sets the configured URL in fresh local project terminals           | NOT VERIFIED       | Routing and installed terminal configuration source were reviewed; no running terminal was observed.                              |
+| Stop, rename and project disposal remove only Chorus's override            | NOT VERIFIED       | Source review and written, unrun regression tests. Existing shells still require a fresh terminal.                                |
+| Other projects and remote hosts do not inherit the override                | NOT VERIFIED       | Owned-surface resolver and local-host guard reviewed; isolation tests are unrun.                                                  |
+| A surface opened during capture gets current state                         | NOT VERIFIED       | Initial pull and stale-pull guard reviewed; no app launch.                                                                        |
+| Existing terminal settings survive, including configuration reload         | NOT VERIFIED       | MEMORY overlay, reload listener and re-entrancy guard reviewed; regression tests are unrun.                                       |
+| Start/Stop require no persistent env or editor-settings edits              | PASS, source scope | Capture writes only ConfigurationTarget.MEMORY. The separate, one-time env restoration is recorded above.                         |
 
 Verification performed: source and diff review against the initial baseline and the review-fix snapshot, installed dependency API/source inspection, and static review of the env-file deltas. At the user's explicit build-and-install request, `pnpm exec turbo run build '--filter=@chorus/desktop^...'` succeeded for all eight dependencies (cache hits), `node build/package-local.mjs` succeeded, and `CHORUS_INSTALL_KEEP_RUNNING=1 node build/install-local.mjs` installed the app and passed its `codesign --verify --deep --strict` step. Both Node commands ran from `apps/desktop`. Installed metadata reads `0.20.0` and `dev.chorus.desktop`. **No executable capture acceptance checks were run.** `pnpm test`, `pnpm typecheck`, `pnpm lint` and `pnpm check` remain unrun, in accordance with the standing no-testing instruction.
 

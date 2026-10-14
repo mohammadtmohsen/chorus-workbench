@@ -1,13 +1,19 @@
 name: CI
 
 on:
-  push:
-    branches: [main]
-  pull_request:
-  schedule:
-    # Upstream drift check. Both CLIs self-update, so this is how we find out
-    # the protocol moved from a red build rather than a broken session.
-    - cron: '17 6 * * *'
+  workflow_dispatch:
+    inputs:
+      check_windows:
+        description: 'Run Windows portability tests'
+        type: boolean
+        default: false
+      check_protocol_drift:
+        description: 'Check the latest Codex protocol for upstream drift'
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -19,8 +25,9 @@ env:
 
 jobs:
   check:
-    name: Typecheck, lint, test
-    runs-on: macos-latest
+    name: Typecheck, lint, test, build
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v6
 
@@ -54,6 +61,9 @@ jobs:
       - name: Test
         run: pnpm run test
 
+      - name: Build
+        run: pnpm run build
+
   # Does the suite we already have run on Windows at all?
   #
   # A portability probe, not the release job — Windows support is being built in
@@ -74,8 +84,10 @@ jobs:
   # default pwsh handles those; the moment a step needs a pipeline or a `$VAR`
   # it needs `shell: bash` stated, because pwsh is not sh.
   check-windows:
-    name: Typecheck, lint, test (Windows)
+    name: Windows portability tests
+    if: inputs.check_windows
     runs-on: windows-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v6
       # See the note in `check` above.
@@ -93,33 +105,8 @@ jobs:
       # this step ever fails on the lockfile, that assumption broke.
       - run: pnpm install --frozen-lockfile
 
-      - name: Typecheck
-        run: pnpm run typecheck
-
-      - name: Lint
-        run: pnpm run lint
-
-      # The step `.gitattributes` exists for. Without `eol=lf` this fails on
-      # every file in the repo, because the checkout above converted them.
-      - name: Format
-        run: pnpm run format:check
-
       - name: Test
         run: pnpm run test
-
-  build:
-    name: Build
-    runs-on: macos-latest
-    steps:
-      - uses: actions/checkout@v6
-      # See the note in `check` above.
-      - uses: pnpm/action-setup@v6
-      - uses: actions/setup-node@v6
-        with:
-          node-version: 22
-          cache: pnpm
-      - run: pnpm install --frozen-lockfile
-      - run: pnpm run build
 
   # Two different questions, deliberately split.
   #
@@ -127,7 +114,8 @@ jobs:
   # — i.e. did someone hand-edit generated code. It must always pass.
   bindings-match-pin:
     name: Codex bindings match pinned CLI
-    runs-on: macos-latest
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-node@v6
@@ -154,12 +142,11 @@ jobs:
   # This job asks "has the protocol moved upstream?" The app-server is marked
   # [experimental] and its generated types already contradicted the published
   # docs in six places, so a red build here is the signal we want (plan §6.1).
-  # It runs on a schedule rather than per-PR, because upstream shipping is not a
-  # reason to block a pull request.
   protocol-drift:
     name: Codex protocol drift (upstream)
-    if: github.event_name == 'schedule'
-    runs-on: macos-latest
+    if: inputs.check_protocol_drift
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-node@v6

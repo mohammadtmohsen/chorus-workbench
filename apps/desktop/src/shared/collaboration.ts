@@ -29,16 +29,12 @@ function rolesHeadings(leader: AgentId, partner: AgentId): readonly string[] {
 
 export function isExpandedCollaboration(text: string): boolean {
   const partner = LEGACY_PROMPT.exec(text)?.[1] ?? LEGACY_APPENDED.exec(text)?.[1]
-  return (
-    isAgentId(partner) &&
-    text.includes(LEGACY_HANDOFF) &&
-    text.includes(legacyEnd(partner))
-  )
+  return isAgentId(partner) && text.includes(LEGACY_HANDOFF) && text.includes(legacyEnd(partner))
 }
 
 export function originalCollaborationText(text: string): string {
   let current = text
-  while (true) {
+  for (;;) {
     const unwrapped = withoutEnvelope(current) ?? withoutAppendedPrompt(current)
     if (unwrapped === null) return current
     current = unwrapped

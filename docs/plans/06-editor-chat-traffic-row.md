@@ -2,19 +2,19 @@
 
 ## Status
 
-| Unit | Result |
-| --- | --- |
-| Investigation | Complete by source inspection; native behavior NOT VERIFIED |
-| U1: widths, persistence and divider math | Implemented; Codex diff/context review complete; authored tests NOT RUN |
-| U2: workbench viewport and activity bar | Implemented and Codex diff/context review complete; agent-edit reveal removed in U3 |
-| U3: horizontal row and removal of floating controls | Implemented; both Codex findings corrected and reviewed; authored tests NOT RUN |
-| Integrated review | Complete by Codex diff/context inspection and Claude adversarial review, including the final corrections; no unresolved source-review findings |
-| Fixed 800px editor revision | Superseded by the fixed 80% revision. Implemented by Claude; finished and source-reviewed by Codex after the user's takeover instruction; authored tests NOT RUN |
-| Fixed 80% editor and wheel forwarding | Implemented by Codex and Claude; Codex integrated diff/context review and Claude adversarial review complete; tab-strip and formatting corrections inspected by Codex; no unresolved required source corrections; authored tests NOT RUN; runtime NOT VERIFIED |
-| Swipe interruption at the native editor edge | JavaScript cancellation correction IMPLEMENTED by Claude and source-reviewed by Codex and Claude; user subsequently reports the swipe is fixed; task closed on that manual confirmation; native proposal remains unimplemented |
-| Runtime verification | Authorized running-dev check previously reproduced the stop in both directions; temporary hooks and debugger removed; user now reports corrected swipe behavior; no agent-run verification of the correction or broad checks |
-| Permanent Traffic and one header capture control | T1 and T2 implemented by Claude; Codex integrated diff/context review and Claude adversarial review complete; no unresolved required source findings; authored regressions NOT RUN; runtime NOT VERIFIED; checks NOT AUTHORIZED for this revision |
-| Capture header refusal feedback and live-read race | Implemented by Claude; Codex diff/context review and Claude integrated adversarial review complete; no required findings remain; two regressions authored NOT RUN; runtime NOT VERIFIED |
+| Unit                                                | Result                                                                                                                                                                                                                                                         |
+| --------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Investigation                                       | Complete by source inspection; native behavior NOT VERIFIED                                                                                                                                                                                                    |
+| U1: widths, persistence and divider math            | Implemented; Codex diff/context review complete; authored tests NOT RUN                                                                                                                                                                                        |
+| U2: workbench viewport and activity bar             | Implemented and Codex diff/context review complete; agent-edit reveal removed in U3                                                                                                                                                                            |
+| U3: horizontal row and removal of floating controls | Implemented; both Codex findings corrected and reviewed; authored tests NOT RUN                                                                                                                                                                                |
+| Integrated review                                   | Complete by Codex diff/context inspection and Claude adversarial review, including the final corrections; no unresolved source-review findings                                                                                                                 |
+| Fixed 800px editor revision                         | Superseded by the fixed 80% revision. Implemented by Claude; finished and source-reviewed by Codex after the user's takeover instruction; authored tests NOT RUN                                                                                               |
+| Fixed 80% editor and wheel forwarding               | Implemented by Codex and Claude; Codex integrated diff/context review and Claude adversarial review complete; tab-strip and formatting corrections inspected by Codex; no unresolved required source corrections; authored tests NOT RUN; runtime NOT VERIFIED |
+| Swipe interruption at the native editor edge        | JavaScript cancellation correction IMPLEMENTED by Claude and source-reviewed by Codex and Claude; user subsequently reports the swipe is fixed; task closed on that manual confirmation; native proposal remains unimplemented                                 |
+| Runtime verification                                | Authorized running-dev check previously reproduced the stop in both directions; temporary hooks and debugger removed; user now reports corrected swipe behavior; no agent-run verification of the correction or broad checks                                   |
+| Permanent Traffic and one header capture control    | T1 and T2 implemented by Claude; Codex integrated diff/context review and Claude adversarial review complete; no unresolved required source findings; authored regressions NOT RUN; runtime NOT VERIFIED; checks NOT AUTHORIZED for this revision              |
+| Capture header refusal feedback and live-read race  | Implemented by Claude; Codex diff/context review and Claude integrated adversarial review complete; no required findings remain; two regressions authored NOT RUN; runtime NOT VERIFIED                                                                        |
 
 ## Current / Issue
 
@@ -47,11 +47,11 @@ flowchart TB
     end
 ```
 
-| Box | Default | Minimum |
-| --- | --- | --- |
+| Box                               | Default                                  | Minimum                                                    |
+| --------------------------------- | ---------------------------------------- | ---------------------------------------------------------- |
 | Editor, including activity gutter | Always 80% of the app window's CSS width | Fixed proportional width; no saved override or drag resize |
-| Each chat column | 500px | 500px |
-| Traffic | 800px | 800px |
+| Each chat column                  | 500px                                    | 500px                                                      |
+| Traffic                           | 800px                                    | 800px                                                      |
 
 The whole row scrolls except the activity gutter. Boxes retain their widths instead of flex-growing or shrinking. Chat and traffic dividers allow pointer dragging and arrow-key resizing; the editor's boundary is fixed. Double-clicking any divider resets all chat and traffic widths for the project. Traffic is always the last box for an active project. Its header icon starts or stops capture, and its visibility toggle and close button are removed by the latest request.
 
@@ -189,13 +189,13 @@ The user requested that the editor match traffic's 800px default and minimum. Cl
 
 ### Final adversarial review
 
-| Finding | Resolution |
-| --- | --- |
+| Finding                                                                                                                                                               | Resolution                                                                                                                               |
+| --------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
 | Strict routing took every sideways gesture over the conversation and terminal tab strips, whose scrollbars are hidden, leaving overflowed tabs unreachable by pointer | Corrected by Claude with the tab-strip exception above; implementation and authored regressions inspected by Codex. Runtime NOT VERIFIED |
-| The workbench's capture listener takes horizontal gestures before Code-OSS content sees them | Accepted as the user's requested browsing behaviour; recorded under Known limits. No `.monaco-scrollable-element` exception |
-| `rowWidths` signature would fail Prettier's check | Collapsed onto one line; the formatter was not run |
-| Preview wheels carry no modifiers and cannot be cancelled from outside the iframe | Recorded under Known limits; no threshold or speculative fix |
-| Plan statements left over from stored editor widths and the editor minimum | Tightened in place |
+| The workbench's capture listener takes horizontal gestures before Code-OSS content sees them                                                                          | Accepted as the user's requested browsing behaviour; recorded under Known limits. No `.monaco-scrollable-element` exception              |
+| `rowWidths` signature would fail Prettier's check                                                                                                                     | Collapsed onto one line; the formatter was not run                                                                                       |
+| Preview wheels carry no modifiers and cannot be cancelled from outside the iframe                                                                                     | Recorded under Known limits; no threshold or speculative fix                                                                             |
+| Plan statements left over from stored editor widths and the editor minimum                                                                                            | Tightened in place                                                                                                                       |
 
 ### Known limits
 
@@ -207,18 +207,18 @@ The user requested that the editor match traffic's 800px default and minimum. Cl
 
 ## Acceptance and verification
 
-| Criterion | Result | Evidence |
-| --- | --- | --- |
-| Editor first, chats next, optional traffic last | NOT VERIFIED at runtime | Integrated DOM/CSS source review confirms the requested order |
-| Editor fixed at 80% of the window; chats 500 and traffic 800 default/minimum | NOT VERIFIED in full | Running-dev editor measured 1382px in a 1728px window, matching the fraction; window resizing and chat/traffic minima remain verified only by source review; regressions authored |
-| Editor follows window resize; reset restores chats and traffic | NOT VERIFIED at runtime | No editor persistence remains; reset path and fixed separator reviewed |
-| Horizontal swipes browse editor, previews, chats and traffic without a focus click | FAIL at the native editor boundary | Real throws stop at the moving editor edge in both directions; two losses identified below; corrections not implemented; preview flows remain unverified |
-| Overflowed conversation and terminal tabs stay reachable by sideways swipe, handing to the row at the strip's edge | NOT VERIFIED at runtime | Codex inspected directional strip routing, both strip classes, edge handoff, non-overflow fallback and cleanup; regressions authored |
-| Chat and traffic dividers drag and nudge; double-click resets them; the editor boundary is static | NOT VERIFIED at runtime | Pointer capture, per-item minimums, keyboard steps, fixed separator and atomic project reset reviewed; regressions authored |
-| Editor toggles and floating mode removed completely | PASS by source inspection | Owned UI, state, schema, IPC, translations and styles removed; historical comment mentions do not retain executable paths |
-| Real activity bar remains visible without native overpaint | NOT VERIFIED on platform | Viewport geometry, actual-width reporting and direct bar ResizeObserver reviewed; geometry regressions authored |
-| Editor controls and overlays remain reachable when cropped | NOT VERIFIED at runtime | Pane-limited logical width and pointer/key/palette/dialog reveal paths reviewed; tiny-pane limitation recorded above |
-| Project tabs, detach/reattach, notes and capture preserved | NOT VERIFIED at runtime | Lifecycle, ownership, cached reads, project slices and shell overlay paths reviewed |
+| Criterion                                                                                                          | Result                             | Evidence                                                                                                                                                                          |
+| ------------------------------------------------------------------------------------------------------------------ | ---------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Editor first, chats next, optional traffic last                                                                    | NOT VERIFIED at runtime            | Integrated DOM/CSS source review confirms the requested order                                                                                                                     |
+| Editor fixed at 80% of the window; chats 500 and traffic 800 default/minimum                                       | NOT VERIFIED in full               | Running-dev editor measured 1382px in a 1728px window, matching the fraction; window resizing and chat/traffic minima remain verified only by source review; regressions authored |
+| Editor follows window resize; reset restores chats and traffic                                                     | NOT VERIFIED at runtime            | No editor persistence remains; reset path and fixed separator reviewed                                                                                                            |
+| Horizontal swipes browse editor, previews, chats and traffic without a focus click                                 | FAIL at the native editor boundary | Real throws stop at the moving editor edge in both directions; two losses identified below; corrections not implemented; preview flows remain unverified                          |
+| Overflowed conversation and terminal tabs stay reachable by sideways swipe, handing to the row at the strip's edge | NOT VERIFIED at runtime            | Codex inspected directional strip routing, both strip classes, edge handoff, non-overflow fallback and cleanup; regressions authored                                              |
+| Chat and traffic dividers drag and nudge; double-click resets them; the editor boundary is static                  | NOT VERIFIED at runtime            | Pointer capture, per-item minimums, keyboard steps, fixed separator and atomic project reset reviewed; regressions authored                                                       |
+| Editor toggles and floating mode removed completely                                                                | PASS by source inspection          | Owned UI, state, schema, IPC, translations and styles removed; historical comment mentions do not retain executable paths                                                         |
+| Real activity bar remains visible without native overpaint                                                         | NOT VERIFIED on platform           | Viewport geometry, actual-width reporting and direct bar ResizeObserver reviewed; geometry regressions authored                                                                   |
+| Editor controls and overlays remain reachable when cropped                                                         | NOT VERIFIED at runtime            | Pane-limited logical width and pointer/key/palette/dialog reveal paths reviewed; tiny-pane limitation recorded above                                                              |
+| Project tabs, detach/reattach, notes and capture preserved                                                         | NOT VERIFIED at runtime            | Lifecycle, ownership, cached reads, project slices and shell overlay paths reviewed                                                                                               |
 
 Do not run tests, typecheck, lint, builds, launch, screenshots, or a spike. If explicitly requested later, use the actual repository Vitest commands for affected layout/store/open-projects/workbench/preload suites, then `pnpm check`, and manually inspect scrolling, the 80% editor across window sizes and split panes, overflowed tab strips, divider reset, bar clicks, command palette, settings variants, zoom, notes, tab switching and detach/reattach.
 
@@ -429,16 +429,16 @@ T1 and T2 are implemented and source-reviewed together by Codex. The document/pr
 
 Source-review acceptance results (PASS here means inspected code paths, not executed behavior):
 
-| Criterion | Source review | Runtime |
-| --- | --- | --- |
-| Permanent last box, including empty projects and saved `open: false` | PASS: `EditorPane` renders after chat columns or the empty placeholder whenever a project is active | NOT VERIFIED |
-| One header capture control with localized action, pressed state and live dot | PASS: retained ⇄ calls the existing project-scoped start/stop handler; duplicate and close controls removed | NOT VERIFIED |
-| Width, resizing and reset retained | PASS: unchanged `TRAFFIC_WIDTH` 800/800, saved width setters and row-divider handlers | NOT VERIFIED |
-| Concurrent subscriptions, independent credit and foreign-push isolation | PASS: document/project index and panel guards inspected; regression cases authored | NOT VERIFIED |
-| Reattachment, late detach and document release | PASS: replacement scoped to the project; detach and release remove only the intended subscriptions | NOT VERIFIED |
-| Legacy traffic persistence and detach/reattach width transport | PASS: required `open` and width schema, defaults, snapshots and slices unchanged | NOT VERIFIED |
-| Ownership, pending bounds, credit and failure display paths | PASS: main guards and limits unchanged; registry refusals publish state and header IPC rejection catch retained | NOT VERIFIED |
-| Driver setup does not start capture | PASS: only obsolete visibility wait/click removed; setup waits for the panel | NOT VERIFIED |
+| Criterion                                                                    | Source review                                                                                                   | Runtime      |
+| ---------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------- | ------------ |
+| Permanent last box, including empty projects and saved `open: false`         | PASS: `EditorPane` renders after chat columns or the empty placeholder whenever a project is active             | NOT VERIFIED |
+| One header capture control with localized action, pressed state and live dot | PASS: retained ⇄ calls the existing project-scoped start/stop handler; duplicate and close controls removed     | NOT VERIFIED |
+| Width, resizing and reset retained                                           | PASS: unchanged `TRAFFIC_WIDTH` 800/800, saved width setters and row-divider handlers                           | NOT VERIFIED |
+| Concurrent subscriptions, independent credit and foreign-push isolation      | PASS: document/project index and panel guards inspected; regression cases authored                              | NOT VERIFIED |
+| Reattachment, late detach and document release                               | PASS: replacement scoped to the project; detach and release remove only the intended subscriptions              | NOT VERIFIED |
+| Legacy traffic persistence and detach/reattach width transport               | PASS: required `open` and width schema, defaults, snapshots and slices unchanged                                | NOT VERIFIED |
+| Ownership, pending bounds, credit and failure display paths                  | PASS: main guards and limits unchanged; registry refusals publish state and header IPC rejection catch retained | NOT VERIFIED |
+| Driver setup does not start capture                                          | PASS: only obsolete visibility wait/click removed; setup waits for the panel                                    | NOT VERIFIED |
 
 Reviewed files: `main/traffic-ipc.ts` and its test, `TrafficPanel.tsx` and its test, `workspace/EditorPane.tsx`, `store.ts`, `hooks.ts`, `styles.css`, `i18n/en.json`, and `e2e/traffic-drive.mjs`, plus this plan record. File diffs were inspected against the untouched task baselines in `/tmp/chorus-traffic-permanent`. The git index remains unchanged and empty. No executable verification commands were run.
 

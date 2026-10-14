@@ -1,12 +1,15 @@
 import type { WorkbenchRect } from '../../../shared/workbench-ipc.js'
+import { BrowserWebTabId } from '../../../shared/browser-ipc.js'
 import {
   BOX_WIDTH,
   EDITOR_WIDTH,
   MAIN_PROJECT_SHELL,
+  NO_WEB_TABS,
   PROJECT_TERMINAL_WIDTH,
   SIDEBAR_WIDTH,
   TERMINAL_HEIGHT,
   TRAFFIC_WIDTH,
+  WEB_TABS_MAX,
   type ConversationArrangement,
   type ProjectLayoutSlice,
   type ProjectTerminalPaneState,
@@ -17,6 +20,7 @@ import {
   type WorkspaceLayoutNode,
   type WorkspacePane,
   type WorkspaceSnapshot,
+  type WebTabsState,
 } from '../../../shared/workspace-layout.js'
 
 /** Matches the panel grip's own clamp: a floor only, no ceiling. */
@@ -42,6 +46,41 @@ export function clampSidebarWidth(width: number): number {
  */
 export function newTerminalId(): string {
   return crypto.randomUUID()
+}
+
+export function normalizeWebTabs(webTabs: WebTabsState): WebTabsState {
+  const seen = new Set<string>()
+  const tabs = webTabs.tabs.filter((tab) => {
+    if (
+      seen.size >= WEB_TABS_MAX ||
+      seen.has(tab.id) ||
+      !BrowserWebTabId.safeParse(tab.id).success
+    ) {
+      return false
+    }
+    seen.add(tab.id)
+    return true
+  })
+  const activeId =
+    webTabs.activeId !== null && seen.has(webTabs.activeId)
+      ? webTabs.activeId
+      : (tabs[0]?.id ?? null)
+  const showing = webTabs.showing && activeId !== null
+  if (
+    tabs.length === webTabs.tabs.length &&
+    activeId === webTabs.activeId &&
+    showing === webTabs.showing
+  ) {
+    return webTabs
+  }
+  return { tabs, activeId, showing }
+}
+
+export function topRightPaneId(node: WorkspaceLayoutNode | null): string | null {
+  if (node === null) return null
+  if (node.kind === 'leaf') return node.paneId
+  const child = node.orientation === 'row' ? node.children.at(-1) : node.children.at(0)
+  return child === undefined ? null : topRightPaneId(child)
 }
 
 /**
@@ -120,7 +159,10 @@ export const EMPTY_WORKSPACE: WorkspaceSnapshot = {
   globalTerminal: { open: false, height: TERMINAL_HEIGHT.default, tabs: [], activeId: null },
   trafficPanels: {},
   projectTerminals: {},
+  collapsedBrowsers: {},
   rowScroll: {},
+  editorWidthFractions: {},
+  webTabs: NO_WEB_TABS,
 }
 
 export const DETACHED_PANE_ID = 'detached'
@@ -139,7 +181,9 @@ export function sliceOf(workspace: WorkspaceSnapshot, projectId: string): Projec
     conversationGroups: workspace.conversationGroups[projectId],
     trafficPanel: workspace.trafficPanels[projectId],
     projectTerminal: workspace.projectTerminals[projectId],
+    browserCollapsed: workspace.collapsedBrowsers[projectId],
     rowScroll: workspace.rowScroll[projectId],
+    editorWidthFraction: workspace.editorWidthFractions[projectId],
   }
 }
 
@@ -155,9 +199,19 @@ export function mergeSlice(
       projectId,
       slice.conversationGroups
     ),
-    trafficPanels: withEntry(workspace.trafficPanels, projectId, slice.trafficPanel),
+    trafficPanels: withEntry(
+      workspace.trafficPanels,
+      projectId,
+      slice.trafficPanel === undefined ? undefined : normalizeTrafficPanel(slice.trafficPanel)
+    ),
     projectTerminals: withEntry(workspace.projectTerminals, projectId, slice.projectTerminal),
+    collapsedBrowsers: withEntry(workspace.collapsedBrowsers, projectId, slice.browserCollapsed),
     rowScroll: withEntry(workspace.rowScroll, projectId, slice.rowScroll),
+    editorWidthFractions: withEntry(
+      workspace.editorWidthFractions,
+      projectId,
+      slice.editorWidthFraction
+    ),
   }
 }
 
@@ -354,6 +408,14 @@ export function normalizeWorkspace(workspace: WorkspaceSnapshot): WorkspaceSnaps
   return {
     ...tree,
     sidebarWidth: clampSidebarWidth(workspace.sidebarWidth),
+    editorWidthFractions: Object.fromEntries(
+      Object.entries(workspace.editorWidthFractions).flatMap<[string, number]>(
+        ([projectId, value]) => {
+          const fraction = clampEditorWidthFraction(value)
+          return fraction === undefined ? [] : [[projectId, fraction]]
+        }
+      )
+    ),
     /*
      * Clamped on the way through, per project. A snapshot edited by hand or
      * written by an older build can hold anything, and an out-of-range width
@@ -362,13 +424,14 @@ export function normalizeWorkspace(workspace: WorkspaceSnapshot): WorkspaceSnaps
     trafficPanels: Object.fromEntries(
       Object.entries(workspace.trafficPanels).map(([projectId, panel]) => [
         projectId,
-        { ...panel, width: clampTrafficWidth(panel.width) },
+        normalizeTrafficPanel(panel),
       ])
     ),
     projectTerminals: Object.fromEntries(
       Object.entries(workspace.projectTerminals).map(([projectId, pane]) => [
         projectId,
         {
+          ...pane,
           width: clampProjectTerminalWidth(pane.width),
           shells: normalizeProjectShells(pane.shells),
         },
@@ -397,6 +460,7 @@ export function normalizeWorkspace(workspace: WorkspaceSnapshot): WorkspaceSnaps
       ])
     ),
     globalTerminal: normalizeTerminalPanel(workspace.globalTerminal),
+    webTabs: normalizeWebTabs(workspace.webTabs),
     // Repaired here for the same reason, and pruned by conversation in
     // `reconcileWorkspace` for the same reason too.
   }
@@ -740,11 +804,11 @@ export function equalizeBranch<T extends PaneTree>(workspace: T, path: readonly 
   }
 }
 
-export function replaceSession(
-  workspace: WorkspaceSnapshot,
+export function replaceSession<T extends PaneTree>(
+  workspace: T,
   previousId: string,
   nextId: string
-): WorkspaceSnapshot {
+): T {
   const previous = tabLocation(workspace, previousId)
   if (previous === null || previousId === nextId) return workspace
   const alreadyOpen = tabLocation(workspace, nextId)
@@ -863,10 +927,12 @@ export function onScreenConversations(
   state: {
     readonly panes: Record<string, WorkspacePane>
     readonly conversationGroups: Record<string, ConversationArrangement>
+    readonly webTabs: WebTabsState
   },
   reported: readonly string[] = []
 ): ReadonlySet<string> {
   const showing = new Set(reported)
+  if (state.webTabs.showing) return showing
   for (const pane of Object.values(state.panes)) {
     const projectId = pane.activeTabId
     if (projectId === null) continue
@@ -898,6 +964,14 @@ export function clampTrafficWidth(width: number): number {
   return Math.round(Math.max(TRAFFIC_WIDTH.min, width))
 }
 
+export function normalizeTrafficPanel(panel: TrafficPanelState): TrafficPanelState {
+  return {
+    ...panel,
+    width:
+      panel.widthCustomized === true ? clampTrafficWidth(panel.width) : TRAFFIC_WIDTH.default,
+  }
+}
+
 export const DEFAULT_PROJECT_TERMINAL: ProjectTerminalPaneState = {
   width: PROJECT_TERMINAL_WIDTH.default,
   shells: [{ id: MAIN_PROJECT_SHELL }],
@@ -909,19 +983,48 @@ export function clampProjectTerminalWidth(width: number): number {
 }
 
 export function projectTerminalMinimum(shells: number): number {
-  return PROJECT_TERMINAL_WIDTH.run + shells * PROJECT_TERMINAL_WIDTH.slot
+  return Math.max(PROJECT_TERMINAL_WIDTH.run, shells > 0 ? PROJECT_TERMINAL_WIDTH.slot : 0)
 }
 
 export function projectTerminalWidth(pane: ProjectTerminalPaneState): number {
   return Math.max(pane.width, projectTerminalMinimum(pane.shells.length))
 }
 
-export function isRowScroll(left: number): boolean {
-  return Number.isFinite(left) && left >= 0
+export function trafficColumnMinimum(terminalShells: number | null): number {
+  return terminalShells === null
+    ? TRAFFIC_WIDTH.min
+    : Math.max(TRAFFIC_WIDTH.min, projectTerminalMinimum(terminalShells))
 }
 
-export function editorWidthIn(windowWidth: number): number {
-  return Math.round(windowWidth * EDITOR_WIDTH.fraction)
+export function isRowScroll(left: number): boolean {
+  return Number.isFinite(left)
+}
+
+export function clampEditorWidthFraction(fraction: number): number | undefined {
+  return Number.isFinite(fraction) && fraction > 0
+    ? Math.min(fraction, EDITOR_WIDTH.maxFraction)
+    : undefined
+}
+
+export function clampEditorWidth(width: number, windowWidth: number): number {
+  const maximum = Number.isFinite(windowWidth)
+    ? Math.max(0, Math.floor(windowWidth * EDITOR_WIDTH.maxFraction))
+    : 0
+  const wanted = Number.isFinite(width) ? Math.round(width) : maximum - EDITOR_WIDTH.defaultOffset
+  return Math.min(maximum, Math.max(EDITOR_WIDTH.min, wanted))
+}
+
+export function editorWidthIn(
+  windowWidth: number,
+  fraction?: number,
+  paneWidth = windowWidth
+): number {
+  const saved = fraction === undefined ? undefined : clampEditorWidthFraction(fraction)
+  const wanted =
+    saved === undefined
+      ? paneWidth - EDITOR_WIDTH.defaultOffset - ROW_DIVIDER_WIDTH
+      : windowWidth * saved
+  return clampEditorWidth(wanted, windowWidth)
 }
 
 export function clampActivityBar(reported: number, editorWidth: number, paneWidth: number): number {
@@ -931,6 +1034,8 @@ export function clampActivityBar(reported: number, editorWidth: number, paneWidt
 }
 
 export const ROW_EDGE_INSET = 3
+
+export const ROW_DIVIDER_WIDTH = 9
 
 export const ROW_SCROLLBAR_STRIP = 12
 
@@ -953,7 +1058,7 @@ export function editorViewport(
   const barRight = Math.min(Math.round(bar.left + bar.width), limit)
   const right = Math.max(barRight, Math.min(Math.round(surface.left + surface.width), limit))
   const bottom = Math.min(Math.round(surface.top + surface.height), floor)
-  const layoutWidth = Math.min(Math.round(surface.width + bar.width), limit - x)
+  const layoutWidth = Math.max(EDITOR_WIDTH.min, Math.max(0, right - x))
   return {
     rect: {
       x,
@@ -961,8 +1066,28 @@ export function editorViewport(
       width: Math.max(0, right - x),
       height: Math.max(0, bottom - y),
     },
-    layoutWidth: layoutWidth >= 1 ? layoutWidth : undefined,
+    layoutWidth: limit - x >= 1 ? layoutWidth : undefined,
   }
+}
+
+export const BROWSER_FIT_TOLERANCE = 1
+
+export function browserViewport(
+  panel: MeasuredBox,
+  body: MeasuredBox,
+  scroller: MeasuredBox
+): { readonly rect: WorkbenchRect; readonly fullyVisible: boolean } {
+  const left = Math.round(scroller.left)
+  const limit = Math.round(scroller.left + scroller.width) - ROW_EDGE_INSET
+  const floor = Math.round(scroller.top + scroller.height) - ROW_SCROLLBAR_STRIP
+  const x = Math.max(Math.round(body.left), left)
+  const y = Math.round(body.top)
+  const width = Math.max(0, Math.min(Math.round(body.left + body.width), limit) - x)
+  const height = Math.max(0, Math.min(Math.round(body.top + body.height), floor) - y)
+  const fits =
+    panel.left >= scroller.left - BROWSER_FIT_TOLERANCE &&
+    panel.left + panel.width <= scroller.left + scroller.width + BROWSER_FIT_TOLERANCE
+  return { rect: { x, y, width, height }, fullyVisible: fits && width > 0 && height > 0 }
 }
 
 export function columnsOf(layout: WorkspaceLayoutNode | null): WorkspaceLayoutNode[] {
@@ -1175,6 +1300,11 @@ export function reconcileWorkspace(
     ...workspace,
     terminals: Object.fromEntries(
       Object.entries(workspace.terminals).filter(([conversationId]) => allowed.has(conversationId))
+    ),
+    editorWidthFractions: Object.fromEntries(
+      Object.entries(workspace.editorWidthFractions).filter(([projectId]) =>
+        allowedProjects.has(projectId)
+      )
     ),
   }
   /*

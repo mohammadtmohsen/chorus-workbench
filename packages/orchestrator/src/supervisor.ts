@@ -406,11 +406,14 @@ async function verdictOf(
   })
 
   let failed: string | null = null
+  let pending: Promise<IteratorResult<AgentEvent>> | null
   try {
     for (;;) {
-      const next = await Promise.race([iterator.next(), expired])
+      pending = iterator.next()
+      const next = await Promise.race([pending, expired])
       if (next === 'expired') break
       if (next.done === true) break
+      pending = null
       buffered.push(next.value)
       if (next.value.type === 'error' && !next.value.recoverable) {
         failed = next.value.message
@@ -421,7 +424,7 @@ async function verdictOf(
     scheduler.clearTimeout(timer)
   }
 
-  return { failed, session: replaying(session, buffered, iterator) }
+  return { failed, session: replaying(session, buffered, iterator, pending) }
 }
 
 /**
@@ -439,11 +442,17 @@ async function verdictOf(
 function replaying(
   session: AgentSession,
   buffered: readonly AgentEvent[],
-  iterator: AsyncIterator<AgentEvent>
+  iterator: AsyncIterator<AgentEvent>,
+  pending: Promise<IteratorResult<AgentEvent>> | null
 ): AgentSession {
   const events: AsyncIterable<AgentEvent> = {
     async *[Symbol.asyncIterator](): AsyncGenerator<AgentEvent> {
       yield* buffered
+      if (pending !== null) {
+        const next = await pending
+        if (next.done === true) return
+        yield next.value
+      }
       for (;;) {
         const next = await iterator.next()
         if (next.done === true) return

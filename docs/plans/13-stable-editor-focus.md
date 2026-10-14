@@ -2,14 +2,14 @@
 
 ## Status
 
-| Unit | Result |
-| --- | --- |
-| Independent investigation | Codex and Claude traced the same reset path in source; runtime NOT VERIFIED |
-| Plan challenge | Initial source challenge found no required findings; final review subsequently found F1, the activity-bar return regression |
-| U1: remove interaction reveal | Implemented by Claude; Codex inspected the three actual incremental diffs and full changed source files, including F1 correction |
-| Integrated review | Claude found F1; correction implemented and reviewed by both agents; no unresolved supported source findings |
-| Delivery | Reviewed local changes built and installed on the user's subsequent request; actual editor interaction and regression behavior remain NOT VERIFIED |
-| Executable verification | Requested build and installer signature verification PASS; standalone tests/checks and UI verification NOT RUN |
+| Unit                          | Result                                                                                                                                             |
+| ----------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Independent investigation     | Codex and Claude traced the same reset path in source; runtime NOT VERIFIED                                                                        |
+| Plan challenge                | Initial source challenge found no required findings; final review subsequently found F1, the activity-bar return regression                        |
+| U1: remove interaction reveal | Implemented by Claude; Codex inspected the three actual incremental diffs and full changed source files, including F1 correction                   |
+| Integrated review             | Claude found F1; correction implemented and reviewed by both agents; no unresolved supported source findings                                       |
+| Delivery                      | Reviewed local changes built and installed on the user's subsequent request; actual editor interaction and regression behavior remain NOT VERIFIED |
+| Executable verification       | Requested build and installer signature verification PASS; standalone tests/checks and UI verification NOT RUN                                     |
 
 ## Current / Issue
 
@@ -66,15 +66,15 @@ One atomic unit, U1, covers these three files. Claude implements it after the pl
 
 ## Acceptance and verification
 
-| Criterion | Source review | Runtime |
-| --- | --- | --- |
-| Ordinary editor interaction preserves row offset and saved position | PASS: entry pointer reveal and key reveal removed; no replacement focus reset | NOT VERIFIED |
-| Explicit file and opening approval-diff reveal remain available | PASS: main requestWorkbenchReveal and requestWorkbenchAskDiff retain revealRow | NOT VERIFIED |
-| Quick input and modal dialogs retain reveal | PASS: watchWorkbenchChrome retains onShow and onWillShowDialog callbacks | NOT VERIFIED |
-| Pinned activity-bar navigation reveals the cropped workbench | PASS: pointer reveal is registered only on the existing ACTIVITYBAR_PART container | NOT VERIFIED |
-| Horizontal wheel, Shift-wheel and webview modifier tracking remain available | PASS: wheel paths and keydown/keyup/blur tracking unchanged | NOT VERIFIED |
-| Project isolation, saved offsets and crop geometry remain intact | PASS: byContents/owner routing, active-project guard, useRowScroll and editorViewport unchanged | NOT VERIFIED |
-| Existing unrelated working-tree edits remain intact | PASS: task-baseline diffs contain only agreed removals plus the targeted activity-bar listener | NOT VERIFIED |
+| Criterion                                                                    | Source review                                                                                   | Runtime      |
+| ---------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------- | ------------ |
+| Ordinary editor interaction preserves row offset and saved position          | PASS: entry pointer reveal and key reveal removed; no replacement focus reset                   | NOT VERIFIED |
+| Explicit file and opening approval-diff reveal remain available              | PASS: main requestWorkbenchReveal and requestWorkbenchAskDiff retain revealRow                  | NOT VERIFIED |
+| Quick input and modal dialogs retain reveal                                  | PASS: watchWorkbenchChrome retains onShow and onWillShowDialog callbacks                        | NOT VERIFIED |
+| Pinned activity-bar navigation reveals the cropped workbench                 | PASS: pointer reveal is registered only on the existing ACTIVITYBAR_PART container              | NOT VERIFIED |
+| Horizontal wheel, Shift-wheel and webview modifier tracking remain available | PASS: wheel paths and keydown/keyup/blur tracking unchanged                                     | NOT VERIFIED |
+| Project isolation, saved offsets and crop geometry remain intact             | PASS: byContents/owner routing, active-project guard, useRowScroll and editorViewport unchanged | NOT VERIFIED |
+| Existing unrelated working-tree edits remain intact                          | PASS: task-baseline diffs contain only agreed removals plus the targeted activity-bar listener  | NOT VERIFIED |
 
 At source-review delivery, tests, typecheck, lint, formatter, build, app launch and UI checks were NOT RUN. The subsequent requested build/install is recorded below. Standalone tests/checks and UI verification remain NOT RUN. When requested, use `pnpm exec vitest run apps/desktop/src/renderer/src/workbench/viewport.test.ts` and exercise the original scrolled-row click/typing case in the app, followed by the retained reveal and wheel paths.
 

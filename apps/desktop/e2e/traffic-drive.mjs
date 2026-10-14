@@ -621,7 +621,7 @@ try {
           visible,
           panes: widths,
           sum: widths.reduce((total, width) => total + width, 0),
-          narrower: widths.filter((width) => width < visible - 2).length,
+          gap: parseFloat(getComputedStyle(wrap).columnGap) || 0,
           content: Math.round(wrap.scrollWidth),
           moved,
           across: getComputedStyle(wrap).overflowX,
@@ -640,14 +640,16 @@ try {
      * fold is opened.
      */
     check(
-      'each pane is sized by its content, and the wrapper is what can carry the sum',
+      'the two panes are equal halves of the wrapper, and nothing scrolls or clips sideways',
       panes !== null &&
-        panes.narrower >= 1 &&
+        Math.abs(panes.panes[0] - panes.panes[1]) <= 1 &&
+        Math.abs(panes.sum + panes.gap - panes.visible) <= 2 &&
+        panes.content <= panes.visible + 1 &&
+        panes.moved === 0 &&
         panes.hiding === 0 &&
-        panes.content >= panes.sum &&
-        panes.across === 'auto' &&
+        panes.across === 'hidden' &&
         panes.down.every((axis) => axis === 'auto'),
-      `panes [${(panes?.panes ?? []).join(', ')}] in ${String(panes?.visible)}, ${String(panes?.narrower)} narrower than the wrapper, content ${String(panes?.content)} for a sum of ${String(panes?.sum)}, overflow-x ${String(panes?.across)}, hiding ${String(panes?.hiding)}`
+      `panes [${(panes?.panes ?? []).join(', ')}] with a gap of ${String(panes?.gap)} in ${String(panes?.visible)}, content ${String(panes?.content)}, scrolled ${String(panes?.moved)}, overflow-x ${String(panes?.across)}, hiding ${String(panes?.hiding)}`
     )
 
     const values = JSON.parse(
@@ -661,9 +663,6 @@ try {
                 height: Math.round(node.getBoundingClientRect().height),
                 line: parseFloat(getComputedStyle(node).lineHeight) || 0,
               }
-        const named = [...document.querySelectorAll('.traffic-header')].find(
-          (row) => (row.querySelector('dt')?.textContent ?? '') === 'x-refresh-token'
-        )
         return JSON.stringify({
           /*
            * The inspector's header, not the Forwarded-to row. That row is now
@@ -675,7 +674,6 @@ try {
           forwarded: read(
             document.querySelector('.traffic-inspector .traffic-head .traffic-url')
           ),
-          header: read(named === undefined ? null : named.querySelector('dd')),
           /*
            * Which row the inspector is describing. It reads null on a row whose
            * response has not arrived, because a pending capture has request
@@ -696,18 +694,6 @@ try {
       'and it carries the whole forwarded url',
       values.forwarded?.text === `http://127.0.0.1:${String(upstream.port)}${longPath}`,
       String(values.forwarded?.text)
-    )
-    check(
-      'a long header value is not clipped',
-      values.header !== null && values.header.clipped === false,
-      `clipped: ${String(values.header?.clipped)}`
-    )
-    check(
-      'and it took more than one line to say in full',
-      values.header !== null &&
-        values.header.line > 0 &&
-        values.header.height > values.header.line * 1.5,
-      `${String(values.header?.height)}px tall, one line is ${String(values.header?.line)}px`
     )
 
     await wait(4_000)
@@ -893,22 +879,70 @@ try {
         wrap.scrollLeft = before
         return {
           panes: widths,
+          sum: widths.reduce((total, width) => total + width, 0),
+          gap: parseFloat(getComputedStyle(wrap).columnGap) || 0,
           content: Math.round(wrap.scrollWidth),
           visible: Math.round(wrap.getBoundingClientRect().width),
           moved,
-          hiding: both.filter((pane) => pane.scrollWidth > pane.clientWidth + 1).length
+          across: getComputedStyle(wrap).overflowX,
+          hiding: both.filter((pane) => pane.scrollWidth > pane.clientWidth + 1).length,
+          down: both.map((pane) => getComputedStyle(pane).overflowY)
         }
       })())`)
     )
     say('the panes once the fold is open', acrossFold)
     check(
-      'a pane wider than the wrapper scrolls the wrapper, and hides nothing',
+      'with the headers open the halves stay equal, and nothing scrolls or clips sideways',
       acrossFold !== null &&
-        acrossFold.panes.some((width) => width > acrossFold.visible + 1) &&
-        acrossFold.content > acrossFold.visible + 1 &&
-        acrossFold.moved > 1 &&
-        acrossFold.hiding === 0,
-      `panes [${(acrossFold?.panes ?? []).join(', ')}] in ${String(acrossFold?.visible)}, content ${String(acrossFold?.content)}, scrolled ${String(acrossFold?.moved)}, hiding ${String(acrossFold?.hiding)}`
+        Math.abs(acrossFold.panes[0] - acrossFold.panes[1]) <= 1 &&
+        Math.abs(acrossFold.sum + acrossFold.gap - acrossFold.visible) <= 2 &&
+        acrossFold.content <= acrossFold.visible + 1 &&
+        acrossFold.moved === 0 &&
+        acrossFold.hiding === 0 &&
+        acrossFold.across === 'hidden' &&
+        acrossFold.down.every((axis) => axis === 'auto'),
+      `panes [${(acrossFold?.panes ?? []).join(', ')}] with a gap of ${String(acrossFold?.gap)} in ${String(acrossFold?.visible)}, content ${String(acrossFold?.content)}, scrolled ${String(acrossFold?.moved)}, overflow-x ${String(acrossFold?.across)}, hiding ${String(acrossFold?.hiding)}`
+    )
+    check(
+      'opening the headers does not change the width of either pane',
+      acrossFold !== null &&
+        panes !== null &&
+        Math.abs(acrossFold.panes[0] - panes.panes[0]) <= 1 &&
+        Math.abs(acrossFold.panes[1] - panes.panes[1]) <= 1,
+      `closed [${(panes?.panes ?? []).join(', ')}], open [${(acrossFold?.panes ?? []).join(', ')}]`
+    )
+
+    const longHeader = JSON.parse(
+      await app.evaluate(`(() => {
+        const read = (node) =>
+          node === null || node === undefined
+            ? null
+            : {
+                clipped: node.scrollWidth > node.clientWidth,
+                text: node.textContent,
+                height: Math.round(node.getBoundingClientRect().height),
+                line: parseFloat(getComputedStyle(node).lineHeight) || 0,
+              }
+        const named = [...document.querySelectorAll('.traffic-header')].find(
+          (row) => (row.querySelector('dt')?.textContent ?? '') === 'x-refresh-token'
+        )
+        return JSON.stringify({
+          header: read(named === undefined ? null : named.querySelector('dd'))
+        })
+      })()`)
+    )
+    say('the long header once the fold is open', longHeader)
+    check(
+      'a long header value is not clipped',
+      longHeader.header !== null && longHeader.header.clipped === false,
+      `clipped: ${String(longHeader.header?.clipped)}`
+    )
+    check(
+      'and it took more than one line to say in full',
+      longHeader.header !== null &&
+        longHeader.header.line > 0 &&
+        longHeader.header.height > longHeader.header.line * 1.5,
+      `${String(longHeader.header?.height)}px tall, one line is ${String(longHeader.header?.line)}px`
     )
 
     /*

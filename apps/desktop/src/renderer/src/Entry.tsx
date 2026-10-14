@@ -10,6 +10,7 @@ import type { TranscriptMessage } from './transcript.js'
 import { splitTrailingPaths } from './attach.js'
 import { SentAttachments } from './SentAttachments.js'
 import { useTypewriter } from './useTypewriter.js'
+import { isLiveReply } from '../../shared/live-message.js'
 
 /**
  * One entry on the score: a dot on the rail, a speaker, and what was said.
@@ -267,61 +268,82 @@ const ChangesCard = memo(function ChangesCard({
   onOpenFile?: ((path: string) => void) | undefined
 }): React.JSX.Element {
   const { t } = useTranslation()
+  const [openPaths, setOpenPaths] = useState<ReadonlySet<string>>(() => new Set())
+  const toggleOpen = (path: string): void => {
+    setOpenPaths((current) => {
+      const next = new Set(current)
+      if (next.has(path)) next.delete(path)
+      else next.add(path)
+      return next
+    })
+  }
   return (
     <div className="changes-card">
       <p className="changes-head">{t('changes.heading')}</p>
       <ul className="changes-list">
-        {files.map((file) => (
-          <li key={file.path} className="changes-row" data-change={file.change}>
-            <span
-              className="changes-letter"
-              title={t(`changes.of.${file.change}`, { from: file.oldPath ?? '' })}
-            >
-              {t(`changes.letter.${file.change}`)}
-            </span>
-            {/*
-              A button, and the class is unchanged on purpose.
+        {files.map((file) => {
+          const open = openPaths.has(file.path)
+          const shownPath = relativeTo(file.path, cwd)
+          const caretLabel = t(open ? 'changes.hideDiff' : 'changes.showDiff', { path: shownPath })
+          return (
+            <li key={file.path} className="changes-row" data-change={file.change}>
+              {file.patch !== undefined ? (
+                <button
+                  type="button"
+                  className="changes-caret"
+                  aria-expanded={open}
+                  aria-label={caretLabel}
+                  title={caretLabel}
+                  onClick={() => {
+                    toggleOpen(file.path)
+                  }}
+                >
+                  {open ? '⌄' : '›'}
+                </button>
+              ) : (
+                <span className="changes-caret" aria-hidden="true" />
+              )}
+              <span
+                className="changes-letter"
+                title={t(`changes.of.${file.change}`, { from: file.oldPath ?? '' })}
+              >
+                {t(`changes.letter.${file.change}`)}
+              </span>
+              {/*
+                A button, and the class is unchanged on purpose.
 
-              `e2e/shots-changes.mjs` reads `.changes-path`'s `textContent`, so
-              the selector and the text both have to survive — which they do: an
-              icon nested inside would not, and is why there is none.
+                `e2e/shots-changes.mjs` reads `.changes-path`'s `textContent`, so
+                the selector and the text both have to survive — which they do: an
+                icon nested inside would not, and is why there is none.
 
-              The full absolute path was already here as the `title`; this only
-              makes the row do what the tooltip always implied it could.
-            */}
-            <button
-              type="button"
-              className="changes-path"
-              title={file.path}
-              data-open-file={file.path}
-              disabled={onOpenFile === undefined}
-              onClick={() => {
-                onOpenFile?.(file.path)
-              }}
-            >
-              {relativeTo(file.path, cwd)}
-            </button>
-            <span
-              className="changes-count"
-              title={t('changes.wrote', { added: file.added, removed: file.removed })}
-            >
-              {file.added > 0 && <span className="changes-added">+{file.added}</span>}
-              {file.removed > 0 && <span className="changes-removed">−{file.removed}</span>}
-            </span>
-            {/*
-              The diff, under the row it belongs to.
-
-              Open, with nothing to click, for the reason `ToolPatch` is: an edit
-              is the one thing in a turn you almost always want to see, and
-              hiding it behind a caret is the problem the card was drawn to
-              solve. A row from an older log carries no patch and simply shows
-              its counts — an empty frame would be worse than none.
-            */}
-            {file.patch !== undefined && (
-              <ToolPatch patch={file.patch} omittedLines={file.omittedLines} nested={false} />
-            )}
-          </li>
-        ))}
+                The full absolute path was already here as the `title`; this only
+                makes the row do what the tooltip always implied it could.
+              */}
+              <button
+                type="button"
+                className="changes-path"
+                title={file.path}
+                data-open-file={file.path}
+                disabled={onOpenFile === undefined}
+                onClick={() => {
+                  onOpenFile?.(file.path)
+                }}
+              >
+                {shownPath}
+              </button>
+              <span
+                className="changes-count"
+                title={t('changes.wrote', { added: file.added, removed: file.removed })}
+              >
+                {file.added > 0 && <span className="changes-added">+{file.added}</span>}
+                {file.removed > 0 && <span className="changes-removed">−{file.removed}</span>}
+              </span>
+              {open && file.patch !== undefined && (
+                <ToolPatch patch={file.patch} omittedLines={file.omittedLines} nested={false} />
+              )}
+            </li>
+          )
+        })}
       </ul>
     </div>
   )
@@ -778,7 +800,9 @@ export const Entry = memo(function Entry({
         actor={message.actor}
         at={message.kind === 'message' ? message.at : undefined}
         silent={grouped}
-      ></EntryHead>
+      >
+        {isLiveReply(message.key) && <span className="entry-live-label">{t('live.answer')}</span>}
+      </EntryHead>
       <div className="said" data-streaming={message.status === 'streaming'}>
         {message.kind === 'command' ? (
           /*

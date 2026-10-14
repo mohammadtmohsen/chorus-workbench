@@ -1,10 +1,13 @@
-import { useRef, useState } from 'react'
+import { useCallback, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
 import { useTranslation } from 'react-i18next'
 import { requiresExplicitUserDecision } from '@chorus/agent-protocol'
 import { questionFields } from '../../shared/question-text.js'
 import { summarize } from './transcript.js'
 import { dismissToast, NOTICE_KEY, toastKey, toasts as toastSignal } from './toasts.js'
 import { useSignal } from './workspace/signal.js'
+import { useShellOverlayActive } from './workspace/overlay.js'
+import { useToastWindow } from './useToastWindow.js'
 
 export function ToastStack(): React.JSX.Element {
   const { t } = useTranslation()
@@ -12,9 +15,22 @@ export function ToastStack(): React.JSX.Element {
   const [busy, setBusy] = useState<ReadonlySet<string>>(new Set())
   const [drafts, setDrafts] = useState<Readonly<Record<string, string>>>({})
   const inFlight = useRef<Set<string>>(new Set())
+  const overlayActive = useShellOverlayActive()
+  const dismissAll = useCallback(() => {
+    toastSignal.set([])
+  }, [])
+  const { host, anchor, stack } = useToastWindow(shown.length > 0 && !overlayActive, dismissAll)
 
-  return (
-    <div className="toast-stack">
+  const cards = (
+    <div
+      className="toast-stack"
+      ref={stack}
+      style={
+        host === null
+          ? undefined
+          : { position: 'relative', top: 0, right: 0, width: '100%', maxHeight: 'inherit' }
+      }
+    >
       {shown.map((toast) => {
         const key = toastKey(toast)
         const held = busy.has(key)
@@ -69,17 +85,15 @@ export function ToastStack(): React.JSX.Element {
           const text = (drafts[key] ?? '').trim()
           if (text === '') return
           hold()
-          void window.chorus
-            .sendMessage({ conversationId: toast.conversationId, text })
-            .then(
-              () => {
-                setDrafts((current) => ({ ...current, [key]: '' }))
-                release()
-              },
-              () => {
-                release()
-              }
-            )
+          void window.chorus.sendMessage({ conversationId: toast.conversationId, text }).then(
+            () => {
+              setDrafts((current) => ({ ...current, [key]: '' }))
+              release()
+            },
+            () => {
+              release()
+            }
+          )
         }
 
         const open = (): void => {
@@ -95,7 +109,10 @@ export function ToastStack(): React.JSX.Element {
         const asked = toast.reason === 'question' ? questionFields(toast.request) : []
         const single = asked.length === 1 ? asked[0] : undefined
         const choosable =
-          single !== undefined && !single.multiSelect && !single.isSecret && single.options.length > 0
+          single !== undefined &&
+          !single.multiSelect &&
+          !single.isSecret &&
+          single.options.length > 0
             ? single
             : undefined
 
@@ -225,5 +242,17 @@ export function ToastStack(): React.JSX.Element {
         )
       })}
     </div>
+  )
+
+  return (
+    <>
+      <div
+        className="toast-stack"
+        ref={anchor}
+        aria-hidden="true"
+        style={{ visibility: 'hidden', pointerEvents: 'none' }}
+      />
+      {host === null ? cards : createPortal(cards, host)}
+    </>
   )
 }

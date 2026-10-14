@@ -97,7 +97,7 @@ class FakeProcesses {
   kill(pid: number, signal: NodeJS.Signals | 0): void {
     this.signals.push([pid, signal])
     const group = this.groups.get(-pid)
-    if (group === undefined || !group.alive) throw errno('ESRCH')
+    if (!group?.alive) throw errno('ESRCH')
     if (group.behaviour.failure !== null) throw errno(group.behaviour.failure)
     if (signal === 0 || group.behaviour.fatal === 'nothing') return
     if (signal === 'SIGKILL') this.end(group, 137)
@@ -160,7 +160,7 @@ class FakeTerminals {
   interrupt(ref: ProjectTerminalRef, generation: number): boolean {
     this.interrupts.push([ref.projectId, generation])
     const launched = this.launches.findLast((each) => each.ref.projectId === ref.projectId)
-    if (launched === undefined || launched.spec.generation !== generation) return false
+    if (launched?.spec.generation !== generation) return false
     return this.processes.interrupt(launched.pid)
   }
 
@@ -358,6 +358,71 @@ describe('starting a run', () => {
     expect(runner.state('p1')).toMatchObject({ active: DEV })
   })
 
+  const withoutCapture: readonly {
+    readonly name: string
+    readonly edit: Partial<RunProject>
+  }[] = [
+    { name: 'both settings', edit: { trafficOrigin: null, trafficEnvVar: null } },
+    { name: 'the backend URL', edit: { trafficOrigin: null } },
+    { name: 'the variable', edit: { trafficEnvVar: null } },
+  ]
+
+  it.each(withoutCapture)('runs without HTTP capture with $name missing', async ({ edit }) => {
+    const { runner, projects, terminals, traffic } = build()
+    projects.set('p1', project(edit))
+
+    expect((await runner.run('p1')).process).toEqual({
+      kind: 'running',
+      token: 1,
+      active: DEV_CLEAN,
+      pgid: 100,
+    })
+    expect(traffic.starts).toBe(0)
+    expect(terminals.launches[0]?.spec).toEqual({
+      cwd: '/repo/p1',
+      env: { PATH: '/usr/bin:/bin' },
+      file: '/bin/zsh',
+      args: ['-l', '-i', '-c', 'set +m; npm run dev:clean'],
+      generation: 1,
+    })
+  })
+
+  it('restarts and stops a plain command without touching an independent recording', async () => {
+    const { runner, projects, terminals, traffic } = build()
+    projects.set('p1', project({ trafficOrigin: null, trafficEnvVar: null }))
+    traffic.recording.add('p1')
+
+    await runner.run('p1')
+    expect((await runner.restart('p1')).process.kind).toBe('running')
+    expect(terminals.launches).toHaveLength(2)
+    expect(terminals.launches[1]?.spec.args.at(-1)).toBe('set +m; npm run dev:clean')
+    expect((await runner.stop('p1')).process.kind).toBe('exited')
+    expect(terminals.interrupts).toEqual([
+      ['p1', 1],
+      ['p1', 2],
+    ])
+    expect(traffic.starts).toBe(0)
+    expect(traffic.stops).toBe(0)
+    expect(traffic.recording.has('p1')).toBe(true)
+  })
+
+  it.each(['throws', 'refuses'] as const)(
+    'reports a plain command spawn failure when the terminal %s',
+    async (flag) => {
+      const { runner, projects, terminals, traffic } = build()
+      projects.set('p1', project({ trafficOrigin: null, trafficEnvVar: null }))
+      terminals[flag] = true
+
+      expect((await runner.run('p1')).process).toEqual({
+        kind: 'failed',
+        reason: 'spawn-failed',
+        active: DEV_CLEAN,
+      })
+      expect(traffic.starts).toBe(0)
+      expect(traffic.stops).toBe(0)
+    }
+  )
+
   const refusals: readonly {
     readonly name: string
     readonly reason: RunFailure
@@ -369,8 +434,6 @@ describe('starting a run', () => {
     { name: 'Windows', reason: 'unsupported-platform', options: { platform: 'win32' } },
     { name: 'no saved commands', reason: 'no-command', edit: { runCommands: null } },
     { name: 'an unknown command', reason: 'no-command', commandId: 'missing' },
-    { name: 'no origin', reason: 'no-origin', edit: { trafficOrigin: null } },
-    { name: 'no variable', reason: 'no-variable', edit: { trafficEnvVar: null } },
     { name: 'an unexportable variable', reason: 'no-variable', edit: { trafficEnvVar: 'A-B' } },
     { name: 'fish', reason: 'unsupported-shell', options: { shell: '/opt/homebrew/bin/fish' } },
   ]
@@ -615,10 +678,10 @@ describe('restarting', () => {
   it('checks the current settings before it relaunches', async () => {
     const { runner, projects, terminals } = build()
     await runner.run('p1')
-    projects.set('p1', project({ trafficOrigin: null }))
+    projects.set('p1', project({ trafficEnvVar: 'A-B' }))
     expect((await runner.restart('p1')).process).toEqual({
       kind: 'failed',
-      reason: 'no-origin',
+      reason: 'no-variable',
       active: DEV_CLEAN,
     })
     expect(terminals.launches).toHaveLength(1)

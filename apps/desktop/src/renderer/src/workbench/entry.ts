@@ -5,7 +5,13 @@ import { IWorkspaceContextService } from '@codingame/monaco-vscode-api/vscode/vs
 import { IURLService } from '@codingame/monaco-vscode-api/vscode/vs/platform/url/common/url.service'
 import { ILogService } from '@codingame/monaco-vscode-api/vscode/vs/platform/log/common/log.service'
 import { IStorageService } from '@codingame/monaco-vscode-api/vscode/vs/platform/storage/common/storage.service'
+import {
+  StorageScope,
+  StorageTarget,
+  WillSaveStateReason,
+} from '@codingame/monaco-vscode-api/vscode/vs/platform/storage/common/storage'
 import { RunOnceScheduler } from '@codingame/monaco-vscode-api/vscode/vs/base/common/async'
+import { DisposableStore } from '@codingame/monaco-vscode-api/vscode/vs/base/common/lifecycle'
 import { URI } from '@codingame/monaco-vscode-api/vscode/vs/base/common/uri'
 import { IDialogService } from '@codingame/monaco-vscode-api/vscode/vs/platform/dialogs/common/dialogs.service'
 import { IQuickInputService } from '@codingame/monaco-vscode-api/vscode/vs/platform/quickinput/common/quickInput.service'
@@ -26,6 +32,15 @@ import { registerWorkbenchWorkers } from './workers.js'
 import { persistUserSettings, restoreUserSettings } from './user-settings.js'
 import { restoreBrowserExtensions, synchronizeBrowserExtensions } from './browser-extensions.js'
 import { seedWindowFocus } from './window-focus.js'
+import {
+  parseSideBarLayout,
+  ChorusStorageService,
+  flushWorkbenchStorage,
+  stopWorkbenchStorageRetries,
+  SHARED_SIDE_BAR_LAYOUT_KEY,
+  SIDE_BAR_DEFAULT_WIDTH,
+  SIDE_BAR_SIZE_KEY,
+} from './storage.js'
 import { bindTerminalEnv, seedTerminalEnv, type TerminalEnvMemory } from './terminal-env.js'
 import {
   addsIframe,
@@ -91,26 +106,100 @@ async function watchWorkbenchChrome(
   dialogs.onWillShowDialog(revealIfCropped)
 }
 
-async function savePanelLayout(logs: ILogService): Promise<void> {
+async function saveWorkbenchLayout(logs: ILogService): Promise<void> {
   const layout = await getService(IWorkbenchLayoutService)
   const storage = await getService(IStorageService)
   const save = new RunOnceScheduler(() => {
     storage.flush().catch((error: unknown) => {
       const detail = error instanceof Error ? (error.stack ?? error.message) : String(error)
-      logs.error(`Chorus: panel layout could not be saved — ${detail}`)
+      logs.error(`Chorus: workbench layout could not be saved — ${detail}`)
     })
   }, 200)
   const settle = (): void => {
     save.schedule()
   }
+  const panelPartId: string = Parts.PANEL_PART
   layout.onDidChangePartVisibility((event) => {
-    if (event.partId === Parts.PANEL_PART) settle()
+    if (event.partId === panelPartId) settle()
   })
   layout.onDidChangePanelPosition(settle)
   const panel = layout.getContainer(window, Parts.PANEL_PART)
   if (panel !== undefined) {
     const resized = new ResizeObserver(settle)
     resized.observe(panel)
+  }
+
+  const savedWidth = Number(storage.get(SIDE_BAR_SIZE_KEY, StorageScope.PROFILE))
+  let sideBarLayout =
+    parseSideBarLayout(storage.get(SHARED_SIDE_BAR_LAYOUT_KEY, StorageScope.PROFILE)) ?? {
+      width: Number.isFinite(savedWidth) && savedWidth > 0 ? savedWidth : SIDE_BAR_DEFAULT_WIDTH,
+      hidden: !layout.isVisible(Parts.SIDEBAR_PART),
+    }
+  let observedWidth = layout.getSize(Parts.SIDEBAR_PART).width
+  let containerWidth = layout.mainContainerDimension.width
+  let applyingSideBarLayout = false
+  const applySideBarLayout = (): void => {
+    if (applyingSideBarLayout) return
+    applyingSideBarLayout = true
+    try {
+      if (layout.isVisible(Parts.SIDEBAR_PART) === sideBarLayout.hidden) {
+        layout.setPartHidden(sideBarLayout.hidden, Parts.SIDEBAR_PART)
+      }
+      if (!sideBarLayout.hidden) {
+        const size = layout.getSize(Parts.SIDEBAR_PART)
+        if (size.width !== sideBarLayout.width) {
+          layout.setSize(Parts.SIDEBAR_PART, { ...size, width: sideBarLayout.width })
+        }
+      }
+    } finally {
+      observedWidth = layout.getSize(Parts.SIDEBAR_PART).width
+      containerWidth = layout.mainContainerDimension.width
+      applyingSideBarLayout = false
+    }
+  }
+  const storeSideBarLayout = (): void => {
+    storage.store(
+      SHARED_SIDE_BAR_LAYOUT_KEY,
+      JSON.stringify(sideBarLayout),
+      StorageScope.PROFILE,
+      StorageTarget.MACHINE
+    )
+    settle()
+  }
+  const sideBarPartId: string = Parts.SIDEBAR_PART
+  layout.onDidChangePartVisibility((event) => {
+    if (event.partId !== sideBarPartId || applyingSideBarLayout) return
+    if (sideBarLayout.hidden === !event.visible) return
+    sideBarLayout = { ...sideBarLayout, hidden: !event.visible }
+    applySideBarLayout()
+    storeSideBarLayout()
+  })
+  layout.onDidLayoutMainContainer(() => {
+    if (applyingSideBarLayout || containerWidth === layout.mainContainerDimension.width) return
+    applySideBarLayout()
+  })
+  const changes = new DisposableStore()
+  changes.add(
+    storage.onDidChangeValue(StorageScope.PROFILE, SHARED_SIDE_BAR_LAYOUT_KEY, changes)((event) => {
+      if (!event.external) return
+      const shared = parseSideBarLayout(storage.get(SHARED_SIDE_BAR_LAYOUT_KEY, StorageScope.PROFILE))
+      if (shared === undefined) return
+      sideBarLayout = shared
+      applySideBarLayout()
+    })
+  )
+  applySideBarLayout()
+  const sideBar = layout.getContainer(window, Parts.SIDEBAR_PART)
+  if (sideBar !== undefined) {
+    const resized = new ResizeObserver(() => {
+      if (applyingSideBarLayout || !layout.isVisible(Parts.SIDEBAR_PART)) return
+      const width = layout.getSize(Parts.SIDEBAR_PART).width
+      if (!Number.isFinite(width) || width <= 0 || width === observedWidth) return
+      observedWidth = width
+      sideBarLayout = { ...sideBarLayout, width }
+      storeSideBarLayout()
+    })
+    resized.observe(sideBar)
   }
 }
 
@@ -267,6 +356,16 @@ async function main(): Promise<void> {
   })
 
   const { services, options, env } = prepareWorkbench(connection)
+  window.addEventListener('pagehide', stopWorkbenchStorageRetries, { once: true })
+  window.chorusWorkbench.onStorageFlushRequest(async () => {
+    const storage = await getService(IStorageService)
+    if (storage instanceof ChorusStorageService) {
+      await storage.shutdownStorage()
+      return
+    }
+    await storage.flush(WillSaveStateReason.SHUTDOWN).catch(() => undefined)
+    await flushWorkbenchStorage()
+  })
   await initialize(services, container, options, env)
 
   /*
@@ -353,9 +452,9 @@ async function main(): Promise<void> {
     const detail = error instanceof Error ? (error.stack ?? error.message) : String(error)
     logs.error(`Chorus: workbench viewport reporting failed to start — ${detail}`)
   })
-  await savePanelLayout(logs).catch((error: unknown) => {
+  await saveWorkbenchLayout(logs).catch((error: unknown) => {
     const detail = error instanceof Error ? (error.stack ?? error.message) : String(error)
-    logs.error(`Chorus: panel layout saving failed to start — ${detail}`)
+    logs.error(`Chorus: workbench layout saving failed to start — ${detail}`)
   })
   await forwardWebviewWheels(container, modifiers.current).catch((error: unknown) => {
     const detail = error instanceof Error ? (error.stack ?? error.message) : String(error)

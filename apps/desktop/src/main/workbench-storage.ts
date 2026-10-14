@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
+import { mkdir, readFile, rename, writeFile } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import { workbenchUserDataPath } from './workbench-user-settings.js'
 
@@ -60,21 +60,51 @@ export const STORAGE_SCOPE_MAX_BYTES = 5_000_000
 
 type StorageFile = Record<string, Record<string, string>>
 
+type StorageStore = {
+  readonly userData: string
+  items: StorageFile | null
+  loading: Promise<StorageFile> | null
+  queue: Promise<void>
+}
+
+const stores = new Map<string, StorageStore>()
+
+export async function flushWorkbenchStorageWrites(): Promise<void> {
+  await Promise.all([...stores.values()].map((store) => store.queue))
+}
+
+function storeFor(userData: string): StorageStore {
+  const path = workbenchStoragePath(userData)
+  const current = stores.get(path)
+  if (current !== undefined) return current
+  const store: StorageStore = { userData, items: null, loading: null, queue: Promise.resolve() }
+  stores.set(path, store)
+  return store
+}
+
+function loadStore(store: StorageStore): Promise<StorageFile> {
+  if (store.items !== null) return Promise.resolve(store.items)
+  if (store.loading !== null) return store.loading
+  store.loading = readAll(store.userData)
+    .then((items) => {
+      store.items = items
+      return items
+    })
+    .finally(() => {
+      store.loading = null
+    })
+  return store.loading
+}
+
 /**
  * The whole file, or an empty object — and a corrupt file reads as empty rather
  * than throwing.
  *
- * Same judgement as `readWorkbenchUserSettings`: this is read during workbench
- * startup, and taking the editor down over an unparseable cache would trade a
- * forgotten preference for an app that will not open. Anything unreadable is
- * treated as "nothing remembered yet", which is the state every profile starts
- * in anyway and which the next write repairs.
  */
-function readAll(userData: string): StorageFile {
+async function readAll(userData: string): Promise<StorageFile> {
   const path = workbenchStoragePath(userData)
-  if (!existsSync(path)) return {}
   try {
-    const parsed: unknown = JSON.parse(readFileSync(path, 'utf8'))
+    const parsed: unknown = JSON.parse(await readFile(path, 'utf8'))
     if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return {}
     /*
      * Shape-checked one level down, not cast. A hand-edited file with a string
@@ -98,23 +128,27 @@ function readAll(userData: string): StorageFile {
       out[scope] = clean
     }
     return out
-  } catch {
-    return {}
+  } catch (error) {
+    if (error instanceof SyntaxError) return {}
+    if (error instanceof Error && 'code' in error && error.code === 'ENOENT') return {}
+    throw error
   }
 }
 
 /** What this scope last stored, as the JSON text the client will parse, or null. */
-export function readWorkbenchStorage(userData: string, scope: string): string | null {
-  const items = readAll(userData)[scope]
-  return items === undefined ? null : JSON.stringify(items)
+export async function readWorkbenchStorage(userData: string, scope: string): Promise<string | null> {
+  const store = storeFor(userData)
+  await store.queue
+  try {
+    const items = (await loadStore(store))[scope]
+    return items === undefined ? null : JSON.stringify(items)
+  } catch {
+    return null
+  }
 }
 
 /**
  * Replaces one scope's items, leaving every other scope alone.
- *
- * Read-modify-write of the whole file on every flush, which is affordable
- * because the storage service batches: it does not call this per `set`, it calls
- * it when it flushes a working set that is already in memory.
  *
  * Written through a temporary file and renamed, for the reason
  * `writeWorkbenchUserSettings` gives — a torn write leaves a file that parses as
@@ -126,7 +160,7 @@ export function applyWorkbenchStorageDelta(
   scope: string,
   insert: Record<string, string>,
   remove: readonly string[]
-): void {
+): Promise<void> {
   /*
    * **A delta, because a whole map is a race with a knife in it.**
    *
@@ -143,23 +177,26 @@ export function applyWorkbenchStorageDelta(
    * I have not heard about", which is what the old shape said accidentally on
    * every write.
    */
-  const merged = readAll(userData)
-  const items = { ...merged[scope] }
-  for (const [key, value] of Object.entries(insert)) items[key] = value
-  for (const key of remove) {
-    // eslint-disable-next-line @typescript-eslint/no-dynamic-delete
-    delete items[key]
-  }
+  const store = storeFor(userData)
+  const write = store.queue.then(async () => {
+    const current = await loadStore(store)
+    const entries = new Map(Object.entries(current[scope] ?? {}))
+    for (const [key, value] of Object.entries(insert)) entries.set(key, value)
+    for (const key of remove) entries.delete(key)
+    const items = Object.fromEntries(entries)
+    const size = JSON.stringify(items).length
+    if (size > STORAGE_SCOPE_MAX_BYTES) {
+      throw new Error(`Workbench storage for "${scope}" is too large (${String(size)})`)
+    }
 
-  const size = JSON.stringify(items).length
-  if (size > STORAGE_SCOPE_MAX_BYTES) {
-    throw new Error(`Workbench storage for "${scope}" is too large (${String(size)})`)
-  }
-
-  merged[scope] = items
-  const path = workbenchStoragePath(userData)
-  mkdirSync(dirname(path), { recursive: true })
-  const staging = `${path}.tmp`
-  writeFileSync(staging, JSON.stringify(merged), 'utf8')
-  renameSync(staging, path)
+    const merged = { ...current, [scope]: items }
+    const path = workbenchStoragePath(userData)
+    await mkdir(dirname(path), { recursive: true })
+    const staging = `${path}.tmp`
+    await writeFile(staging, JSON.stringify(merged), 'utf8')
+    await rename(staging, path)
+    store.items = merged
+  })
+  store.queue = write.catch(() => undefined)
+  return write
 }

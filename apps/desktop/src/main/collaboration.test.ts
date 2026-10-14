@@ -5,6 +5,7 @@ import { mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { isExpandedCollaboration, originalCollaborationText } from '../shared/collaboration.js'
 import { IPC_CONTRACT } from '../shared/ipc.js'
 import { applyMention, teamCommandOption } from '../renderer/src/mention-menu.js'
 import { EMPTY_VIEW, reduceEvents } from '../renderer/src/transcript.js'
@@ -22,9 +23,9 @@ const sentTo = (agent: AgentId): string[] =>
     .flatMap((session) => session.sent.map((message) => message.text)) ?? []
 
 const logged = (): string[] =>
-  runtime.store.read(conversationId).flatMap((event) =>
-    event.payload.type === 'user.message' ? [event.payload.text] : []
-  )
+  runtime.store
+    .read(conversationId)
+    .flatMap((event) => (event.payload.type === 'user.message' ? [event.payload.text] : []))
 
 beforeEach(async () => {
   adapters = new Map(AGENT_IDS.map((id) => [id, new FakeAdapter({ id })]))
@@ -119,11 +120,68 @@ describe('collaboration delivery', () => {
   })
 })
 
+describe('collaboration prompt', () => {
+  const pairs = AGENT_IDS.flatMap((leader) =>
+    AGENT_IDS.filter((partner) => partner !== leader).map((partner) => ({ leader, partner }))
+  )
+
+  it.each(pairs)('wraps, recovers and resends $leader leading $partner', async (pair) => {
+    const { leader, partner } = pair
+    const task = `@${leader} @${partner}: {{leader}} {{partner}} {{task}} $& $t(example)`
+    const extra = '\n\n"/tmp/image one.png"'
+    const prompt = collaborationPrompt(pair, task)
+    const opening = [
+      `@${leader} Run this task collaboratively with ${partner}.`,
+      '# TASK',
+      task,
+      '# ROLES AND SCOPE',
+      `You, ${leader}, are the lead and coordinator. ${partner} is your collaborator.`,
+    ].join('\n\n')
+    const closing = `- A reply whose next step belongs to ${partner} and which does not end with an @${partner} line stops the run.`
+
+    expect(prompt.slice(0, opening.length)).toBe(opening)
+    expect(prompt.slice(-closing.length)).toBe(closing)
+    expect(isExpandedCollaboration(prompt)).toBe(true)
+    expect(originalCollaborationText(prompt)).toBe(task)
+    expect(originalCollaborationText(prompt + extra)).toBe(task + extra)
+    expect(originalCollaborationText(collaborationPrompt(pair, prompt))).toBe(task)
+    expect(prompt.length - task.length).toBeLessThan(10_000)
+
+    const old = prompt + extra
+    runtime.store.append({
+      conversationId,
+      actor: 'user',
+      payload: { type: 'user.message', text: old },
+    })
+    const events = runtime.store.read(conversationId).map((event) => ({
+      ...event,
+      type: event.payload.type,
+    }))
+    const history = reduceEvents(EMPTY_VIEW, events)
+      .messages.filter((message) => message.actor === 'user')
+      .map((message) => message.text)
+    expect(history).toEqual([task + extra])
+
+    const result = await runtime.send(conversationId, old, 'collaborate')
+    expect(result.targets).toEqual([leader])
+    expect(logged()).toEqual([old, task + extra])
+    expect(sentTo(leader)[0]).toContain(`# TASK\n\n${task + extra}\n\n# ROLES AND SCOPE`)
+    for (const agent of AGENT_IDS.filter((id) => id !== leader)) {
+      expect(sentTo(agent)).toEqual([])
+    }
+  })
+})
+
 describe('team introduction', () => {
   it('keeps the command in history and broadcasts the introduction on send and resend', async () => {
     const option = teamCommandOption(AGENT_IDS, 'te', { detail: 'Team' })[0]
     if (option === undefined) throw new Error('missing team option')
-    const draft = applyMention('/te', { trigger: '/', start: 0, query: 'te' }, 3, option).text.trim()
+    const draft = applyMention(
+      '/te',
+      { trigger: '/', start: 0, query: 'te' },
+      3,
+      option
+    ).text.trim()
     expect(draft).toBe('/team')
 
     const first = await runtime.send(conversationId, draft)

@@ -121,7 +121,7 @@ export const ChorusEventPayload = z.discriminatedUnion('type', [
     reason: z.enum(['closed', 'crashed', 'replaced', 'shutdown']),
   }),
 
-  z.object({ type: z.literal('user.message'), text: z.string() }),
+  z.object({ type: z.literal('user.message'), text: z.string(), live: z.boolean().optional() }),
 
   /**
    * The person edited a file themselves, in Chorus.

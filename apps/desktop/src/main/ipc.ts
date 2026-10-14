@@ -5,12 +5,12 @@ import { buildDiagnostics, type AgentId } from '@chorus/shared'
 import { homedir } from 'node:os'
 import {
   app,
-  BrowserWindow,
   clipboard,
   dialog,
   ipcMain,
   Notification,
   shell,
+  type BrowserWindow,
   type OpenDialogOptions,
 } from 'electron'
 import {
@@ -49,6 +49,7 @@ import {
 } from '@chorus/workspace'
 import type { IdeBridge } from './ide-bridge.js'
 import { SshRemoteHost } from './remote-host.js'
+import { focusedShellWindow, isShellSender, shellWindows } from './shell-windows.js'
 import { checkRemoteHost, REMOTE_CHECK_DEADLINE_MS } from './remote-workbench.js'
 import {
   defaultDeps,
@@ -327,7 +328,7 @@ export function buildHandlers(
     },
 
     'project:adopt': async () => {
-      const window = BrowserWindow.getFocusedWindow() ?? BrowserWindow.getAllWindows()[0]
+      const window = focusedShellWindow() ?? shellWindows()[0]
       const options: OpenDialogOptions = {
         // `createDirectory` lets a project be started from the dialog itself,
         // which is otherwise a trip to Finder and back.
@@ -348,7 +349,7 @@ export function buildHandlers(
     'project:adoptRemote': async (request: IpcRequest<'project:adoptRemote'>) => {
       const host = remoteProjectHost(request.host)
       remoteProjectRoot(request.root)
-      const window = BrowserWindow.getFocusedWindow() ?? BrowserWindow.getAllWindows()[0]
+      const window = focusedShellWindow() ?? shellWindows()[0]
       const options: OpenDialogOptions = {
         properties: ['openDirectory', 'createDirectory'],
         buttonLabel: 'Run agents here',
@@ -398,7 +399,12 @@ export function buildHandlers(
       runtime.awaitStart(request.conversationId),
 
     'conversation:send': async (request: IpcRequest<'conversation:send'>) => {
-      const { targets } = await runtime.send(request.conversationId, request.text, request.intent)
+      const { targets } = await runtime.send(
+        request.conversationId,
+        request.text,
+        request.intent,
+        request.mode
+      )
       // Copied out of the readonly domain type; the IPC boundary is plain JSON.
       return { targets: [...targets] }
     },
@@ -525,7 +531,7 @@ export function buildHandlers(
      * a folder is a failure nobody would think to look for.
      */
     'files:chooseDirectory': async () => {
-      const window = BrowserWindow.getFocusedWindow() ?? BrowserWindow.getAllWindows()[0]
+      const window = focusedShellWindow() ?? shellWindows()[0]
       const options: OpenDialogOptions = {
         properties: ['openDirectory'],
         buttonLabel: 'Attach this folder',
@@ -574,7 +580,7 @@ export function buildHandlers(
      * report.
      */
     'project:relocate': async (request: { projectId: string }) => {
-      const window = BrowserWindow.getFocusedWindow() ?? BrowserWindow.getAllWindows()[0]
+      const window = focusedShellWindow() ?? shellWindows()[0]
       const options: OpenDialogOptions = {
         properties: ['openDirectory'],
         buttonLabel: 'Use this folder',
@@ -832,7 +838,7 @@ export function buildHandlers(
        * menu, a driver. Echoing to the sender costs a render and removes the
        * question of which writes need answering and which do not.
        */
-      for (const window of BrowserWindow.getAllWindows()) {
+      for (const window of shellWindows()) {
         if (!window.isDestroyed()) window.webContents.send(SETTINGS_PUSH_CHANNEL, answer)
       }
       return Promise.resolve(answer)
@@ -1188,7 +1194,8 @@ export function registerIpcHandlers(
   const handlers = buildHandlers(runtime, mainWindow)
 
   for (const channel of Object.keys(IPC_CONTRACT) as IpcChannel[]) {
-    ipcMain.handle(channel, async (_event, rawRequest: unknown) => {
+    ipcMain.handle(channel, async (event, rawRequest: unknown) => {
+      if (!isShellSender(event)) throw new Error(`"${channel}" is only available to Chorus windows`)
       const schema = IPC_CONTRACT[channel]
 
       const parsedRequest = schema.request.safeParse(rawRequest)
@@ -1218,7 +1225,7 @@ export function registerIpcHandlers(
  */
 export function forwardLimitsToRenderer(runtime: ChorusRuntime): void {
   runtime.onLimitsReported((push) => {
-    for (const window of BrowserWindow.getAllWindows()) {
+    for (const window of shellWindows()) {
       if (!window.isDestroyed()) window.webContents.send(LIMITS_PUSH_CHANNEL, push)
     }
   })
@@ -1227,7 +1234,7 @@ export function forwardLimitsToRenderer(runtime: ChorusRuntime): void {
 /** Sends each conversation's context-window fill as its agents finish a turn. */
 export function forwardContextUsageToRenderer(runtime: ChorusRuntime): void {
   runtime.onContextUsageReported((push) => {
-    for (const window of BrowserWindow.getAllWindows()) {
+    for (const window of shellWindows()) {
       if (!window.isDestroyed()) window.webContents.send(CONTEXT_PUSH_CHANNEL, push)
     }
   })
@@ -1236,7 +1243,7 @@ export function forwardContextUsageToRenderer(runtime: ChorusRuntime): void {
 /** Sends what each conversation's agents have left running, as it changes. */
 export function forwardTasksToRenderer(runtime: ChorusRuntime): void {
   runtime.onTasksReported((push) => {
-    for (const window of BrowserWindow.getAllWindows()) {
+    for (const window of shellWindows()) {
       if (!window.isDestroyed()) window.webContents.send(TASKS_PUSH_CHANNEL, push)
     }
   })
@@ -1250,7 +1257,7 @@ export function forwardTasksToRenderer(runtime: ChorusRuntime): void {
  */
 export function forwardActivityToRenderer(runtime: ChorusRuntime): void {
   runtime.onActivityReported((push) => {
-    for (const window of BrowserWindow.getAllWindows()) {
+    for (const window of shellWindows()) {
       if (!window.isDestroyed()) window.webContents.send(ACTIVITY_PUSH_CHANNEL, push)
     }
   })
@@ -1258,12 +1265,12 @@ export function forwardActivityToRenderer(runtime: ChorusRuntime): void {
 
 export function forwardAttentionToRenderer(runtime: ChorusRuntime): void {
   runtime.onAttentionReported((push) => {
-    const focused = BrowserWindow.getFocusedWindow()
-    if (focused !== null && !focused.isDestroyed()) {
+    const focused = focusedShellWindow()
+    if (focused !== null) {
       focused.webContents.send(ATTENTION_PUSH_CHANNEL, { ...push, mode: 'toast' })
       return
     }
-    for (const window of BrowserWindow.getAllWindows()) {
+    for (const window of shellWindows()) {
       if (!window.isDestroyed()) {
         window.webContents.send(ATTENTION_PUSH_CHANNEL, { ...push, mode: 'banner' })
       }
@@ -1280,7 +1287,7 @@ export function forwardAttentionToRenderer(runtime: ChorusRuntime): void {
  */
 export function forwardTerminalToRenderer(runtime: ChorusRuntime): () => void {
   return runtime.onTerminalOutput((push) => {
-    for (const window of BrowserWindow.getAllWindows()) {
+    for (const window of shellWindows()) {
       if (!window.isDestroyed()) window.webContents.send(TERMINAL_PUSH_CHANNEL, push)
     }
   })
@@ -1384,7 +1391,7 @@ export function forwardWorkbenchContextToRenderer(runtime: ChorusRuntime): () =>
             source: 'current' as const,
           }
 
-    for (const window of BrowserWindow.getAllWindows()) {
+    for (const window of shellWindows()) {
       if (window.isDestroyed()) continue
       for (const conversationId of conversations) {
         window.webContents.send(IDE_PUSH_CHANNEL, {
@@ -1424,7 +1431,7 @@ export function forwardWorkbenchContextToRenderer(runtime: ChorusRuntime): () =>
   setWorkbenchSurfaceGoneSink((place) => {
     lastWorkbenchContext.delete(placeKey(place.host, place.root))
     for (const conversationId of runtime.conversationsForPlace(place)) {
-      for (const window of BrowserWindow.getAllWindows()) {
+      for (const window of shellWindows()) {
         /*
          * **Both objects, because they die separately.** `window.isDestroyed()`
          * alone was the guard here and it is not enough: this sink is reached
@@ -1477,7 +1484,7 @@ export function forwardIdeContextToRenderer(runtime: ChorusRuntime, bridge: IdeB
         return { conversationId, editor: 'external' as const, status, file }
       })
 
-    for (const window of BrowserWindow.getAllWindows()) {
+    for (const window of shellWindows()) {
       if (window.isDestroyed()) continue
       for (const payload of payloads) window.webContents.send(IDE_PUSH_CHANNEL, payload)
     }
@@ -1539,7 +1546,7 @@ export function forwardDiagnosticsToRenderer(
         endLine: range.endLine,
         text: params.text,
       }
-      for (const window of BrowserWindow.getAllWindows()) {
+      for (const window of shellWindows()) {
         if (!window.isDestroyed()) window.webContents.send(DIAGNOSTIC_PUSH_CHANNEL, payload)
       }
     }
@@ -1549,7 +1556,7 @@ export function forwardDiagnosticsToRenderer(
 export function forwardEventsToRenderer(runtime: ChorusRuntime): () => void {
   return runtime.subscribe((events) => {
     const payload = events.map(toTranscript)
-    for (const window of BrowserWindow.getAllWindows()) {
+    for (const window of shellWindows()) {
       if (!window.isDestroyed()) window.webContents.send(EVENTS_PUSH_CHANNEL, payload)
     }
   })

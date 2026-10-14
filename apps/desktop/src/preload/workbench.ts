@@ -1,4 +1,4 @@
-import { contextBridge, ipcRenderer } from 'electron'
+import { contextBridge, ipcRenderer, type IpcRendererEvent } from 'electron'
 import type {
   ChorusWorkbenchApi,
   EditorReport,
@@ -67,6 +67,8 @@ export const BROWSER_EXTENSIONS_CHANGED_CHANNEL = 'workbench:browserExtensions:c
 export const STORAGE_READ_CHANNEL = 'workbench:storage:read'
 export const STORAGE_WRITE_CHANNEL = 'workbench:storage:write'
 export const STORAGE_CHANGED_CHANNEL = 'workbench:storage:changed'
+export const STORAGE_FLUSH_CHANNEL = 'workbench:storage:flush'
+export const STORAGE_FLUSH_RESULT_CHANNEL = 'workbench:storage:flush:result'
 /* The OAuth callback push, under the same test as every other name here. */
 export const URL_CHANNEL = 'workbench:url'
 /* Credentials. Separate from the storage pair because the stakes are. */
@@ -299,7 +301,12 @@ const api: ChorusWorkbenchApi = {
   onStorageChanged: (
     handler: (scope: string, insert: Record<string, string>, remove: readonly string[]) => void
   ) => {
-    ipcRenderer.on(STORAGE_CHANGED_CHANNEL, (_event, scope, insert, remove) => {
+    const wrapped = (
+      _event: IpcRendererEvent,
+      scope: unknown,
+      insert: unknown,
+      remove: unknown
+    ): void => {
       if (typeof scope !== 'string') return
       if (typeof insert !== 'object' || insert === null || Array.isArray(insert)) return
       if (!Array.isArray(remove)) return
@@ -312,6 +319,27 @@ const api: ChorusWorkbenchApi = {
         inserted,
         remove.filter((k): k is string => typeof k === 'string')
       )
+    }
+    ipcRenderer.on(STORAGE_CHANGED_CHANNEL, wrapped)
+    return () => {
+      ipcRenderer.removeListener(STORAGE_CHANGED_CHANNEL, wrapped)
+    }
+  },
+
+  onStorageFlushRequest: (handler) => {
+    ipcRenderer.on(STORAGE_FLUSH_CHANNEL, (_event, requestId: unknown) => {
+      if (typeof requestId !== 'string') return
+      void Promise.resolve()
+        .then(handler)
+        .then(
+          () => ipcRenderer.send(STORAGE_FLUSH_RESULT_CHANNEL, requestId, null),
+          (error: unknown) =>
+            ipcRenderer.send(
+              STORAGE_FLUSH_RESULT_CHANNEL,
+              requestId,
+              error instanceof Error ? error.message : String(error)
+            )
+        )
     })
   },
 

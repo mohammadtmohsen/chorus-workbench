@@ -44,6 +44,8 @@ import {
   WORKBENCH_SECRET_READ_CHANNEL,
   WORKBENCH_SECRET_WRITE_CHANNEL,
   WORKBENCH_STORAGE_CHANGED_CHANNEL,
+  WORKBENCH_STORAGE_FLUSH_CHANNEL,
+  WORKBENCH_STORAGE_FLUSH_RESULT_CHANNEL,
   WORKBENCH_STORAGE_READ_CHANNEL,
   WORKBENCH_STORAGE_WRITE_CHANNEL,
   WORKBENCH_URL_CHANNEL,
@@ -85,6 +87,7 @@ import {
 } from './completion-client.js'
 import { applyWorkbenchContentSecurityPolicy, lockDownNavigation } from './security.js'
 import { currentScale, onScaleChange } from './scale.js'
+import { isShellSender } from './shell-windows.js'
 import {
   acquireWorkbenchRuntime,
   releaseWorkbenchRuntime,
@@ -508,6 +511,7 @@ function armOverlayExpiry(caller: WebContents): void {
     caller,
     setTimeout(() => {
       overlayDeadlines.delete(caller)
+      nextOverlayRevision(caller)
       if (!overlayHidden.delete(caller)) return
       /*
        * Restores only what this caller hid. `editorHidden` is a different reason
@@ -519,6 +523,7 @@ function armOverlayExpiry(caller: WebContents): void {
         const surface = byId.get(id)
         if (surface !== undefined) applyVisibility(surface)
       }
+      applyParticipants(caller)
     }, OVERLAY_HIDE_TTL_MS)
   )
 }
@@ -534,6 +539,74 @@ function applyVisibility(surface: Surface): void {
   surface.view.setVisible(
     !editorHidden.has(surface.projectRoot) && !overlayHidden.has(surface.owner)
   )
+}
+
+export interface OverlayParticipant {
+  readonly id: string
+  readonly owner: WebContents
+  readonly view: WebContentsView
+  readonly shown: () => boolean
+  readonly conceal?: () => void
+}
+
+const participants = new Map<WebContents, Set<OverlayParticipant>>()
+const overlayRevisions = new WeakMap<WebContents, number>()
+let overlaySequence = 0
+
+export function registerOverlayParticipant(participant: OverlayParticipant): () => void {
+  watchOwner(participant.owner)
+  const owned = participants.get(participant.owner) ?? new Set<OverlayParticipant>()
+  participants.set(participant.owner, owned)
+  owned.add(participant)
+  applyParticipant(participant)
+  return () => {
+    owned.delete(participant)
+    if (owned.size === 0 && participants.get(participant.owner) === owned) {
+      participants.delete(participant.owner)
+    }
+  }
+}
+
+export function applyParticipant(participant: OverlayParticipant): void {
+  if (participant.view.webContents.isDestroyed()) return
+  if (overlayHidden.has(participant.owner)) participant.conceal?.()
+  participant.view.setVisible(participant.shown() && !overlayHidden.has(participant.owner))
+}
+
+function applyParticipants(owner: WebContents): void {
+  for (const participant of participants.get(owner) ?? []) applyParticipant(participant)
+}
+
+function concealParticipants(owner: WebContents): void {
+  for (const participant of [...(participants.get(owner) ?? [])]) participant.conceal?.()
+}
+
+async function captureParticipants(
+  owner: WebContents
+): Promise<{ viewId: string; dataUrl: string }[]> {
+  const stills: { viewId: string; dataUrl: string }[] = []
+  for (const participant of [...(participants.get(owner) ?? [])]) {
+    const contents = participant.view.webContents
+    if (!participant.shown() || contents.isDestroyed() || !participant.view.getVisible()) continue
+    try {
+      const image = await contents.capturePage()
+      if (!image.isEmpty()) {
+        stills.push({
+          viewId: participant.id,
+          dataUrl: `data:image/jpeg;base64,${image.toJPEG(85).toString('base64')}`,
+        })
+      }
+    } catch {
+      continue
+    }
+  }
+  return stills
+}
+
+function nextOverlayRevision(owner: WebContents): number {
+  overlaySequence += 1
+  overlayRevisions.set(owner, overlaySequence)
+  return overlaySequence
 }
 
 /**
@@ -569,6 +642,7 @@ async function setSurfacesVisible(
   const root =
     only !== undefined && owned.includes(only) ? (byId.get(only)?.projectRoot ?? null) : null
   const ids = only === undefined ? owned : owned.filter((id) => byId.get(id)?.projectRoot === root)
+  const revision = only === undefined ? nextOverlayRevision(caller) : null
 
   /*
    * Which reason is being set is decided by whether a surface was named, and
@@ -600,6 +674,7 @@ async function setSurfacesVisible(
       const surface = byId.get(id)
       if (surface !== undefined) applyVisibility(surface)
     }
+    if (only === undefined) applyParticipants(caller)
     return []
   }
 
@@ -636,11 +711,13 @@ async function setSurfacesVisible(
    * caught by the next beat rather than sitting bright under the overlay.
    */
   if (heartbeat) {
+    if (only === undefined) concealParticipants(caller)
     mark()
     for (const id of owned) {
       const surface = byId.get(id)
       if (surface !== undefined) applyVisibility(surface)
     }
+    if (only === undefined) applyParticipants(caller)
     return []
   }
 
@@ -661,7 +738,10 @@ async function setSurfacesVisible(
         /* no still for this one; the region will simply be empty */
       }
     }
+    if (overlayRevisions.get(caller) === revision) concealParticipants(caller)
+    stills.push(...(await captureParticipants(caller)))
   }
+  if (revision !== null && overlayRevisions.get(caller) !== revision) return stills
   /*
    * Marked and applied after the await. Captures take tens of milliseconds and a
    * pane can close inside that, so `owned` may name a surface that is gone —
@@ -673,6 +753,7 @@ async function setSurfacesVisible(
     const surface = byId.get(id)
     if (surface !== undefined) applyVisibility(surface)
   }
+  if (only === undefined) applyParticipants(caller)
   return stills
 }
 
@@ -929,9 +1010,15 @@ export function deliverUrl(url: string): boolean {
 
 /** Every surface this shell owns, torn down without asking it — and every grant. */
 function releaseOwner(owner: WebContents): void {
-  for (const id of [...(byOwner.get(owner) ?? [])]) destroySurface(id)
+  for (const id of [...(byOwner.get(owner) ?? [])]) {
+    void destroySurface(id).catch((error: unknown) => {
+      console.error('Workbench surface could not close', error)
+    })
+  }
   /* The overlay flag is keyed by the document, and this one is gone. */
   overlayHidden.delete(owner)
+  nextOverlayRevision(owner)
+  participants.delete(owner)
   /*
    * And its deadline with it. Deleting the flag without cancelling the timer
    * leaves a `setTimeout` holding a destroyed `WebContents` that fires up to
@@ -1162,7 +1249,9 @@ function expireHandoff(viewId: string): void {
     onHandoffExpired?.(pending.projectRoot)
     return
   }
-  destroySurface(viewId)
+  void destroySurface(viewId).catch((error: unknown) => {
+    console.error('Workbench surface could not close', error)
+  })
 }
 
 function claimHandoff(caller: WebContents, place: WorkbenchPlace): string | null {
@@ -1185,17 +1274,51 @@ function claimHandoff(caller: WebContents, place: WorkbenchPlace): string | null
   return viewId
 }
 
+const closingSurfaces = new Map<string, { surface: Surface; promise: Promise<void> }>()
+const storageFlushRequests = new Map<
+  string,
+  { contents: WebContents; finish: (error?: Error) => void }
+>()
+
+function flushSurfaceStorage(contents: WebContents): Promise<void> {
+  if (contents.isDestroyed()) return Promise.resolve()
+  return new Promise((resolve, reject) => {
+    const requestId = randomUUID()
+    const destroyed = (): void => {
+      finish(new Error('Workbench closed before storage was flushed'))
+    }
+    const timer = setTimeout(() => {
+      finish(new Error('Workbench storage flush timed out'))
+    }, 10_000)
+    const finish = (error?: Error): void => {
+      if (!storageFlushRequests.delete(requestId)) return
+      clearTimeout(timer)
+      contents.removeListener('destroyed', destroyed)
+      if (error === undefined) resolve()
+      else reject(error)
+    }
+    storageFlushRequests.set(requestId, { contents, finish })
+    contents.once('destroyed', destroyed)
+    try {
+      contents.send(WORKBENCH_STORAGE_FLUSH_CHANNEL, requestId)
+    } catch (error) {
+      finish(error instanceof Error ? error : new Error(String(error)))
+    }
+  })
+}
+
 /**
  * Tears one surface down, with no question of who asked.
  *
  * The unchecked half, used by the owner's own lifecycle and by shutdown. Every
  * path a *renderer* can reach goes through `ownedSurface` first.
  */
-function destroySurface(viewId: string): void {
+function destroySurface(viewId: string): Promise<void> {
+  const current = closingSurfaces.get(viewId)
+  if (current !== undefined) return current.promise
   const surface = byId.get(viewId)
-  if (surface === undefined) return
+  if (surface === undefined) return Promise.resolve()
   byId.delete(viewId)
-  byContents.delete(surface.view.webContents)
   byOwner.get(surface.owner)?.delete(viewId)
   stopWatchingFocus(viewId)
   /*
@@ -1218,28 +1341,42 @@ function destroySurface(viewId: string): void {
   )
   parent?.contentView.removeChildView(surface.view)
 
-  // `close()` rather than `destroy()`: it runs the document's own unload path, so
-  // whatever the workbench wants to do on the way out still happens. Whether the
-  // process actually exits afterwards is R11's subject and is not asserted here.
-  if (!surface.view.webContents.isDestroyed()) surface.view.webContents.close()
+  const closing = flushSurfaceStorage(surface.view.webContents)
+    .catch((error: unknown) => {
+      console.error('Workbench storage could not be flushed before closing', error)
+    })
+    .then(() => {
+      byContents.delete(surface.view.webContents)
 
-  /*
-   * The lease goes only when the last surface on that root goes — and the
-   * distinction §5.4 draws, between closing a project and unmounting its view,
-   * **cannot be exercised yet and is not being claimed here.**
-   *
-   * The probe has one surface per project and its close button *is* a project
-   * close, so today the two coincide. What must not happen is a later tab strip
-   * unmounting a background pane and finding that it released a lease: the
-   * refcount is written over projects for exactly that reason, and this is where
-   * it will have to stop being called from. Releasing does not stop the server in
-   * any case — `stopWorkbenchHost` on quit is the only unconditional kill — so
-   * the shape is right before it is load-bearing rather than after.
-   */
-  const stillOpen = [...byId.values()].some(
-    (other) => other.host === surface.host && other.projectRoot === surface.projectRoot
-  )
-  if (!stillOpen) releaseRuntime({ host: surface.host, root: surface.projectRoot })
+      // `close()` rather than `destroy()`: it runs the document's own unload path, so
+      // whatever the workbench wants to do on the way out still happens. Whether the
+      // process actually exits afterwards is R11's subject and is not asserted here.
+      if (!surface.view.webContents.isDestroyed()) surface.view.webContents.close()
+
+      /*
+       * The lease goes only when the last surface on that root goes — and the
+       * distinction §5.4 draws, between closing a project and unmounting its view,
+       * **cannot be exercised yet and is not being claimed here.**
+       *
+       * The probe has one surface per project and its close button *is* a project
+       * close, so today the two coincide. What must not happen is a later tab strip
+       * unmounting a background pane and finding that it released a lease: the
+       * refcount is written over projects for exactly that reason, and this is where
+       * it will have to stop being called from. Releasing does not stop the server in
+       * any case — `stopWorkbenchHost` on quit is the only unconditional kill — so
+       * the shape is right before it is load-bearing rather than after.
+       */
+    })
+    .finally(() => {
+      closingSurfaces.delete(viewId)
+      const sameProject = (other: Surface): boolean =>
+        other.host === surface.host && other.projectRoot === surface.projectRoot
+      const stillOpen = [...byId.values()].some(sameProject)
+      const stillClosing = [...closingSurfaces.values()].some((other) => sameProject(other.surface))
+      if (!stillOpen && !stillClosing) releaseRuntime({ host: surface.host, root: surface.projectRoot })
+    })
+  closingSurfaces.set(viewId, { surface, promise: closing })
+  return closing
 }
 
 /**
@@ -1257,9 +1394,9 @@ function ownedSurface(caller: WebContents, viewId: string): Surface {
   return surface
 }
 
-export function closeSurface(caller: WebContents, viewId: string): void {
+export function closeSurface(caller: WebContents, viewId: string): Promise<void> {
   ownedSurface(caller, viewId)
-  destroySurface(viewId)
+  return destroySurface(viewId)
 }
 
 export function setSurfaceBounds(
@@ -1307,10 +1444,13 @@ function surfaceActivityBar(caller: WebContents, viewId: string): number {
 }
 
 /** Every open surface, for shutdown. */
-export function closeAllSurfaces(): void {
+export function closeAllSurfaces(): Promise<void> {
   for (const pending of handoffs.values()) clearTimeout(pending.timer)
   handoffs.clear()
-  for (const id of [...byId.keys()]) destroySurface(id)
+  for (const id of [...byId.keys()]) void destroySurface(id)
+  return Promise.all([...closingSurfaces.values()].map((closing) => closing.promise)).then(
+    () => undefined
+  )
 }
 
 /**
@@ -1393,6 +1533,16 @@ export function registerWorkbenchHandlers(
   resolvePlace?: (projectId: string) => WorkbenchPlace
 ): void {
   resolveProjectPlace = resolvePlace ?? null
+  ipcMain.on(WORKBENCH_STORAGE_FLUSH_RESULT_CHANNEL, (event, requestId: unknown, error: unknown) => {
+    if (typeof requestId !== 'string') return
+    const request = storageFlushRequests.get(requestId)
+    if (request === undefined || request.contents !== event.sender) return
+    request.finish(
+      error === null
+        ? undefined
+        : new Error(typeof error === 'string' ? error : 'Invalid workbench storage flush result')
+    )
+  })
   for (const channel of WORKBENCH_SHELL_CHANNELS) {
     ipcMain.handle(channel, async (event, rawRequest: unknown) => {
       /*
@@ -1405,6 +1555,7 @@ export function registerWorkbenchHandlers(
       if (byContents.has(event.sender)) {
         throw new Error(`"${channel}" is not available to a workbench surface`)
       }
+      if (!isShellSender(event)) throw new Error(`"${channel}" is only available to Chorus windows`)
 
       const schema = WORKBENCH_SHELL_CONTRACT[channel]
       const parsedRequest = schema.request.safeParse(rawRequest)
@@ -1451,7 +1602,7 @@ export function registerWorkbenchHandlers(
           }
           case 'workbench:close': {
             const { viewId } = parsedRequest.data as { viewId: string }
-            closeSurface(event.sender, viewId)
+            await closeSurface(event.sender, viewId)
             return { ok: true }
           }
           case 'workbench:setVisible': {
@@ -1579,7 +1730,7 @@ export function registerWorkbenchHandlers(
 
   ipcMain.handle(
     WORKBENCH_STORAGE_WRITE_CHANNEL,
-    (event, scope: unknown, insert: unknown, remove: unknown) => {
+    async (event, scope: unknown, insert: unknown, remove: unknown) => {
       if (!byContents.has(event.sender)) throw new Error('unknown workbench surface')
       if (typeof scope !== 'string' || scope === '') throw new Error('Storage scope must be text')
       if (typeof insert !== 'object' || insert === null || Array.isArray(insert)) {
@@ -1594,7 +1745,7 @@ export function registerWorkbenchHandlers(
       }
       const removed = remove.filter((key): key is string => typeof key === 'string')
 
-      applyWorkbenchStorageDelta(app.getPath('userData'), scope, inserted, removed)
+      await applyWorkbenchStorageDelta(app.getPath('userData'), scope, inserted, removed)
 
       /*
        * Then tell every *other* surface, because they hold their own cache of

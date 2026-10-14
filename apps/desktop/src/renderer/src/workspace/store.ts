@@ -19,10 +19,12 @@ import {
   CLOSED_TERMINAL_PANEL,
   PROJECT_TERMINAL_WIDTH,
   TRAFFIC_WIDTH,
+  WEB_TABS_MAX,
   WorkspaceSnapshot,
 } from '../../../shared/workspace-layout.js'
 import {
   activateTab,
+  clampEditorWidthFraction,
   clampProjectTerminalWidth,
   clampSidebarWidth,
   clampTrafficWidth,
@@ -47,7 +49,9 @@ import {
   reconcileWorkspace,
   newTerminalId,
   normalizeTerminalPanel,
+  normalizeWebTabs,
   reorderTab,
+  replaceSession,
   resetBoxes,
   setBranchSizes,
   splitTab,
@@ -206,6 +210,12 @@ export interface WorkspaceRuntime {
 }
 
 export interface WorkspaceActions {
+  addWebTab: (show: boolean) => string
+  insertWebTab: (id: string, index: number, show: boolean) => void
+  closeWebTab: (id: string) => void
+  moveWebTab: (id: string, toIndex: number) => void
+  activateWebTab: (id: string) => void
+  showProjects: () => void
   hydrate: (
     saved: WorkspaceSnapshot | null,
     conversationIds: readonly string[],
@@ -322,8 +332,13 @@ export interface WorkspaceActions {
    * produce a conversation may call it without checking first.
    */
   adoptConversation: (projectId: string, conversationId: string) => void
+  replaceConversation: (projectId: string, previousId: string, nextId: string) => boolean
+  setEditorWidthFraction: (projectId: string, fraction: number) => void
   setTrafficWidth: (projectId: string, width: number) => void
   setProjectTerminalWidth: (projectId: string, width: number) => void
+  setTrafficCollapsed: (projectId: string, collapsed: boolean) => void
+  setProjectTerminalCollapsed: (projectId: string, collapsed: boolean) => void
+  setBrowserCollapsed: (projectId: string, collapsed: boolean) => void
   addProjectShell: (projectId: string) => string
   removeProjectShell: (projectId: string, id: string) => void
   setRowScroll: (projectId: string, left: number) => void
@@ -476,9 +491,12 @@ function snapshot(state: WorkspaceStore): WorkspaceSnapshot {
     conversationGroups: state.conversationGroups,
     trafficPanels: state.trafficPanels,
     projectTerminals: state.projectTerminals,
+    collapsedBrowsers: state.collapsedBrowsers,
     rowScroll: state.rowScroll,
+    editorWidthFractions: state.editorWidthFractions,
     terminals: state.terminals,
     globalTerminal: state.globalTerminal,
+    webTabs: state.webTabs,
     /*
      * Hand-written, unlike `SNAPSHOT_KEYS` below which reads the schema. A field
      * added to `WorkspaceSnapshot` and forgotten *here* is dropped on every
@@ -612,6 +630,68 @@ export const useWorkspaceStore = create<WorkspaceStore>()(
       ideByConversation: {},
       planning: {},
       detached: {},
+      addWebTab: (show) => {
+        if (get().webTabs.tabs.length >= WEB_TABS_MAX) return ''
+        const id = crypto.randomUUID()
+        get().insertWebTab(id, get().webTabs.tabs.length, show)
+        return id
+      },
+      insertWebTab: (id, index, show) => {
+        set((state) => {
+          const current = state.webTabs
+          if (current.tabs.length >= WEB_TABS_MAX || current.tabs.some((tab) => tab.id === id)) {
+            return state
+          }
+          const tabs = [...current.tabs]
+          tabs.splice(Math.max(0, Math.min(index, tabs.length)), 0, { id })
+          return {
+            webTabs: normalizeWebTabs({
+              tabs,
+              activeId: show ? id : current.activeId,
+              showing: show || current.showing,
+            }),
+          }
+        })
+      },
+      closeWebTab: (id) => {
+        set((state) => {
+          const current = state.webTabs
+          const index = current.tabs.findIndex((tab) => tab.id === id)
+          if (index < 0) return state
+          const tabs = current.tabs.filter((tab) => tab.id !== id)
+          const activeId =
+            current.activeId === id
+              ? (tabs[index]?.id ?? tabs[index - 1]?.id ?? null)
+              : current.activeId
+          return { webTabs: { tabs, activeId, showing: current.showing && activeId !== null } }
+        })
+      },
+      moveWebTab: (id, toIndex) => {
+        set((state) => {
+          const current = state.webTabs
+          const from = current.tabs.findIndex((tab) => tab.id === id)
+          if (from < 0 || Number.isNaN(toIndex)) return state
+          const to = Math.max(0, Math.min(Math.trunc(toIndex), current.tabs.length - 1))
+          if (from === to) return state
+          const tabs = [...current.tabs]
+          const moved = tabs.splice(from, 1)[0]
+          if (moved === undefined) return state
+          tabs.splice(to, 0, moved)
+          return { webTabs: { ...current, tabs } }
+        })
+      },
+      activateWebTab: (id) => {
+        set((state) =>
+          state.webTabs.tabs.some((tab) => tab.id === id)
+            ? { webTabs: { ...state.webTabs, activeId: id, showing: true } }
+            : state
+        )
+      },
+      showProjects: () => {
+        set((state) =>
+          state.webTabs.showing ? { webTabs: { ...state.webTabs, showing: false } } : state
+        )
+      },
       hydrate: (
         saved,
         conversationIds,
@@ -678,13 +758,36 @@ export const useWorkspaceStore = create<WorkspaceStore>()(
        */
       openProject: (projectId, paneId) => {
         if (get().detached[projectId] !== undefined) {
+          get().showProjects()
           void window.chorus.focusProjectWindow({ projectId })
           return
         }
-        update((current) => openSession(current, projectId, paneId))
+        update((current) =>
+          openSession(
+            {
+              ...current,
+              webTabs: current.webTabs.showing
+                ? { ...current.webTabs, showing: false }
+                : current.webTabs,
+            },
+            projectId,
+            paneId
+          )
+        )
       },
       activateTab: (paneId, projectId) => {
-        update((current) => activateTab(current, paneId, projectId))
+        update((current) =>
+          activateTab(
+            {
+              ...current,
+              webTabs: current.webTabs.showing
+                ? { ...current.webTabs, showing: false }
+                : current.webTabs,
+            },
+            paneId,
+            projectId
+          )
+        )
       },
       clearConversationUnread: (conversationId) => {
         clearUnread(conversationId)
@@ -717,6 +820,7 @@ export const useWorkspaceStore = create<WorkspaceStore>()(
        */
       showConversation: (projectId, conversationId) => {
         set((state) => ({
+          webTabs: state.webTabs.showing ? { ...state.webTabs, showing: false } : state.webTabs,
           conversationGroups: editArrangement(state, projectId, (arrangement) => {
             /*
              * Reveal, rather than a pointer write. This used to set
@@ -902,6 +1006,16 @@ export const useWorkspaceStore = create<WorkspaceStore>()(
           }
         })
       },
+      replaceConversation: (projectId, previousId, nextId) => {
+        const current = get().conversationGroups[projectId]
+        if (current === undefined || tabLocation(current, previousId) === null) return false
+        set((state) => ({
+          conversationGroups: editArrangement(state, projectId, (arrangement) =>
+            replaceSession(arrangement, previousId, nextId)
+          ),
+        }))
+        return true
+      },
       focusConversationGroup: (projectId, groupId) => {
         set((state) => ({
           conversationGroups: editArrangement(state, projectId, (arrangement) =>
@@ -923,13 +1037,22 @@ export const useWorkspaceStore = create<WorkspaceStore>()(
           ),
         }))
       },
+      setEditorWidthFraction: (projectId, value) => {
+        const fraction = clampEditorWidthFraction(value)
+        if (fraction === undefined || get().editorWidthFractions[projectId] === fraction) return
+        set((state) => ({
+          editorWidthFractions: { ...state.editorWidthFractions, [projectId]: fraction },
+        }))
+      },
       setTrafficWidth: (projectId, width) => {
         set((state) => {
           const current = state.trafficPanels[projectId] ?? CLOSED_TRAFFIC
+          const nextWidth = clampTrafficWidth(width)
+          if (nextWidth === current.width) return state
           return {
             trafficPanels: {
               ...state.trafficPanels,
-              [projectId]: { ...current, width: clampTrafficWidth(width) },
+              [projectId]: { ...current, width: nextWidth, widthCustomized: true },
             },
           }
         })
@@ -945,6 +1068,27 @@ export const useWorkspaceStore = create<WorkspaceStore>()(
           }
         })
       },
+      setTrafficCollapsed: (projectId, collapsed) => {
+        set((state) => {
+          const current = state.trafficPanels[projectId] ?? CLOSED_TRAFFIC
+          return {
+            trafficPanels: { ...state.trafficPanels, [projectId]: { ...current, collapsed } },
+          }
+        })
+      },
+      setProjectTerminalCollapsed: (projectId, collapsed) => {
+        set((state) => {
+          const current = state.projectTerminals[projectId] ?? DEFAULT_PROJECT_TERMINAL
+          return {
+            projectTerminals: { ...state.projectTerminals, [projectId]: { ...current, collapsed } },
+          }
+        })
+      },
+      setBrowserCollapsed: (projectId, collapsed) => {
+        set((state) => ({
+          collapsedBrowsers: { ...state.collapsedBrowsers, [projectId]: collapsed },
+        }))
+      },
       addProjectShell: (projectId) => {
         const id = newTerminalId()
         set((state) => {
@@ -954,7 +1098,12 @@ export const useWorkspaceStore = create<WorkspaceStore>()(
             clampProjectTerminalWidth(current.width),
             projectTerminalMinimum(shells.length)
           )
-          return { projectTerminals: { ...state.projectTerminals, [projectId]: { width, shells } } }
+          return {
+            projectTerminals: {
+              ...state.projectTerminals,
+              [projectId]: { ...current, width, shells },
+            },
+          }
         })
         return id
       },
@@ -996,9 +1145,12 @@ export const useWorkspaceStore = create<WorkspaceStore>()(
           const terminal = state.projectTerminals[projectId] ?? DEFAULT_PROJECT_TERMINAL
           return {
             conversationGroups: editArrangement(state, projectId, resetBoxes),
+            editorWidthFractions: Object.fromEntries(
+              Object.entries(state.editorWidthFractions).filter(([id]) => id !== projectId)
+            ),
             trafficPanels: {
               ...state.trafficPanels,
-              [projectId]: { ...traffic, width: TRAFFIC_WIDTH.default },
+              [projectId]: { ...traffic, width: TRAFFIC_WIDTH.default, widthCustomized: false },
             },
             projectTerminals: {
               ...state.projectTerminals,

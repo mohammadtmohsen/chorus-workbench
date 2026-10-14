@@ -43,13 +43,13 @@ export type WorkspacePane = z.infer<typeof WorkspacePane>
  */
 export const SIDEBAR_WIDTH = { default: 248, min: 100 } as const
 
-export const EDITOR_WIDTH = { fraction: 0.8 } as const
+export const EDITOR_WIDTH = { defaultOffset: 500, min: 500, maxFraction: 1 } as const
 
 export const BOX_WIDTH = { default: 500, min: 500 } as const
 
-export const TRAFFIC_WIDTH = { default: 800, min: 800 } as const
+export const TRAFFIC_WIDTH = { default: 500, min: 500 } as const
 
-export const PROJECT_TERMINAL_WIDTH = { default: 640, min: 480, run: 640, slot: 320 } as const
+export const PROJECT_TERMINAL_WIDTH = { default: 500, min: 480, run: 480, slot: 320 } as const
 
 /**
  * How big a note is, as fractions of the window. Both notes, one set of bounds.
@@ -152,7 +152,30 @@ export const CLOSED_TERMINAL_PANEL: TerminalPanelState = Object.freeze({
   activeId: null,
 })
 
-export const TrafficPanelState = z.object({ open: z.boolean(), width: z.number() })
+export const WEB_TABS_MAX = 100
+
+export const WebTab = z.object({ id: z.string() })
+export type WebTab = z.infer<typeof WebTab>
+
+export const WebTabsState = z.object({
+  tabs: z.array(WebTab).default([]),
+  activeId: z.string().nullable().default(null),
+  showing: z.boolean().default(false),
+})
+export type WebTabsState = z.infer<typeof WebTabsState>
+
+export const NO_WEB_TABS: WebTabsState = Object.freeze({
+  tabs: [],
+  activeId: null,
+  showing: false,
+})
+
+export const TrafficPanelState = z.object({
+  open: z.boolean(),
+  width: z.number(),
+  widthCustomized: z.boolean().optional(),
+  collapsed: z.boolean().optional(),
+})
 export type TrafficPanelState = z.infer<typeof TrafficPanelState>
 
 export const MAIN_PROJECT_SHELL = 'main'
@@ -160,6 +183,7 @@ export const MAIN_PROJECT_SHELL = 'main'
 export const ProjectTerminalPaneState = z.object({
   width: z.number(),
   shells: z.array(TerminalTab).default(() => [{ id: MAIN_PROJECT_SHELL }]),
+  collapsed: z.boolean().optional(),
 })
 export type ProjectTerminalPaneState = z.infer<typeof ProjectTerminalPaneState>
 
@@ -249,7 +273,10 @@ export const WorkspaceSnapshot = z.object({
   conversationGroups: z.record(z.string(), ConversationArrangement).default({}),
   trafficPanels: z.record(z.string(), TrafficPanelState).default({}),
   projectTerminals: z.record(z.string(), ProjectTerminalPaneState).default({}),
+  collapsedBrowsers: z.record(z.string(), z.boolean()).default({}),
   rowScroll: z.record(z.string(), z.number()).default({}),
+  editorWidthFractions: z.record(z.string(), z.number()).default({}),
+  webTabs: WebTabsState.default(NO_WEB_TABS),
 })
 export type WorkspaceSnapshot = z.infer<typeof WorkspaceSnapshot>
 
@@ -260,6 +287,8 @@ export const ProjectLayoutSlice = z.object({
   conversationGroups: ConversationArrangement.optional(),
   trafficPanel: TrafficPanelState.optional(),
   projectTerminal: ProjectTerminalPaneState.optional(),
+  browserCollapsed: z.boolean().optional(),
   rowScroll: z.number().optional(),
+  editorWidthFraction: z.number().optional(),
 })
 export type ProjectLayoutSlice = z.infer<typeof ProjectLayoutSlice>

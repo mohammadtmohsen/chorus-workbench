@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { mayTakeCaret, type Focused } from './focus.js'
+import { mayTakeCaret, withinFocusClip, type Focused, type FocusRect } from './focus.js'
 
 /**
  * The reported bug, both halves of it: typing in the composer or in an aside's
@@ -166,5 +166,84 @@ describe('a code editor keeps the caret', () => {
 
   it('and an editor inside a modal is still refused, not double-counted', () => {
     expect(mayTakeCaret(focused({ inEditor: true, inModal: true }))).toBe(false)
+  })
+})
+
+const rect = (left: number, top: number, right: number, bottom: number): FocusRect => ({
+  left,
+  top,
+  right,
+  bottom,
+})
+
+const row = rect(0, 0, 800, 600)
+
+describe('a background focus target must be fully on screen', () => {
+  it('takes focus when the control sits inside the row', () => {
+    expect(withinFocusClip(rect(100, 500, 180, 540), row)).toBe(true)
+  })
+
+  it('takes focus when the control touches the edges exactly', () => {
+    expect(withinFocusClip(rect(0, 0, 800, 600), row)).toBe(true)
+  })
+
+  it('refuses a control in a chat the row has scrolled away from', () => {
+    expect(withinFocusClip(rect(900, 500, 980, 540), row)).toBe(false)
+    expect(withinFocusClip(rect(-300, 500, -220, 540), row)).toBe(false)
+  })
+
+  it('refuses a control the row clips on one side', () => {
+    expect(withinFocusClip(rect(760, 500, 840, 540), row)).toBe(false)
+    expect(withinFocusClip(rect(-40, 500, 40, 540), row)).toBe(false)
+  })
+
+  it('refuses a control a short dock clips below its fold', () => {
+    const dock = rect(0, 400, 800, 600)
+    expect(withinFocusClip(rect(100, 580, 180, 620), dock)).toBe(false)
+    expect(withinFocusClip(rect(100, 380, 180, 420), dock)).toBe(false)
+  })
+
+  it('ignores the axis a container does not clip', () => {
+    expect(withinFocusClip(rect(100, 700, 180, 740), row, true, false)).toBe(true)
+    expect(withinFocusClip(rect(900, 500, 980, 540), row, false, true)).toBe(true)
+  })
+
+  it('still refuses on the axis a container does clip', () => {
+    expect(withinFocusClip(rect(900, 700, 980, 740), row, true, false)).toBe(false)
+    expect(withinFocusClip(rect(900, 700, 980, 740), row, false, true)).toBe(false)
+  })
+
+  it('refuses a control with no size, which is hidden or not laid out', () => {
+    expect(withinFocusClip(rect(100, 500, 100, 540), row)).toBe(false)
+    expect(withinFocusClip(rect(100, 500, 180, 500), row)).toBe(false)
+    expect(withinFocusClip(rect(0, 0, 0, 0), row)).toBe(false)
+  })
+
+  it('refuses a control with no size even on an axis nothing clips', () => {
+    expect(withinFocusClip(rect(100, 500, 100, 540), row, false, false)).toBe(false)
+  })
+
+  it('refuses when the clipping box has collapsed to nothing', () => {
+    expect(withinFocusClip(rect(100, 500, 180, 540), rect(0, 0, 0, 600))).toBe(false)
+    expect(withinFocusClip(rect(100, 500, 180, 540), rect(0, 0, 800, 0))).toBe(false)
+  })
+
+  it('ignores a collapsed clipping box on the axis it does not clip', () => {
+    expect(withinFocusClip(rect(100, 500, 180, 540), rect(0, 0, 800, 0), true, false)).toBe(true)
+  })
+
+  it('refuses a control wider or taller than the box that shows it', () => {
+    expect(withinFocusClip(rect(-10, 500, 810, 540), row)).toBe(false)
+    expect(withinFocusClip(rect(100, -10, 180, 610), row)).toBe(false)
+  })
+
+  it('accepts a pixel of rounding on either edge', () => {
+    expect(withinFocusClip(rect(-1, 500, 801, 540), row)).toBe(true)
+    expect(withinFocusClip(rect(100, -0.5, 180, 600.75), row)).toBe(true)
+  })
+
+  it('refuses anything past a pixel of rounding', () => {
+    expect(withinFocusClip(rect(-1.5, 500, 80, 540), row)).toBe(false)
+    expect(withinFocusClip(rect(100, 500, 180, 601.5), row)).toBe(false)
   })
 })

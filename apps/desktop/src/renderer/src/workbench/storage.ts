@@ -4,7 +4,10 @@ import {
   StorageScope,
 } from '@codingame/monaco-vscode-storage-service-override'
 import { Emitter } from '@codingame/monaco-vscode-api/vscode/vs/base/common/event'
-import { StorageTarget } from '@codingame/monaco-vscode-api/vscode/vs/platform/storage/common/storage'
+import {
+  StorageTarget,
+  WillSaveStateReason,
+} from '@codingame/monaco-vscode-api/vscode/vs/platform/storage/common/storage'
 import type { IStorage } from '@codingame/monaco-vscode-api/vscode/vs/base/parts/storage/common/storage'
 import type {
   IStorageDatabase,
@@ -22,6 +25,27 @@ import {
   reviveTerminalEnv,
   serializeIssuedTerminalEnv,
 } from './terminal-env.js'
+
+const databases = new Set<ChorusStorageDatabase>()
+
+export async function flushWorkbenchStorage(): Promise<void> {
+  const deadline = Date.now() + 4_000
+  for (;;) {
+    const results = await Promise.allSettled([...databases].map((database) => database.flush()))
+    const failure = results.find((result) => result.status === 'rejected')
+    if (failure === undefined || failure.status !== 'rejected') return
+    const remaining = deadline - Date.now()
+    if (remaining <= 0) {
+      const error: unknown = failure.reason
+      throw error
+    }
+    await new Promise<void>((resolve) => setTimeout(resolve, Math.min(250, remaining)))
+  }
+}
+
+export function stopWorkbenchStorageRetries(): void {
+  for (const database of databases) database.disposeRetries()
+}
 
 /**
  * The workbench's key-value store, made durable through Chorus rather than
@@ -73,7 +97,19 @@ export class ChorusStorageDatabase implements IStorageDatabase {
    * send the whole map without reading the file back first.
    */
   private items = new Map<string, string>()
+  private clientItems: ReadonlyMap<string, string> | null = null
+  private readonly committed = new Map<string, string>()
   private loaded = false
+  private loading: Promise<void> | null = null
+  private readonly unsaved = new Map<string, { value: string | null; revision: number }>()
+  private revision = 0
+  private flushing: Promise<void> | null = null
+  private sending: ReadonlyMap<string, { value: string | null; revision: number }> | null = null
+  private retryTimer: ReturnType<typeof setTimeout> | null = null
+  private retryDelay = 500
+  private closed = false
+  private closing = false
+  private readonly unsubscribe: () => void
   /**
    * Deltas that arrived before the snapshot did.
    *
@@ -87,7 +123,8 @@ export class ChorusStorageDatabase implements IStorageDatabase {
   private pending: { insert: Record<string, string>; remove: readonly string[] }[] = []
 
   constructor(private readonly scope: string) {
-    window.chorusWorkbench.onStorageChanged((scope, insert, remove) => {
+    databases.add(this)
+    this.unsubscribe = window.chorusWorkbench.onStorageChanged((scope, insert, remove) => {
       if (scope !== this.scope) return
       if (!this.loaded) {
         this.pending.push({ insert, remove })
@@ -104,15 +141,21 @@ export class ChorusStorageDatabase implements IStorageDatabase {
     const changed = new Map<string, string>()
     const deleted = new Set<string>()
     for (const [key, value] of Object.entries(insert)) {
+      this.committed.set(key, value)
+      if (this.sending?.has(key)) continue
+      this.unsaved.delete(key)
       if (this.items.get(key) === value) continue
       this.items.set(key, value)
       changed.set(key, value)
     }
     for (const key of remove) {
+      this.committed.delete(key)
+      if (this.sending?.has(key)) continue
+      this.unsaved.delete(key)
       if (this.items.delete(key)) deleted.add(key)
     }
-    if (changed.size === 0 && deleted.size === 0) return
-    this.external.fire({ changed, deleted })
+    if (changed.size > 0 || deleted.size > 0) this.external.fire({ changed, deleted })
+    if (this.closing && this.unsaved.size === 0 && this.sending === null) this.disposeRetries()
   }
 
   /**
@@ -127,18 +170,31 @@ export class ChorusStorageDatabase implements IStorageDatabase {
    */
   async getItems(): Promise<Map<string, string>> {
     await this.load()
-    return new Map(this.items)
+    const items = new Map(this.items)
+    this.clientItems = items
+    return items
   }
 
-  private async load(): Promise<void> {
-    if (this.loaded) return
+  private load(): Promise<void> {
+    if (this.loaded) return Promise.resolve()
+    if (this.loading !== null) return this.loading
+    this.loading = this.loadSnapshot().finally(() => {
+      this.loading = null
+    })
+    return this.loading
+  }
+
+  private async loadSnapshot(): Promise<void> {
     const raw = await window.chorusWorkbench.readStorage(this.scope)
     if (raw !== null) {
       try {
         const parsed: unknown = JSON.parse(raw)
         if (typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed)) {
           for (const [key, value] of Object.entries(parsed)) {
-            if (typeof value === 'string') this.items.set(key, value)
+            if (typeof value === 'string') {
+              this.items.set(key, value)
+              this.committed.set(key, value)
+            }
           }
         }
       } catch {
@@ -168,44 +224,133 @@ export class ChorusStorageDatabase implements IStorageDatabase {
    * longer say "and delete everything I have not heard about" by accident.
    */
   async updateItems(request: IUpdateRequest): Promise<void> {
+    if (this.closed || this.closing) throw new Error('Workbench storage is closed')
     await this.load()
+    if (this.closed || this.closing) throw new Error('Workbench storage is closed')
 
-    const insert: Record<string, string> = {}
-    const remove: string[] = []
     for (const [key, value] of request.insert ?? new Map<string, string>()) {
       if (this.items.get(key) === value) continue
       this.items.set(key, value)
-      insert[key] = value
+      this.unsaved.set(key, { value, revision: ++this.revision })
     }
     for (const key of request.delete ?? new Set<string>()) {
-      if (this.items.delete(key)) remove.push(key)
+      if (this.items.delete(key)) {
+        this.unsaved.set(key, { value: null, revision: ++this.revision })
+      }
     }
     // A flush that changed nothing is most of them: the service flushes on a
     // timer as well as on a real write.
-    if (Object.keys(insert).length === 0 && remove.length === 0) return
+    this.clearRetry()
+    await this.flushPending()
+  }
 
-    await window.chorusWorkbench.applyStorageDelta(this.scope, insert, remove)
+  private clearRetry(): void {
+    if (this.retryTimer !== null) clearTimeout(this.retryTimer)
+    this.retryTimer = null
+  }
+
+  private flushPending(): Promise<void> {
+    if (this.flushing !== null) return this.flushing
+    if (this.unsaved.size === 0) return Promise.resolve()
+    const run = async (): Promise<void> => {
+      while (this.unsaved.size > 0) {
+        const batch = new Map(this.unsaved)
+        const insert: Record<string, string> = {}
+        const remove: string[] = []
+        for (const [key, change] of batch) {
+          if (change.value === null) remove.push(key)
+          else insert[key] = change.value
+        }
+        this.sending = batch
+        await window.chorusWorkbench.applyStorageDelta(this.scope, insert, remove)
+        for (const [key, change] of batch) {
+          if (change.value === null) this.committed.delete(key)
+          else this.committed.set(key, change.value)
+          if (this.unsaved.get(key)?.revision === change.revision) this.unsaved.delete(key)
+        }
+        this.sending = null
+      }
+      this.retryDelay = 500
+      if (this.closing) this.disposeRetries()
+    }
+    this.flushing = run()
+      .catch((error: unknown) => {
+        const invalid = error instanceof Error && error.message.includes('too large')
+        if (invalid && this.sending !== null) {
+          const changed = new Map<string, string>()
+          const deleted = new Set<string>()
+          for (const [key, change] of this.sending) {
+            if (this.unsaved.get(key)?.revision !== change.revision) continue
+            this.unsaved.delete(key)
+            const value = this.committed.get(key)
+            const canRestoreClient =
+              this.clientItems?.get(key) === (change.value === null ? undefined : change.value)
+            if (value === undefined) {
+              this.items.delete(key)
+              if (canRestoreClient) deleted.add(key)
+            } else {
+              this.items.set(key, value)
+              if (canRestoreClient) changed.set(key, value)
+            }
+          }
+          if (changed.size > 0 || deleted.size > 0) this.external.fire({ changed, deleted })
+        }
+        this.sending = null
+        if (!this.closed && this.unsaved.size > 0 && this.retryTimer === null) {
+          this.retryTimer = setTimeout(() => {
+            this.retryTimer = null
+            void this.flushPending().catch(() => undefined)
+          }, invalid ? 0 : this.retryDelay)
+          if (!invalid) this.retryDelay = Math.min(this.retryDelay * 2, 30_000)
+        }
+        throw error
+      })
+      .finally(() => {
+        this.flushing = null
+      })
+    return this.flushing
   }
 
   /** Nothing to compact: the file holds exactly the live map and no tombstones. */
   optimize(): Promise<void> {
-    return Promise.resolve()
+    return this.flushPending()
   }
 
-  /**
-   * No final flush, because there is nothing outstanding to flush.
-   *
-   * Every `updateItems` has already been written by the time it resolves, so
-   * close has no buffered state to lose — and a write started here would race the
-   * document teardown that called it.
-   */
-  close(): Promise<void> {
-    return Promise.resolve()
+  flush(): Promise<void> {
+    this.clearRetry()
+    return this.flushPending()
+  }
+
+  disposeRetries(): void {
+    if (this.closed) return
+    this.closed = true
+    this.clearRetry()
+    this.unsubscribe()
+    this.external.dispose()
+    databases.delete(this)
+  }
+
+  async close(): Promise<void> {
+    this.closing = true
+    const deadline = Date.now() + 4_000
+    for (;;) {
+      try {
+        await this.flush()
+        this.disposeRetries()
+        return
+      } catch (error) {
+        const remaining = deadline - Date.now()
+        if (remaining <= 0) throw error
+        await new Promise<void>((resolve) => setTimeout(resolve, Math.min(250, remaining)))
+      }
+    }
   }
 }
 
-const SIDE_BAR_SIZE_KEY = 'workbench.sideBar.size'
-const SIDE_BAR_DEFAULT_WIDTH = 350
+export const SIDE_BAR_SIZE_KEY = 'workbench.sideBar.size'
+export const SIDE_BAR_DEFAULT_WIDTH = 350
+export const SHARED_SIDE_BAR_LAYOUT_KEY = 'chorus.sideBar.layout'
+const SIDE_BAR_HIDDEN_KEY = 'workbench.sideBar.hidden'
 const SIDE_BAR_DEFAULT_APPLIED_KEY = 'chorus.sideBar.defaultWidthApplied'
 const PANEL_SIZE_KEY = 'workbench.panel.size'
 const PANEL_DEFAULT_HEIGHT = 400
@@ -217,6 +362,33 @@ const PROJECT_PANEL_KEYS: ReadonlySet<string> = new Set([
 ])
 const TERMINAL_BUFFER_STATE_KEY = 'terminal.integrated.bufferState'
 const TERMINAL_ISSUED_ENV_KEY = 'chorus.terminal.issuedEnv'
+
+export type SideBarLayout = {
+  width: number
+  hidden: boolean
+}
+
+export function parseSideBarLayout(raw: string | undefined): SideBarLayout | undefined {
+  if (raw === undefined) return undefined
+  try {
+    const parsed: unknown = JSON.parse(raw)
+    if (
+      typeof parsed !== 'object' ||
+      parsed === null ||
+      !('width' in parsed) ||
+      typeof parsed.width !== 'number' ||
+      !Number.isFinite(parsed.width) ||
+      parsed.width <= 0 ||
+      !('hidden' in parsed) ||
+      typeof parsed.hidden !== 'boolean'
+    ) {
+      return undefined
+    }
+    return { width: parsed.width, hidden: parsed.hidden }
+  } catch {
+    return undefined
+  }
+}
 
 /**
  * Adds the one storage scope the override package cannot reach.
@@ -244,6 +416,27 @@ const TERMINAL_ISSUED_ENV_KEY = 'chorus.terminal.issuedEnv'
  */
 export class ChorusStorageService extends BrowserStorageService {
   private sharedStorage: Storage | undefined
+  private shutdown: Promise<void> | null = null
+
+  shutdownStorage(): Promise<void> {
+    if (this.shutdown !== null) return this.shutdown
+    this.emitWillSaveState(WillSaveStateReason.SHUTDOWN)
+    const scopes = [
+      StorageScope.APPLICATION,
+      StorageScope.APPLICATION_SHARED,
+      StorageScope.PROFILE,
+      StorageScope.WORKSPACE,
+    ]
+    const storages = scopes
+      .map((scope) => this.getStorage(scope))
+      .filter((storage): storage is IStorage => storage !== undefined)
+    this.shutdown = (async () => {
+      await Promise.allSettled(storages.map((storage) => storage.close()))
+      await flushWorkbenchStorage()
+      super.close()
+    })()
+    return this.shutdown
+  }
 
   protected override getStorage(scope: StorageScope): IStorage | undefined {
     if (scope === StorageScope.APPLICATION_SHARED) return this.sharedStorage
@@ -253,6 +446,15 @@ export class ChorusStorageService extends BrowserStorageService {
   override get(key: string, scope: StorageScope, fallbackValue: string): string
   override get(key: string, scope: StorageScope): string | undefined
   override get(key: string, scope: StorageScope, fallbackValue?: string): string | undefined {
+    if (
+      (scope === StorageScope.PROFILE && key === SIDE_BAR_SIZE_KEY) ||
+      (scope === StorageScope.WORKSPACE && key === SIDE_BAR_HIDDEN_KEY)
+    ) {
+      const shared = parseSideBarLayout(super.get(SHARED_SIDE_BAR_LAYOUT_KEY, StorageScope.PROFILE))
+      if (shared !== undefined) {
+        return String(key === SIDE_BAR_SIZE_KEY ? shared.width : shared.hidden)
+      }
+    }
     if (scope === StorageScope.PROFILE && PROJECT_PANEL_KEYS.has(key)) {
       const own = super.get(key, StorageScope.WORKSPACE)
       if (own !== undefined) return own

@@ -21,6 +21,7 @@ import {
 import { ComposerMenu, type MenuItem } from './ComposerMenu.js'
 import { Attachments, type Attachment } from './Attachments.js'
 import { formatContextBlock, versionFor, withEditorContext } from './editor-context.js'
+import { fullyVisible } from './focus.js'
 import {
   applyMention,
   commandOptions,
@@ -38,6 +39,7 @@ import {
 } from './mention-menu.js'
 import { withQuote } from './quote.js'
 import { ConfirmRestart } from './ConfirmRestart.js'
+import { liveMessageAction, type LiveMessageMode } from '../../shared/live-message.js'
 
 /**
  * The box you type into, and everything that decides what leaves it.
@@ -60,6 +62,7 @@ import { ConfirmRestart } from './ConfirmRestart.js'
 export interface ComposerHandle {
   /** The pane focuses the box after approvals, drops, and its own mount. */
   focus: () => void
+  focusIfVisible: () => void
   /** Puts a passage from the transcript in the draft, as the quote offer does. */
   quote: (passage: string) => void
   /**
@@ -185,6 +188,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(
   function Composer(props, ref): React.JSX.Element {
     const { t } = useTranslation()
     const { conversationId, participants, starting } = props
+    const [messageMode, setMessageMode] = useState<LiveMessageMode>('auto')
 
     const [draft, setDraftState] = useState(() =>
       originalCollaborationText(props.initial?.draft ?? '')
@@ -973,6 +977,8 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(
        * attaching none.
        */
       const compose = async (): Promise<string> => {
+        const action = liveMessageAction(task, messageMode, props.busy)
+        if (action === 'stop' || action === 'status') return task
         if (!ideAttached) return task
         const snapshot = await window.chorus.ideSnapshot({ conversationId })
         if (snapshot.outcome !== 'ok') {
@@ -1032,10 +1038,12 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(
           // the draft and its attachments exactly as they were.
           writeDraft('')
           setAttached([])
+          setMessageMode('auto')
           await window.chorus.sendMessage({
             conversationId,
             text: withAttachments(body),
             ...(pair === null ? {} : { intent: 'collaborate' as const }),
+            ...(props.busy ? { mode: messageMode } : {}),
           })
         })
         .catch((error: unknown) => {
@@ -1049,6 +1057,8 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(
       conversationId,
       task,
       pair,
+      messageMode,
+      props.busy,
       attached,
       ideAttached,
       t,
@@ -1061,6 +1071,9 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(
       ref,
       () => ({
         focus: () => input.current?.focus(),
+        focusIfVisible: () => {
+          if (fullyVisible(input.current)) input.current?.focus({ preventScroll: true })
+        },
         quote: (passage: string) => {
           writeDraft((current) => withQuote(current, passage))
           input.current?.focus()
@@ -1753,7 +1766,24 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(
             every time. Glyphs rather than words, because a label would crowd
             the text being written; the names live on `aria-label`.
           */}
-            {props.busy && !hasDraft ? (
+            {props.busy && (
+              <select
+                className="composer-live-mode"
+                aria-label={t('live.mode')}
+                title={t('live.modeHelp')}
+                value={messageMode}
+                onChange={(event) => {
+                  const value = event.target.value
+                  if (value === 'auto' || value === 'ask' || value === 'guide')
+                    setMessageMode(value)
+                }}
+              >
+                <option value="auto">{t('live.auto')}</option>
+                <option value="ask">{t('live.ask')}</option>
+                <option value="guide">{t('live.guide')}</option>
+              </select>
+            )}
+            {props.busy && (
               <button
                 type="button"
                 className="send send--stop"
@@ -1765,7 +1795,8 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(
               >
                 <span className="send-square" aria-hidden="true" />
               </button>
-            ) : (
+            )}
+            {(!props.busy || hasDraft) && (
               <button
                 type="submit"
                 className="send"
@@ -1782,11 +1813,31 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(
                  * turn after the first and made it literally true.
                  */
                 data-steering={props.busy ? 'true' : undefined}
-                aria-label={props.busy ? t('conversation.steer') : t('conversation.send')}
+                aria-label={
+                  props.busy
+                    ? t(
+                        messageMode === 'ask'
+                          ? 'live.sendAsk'
+                          : messageMode === 'guide'
+                            ? 'live.sendGuide'
+                            : 'live.sendAuto'
+                      )
+                    : t('conversation.send')
+                }
                 /* Titled in both states. It carried one only while an agent was
                    working, so the app's primary action was the one button with
                    nothing to say for itself on hover. */
-                title={props.busy ? t('conversation.steer') : t('conversation.send')}
+                title={
+                  props.busy
+                    ? t(
+                        messageMode === 'ask'
+                          ? 'live.sendAsk'
+                          : messageMode === 'guide'
+                            ? 'live.sendGuide'
+                            : 'live.sendAuto'
+                      )
+                    : t('conversation.send')
+                }
                 disabled={starting || !hasDraft || participants.length === 0}
               >
                 <span aria-hidden="true">↑</span>

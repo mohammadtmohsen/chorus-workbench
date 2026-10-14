@@ -260,6 +260,8 @@ export const WORKBENCH_STORAGE_WRITE_CHANNEL = 'workbench:storage:write'
  * `Event.None` because, at the time, nothing could.
  */
 export const WORKBENCH_STORAGE_CHANGED_CHANNEL = 'workbench:storage:changed'
+export const WORKBENCH_STORAGE_FLUSH_CHANNEL = 'workbench:storage:flush'
+export const WORKBENCH_STORAGE_FLUSH_RESULT_CHANNEL = 'workbench:storage:flush:result'
 
 /**
  * An OAuth callback coming back into the app through its own URL scheme.
@@ -1010,7 +1012,8 @@ export interface ChorusWorkbenchApi {
    */
   readonly onStorageChanged: (
     handler: (scope: string, insert: Record<string, string>, remove: readonly string[]) => void
-  ) => void
+  ) => () => void
+  readonly onStorageFlushRequest: (handler: () => Promise<void>) => void
   /**
    * Receives an OAuth callback main has decided belongs to this surface.
    *

@@ -136,7 +136,9 @@ describe('provisionRemoteServer', () => {
     expect(install).toContain(`& $node $patch $product '${COMMIT}'`)
     expect(install).toContain("if ($LASTEXITCODE -ne 0) { throw 'tar.exe could not extract")
     expect(install).toContain(`$partial = '${BASE}\\1.121.03429-win32-x64.partial'`)
-    expect(install).toContain("Join-Path $partial 'chorus-receipt.txt') -Encoding ASCII -Value $hash")
+    expect(install).toContain(
+      "Join-Path $partial 'chorus-receipt.txt') -Encoding ASCII -Value $hash"
+    )
     expect(install).toContain('Rename-Item -LiteralPath $partial')
     expect(install.indexOf('$_.CommandLine.Contains($final)')).toBeGreaterThan(-1)
     expect(install.indexOf('$_.CommandLine.Contains($final)')).toBeLessThan(

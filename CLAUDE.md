@@ -80,10 +80,16 @@ it.
 whole sequence without asking which parts — the only thing worth confirming is
 the version number when the bump is not obvious.
 
-**Everything after the tag is `.github/workflows/release.yml`.** It gates,
-builds the DMG and the `.exe` in parallel, verifies each against its own
-packaged bundle, and publishes the release with both assets, both checksums and
-notes assembled from the CHANGELOG. There is no manual packaging step and no
+**GitHub Actions run only by manual `workflow_dispatch`.** CI uses Ubuntu for
+typecheck, lint, format, tests, builds and pinned Codex bindings. Windows tests
+and upstream protocol drift checks are optional inputs. There are no push,
+pull-request or scheduled runs.
+
+**After pushing the tag, dispatch `.github/workflows/release.yml`.** Its gate
+runs on Ubuntu. It builds Apple Silicon and Intel DMGs, a Windows `.exe`, and
+Linux AppImage and `.deb` installers on their required platform runners. It
+verifies the bundles and publishes all assets, checksums and notes from the
+CHANGELOG. There is no manual packaging step and no
 manual upload; adding one back would mean building an artifact from whatever
 happens to be in a working tree, which is the bug described in step 4.
 
@@ -107,17 +113,19 @@ happens to be in a working tree, which is the bug described in step 4.
 5. **Commit** as `chore(release): X.Y.Z`, touching only the changelog and the
    two `package.json` files.
 6. **Tag and push**: `git tag -a vX.Y.Z -m "Chorus Workbench X.Y.Z"`, then push `main` and
-   the tag separately. **This is the release.** Everything above was
-   preparation.
-7. **Watch the run, and verify against the API rather than the exit code.**
-   `gh run watch`, then `gh release view vX.Y.Z --json assets` for both files
+   the tag separately. Pushing the tag does not start GitHub Actions.
+7. **Dispatch the release**: `gh workflow run release.yml --ref main -f publish_to=vX.Y.Z`.
+   The workflow checks out that existing tag and builds every installer from
+   the same commit. Publishing requires the explicit `publish_to` input.
+8. **Watch the run, and verify against the API rather than the exit code.**
+   `gh run watch`, then `gh release view vX.Y.Z --json assets` for all installers
    and their sizes, and `git ls-remote --tags` for the tag. The pipeline's own
-   last step counts the `.dmg` and the `.exe` and fails if it does not find
-   both — but a workflow that never started is also a workflow that never
+   last step requires two DMGs, one `.exe`, one AppImage and one `.deb` — but
+   a workflow that never started is also a workflow that never
    failed, so look.
 
 **To rehearse it**, run **Release** from the Actions tab with no input: it
-builds both installers and uploads them as workflow artifacts without
+builds all installers and uploads them as workflow artifacts retained for seven days without
 publishing. That is also how a tester gets a build without a release being cut.
 
 ### What a release does not prove, and must not be reported as proving

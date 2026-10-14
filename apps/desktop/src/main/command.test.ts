@@ -371,7 +371,9 @@ describe('parseShimExecutables, against shims off a real machine', () => {
   })
 
   it('finds nothing in a shim that names no executable', () => {
-    expect(parseShimExecutables('@echo off\r\nnode cli.js %*', `${NPM}\\x.cmd`, WINDOWS)).toEqual([])
+    expect(parseShimExecutables('@echo off\r\nnode cli.js %*', `${NPM}\\x.cmd`, WINDOWS)).toEqual(
+      []
+    )
   })
 
   /*

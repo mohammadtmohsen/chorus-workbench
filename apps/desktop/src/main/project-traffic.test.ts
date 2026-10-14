@@ -442,7 +442,51 @@ describe('the terminal env a capture hands the editor', () => {
   it('hands over nothing for a project the registry has never seen', () => {
     expect(terminalEnvOf(null)).toBeNull()
   })
+
+  it('names the LAN address when the listener serves the network', async () => {
+    const registry = rememberingOnLan(await serving(Buffer.from('ok')), '192.168.1.23')
+    await registry.configure(PROJECT, { envVar: 'EXPO_PUBLIC_API_BASE_URL' })
+    await registry.start(PROJECT)
+    const port = registry.state(PROJECT)?.port ?? null
+    expect(port).not.toBeNull()
+    expect(terminalEnvOf(registry.state(PROJECT))).toEqual({
+      name: 'EXPO_PUBLIC_API_BASE_URL',
+      value: `http://192.168.1.23:${String(port)}`,
+    })
+    await registry.shutdown()
+  })
+
+  it('falls back to loopback on the network when no LAN address is known', async () => {
+    const registry = rememberingOnLan(await serving(Buffer.from('ok')), null)
+    await registry.configure(PROJECT, { envVar: 'EXPO_PUBLIC_API_BASE_URL' })
+    await registry.start(PROJECT)
+    const port = registry.state(PROJECT)?.port ?? null
+    expect(port).not.toBeNull()
+    expect(terminalEnvOf(registry.state(PROJECT))).toEqual({
+      name: 'EXPO_PUBLIC_API_BASE_URL',
+      value: `http://127.0.0.1:${String(port)}`,
+    })
+    await registry.shutdown()
+  })
 })
+
+const rememberingOnLan = (origin: number, address: string | null): ProjectTrafficRegistry => {
+  let saved: ProjectTrafficConfig = {
+    origin: `http://127.0.0.1:${String(origin)}`,
+    port: null,
+    access: 'lan',
+    envVar: null,
+  }
+  return new ProjectTrafficRegistry({
+    config: () => saved,
+    nextPort: () => 0,
+    remember: (_projectId, config) => {
+      saved = config
+    },
+    address: () => address,
+    localProject: () => true,
+  })
+}
 
 const VARIABLE = 'EXPO_PUBLIC_API_BASE_URL'
 

@@ -281,43 +281,45 @@ export interface ProjectFacts {
 ```
 
 ```ts
-      for (const reading of Object.values(pulse.contextByActor)) {
-        context = context === null ? reading.percent : Math.max(context, reading.percent)
-        if (reading.markPercent === null) continue
-        mark = mark === null ? reading.markPercent : Math.max(mark, reading.markPercent)
-      }
+for (const reading of Object.values(pulse.contextByActor)) {
+  context = context === null ? reading.percent : Math.max(context, reading.percent)
+  if (reading.markPercent === null) continue
+  mark = mark === null ? reading.markPercent : Math.max(mark, reading.markPercent)
+}
 ```
 
 ```ts
-    return JSON.stringify({
-      tokens,
-      costUsd: cost,
-      contextPercent: context,
-      contextMarkPercent: mark,
-      tasks,
-    })
+return JSON.stringify({
+  tokens,
+  costUsd: cost,
+  contextPercent: context,
+  contextMarkPercent: mark,
+  tasks,
+})
 ```
 
 ### `apps/desktop/src/renderer/src/workspace/ProjectPreviewCard.tsx`
 
 ```tsx
-        {facts.contextPercent !== null && (
-          <>
-            <dt>{t('preview.context')}</dt>
-            <dd className="session-preview-figure">
-              {t('context.short', { percent: facts.contextPercent })}
-            </dd>
-            <dd className="session-preview-meter">
-              <i style={{ width: `${String(facts.contextPercent)}%` }} />
-              {facts.contextMarkPercent !== null && (
-                <i
-                  className="session-preview-meter-mark"
-                  style={{ left: `${String(facts.contextMarkPercent)}%` }}
-                />
-              )}
-            </dd>
-          </>
+{
+  facts.contextPercent !== null && (
+    <>
+      <dt>{t('preview.context')}</dt>
+      <dd className="session-preview-figure">
+        {t('context.short', { percent: facts.contextPercent })}
+      </dd>
+      <dd className="session-preview-meter">
+        <i style={{ width: `${String(facts.contextPercent)}%` }} />
+        {facts.contextMarkPercent !== null && (
+          <i
+            className="session-preview-meter-mark"
+            style={{ left: `${String(facts.contextMarkPercent)}%` }}
+          />
         )}
+      </dd>
+    </>
+  )
+}
 ```
 
 The meter also carries `context.title` as a `title`, and only when a mark is
@@ -394,5 +396,5 @@ means changing how a coded notice is worded, which is a separate change.
 `autoCompactThreshold` — it runs with `CLAUDE_CODE_AUTO_COMPACT_WINDOW=786432`
 against a 1M window, and nothing above establishes what the CLI answers there. The
 reading that produced this plan was of the standard Claude path. Every conclusion
-about field *semantics* rests on that binary; every conclusion about field
-*values* is untested.
+about field _semantics_ rests on that binary; every conclusion about field
+_values_ is untested.

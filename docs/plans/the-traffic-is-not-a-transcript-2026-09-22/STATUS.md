@@ -353,3 +353,53 @@ Nothing has been **launched**. The pane has never been rendered, no phone has be
 pointed at the running app, and `TrafficPanel.tsx` has no test — it is a component,
 and the repo tests reducers rather than components. `onFailure`'s fan-out and the
 mid-response stall remain untested for the reasons recorded above.
+
+### Inspector panes: equal halves that wrap (2026-10-04)
+
+**Status: written and source-reviewed; runtime NOT VERIFIED.**
+
+**The problem.** The owner asked for Request and Response as equal 50% halves,
+every text wrapping, and no horizontal scroll. Commit `bc0281b` ("let a pane be its
+own width") had made each pane as wide as its longest line — `flex: 0 0 auto`,
+`min-width: 200px` — kept `white-space: pre` on the body text and JSON tree rows,
+and let `.traffic-panes` scroll sideways. The owner's screenshot showed an uneven
+split, the request pane scrolled half out of view, and long token values running
+off the right edge. This decision replaces that one.
+
+**The decision.** `.traffic-panes` becomes a grid of two `minmax(0, 1fr)` columns
+over a bounded `minmax(0, 1fr)` row with `overflow: hidden`, keeping its gap, flex
+share and `min-height`. Grid rather than flex because the response pane's 1px left
+border would make flex outer boxes differ by a pixel; with app-wide
+`box-sizing: border-box` grid tracks are exactly equal. Each `.traffic-pane` stays
+a flex column with `min-width: 0`, `min-height: 0`, hidden horizontal and auto
+vertical overflow, and `overflow-wrap: anywhere`, which every descendant inherits —
+form and size values, header names and values, notices, the tree and the body
+text. `.traffic-body-text` and `.traffic-node` go from `pre` to `pre-wrap`, keeping
+newlines and spacing. The tree's indent base is capped at 40% of the row width with
+CSS `min()` before the closing delimiter's 1.4em offset, so deep JSON cannot push
+text out of view and closing brackets still align with their keys.
+
+**Deliberately not done.** The shared fixed label widths (10em / 14em) stay; they
+fit the ~395px minimum half the 800px Traffic floor guarantees. No data, state or
+clipboard change — copy still copies source data. The CSS comments describing the
+old size-to-content shape (`styles.css` around 7431–7444, 7456–7473 and 7595–7613)
+are left untouched on the owner's instruction, so they now describe the previous
+design. This entry is the record of the current one.
+
+**The trade-offs.** The hex dump's fixed 75-character lines now wrap inside a half
+and its columns go ragged — accepted, because the request was no horizontal
+scroll. Past the indent cap, about depth 8 at the minimum width, deeper levels
+share one indent.
+
+**Done means** equal visible outer pane widths after the gap; JSON, plain bodies,
+headers, form fields and notices wrap; opening the headers fold changes neither
+pane's width; no inner horizontal overflow or scrolling; and independent vertical
+pane scrolling, copy and the tree's keyboard interactions unchanged.
+
+**The driver.** In `apps/desktop/e2e/traffic-drive.mjs` the two fit-to-content /
+sideways-scroll checks are replaced with equal-width and no-horizontal-overflow
+checks. The long-header wrap measurement moves to after the fold opens — it was
+measuring an element inside a closed `details` — and a new check asserts the fold
+leaves both pane widths unchanged.
+
+Nothing has been run — no test, typecheck, build, driver or launch.

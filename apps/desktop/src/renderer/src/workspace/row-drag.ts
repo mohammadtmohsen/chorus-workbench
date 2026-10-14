@@ -1,15 +1,13 @@
 import { flushSync } from 'react-dom'
-import type {
-  KeyboardEvent as ReactKeyboardEvent,
-  PointerEvent as ReactPointerEvent,
-} from 'react'
+import type { KeyboardEvent as ReactKeyboardEvent, PointerEvent as ReactPointerEvent } from 'react'
 import {
   BOX_WIDTH,
+  EDITOR_WIDTH,
   PROJECT_TERMINAL_WIDTH,
   TRAFFIC_WIDTH,
 } from '../../../shared/workspace-layout.js'
 import { horizontalRowWheel } from '../workbench/viewport.js'
-import { pushDivider } from './layout.js'
+import { clampEditorWidth, pushDivider } from './layout.js'
 
 const TAB_STRIPS = '.conversation-dock-tabs, .terminal-tabs'
 
@@ -39,6 +37,67 @@ export function routeRowWheel(row: HTMLElement): () => void {
   }
 }
 
+export function startEditorResize(
+  event: ReactPointerEvent<HTMLDivElement>,
+  width: number,
+  windowWidth: number,
+  apply: (width: number) => void,
+  commit: () => void
+): void {
+  if (event.button !== 0 || windowWidth <= 0) return
+  const sash = event.currentTarget
+  const originX = event.clientX
+  const pointerId = event.pointerId
+  let dragged = false
+  let stopped = false
+  sash.setPointerCapture(pointerId)
+  const move = (moved: PointerEvent): void => {
+    if (moved.pointerId !== pointerId || (moved.clientX === originX && !dragged)) return
+    dragged = true
+    flushSync(() => {
+      apply(clampEditorWidth(width + moved.clientX - originX, windowWidth))
+    })
+  }
+  const stop = (ended: PointerEvent): void => {
+    if (ended.pointerId !== pointerId || stopped) return
+    stopped = true
+    sash.removeEventListener('pointermove', move)
+    sash.removeEventListener('pointerup', stop)
+    sash.removeEventListener('pointercancel', stop)
+    sash.removeEventListener('lostpointercapture', stop)
+    if (sash.hasPointerCapture(pointerId)) sash.releasePointerCapture(pointerId)
+    if (dragged) commit()
+  }
+  sash.addEventListener('pointermove', move)
+  sash.addEventListener('pointerup', stop)
+  sash.addEventListener('pointercancel', stop)
+  sash.addEventListener('lostpointercapture', stop)
+}
+
+export function stepEditorResize(
+  event: ReactKeyboardEvent<HTMLDivElement>,
+  width: number,
+  windowWidth: number,
+  apply: (width: number) => void
+): void {
+  const step = event.shiftKey ? 40 : 8
+  const wanted =
+    event.key === 'Home'
+      ? EDITOR_WIDTH.min
+      : event.key === 'End'
+        ? windowWidth
+        : event.key === 'ArrowLeft'
+          ? width - step
+          : event.key === 'ArrowRight'
+            ? width + step
+            : null
+  if (wanted === null) return
+  event.preventDefault()
+  flushSync(() => {
+    apply(clampEditorWidth(wanted, windowWidth))
+  })
+}
+
 export interface RowWidths {
   readonly boxes: number[]
   readonly traffic: number | null
@@ -57,17 +116,16 @@ interface RowItems {
 const isSash = (element: Element): boolean => element.classList.contains('conversation-sash')
 
 function rowItemKind(element: Element): RowItemKind {
+  if (element.getAttribute('data-collapsed') === 'true') return 'fixed'
   if (element.classList.contains('conversation-slot')) return 'box'
   if (element.classList.contains('traffic-box')) return 'traffic'
   if (element.classList.contains('project-terminal-box')) return 'terminal'
   return 'fixed'
 }
 
-function terminalMinimum(item: Element | undefined): number {
+function declaredMinimum(item: Element | undefined, floor: number): number {
   const declared = Number(item?.getAttribute('data-min-width'))
-  return Number.isFinite(declared) && declared > PROJECT_TERMINAL_WIDTH.min
-    ? declared
-    : PROJECT_TERMINAL_WIDTH.min
+  return Number.isFinite(declared) && declared > floor ? declared : floor
 }
 
 function rowItems(sash: HTMLElement): RowItems | null {
@@ -79,8 +137,8 @@ function rowItems(sash: HTMLElement): RowItems | null {
   const frozen = items.map((item) => item.getBoundingClientRect().width)
   const minimums = kinds.map((kind, at) => {
     if (kind === 'box') return BOX_WIDTH.min
-    if (kind === 'traffic') return TRAFFIC_WIDTH.min
-    if (kind === 'terminal') return terminalMinimum(items[at])
+    if (kind === 'traffic') return declaredMinimum(items[at], TRAFFIC_WIDTH.min)
+    if (kind === 'terminal') return declaredMinimum(items[at], PROJECT_TERMINAL_WIDTH.min)
     return frozen[at] ?? 0
   })
   const index = children.slice(0, children.indexOf(sash)).filter((child) => !isSash(child)).length

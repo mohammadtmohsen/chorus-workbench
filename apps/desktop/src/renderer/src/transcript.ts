@@ -2,6 +2,7 @@ import { parseDiff } from '@chorus/workspace/diff'
 import { agentRecord, isAgentId, type AgentId } from '@chorus/shared'
 import { trailingSummary } from '../../shared/markdown.js'
 import { originalCollaborationText } from '../../shared/collaboration.js'
+import { isLiveInteraction, isLiveReply, LIVE_USER_PREFIX } from '../../shared/live-message.js'
 import { questionFields, type QuestionField } from '../../shared/question-text.js'
 import { TRANSCRIPT_DISPOSITION } from '../../shared/transcript-events.js'
 import type { ChorusEventType } from '@chorus/event-store'
@@ -481,7 +482,7 @@ export function prependEvents(
   if (head !== undefined && isActivityStep(head)) {
     for (let at = rows.length - 1; at >= 0; at -= 1) {
       const row = rows[at]
-      if (row === undefined || row.actor !== head.actor || !isActivityStep(row)) break
+      if (row?.actor !== head.actor || !isActivityStep(row)) break
       joined = at
     }
   }
@@ -533,7 +534,7 @@ function apply(view: Mutable, event: TranscriptEvent): void {
   switch (event.type) {
     case 'user.message':
       view.messages.push({
-        key: event.id,
+        key: p['live'] === true ? `${LIVE_USER_PREFIX}${event.id}` : event.id,
         eventId: event.id,
         at: event.createdAt,
         actor: 'user',
@@ -1248,7 +1249,7 @@ export function transcriptRows(messages: readonly TranscriptMessage[]): Transcri
     let latest: TranscriptMessage | undefined
     for (let at = index; at < messages.length; at += 1) {
       const step = messages[at]
-      if (step === undefined || step.actor !== first.actor || !isActivityStep(step)) break
+      if (step?.actor !== first.actor || !isActivityStep(step)) break
       steps.push(step)
       if (step.kind === 'command' || step.kind === 'tool') {
         calls += 1
@@ -1292,13 +1293,19 @@ export function answersThinking(
 export function finalAnswerKey(view: TranscriptView): string | null {
   const trigger = view.busy
     ? view.messages.findLastIndex(
-        (m) => (m.actor === 'user' && m.kind === 'message') || m.kind === 'handoff'
+        (m) =>
+          (m.actor === 'user' && m.kind === 'message' && !isLiveInteraction(m.key)) ||
+          m.kind === 'handoff'
       )
     : view.messages.length
   if (trigger === -1) return null
   const answer = view.messages.findLast(
     (m, index) =>
-      index < trigger && isAgentId(m.actor) && m.kind === 'message' && m.status === 'complete'
+      index < trigger &&
+      isAgentId(m.actor) &&
+      m.kind === 'message' &&
+      m.status === 'complete' &&
+      !isLiveReply(m.key)
   )
   return answer?.key ?? null
 }

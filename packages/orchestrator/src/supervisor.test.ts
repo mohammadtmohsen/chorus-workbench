@@ -110,6 +110,26 @@ describe('SupervisedSession.resume, when the thread is gone', () => {
     const events = await collect(sup, 1)
     expect(events[0]).toMatchObject({ type: 'message.delta', text: 'still here' })
   })
+
+  it('delivers the first event after the probe expires once and in order', async () => {
+    const adapter = new FakeAdapter({ id: 'claude' })
+    const resuming = SupervisedSession.resume(adapter, 'thread-1', OPTS, POLICY)
+    await tick()
+    adapter.sessions[0]?.emit({ type: 'message.delta', itemRef: 'm1', text: 'before' })
+    const sup = await resuming
+
+    adapter.sessions[0]?.emit({ type: 'message.delta', itemRef: 'm2', text: 'after' })
+    adapter.sessions[0]?.emit({ type: 'message.delta', itemRef: 'm3', text: 'later' })
+    await sup.close()
+
+    const events: AgentEvent[] = []
+    for await (const event of sup.events) events.push(event)
+    expect(events).toMatchObject([
+      { type: 'message.delta', itemRef: 'm1', text: 'before' },
+      { type: 'message.delta', itemRef: 'm2', text: 'after' },
+      { type: 'message.delta', itemRef: 'm3', text: 'later' },
+    ])
+  })
 })
 
 describe('SupervisedSession', () => {

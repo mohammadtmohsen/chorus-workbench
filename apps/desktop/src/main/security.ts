@@ -1,5 +1,6 @@
-import { shell, type Session, type WebContents } from 'electron'
+import { shell, type Session, type WebContents, type WindowOpenHandlerResponse } from 'electron'
 import { isSafeHref } from '../shared/markdown.js'
+import { TOAST_WINDOW_NAME } from '../shared/toast-window-ipc.js'
 import { NOTE_IMAGE_SCHEME } from './note-images.js'
 
 /**
@@ -562,7 +563,8 @@ export function lockDownNavigation(
    * route: only a workbench surface can be the origin of a flow that comes back
    * through the app's URL scheme.
    */
-  onExternal?: (url: string) => void
+  onExternal?: (url: string) => void,
+  openToastWindow?: () => WindowOpenHandlerResponse
 ): void {
   const allowed = new Set<string>()
   for (const entry of allowedEntries) {
@@ -594,7 +596,10 @@ export function lockDownNavigation(
    * as easily as `http://`. What protects the app is that this hands the URL to
    * the OS browser and denies the window, which is unchanged.
    */
-  contents.setWindowOpenHandler(({ url }) => {
+  contents.setWindowOpenHandler(({ url, frameName }) => {
+    if (url === 'about:blank' && frameName === TOAST_WINDOW_NAME && openToastWindow !== undefined) {
+      return openToastWindow()
+    }
     if (isSafeHref(url)) {
       void shell.openExternal(url)
       /*

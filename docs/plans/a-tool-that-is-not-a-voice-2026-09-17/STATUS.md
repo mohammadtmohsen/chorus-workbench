@@ -165,7 +165,7 @@ sends you to regenerate a key, `malformed` to report a bug, `busy` to wait,
 3. ~~The install~~ — done and observed: `claude plugin list --json` reports
    `typesafe@typesafe-ai  enabled=true  scope=user`, and user scope is what makes
    DeepSeek inherit it. The key is stored: `agent-secrets.json` holds `deepseek,
-   typesafe`, so Phase 2 is proven end to end.
+typesafe`, so Phase 2 is proven end to end.
 4. ~~Test the key~~ — done, with the user's authorisation, and it answers the last
    guessed thing in the feature. `PROBE` is correct: `POST /v1/systemone` with the
    stored key returned **200** and

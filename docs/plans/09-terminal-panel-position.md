@@ -2,15 +2,15 @@
 
 ## Status
 
-| Step | Status |
-| --- | --- |
-| Investigation | Codex and Claude traced panel storage and native-view bounds independently; source evidence supports shared-key overwrites and degenerate layout; runtime NOT VERIFIED |
-| Plan challenge | Codex accepted the narrower renderer-side size hold and legacy seed write-through; unsupported hidden-view resize claims remain an uncertainty |
-| Implementation | Implemented by Claude in `storage.ts` and `entry.ts`; main-process files unchanged; Codex inspected the actual incremental diff |
-| Integrated review | Codex reviewed U1 and U2 together; Claude's final integrated adversarial review found no supported functional defect; Codex confirmed and documented the logging and seed-write cost notes |
-| U2: save when panel layout settles | Implemented and source-reviewed by Codex and Claude; runtime NOT VERIFIED |
-| Verification | Tests, typecheck, lint, builds and app launches NOT RUN under the standing user instruction |
-| Delivery | Reviewed local changes complete; no commit, installation, packaging or push |
+| Step                               | Status                                                                                                                                                                                     |
+| ---------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Investigation                      | Codex and Claude traced panel storage and native-view bounds independently; source evidence supports shared-key overwrites and degenerate layout; runtime NOT VERIFIED                     |
+| Plan challenge                     | Codex accepted the narrower renderer-side size hold and legacy seed write-through; unsupported hidden-view resize claims remain an uncertainty                                             |
+| Implementation                     | Implemented by Claude in `storage.ts` and `entry.ts`; main-process files unchanged; Codex inspected the actual incremental diff                                                            |
+| Integrated review                  | Codex reviewed U1 and U2 together; Claude's final integrated adversarial review found no supported functional defect; Codex confirmed and documented the logging and seed-write cost notes |
+| U2: save when panel layout settles | Implemented and source-reviewed by Codex and Claude; runtime NOT VERIFIED                                                                                                                  |
+| Verification                       | Tests, typecheck, lint, builds and app launches NOT RUN under the standing user instruction                                                                                                |
+| Delivery                           | Reviewed local changes complete; no commit, installation, packaging or push                                                                                                                |
 
 ## Current / Issue
 
@@ -96,17 +96,17 @@ Changes are incremental over the already dirty working tree. Main, preload, IPC 
 
 ### Acceptance evidence
 
-| Criterion | Result | Evidence and limit |
-| --- | --- | --- |
-| 1: resized panel restores on reopen | NOT VERIFIED | Installed layout calls the new workspace-first `get` and routed `store`; relaunch was not exercised |
-| 2: independent project sizes | NOT VERIFIED | Each surface uses its existing `workspace:<id>` database; multi-project runtime behavior was not exercised |
-| 3: background first activation avoids zero-size collapse | NOT VERIFIED | Root min-size hold precedes initialization and preserves positive axes; browser grid clamping was not observed |
-| 4: detach/reattach preserves size | NOT VERIFIED | Existing transfer code is unchanged; zero-viewport root hold retains prior usable dimensions; transfer was not exercised |
-| 5: maximize, dock and visibility | NOT VERIFIED | Both last-non-maximized dimensions are routed, and panel size/position/visibility watchers schedule a full layout flush; UI flow was not exercised |
-| 6: legacy fallback, defaults and current seed | NOT VERIFIED | Default seeding uses `super.store`; workspace reads win and normal saves refresh PROFILE; migration was not exercised |
-| 7: native visibility and root protection | NOT VERIFIED | Native code is unchanged and min-size protection is present; Electron rendering was not observed |
-| 8: authorization, zoom and logical-width contracts | PASS (source) | Main and its tests match the saved baseline; no IPC changes; the hold never writes logical `style.width`; existing write parameters are forwarded |
-| 9: save shortly after panel changes | NOT VERIFIED | One trailing 200ms scheduler covers size, dock and visibility events; actual persistence timing was not measured |
+| Criterion                                                | Result        | Evidence and limit                                                                                                                                 |
+| -------------------------------------------------------- | ------------- | -------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 1: resized panel restores on reopen                      | NOT VERIFIED  | Installed layout calls the new workspace-first `get` and routed `store`; relaunch was not exercised                                                |
+| 2: independent project sizes                             | NOT VERIFIED  | Each surface uses its existing `workspace:<id>` database; multi-project runtime behavior was not exercised                                         |
+| 3: background first activation avoids zero-size collapse | NOT VERIFIED  | Root min-size hold precedes initialization and preserves positive axes; browser grid clamping was not observed                                     |
+| 4: detach/reattach preserves size                        | NOT VERIFIED  | Existing transfer code is unchanged; zero-viewport root hold retains prior usable dimensions; transfer was not exercised                           |
+| 5: maximize, dock and visibility                         | NOT VERIFIED  | Both last-non-maximized dimensions are routed, and panel size/position/visibility watchers schedule a full layout flush; UI flow was not exercised |
+| 6: legacy fallback, defaults and current seed            | NOT VERIFIED  | Default seeding uses `super.store`; workspace reads win and normal saves refresh PROFILE; migration was not exercised                              |
+| 7: native visibility and root protection                 | NOT VERIFIED  | Native code is unchanged and min-size protection is present; Electron rendering was not observed                                                   |
+| 8: authorization, zoom and logical-width contracts       | PASS (source) | Main and its tests match the saved baseline; no IPC changes; the hold never writes logical `style.width`; existing write parameters are forwarded  |
+| 9: save shortly after panel changes                      | NOT VERIFIED  | One trailing 200ms scheduler covers size, dock and visibility events; actual persistence timing was not measured                                   |
 
 ### Verification performed
 

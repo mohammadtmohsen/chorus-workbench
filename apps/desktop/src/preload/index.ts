@@ -1,5 +1,12 @@
 import { contextBridge, ipcRenderer, webUtils } from 'electron'
 import {
+  TOAST_WINDOW_BOUNDS_CHANNEL,
+  TOAST_WINDOW_INTERACTION_CHANNEL,
+  ToastWindowBoundsResponse,
+  ToastWindowInteractionResponse,
+  type ChorusToastApi,
+} from '../shared/toast-window-ipc.js'
+import {
   ACTIVITY_PUSH_CHANNEL,
   ActivityPush,
   ATTENTION_PUSH_CHANNEL,
@@ -27,6 +34,13 @@ import {
   type IpcChannel,
   type IpcResponse,
 } from '../shared/ipc.js'
+import {
+  BROWSER_CONTRACT,
+  BROWSER_PUSH_CHANNEL,
+  BrowserPush,
+  type BrowserChannel,
+  type BrowserResponse,
+} from '../shared/browser-ipc.js'
 import {
   RUN_CONTRACT,
   RUN_PUSH_CHANNEL,
@@ -105,6 +119,17 @@ function invokeTraffic<C extends TrafficChannel>(channel: C) {
       throw new Error(`Malformed response on "${channel}": ${parsed.error.message}`)
     }
     return parsed.data as TrafficResponse<C>
+  }
+}
+
+function invokeBrowser<C extends BrowserChannel>(channel: C) {
+  return async (request: unknown): Promise<BrowserResponse<C>> => {
+    const raw: unknown = await ipcRenderer.invoke(channel, request)
+    const parsed = BROWSER_CONTRACT[channel].response.safeParse(raw)
+    if (!parsed.success) {
+      throw new Error(`Malformed response on "${channel}": ${parsed.error.message}`)
+    }
+    return parsed.data as BrowserResponse<C>
   }
 }
 
@@ -244,6 +269,26 @@ const api: ChorusApi = {
   readTrafficLegacy: invokeTraffic('traffic:legacy'),
   decideTrafficLegacy: invokeTraffic('traffic:legacyDecide'),
   readTrafficLive: invokeTraffic('traffic:live'),
+  announceWebReady: () => invokeBrowser('browser:webReady')({}),
+  attachBrowser: invokeBrowser('browser:attach'),
+  detachBrowser: invokeBrowser('browser:detach'),
+  restoreBrowser: invokeBrowser('browser:restore'),
+  navigateBrowser: invokeBrowser('browser:navigate'),
+  actOnBrowser: invokeBrowser('browser:action'),
+  findInBrowser: invokeBrowser('browser:find'),
+  closeBrowser: invokeBrowser('browser:close'),
+  reopenBrowser: () => invokeBrowser('browser:reopen')({}),
+  readBrowserDownloads: () => invokeBrowser('browser:downloads')({}),
+  actOnBrowserDownload: invokeBrowser('browser:download'),
+  setBrowserGeometry: invokeBrowser('browser:geometry'),
+  addBrowserFavorite: invokeBrowser('browser:favoriteAdd'),
+  removeBrowserFavorite: invokeBrowser('browser:favoriteRemove'),
+  openBrowserFavorite: invokeBrowser('browser:favoriteOpen'),
+  readBrowserPasswords: invokeBrowser('browser:passwords'),
+  decideBrowserPassword: invokeBrowser('browser:passwordDecide'),
+  fillBrowserPassword: invokeBrowser('browser:passwordFill'),
+  removeBrowserPassword: invokeBrowser('browser:passwordRemove'),
+  allowBrowserPasswordSaving: invokeBrowser('browser:passwordAllow'),
   readRunState: invokeRun('run:state'),
   detectRunScripts: invokeRun('run:detect'),
   configureRun: invokeRun('run:configure'),
@@ -437,6 +482,16 @@ const api: ChorusApi = {
       ipcRenderer.removeListener(TRAFFIC_LIVE_PUSH_CHANNEL, wrapped)
     }
   },
+  onBrowser: (listener) => {
+    const wrapped = (_event: unknown, payload: unknown): void => {
+      const parsed = BrowserPush.safeParse(payload)
+      if (parsed.success) listener(parsed.data)
+    }
+    ipcRenderer.on(BROWSER_PUSH_CHANNEL, wrapped)
+    return () => {
+      ipcRenderer.removeListener(BROWSER_PUSH_CHANNEL, wrapped)
+    }
+  },
   onDiagnostic: (listener) => {
     const wrapped = (_event: unknown, payload: unknown): void => {
       const parsed = DiagnosticPush.safeParse(payload)
@@ -530,3 +585,16 @@ const api: ChorusApi = {
 }
 
 contextBridge.exposeInMainWorld('chorus', api)
+
+const toastApi: ChorusToastApi = {
+  setBounds: async (request) => {
+    const raw: unknown = await ipcRenderer.invoke(TOAST_WINDOW_BOUNDS_CHANNEL, request)
+    return ToastWindowBoundsResponse.parse(raw)
+  },
+  setInteraction: async (request) => {
+    const raw: unknown = await ipcRenderer.invoke(TOAST_WINDOW_INTERACTION_CHANNEL, request)
+    return ToastWindowInteractionResponse.parse(raw)
+  },
+}
+
+contextBridge.exposeInMainWorld('chorusToasts', toastApi)

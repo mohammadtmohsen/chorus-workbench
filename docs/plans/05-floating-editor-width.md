@@ -2,12 +2,12 @@
 
 ## Status
 
-| Item | Result |
-| --- | --- |
-| Implementation | Complete: two product files and existing test expectations updated |
-| Codex integrated review | Complete: actual diff and all three changed files read |
-| Claude adversarial review | Complete: no findings |
-| Runtime verification | NOT VERIFIED: no tests, typechecks, lint, builds, or app checks run |
+| Item                      | Result                                                              |
+| ------------------------- | ------------------------------------------------------------------- |
+| Implementation            | Complete: two product files and existing test expectations updated  |
+| Codex integrated review   | Complete: actual diff and all three changed files read              |
+| Claude adversarial review | Complete: no findings                                               |
+| Runtime verification      | NOT VERIFIED: no tests, typechecks, lint, builds, or app checks run |
 
 ## Current / Issue
 
@@ -57,11 +57,11 @@ return {
 Update the existing covered-case `raised` expectations:
 
 | Pane / stored Chorus width | Raised width |
-| --- | --- |
-| 1000 / 601 | 800 |
-| 900 / 501 | 720 |
-| 1000 / 5000 | 800 |
-| 899 / 700 | 719 |
+| -------------------------- | ------------ |
+| 1000 / 601                 | 800          |
+| 900 / 501                  | 720          |
+| 1000 / 5000                | 800          |
+| 899 / 700                  | 719          |
 
 ## Acceptance and verification
 

@@ -1,9 +1,16 @@
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
+import {
+  BROWSER_HOME_URL,
+  type BrowserApi,
+  type BrowserPush,
+  type BrowserState,
+} from '../../../shared/browser-ipc.js'
 import type { IdeContextPush, TranscriptEvent } from '../../../shared/ipc.js'
 import {
   BOX_WIDTH,
   CLOSED_TERMINAL_PANEL,
   TRAFFIC_WIDTH,
+  WEB_TABS_MAX,
   WorkspaceSnapshot,
   type TerminalPanelState,
 } from '../../../shared/workspace-layout.js'
@@ -15,6 +22,7 @@ import {
   workspaceSnapshot,
   type SessionPulse,
 } from './store.js'
+import { attachWebPage, runWebCommand, startWebPages } from './web-pages.js'
 
 const PULSE: SessionPulse = {
   lastSeq: 0,
@@ -494,6 +502,22 @@ describe('a detached project', () => {
   })
 })
 
+describe('editor width persistence', () => {
+  it('saves each project separately and restores the fractions with the layout', () => {
+    useWorkspaceStore.setState({ editorWidthFractions: {} })
+    const store = useWorkspaceStore.getState()
+    store.setEditorWidthFraction('p1', 1.4)
+    store.setEditorWidthFraction('p2', 0.7)
+    store.setEditorWidthFraction('p1', 0)
+    store.setEditorWidthFraction('p1', Number.NaN)
+    const saved = workspaceSnapshot(useWorkspaceStore.getState())
+    expect(saved.editorWidthFractions).toEqual({ p1: 1, p2: 0.7 })
+
+    useWorkspaceStore.getState().hydrate(saved, [], ['p1', 'p2'])
+    expect(useWorkspaceStore.getState().editorWidthFractions).toEqual({ p1: 1, p2: 0.7 })
+  })
+})
+
 describe('resetProjectWidths', () => {
   it('puts every box and Traffic at its default in one update', () => {
     useWorkspaceStore.setState({
@@ -516,7 +540,8 @@ describe('resetProjectWidths', () => {
           widths: { g1: 900, g2: 760 },
         },
       },
-      trafficPanels: { p1: { open: true, width: 1_200 } },
+      trafficPanels: { p1: { open: true, width: 1_200, widthCustomized: true } },
+      editorWidthFractions: { p1: 1, p2: 0.7 },
     })
 
     const seen: string[] = []
@@ -533,7 +558,94 @@ describe('resetProjectWidths', () => {
       BOX_WIDTH.default,
       BOX_WIDTH.default,
     ])
-    expect(state.trafficPanels['p1']).toEqual({ open: true, width: TRAFFIC_WIDTH.default })
+    expect(state.trafficPanels['p1']).toEqual({
+      open: true,
+      width: TRAFFIC_WIDTH.default,
+      widthCustomized: false,
+    })
+    expect(state.editorWidthFractions).toEqual({ p2: 0.7 })
+  })
+})
+
+describe('replacing a restarted chat', () => {
+  const seed = (): void => {
+    useWorkspaceStore.setState({
+      panes: { 'pane-1': { id: 'pane-1', tabs: ['p1', 'p2'], activeTabId: 'p1' } },
+      conversationGroups: {
+        p1: {
+          layout: {
+            kind: 'branch',
+            orientation: 'row',
+            children: [
+              { kind: 'leaf', paneId: 'g1' },
+              {
+                kind: 'branch',
+                orientation: 'column',
+                children: [
+                  { kind: 'leaf', paneId: 'g2' },
+                  { kind: 'leaf', paneId: 'g3' },
+                ],
+                sizes: [0.25, 0.75],
+              },
+            ],
+            sizes: [0.7, 0.3],
+          },
+          panes: {
+            g1: { id: 'g1', tabs: ['c1'], activeTabId: 'c1' },
+            g2: { id: 'g2', tabs: ['c2'], activeTabId: 'c2' },
+            g3: { id: 'g3', tabs: ['c3'], activeTabId: 'c3' },
+          },
+          focusedPaneId: 'g1',
+          widths: { g1: 900, g2: 760, g3: 760 },
+        },
+        p2: {
+          layout: { kind: 'leaf', paneId: 'g4' },
+          panes: { g4: { id: 'g4', tabs: ['c4'], activeTabId: 'c4' } },
+          focusedPaneId: 'g4',
+        },
+      },
+    })
+  }
+
+  it('swaps the focused chat in a resized row inside its own box', () => {
+    seed()
+    const before = useWorkspaceStore.getState()
+    expect(before.replaceConversation('p1', 'c1', 'n1')).toBe(true)
+
+    const after = useWorkspaceStore.getState()
+    const was = before.conversationGroups['p1']
+    const now = after.conversationGroups['p1']
+    expect(now?.panes['g1']).toEqual({ id: 'g1', tabs: ['n1'], activeTabId: 'n1' })
+    expect(now?.layout).toBe(was?.layout)
+    expect(now?.widths).toBe(was?.widths)
+    expect(now?.focusedPaneId).toBe('g1')
+    expect(now?.panes['g2']).toBe(was?.panes['g2'])
+    expect(now?.panes['g3']).toBe(was?.panes['g3'])
+    expect(after.conversationGroups['p2']).toBe(before.conversationGroups['p2'])
+    expect(after.panes).toBe(before.panes)
+  })
+
+  it('swaps a chat in a resized vertical split without moving the caret', () => {
+    seed()
+    const before = useWorkspaceStore.getState()
+    expect(before.replaceConversation('p1', 'c3', 'n3')).toBe(true)
+
+    const now = useWorkspaceStore.getState().conversationGroups['p1']
+    const was = before.conversationGroups['p1']
+    expect(now?.panes['g3']).toEqual({ id: 'g3', tabs: ['n3'], activeTabId: 'n3' })
+    expect(now?.layout).toBe(was?.layout)
+    expect(now?.widths).toBe(was?.widths)
+    expect(now?.focusedPaneId).toBe('g1')
+    expect(now?.panes['g1']).toBe(was?.panes['g1'])
+    expect(now?.panes['g2']).toBe(was?.panes['g2'])
+  })
+
+  it('refuses, and changes nothing, when the chat has no box in that project', () => {
+    seed()
+    const before = useWorkspaceStore.getState().conversationGroups
+    expect(useWorkspaceStore.getState().replaceConversation('p1', 'c4', 'n4')).toBe(false)
+    expect(useWorkspaceStore.getState().replaceConversation('p9', 'c1', 'n1')).toBe(false)
+    expect(useWorkspaceStore.getState().conversationGroups).toBe(before)
   })
 })
 
@@ -541,12 +653,48 @@ const MAIN = [{ id: 'main' }]
 const SPLIT = [{ id: 'main' }, { id: 's2' }]
 
 describe('project widths', () => {
-  it('keeps Traffic at its own floor, not a chat box floor', () => {
-    useWorkspaceStore.setState({ trafficPanels: {} })
-    useWorkspaceStore.getState().setTrafficWidth('p1', BOX_WIDTH.min)
+  it('keeps Traffic at its 500px floor', () => {
+    useWorkspaceStore.setState({
+      trafficPanels: { p1: { open: false, width: 800, widthCustomized: true } },
+    })
+    useWorkspaceStore.getState().setTrafficWidth('p1', 120)
     expect(useWorkspaceStore.getState().trafficPanels['p1']).toEqual({
       open: false,
       width: TRAFFIC_WIDTH.min,
+      widthCustomized: true,
+    })
+  })
+
+  it('keeps the default through collapse and saves a future resize across reloads', () => {
+    useWorkspaceStore.setState({ ...EMPTY_WORKSPACE })
+    const store = useWorkspaceStore.getState()
+    store.setTrafficCollapsed('p1', true)
+    store.setTrafficCollapsed('p1', false)
+    const initial = useWorkspaceStore.getState().trafficPanels['p1']
+    expect(initial).toEqual({ open: false, width: 500, collapsed: false })
+    store.setTrafficWidth('p1', 500)
+    expect(useWorkspaceStore.getState().trafficPanels['p1']).toBe(initial)
+
+    store.setTrafficWidth('p1', 800)
+    store.setTrafficCollapsed('p1', true)
+    store.setTrafficCollapsed('p1', false)
+    const saved = WorkspaceSnapshot.parse(workspaceSnapshot(useWorkspaceStore.getState()))
+    store.hydrate(saved, [], ['p1'])
+    expect(useWorkspaceStore.getState().trafficPanels['p1']).toEqual({
+      open: false,
+      width: 800,
+      widthCustomized: true,
+      collapsed: false,
+    })
+
+    store.resetProjectWidths('p1')
+    const reset = WorkspaceSnapshot.parse(workspaceSnapshot(useWorkspaceStore.getState()))
+    store.hydrate(reset, [], ['p1'])
+    expect(useWorkspaceStore.getState().trafficPanels['p1']).toEqual({
+      open: false,
+      width: 500,
+      widthCustomized: false,
+      collapsed: false,
     })
   })
 
@@ -560,24 +708,28 @@ describe('project widths', () => {
     })
   })
 
-  it('puts the run terminal pane back to 640 with the row’s widths, keeping its shells', () => {
+  it('puts the run terminal pane back to 500 with the row’s widths, keeping its shells', () => {
     useWorkspaceStore.setState({
-      trafficPanels: { p1: { open: true, width: 1_200 } },
+      trafficPanels: { p1: { open: true, width: 1_200, widthCustomized: true } },
       projectTerminals: { p1: { width: 1_000, shells: SPLIT }, p2: { width: 900, shells: MAIN } },
     })
     useWorkspaceStore.getState().resetProjectWidths('p1')
     const state = useWorkspaceStore.getState()
     expect(state.projectTerminals).toEqual({
-      p1: { width: 640, shells: SPLIT },
+      p1: { width: 500, shells: SPLIT },
       p2: { width: 900, shells: MAIN },
     })
-    expect(state.trafficPanels['p1']).toEqual({ open: true, width: TRAFFIC_WIDTH.default })
+    expect(state.trafficPanels['p1']).toEqual({
+      open: true,
+      width: TRAFFIC_WIDTH.default,
+      widthCustomized: false,
+    })
     expect(workspaceSnapshot(state).projectTerminals).toEqual(state.projectTerminals)
   })
 })
 
 describe('project shells', () => {
-  it('splits again and again, each with a fresh id, widening the pane only as needed', () => {
+  it('adds shell rows with fresh ids without widening the pane', () => {
     useWorkspaceStore.setState({ projectTerminals: {} })
     const store = useWorkspaceStore.getState()
     const added = Array.from({ length: 7 }, () => store.addProjectShell('p1'))
@@ -586,7 +738,7 @@ describe('project shells', () => {
     expect(new Set(added).size).toBe(7)
     expect(added).not.toContain('main')
     expect(pane?.shells.map((shell) => shell.id)).toEqual(['main', ...added])
-    expect(pane?.width).toBe(640 + 8 * 320)
+    expect(pane?.width).toBe(500)
     expect(useWorkspaceStore.getState().projectTerminals['p2']).toBeUndefined()
   })
 
@@ -618,8 +770,8 @@ describe('row scroll', () => {
     useWorkspaceStore.setState({ rowScroll: {} })
     const store = useWorkspaceStore.getState()
     store.setRowScroll('a', 640)
-    store.setRowScroll('b', 120)
-    expect(useWorkspaceStore.getState().rowScroll).toEqual({ a: 640, b: 120 })
+    store.setRowScroll('b', -500)
+    expect(useWorkspaceStore.getState().rowScroll).toEqual({ a: 640, b: -500 })
   })
 
   it('does not update for an unchanged offset or one a row could not report', () => {
@@ -630,7 +782,7 @@ describe('row scroll', () => {
     })
     const store = useWorkspaceStore.getState()
     store.setRowScroll('a', 640)
-    store.setRowScroll('a', -1)
+    store.setRowScroll('a', Number.NEGATIVE_INFINITY)
     store.setRowScroll('a', Number.NaN)
     store.setRowScroll('b', Number.POSITIVE_INFINITY)
     stop()
@@ -649,5 +801,346 @@ describe('row scroll', () => {
     const persisted = workspaceSnapshot(useWorkspaceStore.getState())
     expect(persisted.rowScroll).toEqual({ a: 640 })
     expect(Object.keys(persisted).sort()).toEqual(Object.keys(WorkspaceSnapshot.shape).sort())
+  })
+})
+
+describe('web tabs', () => {
+  const reset = (): void => {
+    useWorkspaceStore.setState({ ...EMPTY_WORKSPACE, hydrated: true, detached: {} })
+  }
+
+  it('adds independent tabs and preserves order when inserting after an opener', () => {
+    reset()
+    const state = useWorkspaceStore.getState()
+    const first = state.addWebTab(true)
+    const last = state.addWebTab(false)
+    state.insertWebTab('linked-tab', 1, false)
+    expect(useWorkspaceStore.getState().webTabs).toEqual({
+      tabs: [{ id: first }, { id: 'linked-tab' }, { id: last }],
+      activeId: first,
+      showing: true,
+    })
+  })
+
+  it('closing selects the right neighbour then the left and returns to projects when empty', () => {
+    reset()
+    const state = useWorkspaceStore.getState()
+    state.insertWebTab('left', 0, false)
+    state.insertWebTab('middle', 1, true)
+    state.insertWebTab('right', 2, false)
+    state.closeWebTab('middle')
+    expect(useWorkspaceStore.getState().webTabs.activeId).toBe('right')
+    state.closeWebTab('right')
+    expect(useWorkspaceStore.getState().webTabs.activeId).toBe('left')
+    state.closeWebTab('left')
+    expect(useWorkspaceStore.getState().webTabs).toEqual(EMPTY_WORKSPACE.webTabs)
+  })
+
+  it('closing a background tab keeps the selection and whether projects are showing', () => {
+    reset()
+    const state = useWorkspaceStore.getState()
+    state.insertWebTab('first', 0, true)
+    state.insertWebTab('second', 1, false)
+    state.showProjects()
+    state.closeWebTab('second')
+    expect(useWorkspaceStore.getState().webTabs).toEqual({
+      tabs: [{ id: 'first' }],
+      activeId: 'first',
+      showing: false,
+    })
+  })
+
+  it('repairs invalid, duplicate and overflow ids during hydration without losing projects', () => {
+    reset()
+    const tabs = [
+      '',
+      'has space',
+      'has/slash',
+      'x'.repeat(129),
+      'valid',
+      'valid',
+      ...Array.from({ length: WEB_TABS_MAX + 5 }, (_, index) => `tab-${String(index)}`),
+    ]
+    const saved: WorkspaceSnapshot = {
+      ...EMPTY_WORKSPACE,
+      layout: { kind: 'leaf', paneId: 'saved-pane' },
+      panes: { 'saved-pane': { id: 'saved-pane', tabs: ['p1'], activeTabId: 'p1' } },
+      focusedPaneId: 'saved-pane',
+      webTabs: { tabs: tabs.map((id) => ({ id })), activeId: 'missing', showing: true },
+    }
+    useWorkspaceStore.getState().hydrate(saved, ['c1'], ['p1'], {}, { p1: ['c1'] })
+    const state = useWorkspaceStore.getState()
+    expect(state.webTabs.tabs).toHaveLength(WEB_TABS_MAX)
+    expect(state.webTabs.tabs[0]?.id).toBe('valid')
+    expect(new Set(state.webTabs.tabs.map((tab) => tab.id)).size).toBe(WEB_TABS_MAX)
+    expect(state.webTabs.activeId).toBe('valid')
+    expect(state.layout).toEqual(saved.layout)
+    expect(state.focusedPaneId).toBe('saved-pane')
+    expect(state.panes['saved-pane']).toEqual(saved.panes['saved-pane'])
+    expect(state.panes[state.focusedPaneId ?? '']?.tabs).toEqual(['p1'])
+    expect(state.addWebTab(true)).toBe('')
+  })
+
+  it('moves a tab to a clamped final index without changing selection or showing', () => {
+    reset()
+    const state = useWorkspaceStore.getState()
+    state.insertWebTab('first', 0, false)
+    state.insertWebTab('second', 1, true)
+    state.insertWebTab('third', 2, false)
+    state.moveWebTab('first', 999)
+    expect(useWorkspaceStore.getState().webTabs).toEqual({
+      tabs: [{ id: 'second' }, { id: 'third' }, { id: 'first' }],
+      activeId: 'second',
+      showing: true,
+    })
+    state.moveWebTab('first', -999)
+    expect(useWorkspaceStore.getState().webTabs.tabs.map((tab) => tab.id)).toEqual([
+      'first',
+      'second',
+      'third',
+    ])
+    state.showProjects()
+    state.moveWebTab('second', 2)
+    expect(useWorkspaceStore.getState().webTabs).toEqual({
+      tabs: [{ id: 'first' }, { id: 'third' }, { id: 'second' }],
+      activeId: 'second',
+      showing: false,
+    })
+    expect(workspaceSnapshot(useWorkspaceStore.getState()).webTabs.tabs).toEqual([
+      { id: 'first' },
+      { id: 'third' },
+      { id: 'second' },
+    ])
+  })
+
+  it('does not publish a roster change for unknown ids or unchanged positions', () => {
+    reset()
+    const state = useWorkspaceStore.getState()
+    state.insertWebTab('only', 0, true)
+    const before = useWorkspaceStore.getState().webTabs
+    state.moveWebTab('missing', 0)
+    state.moveWebTab('only', 0)
+    state.moveWebTab('only', -10)
+    state.moveWebTab('only', 10)
+    state.moveWebTab('only', Number.NaN)
+    expect(useWorkspaceStore.getState().webTabs).toBe(before)
+    state.closeWebTab('only')
+    const empty = useWorkspaceStore.getState().webTabs
+    state.moveWebTab('only', 0)
+    expect(useWorkspaceStore.getState().webTabs).toBe(empty)
+  })
+
+  it('intentional project reveals hide web tabs and preserve their roster', () => {
+    reset()
+    const state = useWorkspaceStore.getState()
+    state.hydrate(null, ['c1'], ['p1'], {}, { p1: ['c1'] })
+    state.insertWebTab('web', 0, true)
+    const paneId = useWorkspaceStore.getState().focusedPaneId ?? ''
+    state.activateTab(paneId, 'p1')
+    expect(useWorkspaceStore.getState().webTabs.showing).toBe(false)
+    state.activateWebTab('web')
+    state.openProject('p1')
+    expect(useWorkspaceStore.getState().webTabs.showing).toBe(false)
+    state.activateWebTab('web')
+    state.showConversation('p1', 'c1')
+    expect(useWorkspaceStore.getState().webTabs).toEqual({
+      tabs: [{ id: 'web' }],
+      activeId: 'web',
+      showing: false,
+    })
+  })
+
+  it('includes the roster, selection and showing state in every snapshot', () => {
+    reset()
+    useWorkspaceStore.getState().insertWebTab('saved-web', 0, true)
+    const snapshot = workspaceSnapshot(useWorkspaceStore.getState())
+    expect(snapshot.webTabs).toEqual({
+      tabs: [{ id: 'saved-web' }],
+      activeId: 'saved-web',
+      showing: true,
+    })
+    expect(WorkspaceSnapshot.parse(snapshot).webTabs).toEqual(snapshot.webTabs)
+    expect(
+      sameWorkspaceSnapshot(snapshot, {
+        ...snapshot,
+        webTabs: { ...snapshot.webTabs, showing: false },
+      })
+    ).toBe(false)
+  })
+})
+
+describe('web tab initial pages and commands', () => {
+  const empty: BrowserState = {
+    status: 'empty',
+    live: false,
+    url: null,
+    title: '',
+    icon: null,
+    canGoBack: false,
+    canGoForward: false,
+    documentId: null,
+    passwordOrigin: null,
+    error: null,
+    zoom: 1,
+  }
+  let stop: (() => void) | null = null
+
+  afterEach(() => {
+    stop?.()
+    stop = null
+    useWorkspaceStore.setState({ ...EMPTY_WORKSPACE, hydrated: true, detached: {} })
+    vi.unstubAllGlobals()
+  })
+
+  const setup = (saved: WorkspaceSnapshot | null = null) => {
+    useWorkspaceStore.setState({ ...EMPTY_WORKSPACE, hydrated: false, detached: {} })
+    useWorkspaceStore.getState().hydrate(saved, [], [])
+    const attachBrowser = vi.fn<BrowserApi['attachBrowser']>((request) => {
+      if (!('webTabId' in request)) return Promise.reject(new Error('Expected a web tab'))
+      return Promise.resolve({
+        browserId: `browser-${request.webTabId}`,
+        state: empty,
+        settings: 'ready',
+        favorites: [],
+      })
+    })
+    const navigateBrowser = vi.fn<BrowserApi['navigateBrowser']>((request) =>
+      Promise.resolve({ state: { ...empty, url: request.address }, failure: null })
+    )
+    const reopenBrowser = vi.fn<BrowserApi['reopenBrowser']>(() =>
+      Promise.resolve({ reopened: null })
+    )
+    let listener: ((push: BrowserPush) => void) | null = null
+    vi.stubGlobal('window', {
+      chorus: {
+        attachBrowser,
+        navigateBrowser,
+        reopenBrowser,
+        closeBrowser: vi.fn<BrowserApi['closeBrowser']>(() => Promise.resolve({ ok: true })),
+        announceWebReady: vi.fn<BrowserApi['announceWebReady']>(() =>
+          Promise.resolve({ ok: true })
+        ),
+        readBrowserDownloads: vi.fn<BrowserApi['readBrowserDownloads']>(() =>
+          Promise.resolve({ downloads: [] })
+        ),
+        onBrowser: (next: (push: BrowserPush) => void) => {
+          listener = next
+          return () => {
+            listener = null
+          }
+        },
+      },
+    })
+    const commit = vi.fn()
+    stop = startWebPages(commit)
+    return {
+      attachBrowser,
+      navigateBrowser,
+      reopenBrowser,
+      commit,
+      push: (push: BrowserPush): void => {
+        listener?.(push)
+      },
+    }
+  }
+
+  it('requests Home once after a fresh new tab attaches', async () => {
+    const { attachBrowser, navigateBrowser } = setup()
+    runWebCommand('new-tab')
+    const id = useWorkspaceStore.getState().webTabs.activeId ?? ''
+    expect(navigateBrowser).not.toHaveBeenCalled()
+    await attachWebPage(id)
+    await attachWebPage(id)
+    expect(attachBrowser).toHaveBeenCalledTimes(1)
+    expect(navigateBrowser).toHaveBeenCalledTimes(1)
+    expect(navigateBrowser).toHaveBeenCalledWith({
+      browserId: `browser-${id}`,
+      address: BROWSER_HOME_URL,
+    })
+  })
+
+  it('keeps the Home request through an attach failure and retry', async () => {
+    const { attachBrowser, navigateBrowser } = setup()
+    attachBrowser.mockRejectedValueOnce(new Error('Attach failed'))
+    runWebCommand('new-tab')
+    const id = useWorkspaceStore.getState().webTabs.activeId ?? ''
+    await attachWebPage(id)
+    expect(navigateBrowser).not.toHaveBeenCalled()
+    await attachWebPage(id)
+    await attachWebPage(id)
+    expect(attachBrowser).toHaveBeenCalledTimes(2)
+    expect(navigateBrowser).toHaveBeenCalledTimes(1)
+    expect(navigateBrowser).toHaveBeenCalledWith({
+      browserId: `browser-${id}`,
+      address: BROWSER_HOME_URL,
+    })
+  })
+
+  it('does not request Home for a restored roster tab', async () => {
+    const { attachBrowser, navigateBrowser } = setup({
+      ...EMPTY_WORKSPACE,
+      webTabs: { tabs: [{ id: 'restored' }], activeId: 'restored', showing: true },
+    })
+    await attachWebPage('restored')
+    expect(useWorkspaceStore.getState().webTabs.tabs).toEqual([{ id: 'restored' }])
+    expect(attachBrowser).toHaveBeenCalledWith({ webTabId: 'restored' })
+    expect(navigateBrowser).not.toHaveBeenCalled()
+  })
+
+  it('does not request Home for a tab opened by the page or a context menu', async () => {
+    const { push, navigateBrowser } = setup()
+    push({
+      kind: 'tab-open',
+      browserId: 'browser-linked',
+      webTabId: 'linked',
+      openerWebTabId: null,
+      background: true,
+      state: { ...empty, url: 'https://example.com/link' },
+    })
+    await attachWebPage('linked')
+    expect(useWorkspaceStore.getState().webTabs.tabs).toEqual([{ id: 'linked' }])
+    expect(navigateBrowser).not.toHaveBeenCalled()
+  })
+
+  it('does not request Home for a reopened tab', async () => {
+    const { reopenBrowser, navigateBrowser } = setup()
+    reopenBrowser.mockResolvedValueOnce({
+      reopened: { webTabId: 'reopened', index: 0, state: empty },
+    })
+    runWebCommand('reopen-tab')
+    await Promise.resolve()
+    await attachWebPage('reopened')
+    expect(useWorkspaceStore.getState().webTabs.activeId).toBe('reopened')
+    expect(navigateBrowser).not.toHaveBeenCalled()
+  })
+
+  it('commits reorders immediately and keeps the selected tab through keyboard moves', async () => {
+    const { commit } = setup()
+    runWebCommand('new-tab')
+    const first = useWorkspaceStore.getState().webTabs.activeId ?? ''
+    await attachWebPage(first)
+    runWebCommand('new-tab')
+    const second = useWorkspaceStore.getState().webTabs.activeId ?? ''
+    await attachWebPage(second)
+    commit.mockClear()
+    runWebCommand('move-tab-left')
+    expect(commit).toHaveBeenCalledTimes(1)
+    expect(useWorkspaceStore.getState().webTabs).toEqual({
+      tabs: [{ id: second }, { id: first }],
+      activeId: second,
+      showing: true,
+    })
+    runWebCommand('move-tab-left')
+    expect(commit).toHaveBeenCalledTimes(1)
+    runWebCommand('move-tab-right')
+    expect(commit).toHaveBeenCalledTimes(2)
+    expect(workspaceSnapshot(useWorkspaceStore.getState()).webTabs.tabs).toEqual([
+      { id: first },
+      { id: second },
+    ])
+    useWorkspaceStore.getState().showProjects()
+    const before = useWorkspaceStore.getState().webTabs
+    runWebCommand('move-tab-left')
+    expect(useWorkspaceStore.getState().webTabs).toBe(before)
   })
 })

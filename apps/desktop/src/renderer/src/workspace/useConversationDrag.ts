@@ -1,4 +1,4 @@
-import { useRef, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import type { PointerEvent as ReactPointerEvent } from 'react'
 import type { SplitDirection } from './layout.js'
 
@@ -69,8 +69,11 @@ export function useConversationDrag(options: {
    */
   const live = useRef<ConversationDragState | null>(null)
   const suppressClick = useRef(false)
+  const cancelGesture = useRef<(() => void) | null>(null)
   const latest = useRef(options)
   latest.current = options
+
+  useEffect(() => () => cancelGesture.current?.(), [])
 
   const onPointerDown = (
     groupId: string,
@@ -79,6 +82,8 @@ export function useConversationDrag(options: {
     event: ReactPointerEvent<HTMLElement>
   ): void => {
     if (event.button !== 0) return
+    cancelGesture.current?.()
+    suppressClick.current = false
     /*
      * The element is captured in a local, not read from the event later. React
      * nulls `currentTarget` the moment the handler returns, so a closure that
@@ -87,33 +92,28 @@ export function useConversationDrag(options: {
      * the two sashes carry a comment about.
      */
     const tab = event.currentTarget
+    const pointerId = event.pointerId
     const originX = event.clientX
     const originY = event.clientY
     let started = false
-
-    /*
-     * **Captured now, not at the threshold**, and that was the bug behind "the
-     * tab is not draggable until I let go".
-     *
-     * `move` is attached to the tab, so without capture it only fires while the
-     * pointer is *over* the tab — press and move away in one quick gesture and
-     * the threshold is never crossed, because nothing reaches the listener to
-     * measure it. The drag then appeared to do nothing until `pointerup`, which
-     * did reach it. Both sashes in `Workspace.tsx` capture on pointer-down for
-     * exactly this reason; this one did not.
-     *
-     * Capturing before the threshold is decided is safe: a press that never
-     * moves far enough releases the capture in `stop` and the click goes through
-     * untouched.
-     */
-    tab.setPointerCapture(event.pointerId)
+    let stopped = false
 
     const move = (moved: PointerEvent): void => {
+      if (moved.pointerId !== pointerId) return
+      if (moved.buttons === 0) {
+        stop(false)
+        return
+      }
       if (!started) {
         const far =
           Math.abs(moved.clientX - originX) > THRESHOLD_PX ||
           Math.abs(moved.clientY - originY) > THRESHOLD_PX
         if (!far) return
+        if (!tab.isConnected) {
+          stop(false)
+          return
+        }
+        tab.setPointerCapture(pointerId)
         started = true
       }
       const target = targetAt(moved.clientX, moved.clientY, groupId)
@@ -129,16 +129,21 @@ export function useConversationDrag(options: {
       setDrag(next)
     }
 
-    const stop = (): void => {
-      tab.removeEventListener('pointermove', move)
-      tab.removeEventListener('pointerup', stop)
-      tab.removeEventListener('pointercancel', stop)
-      if (tab.hasPointerCapture(event.pointerId)) tab.releasePointerCapture(event.pointerId)
+    const stop = (commit: boolean): void => {
+      if (stopped) return
+      stopped = true
+      document.removeEventListener('pointermove', move, true)
+      document.removeEventListener('pointerup', up, true)
+      document.removeEventListener('pointercancel', cancelPointer, true)
+      tab.removeEventListener('lostpointercapture', cancelPointer)
+      window.removeEventListener('blur', cancel)
+      cancelGesture.current = null
+      if (tab.hasPointerCapture(pointerId)) tab.releasePointerCapture(pointerId)
 
       const finished = live.current
       live.current = null
       setDrag(null)
-      if (!started) return
+      if (!started || !commit) return
       /*
        * A drag that moved suppresses the click the browser fires next, or
        * letting go over the tab's own strip would both reorder it and switch to
@@ -150,10 +155,22 @@ export function useConversationDrag(options: {
       latest.current.onMove(groupId, finished.target.groupId, finished.target.direction)
     }
 
-    tab.addEventListener('pointermove', move)
-    tab.addEventListener('pointerup', stop)
-    // A capture lost to a system gesture fires this and never `pointerup`.
-    tab.addEventListener('pointercancel', stop)
+    const up = (released: PointerEvent): void => {
+      if (released.pointerId === pointerId) stop(true)
+    }
+    const cancelPointer = (cancelled: PointerEvent): void => {
+      if (cancelled.pointerId === pointerId) stop(false)
+    }
+    const cancel = (): void => {
+      stop(false)
+    }
+
+    cancelGesture.current = cancel
+    document.addEventListener('pointermove', move, true)
+    document.addEventListener('pointerup', up, true)
+    document.addEventListener('pointercancel', cancelPointer, true)
+    tab.addEventListener('lostpointercapture', cancelPointer)
+    window.addEventListener('blur', cancel)
   }
 
   return {

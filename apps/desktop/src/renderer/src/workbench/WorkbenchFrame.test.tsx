@@ -1,6 +1,6 @@
 /** @vitest-environment jsdom */
 import { act, cleanup, render } from '@testing-library/react'
-import { afterEach, beforeAll, describe, expect, it } from 'vitest'
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 import type {
   WorkbenchActivityBarPush,
   WorkbenchRect,
@@ -68,6 +68,10 @@ beforeAll(() => {
   window.cancelAnimationFrame = (id: number): void => {
     frames.delete(id)
   }
+})
+
+beforeEach(() => {
+  vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
 })
 
 /**
@@ -178,21 +182,26 @@ function pending(): Pending {
 async function settle(): Promise<void> {
   for (let pass = 0; pass < 3; pass += 1) {
     await act(async () => {
-      await new Promise((resolve) => setTimeout(resolve, 0))
+      await vi.advanceTimersByTimeAsync(0)
     })
   }
 }
 
-afterEach(() => {
-  cleanup()
-  /*
-   * An assertion rather than a reset. A frame still outstanding once the
-   * component is gone is a measurement loop that never stops — invisible in a
-   * test that simply cleared the queue, and in the app a `getBoundingClientRect`
-   * every frame for a surface nobody can see.
-   */
-  expect(frames.size).toBe(0)
-  frames.clear()
+afterEach(async () => {
+  try {
+    cleanup()
+    await vi.runOnlyPendingTimersAsync()
+    /*
+     * An assertion rather than a reset. A frame still outstanding once the
+     * component is gone is a measurement loop that never stops — invisible in a
+     * test that simply cleared the queue, and in the app a `getBoundingClientRect`
+     * every frame for a surface nobody can see.
+     */
+    expect(frames.size).toBe(0)
+    frames.clear()
+  } finally {
+    vi.useRealTimers()
+  }
 })
 
 /**
@@ -408,9 +417,7 @@ describe('WorkbenchFrame bounds tracking', () => {
 
 type BoundsRequest = WorkbenchShellRequest<'workbench:setBounds'>
 
-function paneBridge(
-  read: () => Promise<{ width: number }> = () => Promise.resolve({ width: 0 })
-): {
+function paneBridge(read: () => Promise<{ width: number }> = () => Promise.resolve({ width: 0 })): {
   readonly bridge: Bridge
   readonly sent: BoundsRequest[]
   readonly opened: string[]

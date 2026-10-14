@@ -1,6 +1,6 @@
 /** @vitest-environment jsdom */
 import { act, cleanup, fireEvent, render } from '@testing-library/react'
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { ApprovalCard } from './Session.js'
 import type { PendingApproval } from './transcript.js'
 
@@ -31,7 +31,7 @@ const approval = (kind: string): PendingApproval => ({
   expiresAt: 0,
 })
 
-function draw(kind: string): { buttons: HTMLButtonElement[]; hint: string } {
+function draw(kind: string, into?: HTMLElement): { buttons: HTMLButtonElement[]; hint: string } {
   const { container } = render(
     <ApprovalCard
       approval={approval(kind)}
@@ -40,7 +40,8 @@ function draw(kind: string): { buttons: HTMLButtonElement[]; hint: string } {
       onAllow={() => undefined}
       onAllowAlways={() => undefined}
       onDeny={() => undefined}
-    />
+    />,
+    into === undefined ? {} : { container: into }
   )
   return {
     buttons: [...container.querySelectorAll<HTMLButtonElement>('.approval-actions button')],
@@ -48,8 +49,55 @@ function draw(kind: string): { buttons: HTMLButtonElement[]; hint: string } {
   }
 }
 
+const box = (left: number, top: number, right: number, bottom: number): DOMRect => ({
+  x: left,
+  y: top,
+  left,
+  top,
+  right,
+  bottom,
+  width: right - left,
+  height: bottom - top,
+  toJSON: () => ({}),
+})
+
+function placeButtons(rect: DOMRect): void {
+  vi.spyOn(Element.prototype, 'getBoundingClientRect').mockReturnValue(rect)
+}
+
+function focusOutside(): HTMLButtonElement {
+  const outside = document.createElement('button')
+  document.body.append(outside)
+  outside.focus()
+  return outside
+}
+
+function clipping(
+  overflow: Partial<Pick<CSSStyleDeclaration, 'overflowX' | 'overflowY'>>,
+  rect: DOMRect,
+  client: { left: number; top: number; width: number; height: number }
+): HTMLDivElement {
+  const wrapper = document.createElement('div')
+  Object.assign(wrapper.style, overflow)
+  Object.defineProperties(wrapper, {
+    getBoundingClientRect: { value: () => rect, configurable: true },
+    clientLeft: { value: client.left, configurable: true },
+    clientTop: { value: client.top, configurable: true },
+    clientWidth: { value: client.width, configurable: true },
+    clientHeight: { value: client.height, configurable: true },
+  })
+  document.body.append(wrapper)
+  return wrapper
+}
+
+beforeEach(() => {
+  placeButtons(box(16, 700, 136, 728))
+})
+
 afterEach(() => {
   cleanup()
+  vi.restoreAllMocks()
+  document.body.replaceChildren()
 })
 
 describe('an approval card', () => {
@@ -121,6 +169,56 @@ describe('an approval card', () => {
     )
     const buttons = [...container.querySelectorAll<HTMLButtonElement>('.approval-actions button')]
     expect(buttons.some((b) => b === document.activeElement)).toBe(false)
+  })
+
+  it('leaves the caret where it was when its armed button is outside the window', () => {
+    placeButtons(box(1100, 700, 1220, 728))
+    const before = focusOutside()
+    const { buttons } = draw('command')
+    expect(buttons.some((b) => b === document.activeElement)).toBe(false)
+    expect(document.activeElement).toBe(before)
+  })
+
+  it('leaves the caret where it was when a clipping row has scrolled the button away', () => {
+    placeButtons(box(520, 100, 640, 128))
+    const before = focusOutside()
+    const row = clipping({ overflowX: 'hidden' }, box(0, 0, 400, 300), {
+      left: 0,
+      top: 0,
+      width: 400,
+      height: 300,
+    })
+    const { buttons } = draw('command', row)
+    expect(buttons.some((b) => b === document.activeElement)).toBe(false)
+    expect(document.activeElement).toBe(before)
+  })
+
+  it('leaves the caret where it was when a dock border and scrollbar cover the button', () => {
+    placeButtons(box(100, 286, 220, 298))
+    const before = focusOutside()
+    const dock = clipping({ overflowY: 'auto' }, box(0, 0, 400, 300), {
+      left: 1,
+      top: 1,
+      width: 383,
+      height: 283,
+    })
+    const { buttons } = draw('command', dock)
+    expect(buttons.some((b) => b === document.activeElement)).toBe(false)
+    expect(document.activeElement).toBe(before)
+  })
+
+  it('still arms the narrow grant when the clipping box shows all of it', () => {
+    placeButtons(box(100, 100, 220, 128))
+    focusOutside()
+    const row = clipping({ overflowX: 'hidden' }, box(0, 0, 400, 300), {
+      left: 0,
+      top: 0,
+      width: 400,
+      height: 300,
+    })
+    const { buttons } = draw('command', row)
+    const armed = buttons.find((b) => b === document.activeElement)
+    expect(armed?.textContent).toBe('approval.allowOnce')
   })
 
   /*

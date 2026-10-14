@@ -187,6 +187,7 @@ export class TrafficIpc {
             origin: config['origin'] as string | null | undefined,
             port: config['port'] as number | null | undefined,
             access: config['access'] as 'loopback' | 'lan' | undefined,
+            host: config['host'] as string | null | undefined,
             envVar: config['envVar'] as string | null | undefined,
           })
           .then((next) => ({ state: next, failure: next.failure }))

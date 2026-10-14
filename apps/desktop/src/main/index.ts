@@ -2,7 +2,7 @@ import { mkdirSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
-import { app, BrowserWindow, session } from 'electron'
+import { app, BrowserWindow, session, type WebContents } from 'electron'
 import {
   attachDetachedWindowListeners,
   closeEveryDetachedWindow,
@@ -28,12 +28,21 @@ import {
 } from './ipc.js'
 import { TrafficIpc } from './traffic-ipc.js'
 import { RunIpc } from './run-ipc.js'
+import { BrowserIpc } from './browser-ipc.js'
+import { BrowserDownloads } from './browser-downloads.js'
+import { BrowserSettingsStore } from './browser-settings.js'
+import { BROWSER_PARTITION, BrowserSurfaces, isBrowserPage } from './browser-surface.js'
+import { BrowserVault } from './browser-vault.js'
+import { registerShellWindow } from './shell-windows.js'
+import { registerToastWindow, registerToastWindowHandlers } from './toast-windows.js'
 import { detectScripts } from './project-scripts.js'
 import { createLogger } from './logging.js'
 import { registerNoteImageScheme, serveNoteImages } from './note-images.js'
 import { createQuitGate } from './quit-gate.js'
 import { installMenu } from './menu.js'
 import { readSettings } from './settings.js'
+import { flushWorkbenchStorageWrites } from './workbench-storage.js'
+import { readOpenProjects } from './open-projects.js'
 import { applyTheme } from './theme.js'
 import { applyScale, currentScale } from './scale.js'
 import { reapOrphanedChildren } from './reap.js'
@@ -64,6 +73,8 @@ const devServerUrl = process.env['ELECTRON_RENDERER_URL']
  */
 let trafficIpc: TrafficIpc | null = null
 let runIpc: RunIpc | null = null
+let browserIpc: BrowserIpc | null = null
+let browserDownloads: BrowserDownloads | null = null
 
 /** The shell's one document, named once so the load and the allowlist agree. */
 const SHELL_ENTRY_FILE = join(__dirname, '../renderer/index.html')
@@ -115,6 +126,7 @@ function createWindow(role: ShellWindowRole): BrowserWindow {
       webSecurity: true,
     },
   })
+  registerShellWindow(window)
 
   /*
    * One value decides both what loads and what is allowed to load.
@@ -125,7 +137,7 @@ function createWindow(role: ShellWindowRole): BrowserWindow {
    * nowhere, or one that navigates anywhere.
    */
   const entry = devServerUrl ?? pathToFileURL(SHELL_ENTRY_FILE).href
-  lockDownNavigation(window.webContents, [entry])
+  lockDownNavigation(window.webContents, [entry], undefined, registerToastWindow(window))
 
   /*
    * The shell's role, registered here rather than at each call site: this is the
@@ -139,9 +151,11 @@ function createWindow(role: ShellWindowRole): BrowserWindow {
       : { kind: 'detached' as const, projectId: role.projectId }
   trafficIpc?.registerShell(window.webContents, shellRole)
   runIpc?.registerShell(window.webContents, shellRole)
+  browserIpc?.registerShell(window.webContents, shellRole)
   window.webContents.on('destroyed', () => {
     trafficIpc?.releaseShell(window.webContents)
     runIpc?.releaseShell(window.webContents)
+    browserIpc?.releaseShell(window.webContents)
   })
 
   // Avoids a white flash before the renderer has painted.
@@ -253,6 +267,7 @@ void app.whenReady().then(async () => {
    */
   app.on('web-contents-created', (_event, contents) => {
     contents.on('console-message', ({ level, message, lineNumber, sourceId, frame }) => {
+      if (isBrowserPage(contents)) return
       // `frame` is non-optional on the event and `lineNumber` is a number, so no
       // `??` and no optional chain — the linter rejects both as unnecessary.
       const fields = { level, source: `${sourceId}:${String(lineNumber)}`, frame: frame.url }
@@ -349,9 +364,12 @@ void app.whenReady().then(async () => {
   // A local binding as well as the module one: the workbench resolver below is a
   // closure, and the module `runtime` is nullable for the whole life of the app,
   // so narrowing it here would not survive into the callback.
-  const opened = ChorusRuntime.open(app.getPath('userData'), log)
+  const opened = ChorusRuntime.open(app.getPath('userData'), log, undefined, {
+    deferRestoredAgents: devServerUrl !== undefined,
+  })
   runtime = opened
   registerIpcHandlers(runtime, () => mainWindow)
+  registerToastWindowHandlers()
   /*
    * Separate from `registerIpcHandlers` because these handlers need `event`.
    * Registered even though no surface exists yet: opening one is a renderer
@@ -430,10 +448,76 @@ void app.whenReady().then(async () => {
     detect: detectScripts,
     platform: process.platform,
   })
+  const userData = app.getPath('userData')
+  const browserSettings = new BrowserSettingsStore(userData)
+  const webTabIds = new Set(
+    (readOpenProjects(userData).workspace?.webTabs.tabs ?? []).map((tab) => tab.id)
+  )
+  browserSettings
+    .prune(new Set(opened.projects.list().map((project) => project.id)), webTabIds)
+    .then((failure) => {
+      if (failure !== null) log.warn('browser settings were not pruned', { failure })
+    })
+    .catch((error: unknown) => {
+      log.warn('browser settings were not pruned', {
+        error: error instanceof Error ? error.message : String(error),
+      })
+    })
+  const mainOwner = (): WebContents | null =>
+    mainWindow === null || mainWindow.isDestroyed() ? null : mainWindow.webContents
+  const browserSurfaces = new BrowserSurfaces({
+    settings: browserSettings,
+    vault: new BrowserVault(userData),
+    preloadPath: join(__dirname, '../preload/browser.js'),
+    mainOwner,
+    downloads: {
+      expect: (contents) => {
+        downloads.expect(contents)
+      },
+    },
+    deliver: (owner, push) => {
+      browserIpc?.deliver(owner, push)
+    },
+  })
+  const downloads = new BrowserDownloads({
+    session: session.fromPartition(BROWSER_PARTITION),
+    ownerOf: (contents) => browserSurfaces.ownerOf(contents),
+    mainOwner,
+    directory: () => app.getPath('downloads'),
+    deliver: (owner, push) => {
+      browserIpc?.deliver(owner, push)
+    },
+  })
+  browserDownloads = downloads
+  browserIpc = new BrowserIpc({
+    surfaces: browserSurfaces,
+    downloads,
+    isAdopted: (projectId) => opened.projects.get(projectId) !== null,
+  })
   // Takes no runtime: the watches are keyed by the conversations that ask for
   // one, not by what the runtime happens to have open.
   // Owns ⌘+ / ⌘− / ⌘0; a menu accelerator is handled before the page sees it.
-  installMenu()
+  const routeOwner = (): BrowserWindow | null => {
+    const focused = BrowserWindow.getFocusedWindow()
+    return focused === mainWindow && focused !== null && !focused.isDestroyed() ? focused : null
+  }
+  installMenu(
+    {
+      zoom: (direction) => {
+        const owner = routeOwner()
+        return owner !== null && browserSurfaces.routeZoom(owner.webContents, direction)
+      },
+      reload: () => {
+        const owner = routeOwner()
+        return owner !== null && browserSurfaces.routeReload(owner.webContents)
+      },
+      devtools: () => {
+        const owner = routeOwner()
+        return owner !== null && browserSurfaces.routeDevtools(owner.webContents)
+      },
+    },
+    process.platform
+  )
   forwardEventsToRenderer(runtime)
 
   /*
@@ -608,11 +692,11 @@ async function shutDownEverything(): Promise<void> {
   ideBridge = null
   runIpc?.close()
   runIpc = null
-  // Synchronous and first: a watch holds no resource worth draining, and one
-  // still firing during shutdown would push at windows that are going away.
-  // Same reasoning one level out: a surface left attached to a window that is
-  // going away is a `WebContents` nothing will ever close.
-  closeAllSurfaces()
+  browserDownloads?.dispose()
+  browserDownloads = null
+  const browserClosed = browserIpc?.close()
+  browserIpc = null
+  const surfacesClosed = closeAllSurfaces()
   /*
    * And one level out again — `stopAll()` from preflight §5.4, the only
    * unconditional kill in the workbench's lifecycle. Closing the last project
@@ -659,9 +743,13 @@ async function shutDownEverything(): Promise<void> {
     }
   }
 
+  await step(surfacesClosed, 'the workbench surfaces did not close cleanly')
+  await step(flushWorkbenchStorageWrites(), 'the workbench storage did not flush cleanly')
+
   // The bridge closes first: it unlinks its socket and descriptor, and anything
   // waiting on a snapshot is settled rather than left hanging behind the
   // runtime's own shutdown.
+  await step(browserClosed, 'the browser did not close cleanly')
   await step(Promise.resolve(bridge?.close()), 'the ide bridge did not close cleanly')
   await step(Promise.resolve(closing?.close()), 'the event store did not close cleanly')
 

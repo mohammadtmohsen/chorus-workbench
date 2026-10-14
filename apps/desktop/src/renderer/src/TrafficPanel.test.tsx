@@ -2,13 +2,13 @@
 import { act, cleanup, fireEvent, render, renderHook } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { TrafficRowShape } from '../../shared/ipc.js'
+import type { DetectedScriptsShape, RunPush, RunResponse, RunState } from '../../shared/run-ipc.js'
 import type {
-  DetectedScriptsShape,
-  RunPush,
-  RunResponse,
-  RunState,
-} from '../../shared/run-ipc.js'
-import type { TrafficLive, TrafficPush, TrafficState } from '../../shared/traffic-ipc.js'
+  TrafficLive,
+  TrafficPush,
+  TrafficRequest,
+  TrafficState,
+} from '../../shared/traffic-ipc.js'
 import { TrafficPanel, type TrafficRunHost } from './TrafficPanel.js'
 import { useProjectRun, useTrafficLive } from './workspace/hooks.js'
 
@@ -252,16 +252,20 @@ describe('pushes meant for another panel', () => {
   it('neither draws nor acknowledges a push for another project or subscription', async () => {
     const listeners: ((push: TrafficPush) => void)[] = []
     const acked: { subscriptionId: string; seq: number }[] = []
-    Object.assign(installed, bridge(() => Promise.resolve({ state: state(), failure: null })), {
-      onTraffic: (listener: (push: TrafficPush) => void) => {
-        listeners.push(listener)
-        return () => undefined
-      },
-      ackTraffic: (request: { subscriptionId: string; seq: number }) => {
-        acked.push({ subscriptionId: request.subscriptionId, seq: request.seq })
-        return Promise.resolve({ ok: true as const })
-      },
-    })
+    Object.assign(
+      installed,
+      bridge(() => Promise.resolve({ state: state(), failure: null })),
+      {
+        onTraffic: (listener: (push: TrafficPush) => void) => {
+          listeners.push(listener)
+          return () => undefined
+        },
+        ackTraffic: (request: { subscriptionId: string; seq: number }) => {
+          acked.push({ subscriptionId: request.subscriptionId, seq: request.seq })
+          return Promise.resolve({ ok: true as const })
+        },
+      }
+    )
     const { container } = render(<TrafficPanel projectId="p1" terminals={[]} />)
     await act(() => Promise.resolve())
     acked.length = 0
@@ -367,7 +371,7 @@ const READY = { capturing: false, envVar: 'EXPO_PUBLIC_API_BASE_URL' }
 
 const canonical = (
   over: Partial<TrafficState>,
-  config: { readonly origin?: string | null; readonly envVar?: string | null }
+  config: TrafficRequest<'traffic:configure'>['config']
 ): TrafficState =>
   state({
     ...over,
@@ -483,12 +487,60 @@ describe('Run in Traffic', () => {
     expect(container.querySelector('.run-setup')).toBeNull()
   })
 
+  const missingCaptureSettings: readonly Partial<TrafficState>[] = [
+    { origin: null, envVar: null },
+    { origin: null },
+    { envVar: null },
+  ]
+
+  it.each(missingCaptureSettings)(
+    'runs the saved command with optional capture settings %j',
+    async (settings) => {
+      const { container, calls } = await drawRun(runState(), {
+        ...READY,
+        ...settings,
+      })
+
+      expect(labelOf(control(container, 'run'))).toBe('run.run')
+      expect(control(container, 'run')?.disabled).toBe(false)
+      await press(control(container, 'run'))
+      expect(calls.startRun).toHaveBeenCalledWith({ projectId: 'p1' })
+      expect(calls.configureTraffic).not.toHaveBeenCalled()
+      expect(container.querySelector('.run-setup')).toBeNull()
+    }
+  )
+
+  it('enables Run after choosing Chorus dev without HTTP capture settings', async () => {
+    const { container, calls } = await drawRun(
+      runState({ commands: null }),
+      { capturing: false, origin: null, envVar: null },
+      {
+        ...NO_VARIABLES,
+        manager: 'pnpm',
+        scripts: [{ name: 'dev', command: 'pnpm run dev' }],
+        expo: false,
+      }
+    )
+
+    await press(control(container, 'run'))
+    await settle()
+
+    expect(lastSaved(calls)).toEqual(savedOnly('script:dev', 'dev', 'pnpm run dev'))
+    expect(labelOf(control(container, 'run'))).toBe('run.run')
+    expect(control(container, 'run')?.disabled).toBe(false)
+    expect(calls.configureTraffic).not.toHaveBeenCalled()
+    expect(calls.startRun).not.toHaveBeenCalled()
+
+    await press(control(container, 'run'))
+    expect(calls.startRun).toHaveBeenCalledWith({ projectId: 'p1' })
+  })
+
   it('keeps every Run control in the Traffic header, with no menu or Capture only', async () => {
     const { container } = await drawRun(runState())
     const head = container.querySelector('.traffic-head')
     expect(head?.querySelector('[data-run-action="run"]')).not.toBeNull()
     expect(head?.querySelector('[data-run-action="edit"]')).not.toBeNull()
-    expect(container.querySelector('details')).toBeNull()
+    expect(head?.querySelector('details')).toBeNull()
     expect(container.querySelector('[data-run-action="capture-only"]')).toBeNull()
     expect(container.querySelector('[data-run-command]')).toBeNull()
     expect(container.querySelector('[data-run-action="restart"]')).toBeNull()
@@ -744,7 +796,7 @@ const setupError = (container: HTMLElement): string | null | undefined =>
   container.querySelector('.run-setup .traffic-stopped')?.textContent
 
 describe('setup fields without Save', () => {
-  it('names a missing or invalid field before anything is sent', async () => {
+  it('accepts blank capture fields and rejects invalid variables before sending', async () => {
     const { container, calls } = await drawRun(
       runState({ commands: null }),
       { capturing: false, origin: null, envVar: null },
@@ -753,9 +805,9 @@ describe('setup fields without Save', () => {
     await openSetupIn(container)
 
     await enterIn(container, 'origin')
-    expect(setupError(container)).toBe('run.needOrigin')
+    expect(setupError(container)).toBeUndefined()
     await enterIn(container, 'variable')
-    expect(setupError(container)).toBe('run.needVariable')
+    expect(setupError(container)).toBeUndefined()
     typeInto(container, 'variable', 'API-URL')
     await enterIn(container, 'variable')
     expect(setupError(container)).toBe('run.badVariable')
@@ -989,12 +1041,7 @@ describe('a scan that answers late', () => {
 
   it('keeps a custom command added while scanning, and suggests nothing over it', async () => {
     const scans = pendingScans()
-    const { container, calls } = await drawRun(
-      runState({ commands: null }),
-      READY,
-      DETECTED,
-      scans
-    )
+    const { container, calls } = await drawRun(runState({ commands: null }), READY, DETECTED, scans)
     await openSetupIn(container)
     typeInto(container, 'custom-command', 'npx expo start --clear')
     await press(control(container, 'add'))
@@ -1050,35 +1097,38 @@ describe('the run state a project row reads', () => {
     expect(result.current?.cleanupPending).toBe(true)
   })
 
-  it('ignores another project’s push, and forgets the last project when switched', async () => {
-    let listener: (push: RunPush) => void = () => undefined
-    const reads: string[] = []
-    Object.assign(installed, {
-      onRun: (next: (push: RunPush) => void) => {
-        listener = next
-        return () => undefined
-      },
-      readRunState: (request: { projectId: string }) => {
-        reads.push(request.projectId)
-        return new Promise<RunState>(() => undefined)
-      },
-    })
-    const { result, rerender } = renderHook(({ id }) => useProjectRun(id), {
-      initialProps: { id: 'p1' },
-    })
+  it('ignores another project’s push, and forgets the last project when switched', () => {
+    return new Promise<void>((resolve) => {
+      let listener: (push: RunPush) => void = () => undefined
+      const reads: string[] = []
+      Object.assign(installed, {
+        onRun: (next: (push: RunPush) => void) => {
+          listener = next
+          return () => undefined
+        },
+        readRunState: (request: { projectId: string }) => {
+          reads.push(request.projectId)
+          return new Promise<RunState>(() => undefined)
+        },
+      })
+      const { result, rerender } = renderHook(({ id }) => useProjectRun(id), {
+        initialProps: { id: 'p1' },
+      })
 
-    act(() => {
-      listener({ projectId: 'p2', ...runState() })
-    })
-    expect(result.current).toBeNull()
-    act(() => {
-      listener({ projectId: 'p1', ...runState() })
-    })
-    expect(result.current?.available).toBe(true)
+      act(() => {
+        listener({ projectId: 'p2', ...runState() })
+      })
+      expect(result.current).toBeNull()
+      act(() => {
+        listener({ projectId: 'p1', ...runState() })
+      })
+      expect(result.current?.available).toBe(true)
 
-    rerender({ id: 'p2' })
-    expect(result.current).toBeNull()
-    expect(reads).toEqual(['p1', 'p2'])
+      rerender({ id: 'p2' })
+      expect(result.current).toBeNull()
+      expect(reads).toEqual(['p1', 'p2'])
+      resolve()
+    })
   })
 })
 

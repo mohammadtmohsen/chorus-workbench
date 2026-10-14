@@ -1,4 +1,10 @@
-import { Menu, type MenuItemConstructorOptions } from 'electron'
+import {
+  Menu,
+  MenuItem,
+  webContents,
+  type MenuItemConstructorOptions,
+  type WebContents,
+} from 'electron'
 import { stepScale } from './scale.js'
 
 /**
@@ -14,9 +20,23 @@ import { stepScale } from './scale.js'
  * in the app at all.
  */
 
-export function menuTemplate(): MenuItemConstructorOptions[] {
+export interface MenuRoutes {
+  readonly zoom: (direction: -1 | 0 | 1) => boolean
+  readonly reload: () => boolean
+  readonly devtools: () => boolean
+}
+
+function focusedTarget(): WebContents | null {
+  const focused = webContents.getFocusedWebContents()
+  if (focused === null) return null
+  return (
+    webContents.getAllWebContents().find((page) => page.devToolsWebContents === focused) ?? focused
+  )
+}
+
+export function menuTemplate(routes: MenuRoutes, platform: string): MenuItemConstructorOptions[] {
   const zoom = (direction: -1 | 0 | 1) => (): void => {
-    stepScale(direction)
+    if (!routes.zoom(direction)) stepScale(direction)
   }
 
   return [
@@ -37,16 +57,33 @@ export function menuTemplate(): MenuItemConstructorOptions[] {
         { label: 'Zoom In', accelerator: 'CommandOrControl+=', click: zoom(1), visible: false },
         { label: 'Zoom Out', accelerator: 'CommandOrControl+-', click: zoom(-1) },
         { type: 'separator' },
-        { role: 'reload' },
-        { role: 'toggleDevTools' },
+        {
+          label: new MenuItem({ role: 'reload' }).label,
+          accelerator: 'CmdOrCtrl+R',
+          click: () => {
+            if (!routes.reload()) focusedTarget()?.reload()
+          },
+        },
+        {
+          label: new MenuItem({ role: 'toggleDevTools' }).label,
+          accelerator: platform === 'darwin' ? 'Alt+Command+I' : 'Ctrl+Shift+I',
+          click: () => {
+            if (!routes.devtools()) focusedTarget()?.toggleDevTools()
+          },
+        },
         { type: 'separator' },
         { role: 'togglefullscreen' },
       ],
     },
-    { role: 'windowMenu' },
+    platform === 'darwin'
+      ? { role: 'windowMenu' }
+      : {
+          label: new MenuItem({ role: 'windowMenu' }).label,
+          submenu: [{ role: 'minimize' }, { role: 'close', registerAccelerator: false }],
+        },
   ]
 }
 
-export function installMenu(): void {
-  Menu.setApplicationMenu(Menu.buildFromTemplate(menuTemplate()))
+export function installMenu(routes: MenuRoutes, platform: string): void {
+  Menu.setApplicationMenu(Menu.buildFromTemplate(menuTemplate(routes, platform)))
 }

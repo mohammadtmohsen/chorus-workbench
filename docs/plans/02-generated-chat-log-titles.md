@@ -76,13 +76,13 @@ Appended after version 18. It is driven by the 1,502 rename rows through `events
 
 ## Before / After
 
-| Past conversations row | Before | After |
-| --- | --- | --- |
-| `01a0f8a1` · …/tpa/tpa-mobile | tpa-mobile | Pull to refresh on all pages |
-| `01a0f843` · …/tpa/tpa-mobile | tpa-mobile | Action sheet bottom safe area |
-| `01a0f867` · …/code/workbench | workbench | Generated titles for chat log |
-| `01a0f668` · …/code/workbench | workbench | Build and install live indicator |
-| a 0-message chat · …/tpa/tpa-mobile | tpa-mobile | tpa-mobile |
+| Past conversations row              | Before     | After                            |
+| ----------------------------------- | ---------- | -------------------------------- |
+| `01a0f8a1` · …/tpa/tpa-mobile       | tpa-mobile | Pull to refresh on all pages     |
+| `01a0f843` · …/tpa/tpa-mobile       | tpa-mobile | Action sheet bottom safe area    |
+| `01a0f867` · …/code/workbench       | workbench  | Generated titles for chat log    |
+| `01a0f668` · …/code/workbench       | workbench  | Build and install live indicator |
+| a 0-message chat · …/tpa/tpa-mobile | tpa-mobile | tpa-mobile                       |
 
 ## Final Flow
 
@@ -137,13 +137,13 @@ The next launch takes a `VACUUM INTO` snapshot (`runtime.ts:5567`) of the roughl
 
 ## Verification
 
-| Check | Status |
-| --- | --- |
-| Source and diff review (Claude and Codex, adversarial) | Done, 2026-10-01. No evidence-backed defect found |
-| Acceptance criteria | Source-reviewed. Runtime **NOT VERIFIED** |
-| v19 against a real database | **NOT RUN**. It runs on the next launch, after the existing snapshot |
-| Unit tests, typecheck, lint, build, app launch | **NOT RUN**, by the user's standing instruction |
-| Events, contracts, runtime, renderer, namer policy, ordering | Untouched |
+| Check                                                        | Status                                                               |
+| ------------------------------------------------------------ | -------------------------------------------------------------------- |
+| Source and diff review (Claude and Codex, adversarial)       | Done, 2026-10-01. No evidence-backed defect found                    |
+| Acceptance criteria                                          | Source-reviewed. Runtime **NOT VERIFIED**                            |
+| v19 against a real database                                  | **NOT RUN**. It runs on the next launch, after the existing snapshot |
+| Unit tests, typecheck, lint, build, app launch               | **NOT RUN**, by the user's standing instruction                      |
+| Events, contracts, runtime, renderer, namer policy, ordering | Untouched                                                            |
 
 Read-only evidence behind the review, from `sqlite3` with `mode=ro` on the live database:
 

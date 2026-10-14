@@ -6,9 +6,10 @@ import { NOTE_IMAGE_DRAG_TYPE, noteImageUrls } from './attach.js'
 import { formatDiagnosticBlock } from './editor-context.js'
 import { fitCard, type AsidePurpose } from './aside.js'
 import { Composer, type ComposerHandle, type ComposerState } from './Composer.js'
+import { isLiveReply } from '../../shared/live-message.js'
 import { Entry, ToolPatch } from './Entry.js'
 import { ErrorNotice } from './ErrorNotice.js'
-import { focusedNow, mayTakeCaret } from './focus.js'
+import { focusedNow, fullyVisible, mayTakeCaret } from './focus.js'
 import { profileHas, profileMark, profileMarkAfterPaint } from './profile-marks.js'
 import { thinkingWord, offsetForActor, THINKING_WORD_MS, AWAITING_MAX_MS } from './thinking-word.js'
 import { QuickQuestion } from './QuickQuestion.js'
@@ -23,11 +24,7 @@ import {
 import type { ActivityPush, TranscriptEvent } from '../../shared/ipc.js'
 
 import { askableQuestion, questionText } from '../../shared/question-text.js'
-import {
-  useBackgroundAgents,
-  useSessionActivity,
-  useIdeContext,
-} from './workspace/hooks.js'
+import { useBackgroundAgents, useSessionActivity, useIdeContext } from './workspace/hooks.js'
 import {
   answersThinking,
   groupedWith,
@@ -1411,7 +1408,12 @@ export function Session(props: {
      * an error or a refusal arrives as a notice, and the row must not outlive
      * the turn it was waiting for.
      */
-    if (view.working.length === 0 && view.messages.at(-1)?.actor !== 'system') return
+    if (
+      view.working.length === 0 &&
+      view.messages.at(-1)?.actor !== 'system' &&
+      !isLiveReply(view.messages.at(-1)?.key ?? '')
+    )
+      return
     setAwaiting(false)
     setStalled(false)
   }, [view.working.length, view.messages])
@@ -1506,10 +1508,12 @@ export function Session(props: {
     openActivity: [...openActivity],
   }
 
-  useEffect(
+  useLayoutEffect(
     () => () => {
       props.onCarry(conversationId, {
         ...latest.current,
+        following: following.current,
+        scrollTop: score.current?.scrollTop ?? latest.current.scrollTop,
         ...box.current,
         ...(openCardRef.current === null ? {} : { card: openCardRef.current }),
       })
@@ -1702,7 +1706,7 @@ export function Session(props: {
      * whole point — but if the card never took the caret, because someone was
      * writing, then the aside they were writing in is where it still belongs.
      */
-    if (props.active && mayTakeCaret(focusedNow())) composer.current?.focus()
+    if (props.active && mayTakeCaret(focusedNow())) composer.current?.focusIfVisible()
   }, [queued, props.active])
 
   /**
@@ -1741,7 +1745,10 @@ export function Session(props: {
    */
   const liveKeys = new Set(
     view.working.map(
-      (actor) => view.messages.findLast((m) => m.actor === actor && m.kind === 'message')?.key
+      (actor) =>
+        view.messages.findLast(
+          (m) => m.actor === actor && m.kind === 'message' && !isLiveReply(m.key)
+        )?.key
     )
   )
 
@@ -2519,7 +2526,22 @@ function QuestionCard({
   useEffect(() => {
     if (!active) return
     if (!mayTakeCaret(focusedNow())) return
-    first.current?.focus()
+    const control = first.current
+    if (control === null) return
+    if (fullyVisible(control)) {
+      control.focus({ preventScroll: true })
+      return
+    }
+    const item = control.closest<HTMLElement>('.question-item')
+    if (item === null || !fullyVisible(item)) return
+    const placed = control.getBoundingClientRect()
+    const top = item.getBoundingClientRect().top + item.clientTop
+    const bottom = top + item.clientHeight
+    if (placed.width <= 0 || placed.height <= 0 || placed.height > item.clientHeight) return
+    if (placed.top < top) item.scrollTop -= top - placed.top
+    else if (placed.bottom > bottom) item.scrollTop += placed.bottom - bottom
+    if (!fullyVisible(control)) return
+    control.focus({ preventScroll: true })
   }, [request.userInputId, active])
 
   /** What this question currently answers, in the array shape the wire expects. */
@@ -2872,7 +2894,8 @@ export function ApprovalCard({
   useEffect(() => {
     if (!active) return
     if (!mayTakeCaret(focusedNow())) return
-    allow.current?.focus()
+    if (!fullyVisible(allow.current)) return
+    allow.current?.focus({ preventScroll: true })
   }, [approval.approvalId, active])
 
   /*

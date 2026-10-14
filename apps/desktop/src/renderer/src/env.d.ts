@@ -1,10 +1,12 @@
 import type { ChorusApi } from '../../shared/ipc.js'
 import type { ChorusWorkbenchApi } from '../../shared/workbench-ipc.js'
+import type { ChorusToastApi } from '../../shared/toast-window-ipc.js'
 
 declare global {
   interface Window {
     /** The only bridge to the main process. Injected by the preload script. */
     readonly chorus: ChorusApi
+    readonly chorusToasts: ChorusToastApi
     /**
      * The workbench surface's bridge, and its whole surface is one method.
      *

@@ -435,6 +435,6 @@ runs a Bash tool in, which is where the `python` that reads the key actually run
 The DeepSeek agent runs with `Options.env` set, so it was asked directly: all nine
 injected values arrive in its Bash tool, and `ANTHROPIC_API_KEY` is absent, which
 also puts the clear half beyond argument. `STATUS.md` records the detail, including
-what the result does *not* establish — it was the installed build, so the refactor
+what the result does _not_ establish — it was the installed build, so the refactor
 itself is still unrun, and `TYPESAFE_API_KEY`'s own arrival is inferred from
 travelling an identical path rather than seen.

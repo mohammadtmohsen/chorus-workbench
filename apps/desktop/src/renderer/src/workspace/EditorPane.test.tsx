@@ -12,6 +12,7 @@ vi.mock('react-i18next', () => ({
 }))
 vi.mock('./PaneTabStrip.js', () => ({ PaneTabStrip: () => null }))
 vi.mock('./PaneWorkbench.js', () => ({ PaneWorkbench: () => null }))
+vi.mock('../BrowserPanel.js', () => ({ BrowserPanel: () => null }))
 vi.mock('./ProjectNotes.js', () => ({ ProjectNotes: () => null }))
 vi.mock('../TrafficPanel.js', () => ({ TrafficPanel: () => null }))
 vi.mock('../ProjectTerminalPane.js', () => ({ ProjectTerminalPane: () => null }))
@@ -116,6 +117,150 @@ beforeEach(() => {
     panes: { 'pane-1': { id: 'pane-1', tabs: ['p1'], activeTabId: 'p1' } },
     focusedPaneId: 'pane-1',
     conversationGroups: { p1: twoColumns },
+    editorWidthFractions: {},
+    rowScroll: {},
+  })
+})
+
+describe('the editor resize control', () => {
+  it('resizes through the saved project width and resets to the default width', () => {
+    const originalWidth = window.innerWidth
+    Object.defineProperty(window, 'innerWidth', { configurable: true, value: 1_000 })
+    try {
+      const settings = props([session('source'), session('replacement')])
+      const commit = vi.fn()
+      const view = render(<EditorPane {...settings} onCommitLayout={commit} />)
+      const divider = view.container.querySelector<HTMLElement>('[data-editor-resize]')
+      const editor = view.container.querySelector<HTMLElement>('.workspace-pane-workbench')
+      const row = view.container.querySelector<HTMLElement>('.conversation-scroller')
+      if (divider === null || editor === null || row === null) {
+        throw new Error('the editor is not drawn')
+      }
+      const groups = useWorkspaceStore.getState().conversationGroups
+
+      expect(divider.getAttribute('aria-valuenow')).toBe('500')
+      expect(divider.getAttribute('aria-valuemax')).toBe('1000')
+      expect(row.scrollLeft).toBe(500)
+      expect(editor.style.flexBasis).toBe('997px')
+      fireEvent.keyDown(divider, { key: 'End' })
+      fireEvent.keyUp(divider, { key: 'End' })
+      expect(useWorkspaceStore.getState().editorWidthFractions['p1']).toBe(1)
+      expect(useWorkspaceStore.getState().conversationGroups).toBe(groups)
+      expect(divider.getAttribute('aria-valuenow')).toBe('1000')
+      expect(editor.style.flexBasis).toBe('997px')
+      expect(row.scrollLeft).toBe(0)
+      expect(commit).toHaveBeenCalledTimes(1)
+
+      Object.defineProperty(window, 'innerWidth', { configurable: true, value: 800 })
+      fireEvent(window, new Event('resize'))
+      expect(divider.getAttribute('aria-valuemax')).toBe('800')
+      expect(divider.getAttribute('aria-valuenow')).toBe('800')
+      expect(editor.style.flexBasis).toBe('797px')
+
+      fireEvent.doubleClick(divider)
+      expect(useWorkspaceStore.getState().editorWidthFractions['p1']).toBeUndefined()
+      expect(divider.getAttribute('aria-valuenow')).toBe('500')
+      expect(editor.style.flexBasis).toBe('797px')
+      expect(row.scrollLeft).toBe(300)
+      expect(commit).toHaveBeenCalledTimes(2)
+    } finally {
+      Object.defineProperty(window, 'innerWidth', { configurable: true, value: originalWidth })
+    }
+  })
+
+  it('keeps the first chat fully visible at the default and after resetting a narrower pane', () => {
+    const originalWidth = window.innerWidth
+    Object.defineProperty(window, 'innerWidth', { configurable: true, value: 2_000 })
+    let paneWidth = 1_880
+    const measuredWidth = vi
+      .spyOn(HTMLElement.prototype, 'clientWidth', 'get')
+      .mockImplementation(function (this: HTMLElement) {
+        if (this.classList.contains('workspace-pane-content')) return paneWidth
+        if (this.classList.contains('conversation-scroller')) return paneWidth - 3
+        return 0
+      })
+    try {
+      const commit = vi.fn()
+      const view = render(
+        <EditorPane {...props([session('source'), session('replacement')])} onCommitLayout={commit} />
+      )
+      const divider = view.container.querySelector<HTMLElement>('[data-editor-resize]')
+      const editor = view.container.querySelector<HTMLElement>('.workspace-pane-workbench')
+      const row = view.container.querySelector<HTMLElement>('.conversation-scroller')
+      const firstChat = view.container.querySelector<HTMLElement>('.conversation-slot')
+      const typed = chat(view.container, 'source')
+      if (divider === null || editor === null || row === null || firstChat === null || typed === null) {
+        throw new Error('the editor and first chat are not drawn')
+      }
+      const firstChatRight = (): number =>
+        Number.parseFloat(editor.style.flexBasis) +
+        Number.parseFloat(divider.style.flexBasis) +
+        Number.parseFloat(firstChat.style.flexBasis) -
+        row.scrollLeft
+
+      expect(divider.getAttribute('aria-valuenow')).toBe('1371')
+      expect(firstChatRight()).toBe(row.clientWidth)
+      fireEvent.change(typed, { target: { value: 'draft preserved after reset' } })
+      fireEvent.keyDown(divider, { key: 'End' })
+      fireEvent.keyUp(divider, { key: 'End' })
+      expect(divider.getAttribute('aria-valuenow')).toBe('2000')
+      expect(row.scrollLeft).toBe(0)
+
+      fireEvent.doubleClick(divider)
+      expect(divider.getAttribute('aria-valuenow')).toBe('1371')
+      expect(row.scrollLeft).toBe(629)
+      expect(firstChatRight()).toBe(row.clientWidth)
+      expect(useWorkspaceStore.getState().editorWidthFractions['p1']).toBeUndefined()
+      expect(useWorkspaceStore.getState().rowScroll['p1']).toBe(0)
+      expect(chat(view.container, 'source')).toBe(typed)
+      expect(typed.value).toBe('draft preserved after reset')
+      expect(commit).toHaveBeenCalledTimes(2)
+
+      paneWidth = 1_480
+      fireEvent(window, new Event('resize'))
+      expect(divider.getAttribute('aria-valuenow')).toBe('971')
+      expect(firstChatRight()).toBe(row.clientWidth)
+    } finally {
+      measuredWidth.mockRestore()
+      Object.defineProperty(window, 'innerWidth', { configurable: true, value: originalWidth })
+    }
+  })
+
+  it('scrolls back to the full editor and resizes from that position without remounting chats', () => {
+    const originalWidth = window.innerWidth
+    Object.defineProperty(window, 'innerWidth', { configurable: true, value: 1_000 })
+    try {
+      const commit = vi.fn()
+      const view = render(
+        <EditorPane {...props([session('source'), session('replacement')])} onCommitLayout={commit} />
+      )
+      const divider = view.container.querySelector<HTMLElement>('[data-editor-resize]')
+      const row = view.container.querySelector<HTMLElement>('.conversation-scroller')
+      const typed = chat(view.container, 'source')
+      if (divider === null || row === null || typed === null) {
+        throw new Error('the project row is not drawn')
+      }
+      fireEvent.change(typed, { target: { value: 'draft preserved while scrolling' } })
+      expect(row.scrollLeft).toBe(500)
+      fireEvent.wheel(row, { deltaX: -500, deltaY: 0 })
+      fireEvent.scroll(row)
+      expect(row.scrollLeft).toBe(0)
+      expect(divider.getAttribute('aria-valuenow')).toBe('1000')
+      expect(useWorkspaceStore.getState().rowScroll['p1']).toBe(-500)
+      expect(useWorkspaceStore.getState().editorWidthFractions['p1']).toBeUndefined()
+      expect(chat(view.container, 'source')).toBe(typed)
+      expect(typed.value).toBe('draft preserved while scrolling')
+
+      fireEvent.keyDown(divider, { key: 'ArrowLeft' })
+      fireEvent.keyUp(divider, { key: 'ArrowLeft' })
+      expect(divider.getAttribute('aria-valuenow')).toBe('992')
+      expect(row.scrollLeft).toBe(8)
+      expect(useWorkspaceStore.getState().editorWidthFractions['p1']).toBe(0.992)
+      expect(useWorkspaceStore.getState().rowScroll['p1']).toBe(0)
+      expect(commit).toHaveBeenCalledTimes(1)
+    } finally {
+      Object.defineProperty(window, 'innerWidth', { configurable: true, value: originalWidth })
+    }
   })
 })
 

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { SIDEBAR_WIDTH, TERMINAL_HEIGHT } from '../shared/workspace-layout.js'
+import { NO_WEB_TABS, SIDEBAR_WIDTH, TERMINAL_HEIGHT } from '../shared/workspace-layout.js'
 import { parseOpenProjects } from './open-projects.js'
 
 /*
@@ -67,8 +67,79 @@ describe('open project persistence', () => {
         globalTerminal: { open: false, height: TERMINAL_HEIGHT.default, tabs: [], activeId: null },
         trafficPanels: {},
         projectTerminals: {},
+        collapsedBrowsers: {},
         rowScroll: {},
+        editorWidthFractions: {},
+        webTabs: NO_WEB_TABS,
       },
+    })
+  })
+
+  it('keeps every conversation in a snapshot written before web tabs existed', () => {
+    const conversations = [
+      conversation,
+      { ...conversation, conversationId: 'conversation-2', title: 'second' },
+    ]
+    const parsed = parseOpenProjects(
+      file(
+        {
+          ...paneLayout,
+          conversationGroups: {},
+          projectTerminals: {},
+          rowScroll: { 'conversation-1': 320 },
+        },
+        conversations
+      )
+    )
+    expect(parsed.projects[0]?.conversations.map((item) => item.conversationId)).toEqual([
+      'conversation-1',
+      'conversation-2',
+    ])
+    expect(parsed.workspace?.panes).toEqual(paneLayout.panes)
+    expect(parsed.workspace?.rowScroll).toEqual({ 'conversation-1': 320 })
+    expect(parsed.workspace?.webTabs).toEqual(NO_WEB_TABS)
+    expect(parsed.workspace?.editorWidthFractions).toEqual({})
+  })
+
+  it('keeps a web roster intact and leaves invalid ids for renderer repair', () => {
+    const webTabs = {
+      tabs: [{ id: 'web-1' }, { id: '' }, { id: 'web-1' }, { id: 'bad/id' }],
+      activeId: 'missing',
+      showing: true,
+    }
+    const parsed = parseOpenProjects(file({ ...paneLayout, webTabs }))
+    expect(parsed.projects[0]?.conversations).toHaveLength(1)
+    expect(parsed.workspace?.webTabs).toEqual(webTabs)
+  })
+
+  it('keeps every conversation when web tabs contain fields from a newer snapshot', () => {
+    const conversations = [
+      conversation,
+      { ...conversation, conversationId: 'conversation-2', title: 'second' },
+    ]
+    const parsed = parseOpenProjects(
+      file(
+        {
+          ...paneLayout,
+          webTabs: {
+            tabs: [{ id: 'web-1', pinned: true }],
+            activeId: 'web-1',
+            showing: true,
+            group: 'saved',
+          },
+        },
+        conversations
+      )
+    )
+    expect(parsed.projects[0]?.conversations.map((item) => item.conversationId)).toEqual([
+      'conversation-1',
+      'conversation-2',
+    ])
+    expect(parsed.workspace?.panes).toEqual(paneLayout.panes)
+    expect(parsed.workspace?.webTabs).toEqual({
+      tabs: [{ id: 'web-1' }],
+      activeId: 'web-1',
+      showing: true,
     })
   })
 

@@ -10,6 +10,9 @@ const send = vi.fn()
 vi.mock('electron', () => ({
   BrowserWindow: { getAllWindows: () => [{ webContents: { setZoomFactor, send } }] },
 }))
+vi.mock('./shell-windows.js', () => ({
+  shellWindows: () => [{ webContents: { setZoomFactor, send } }],
+}))
 
 const { applyScale, currentScale, stepScale } = await import('./scale.js')
 

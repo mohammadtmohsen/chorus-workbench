@@ -1,10 +1,14 @@
 /** @vitest-environment jsdom */
-import type {
-  KeyboardEvent as ReactKeyboardEvent,
-  PointerEvent as ReactPointerEvent,
-} from 'react'
+import type { KeyboardEvent as ReactKeyboardEvent, PointerEvent as ReactPointerEvent } from 'react'
 import { describe, expect, it } from 'vitest'
-import { routeRowWheel, startRowPush, stepRow, type RowWidths } from './row-drag.js'
+import {
+  routeRowWheel,
+  startEditorResize,
+  startRowPush,
+  stepEditorResize,
+  stepRow,
+  type RowWidths,
+} from './row-drag.js'
 
 function item(className: string, width: number): HTMLDivElement {
   const node = document.createElement('div')
@@ -57,6 +61,108 @@ function release(target: HTMLElement): void {
   target.dispatchEvent(new MouseEvent('pointerup'))
 }
 
+describe('resizing the editor divider', () => {
+  function editorSash(): HTMLDivElement {
+    const divider = sash()
+    let captured = false
+    divider.setPointerCapture = (): void => {
+      captured = true
+    }
+    divider.hasPointerCapture = (): boolean => captured
+    divider.releasePointerCapture = (): void => {
+      captured = false
+    }
+    return divider
+  }
+
+  function pointer(target: HTMLElement, type: string, clientX = 800, pointerId = 1): void {
+    const event = new MouseEvent(type, { clientX })
+    Object.defineProperty(event, 'pointerId', { value: pointerId })
+    target.dispatchEvent(event)
+  }
+
+  it('clamps a drag to the window and minimum, restores the origin and commits once', () => {
+    const divider = editorSash()
+    const applied: number[] = []
+    let commits = 0
+    startEditorResize(
+      press(divider, 800),
+      780,
+      1_280,
+      (width) => applied.push(width),
+      () => {
+        commits += 1
+      }
+    )
+    pointer(divider, 'pointermove', 1_700)
+    pointer(divider, 'pointermove', 400)
+    pointer(divider, 'pointermove', 800)
+    pointer(divider, 'pointerup')
+    pointer(divider, 'pointerup')
+    expect(applied).toEqual([1_280, 500, 780])
+    expect(commits).toBe(1)
+    expect(divider.hasPointerCapture(1)).toBe(false)
+  })
+
+  it('ignores another pointer and cleans up after losing capture', () => {
+    const divider = editorSash()
+    const applied: number[] = []
+    let commits = 0
+    startEditorResize(
+      press(divider, 800),
+      800,
+      1_000,
+      (width) => applied.push(width),
+      () => {
+        commits += 1
+      }
+    )
+    pointer(divider, 'pointermove', 1_200, 2)
+    pointer(divider, 'pointermove', 1_200)
+    divider.releasePointerCapture(1)
+    pointer(divider, 'lostpointercapture')
+    pointer(divider, 'pointermove', 400)
+    pointer(divider, 'pointerup')
+    expect(applied).toEqual([1_000])
+    expect(commits).toBe(1)
+  })
+
+  it('supports keyboard steps, Home and End without exceeding the bounds', () => {
+    const divider = editorSash()
+    let width = 800
+    const applied: number[] = []
+    let prevented = 0
+    const keys = [
+      { key: 'ArrowRight', shiftKey: false },
+      { key: 'ArrowRight', shiftKey: true },
+      { key: 'End', shiftKey: false },
+      { key: 'ArrowRight', shiftKey: false },
+      { key: 'Home', shiftKey: false },
+      { key: 'ArrowLeft', shiftKey: true },
+      { key: 'Tab', shiftKey: false },
+    ]
+    for (const key of keys) {
+      stepEditorResize(
+        {
+          ...key,
+          currentTarget: divider,
+          preventDefault: () => {
+            prevented += 1
+          },
+        } as unknown as ReactKeyboardEvent<HTMLDivElement>,
+        width,
+        1_000,
+        (next) => {
+          width = next
+          applied.push(next)
+        }
+      )
+    }
+    expect(applied).toEqual([808, 848, 1_000, 1_000, 500, 500])
+    expect(prevented).toBe(6)
+  })
+})
+
 describe('dragging a row divider', () => {
   it('resizes chats and restores them at the origin without writing an editor width', () => {
     const divider = sash()
@@ -97,7 +203,7 @@ describe('dragging a row divider', () => {
       sash(),
       item('conversation-slot', 500),
       divider,
-      item('traffic-box', 800)
+      item('traffic-box', 500)
     )
     const applied: RowWidths[] = []
 
@@ -111,7 +217,7 @@ describe('dragging a row divider', () => {
     moveTo(divider, 260)
     release(divider)
 
-    expect(applied).toEqual([{ boxes: [500], traffic: 840, terminal: null }])
+    expect(applied).toEqual([{ boxes: [500], traffic: 540, terminal: null }])
   })
 })
 
@@ -123,7 +229,7 @@ describe('the run terminal pane in the row', () => {
       sash(),
       item('conversation-slot', 500),
       sash(),
-      item('traffic-box', 800),
+      item('traffic-box', 500),
       divider,
       item('project-terminal-box', 640)
     )
@@ -139,7 +245,7 @@ describe('the run terminal pane in the row', () => {
     moveTo(divider, 260)
     release(divider)
 
-    expect(applied).toEqual([{ boxes: [500], traffic: 800, terminal: 680 }])
+    expect(applied).toEqual([{ boxes: [500], traffic: 500, terminal: 680 }])
   })
 
   it('reports the terminal width it left alone while Traffic grows', () => {
@@ -245,7 +351,7 @@ describe('nudging a row divider from the keyboard', () => {
       sash(),
       item('conversation-slot', 500),
       divider,
-      item('traffic-box', 800)
+      item('traffic-box', 500)
     )
     const applied: RowWidths[] = []
 
@@ -253,7 +359,7 @@ describe('nudging a row divider from the keyboard', () => {
       applied.push(widths)
     })
 
-    expect(applied).toEqual([{ boxes: [500], traffic: 840, terminal: null }])
+    expect(applied).toEqual([{ boxes: [500], traffic: 540, terminal: null }])
   })
 
   it('leaves every other key to the page', () => {

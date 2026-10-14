@@ -113,8 +113,14 @@ export function RemoteProjectDialog(props: {
           />
         </label>
 
-        <p className="hint" role="status">{status}</p>
-        {problem !== null && <p className="hint" role="alert">{problem}</p>}
+        <p className="hint" role="status">
+          {status}
+        </p>
+        {problem !== null && (
+          <p className="hint" role="alert">
+            {problem}
+          </p>
+        )}
 
         <div className="sheet-actions">
           <button

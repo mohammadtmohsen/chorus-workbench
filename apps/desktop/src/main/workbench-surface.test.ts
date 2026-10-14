@@ -70,7 +70,12 @@ const captureStill = (): { isEmpty: () => boolean; toJPEG: (quality: number) => 
   toJPEG: () => Buffer.from('still'),
 })
 
+const shellSenders = vi.hoisted(() => new WeakSet<object>())
+
 class FakeWebContents {
+  constructor() {
+    shellSenders.add(this)
+  }
   readonly listeners = new Map<string, ((...args: unknown[]) => void)[]>()
   readonly sent: unknown[] = []
   readonly mainFrame = { processId: 1, frameToken: randomUUID() }
@@ -124,6 +129,7 @@ class FakeWebContentsView {
   readonly webContents = new FakeWebContents()
   bounds: unknown = null
   constructor(options: { webPreferences: Record<string, unknown> }) {
+    shellSenders.delete(this.webContents)
     constructed.push(options)
   }
   setBounds(rect: unknown): void {
@@ -247,6 +253,13 @@ vi.mock('./remote-workbench.js', () => ({
     acquireRemoteWorkbenchRuntime(host, root),
   releaseRemoteWorkbenchRuntime: (host: string, root: string) =>
     releaseRemoteWorkbenchRuntime(host, root),
+}))
+
+vi.mock('./shell-windows.js', () => ({
+  isShellSender: (event: { readonly sender: object }) => shellSenders.has(event.sender),
+  shellWindows: () => [],
+  focusedShellWindow: () => null,
+  registerShellWindow: () => undefined,
 }))
 
 vi.mock('./workbench-host.js', () => ({
@@ -1071,6 +1084,14 @@ describe('the connection descriptor', () => {
     expect(() => pull?.({ sender: new FakeWebContents() })).toThrow(/unknown workbench surface/)
   })
 
+  it('refuses shell channels to a document that is not a Chorus window', async () => {
+    const website = new FakeWebContents()
+    shellSenders.delete(website)
+    await expect(
+      handlers.get('workbench:setVisible')?.({ sender: website }, { visible: false })
+    ).rejects.toThrow(/only available to Chorus windows/)
+  })
+
   it('refuses to let a surface open, close or choose', async () => {
     const grant = await grantFor(shell, ROOT_B)
     await openAt(shell, ROOT_A)
@@ -1694,5 +1715,108 @@ describe('bringing an editor back into view', () => {
     }
     await expect(opened).resolves.toMatchObject({ ok: true })
     await expect(closed).resolves.toMatchObject({ ok: true })
+  })
+})
+
+describe('a native participant under an overlay', () => {
+  it('conceals before an overlay capture and on a heartbeat, never on a show', async () => {
+    const viewId = await openAt(shell, ROOT_A)
+    const order: string[] = []
+    const view = {
+      webContents: {
+        isDestroyed: () => false,
+        capturePage: () => {
+          order.push('capture')
+          return Promise.resolve(captureStill())
+        },
+      },
+      visible: true,
+      setVisible(next: boolean): void {
+        this.visible = next
+      },
+      getVisible(): boolean {
+        return this.visible
+      },
+    }
+    const unregister = surface.registerOverlayParticipant({
+      id: 'browser-1',
+      owner: shell as never,
+      view: view as never,
+      shown: () => true,
+      conceal: () => {
+        order.push('conceal')
+      },
+    })
+    const setVisible = handlers.get('workbench:setVisible')
+    try {
+      await setVisible?.({ sender: shell }, { visible: false })
+      expect(order).toEqual(['conceal', 'capture', 'conceal'])
+      expect(view.visible).toBe(false)
+      await setVisible?.({ sender: shell }, { visible: false, heartbeat: true })
+      expect(order).toEqual(['conceal', 'capture', 'conceal', 'conceal', 'conceal'])
+      await setVisible?.({ sender: shell }, { visible: true })
+      expect(view.visible).toBe(true)
+      await setVisible?.({ sender: shell }, { visible: false, viewId })
+      await setVisible?.({ sender: shell }, { visible: true, viewId })
+      expect(order).toEqual(['conceal', 'capture', 'conceal', 'conceal', 'conceal'])
+    } finally {
+      await setVisible?.({ sender: shell }, { visible: true })
+      unregister()
+    }
+  })
+
+  it('conceals a hold begun during the overlay capture before the view is hidden', async () => {
+    await openAt(shell, ROOT_A)
+    const order: string[] = []
+    let holding = false
+    let finish: () => void = () => undefined
+    const view = {
+      webContents: {
+        isDestroyed: () => false,
+        capturePage: () => {
+          order.push('capture')
+          return new Promise<ReturnType<typeof captureStill>>((resolve) => {
+            finish = () => {
+              resolve(captureStill())
+            }
+          })
+        },
+      },
+      visible: true,
+      setVisible(next: boolean): void {
+        this.visible = next
+        order.push(`visible:${String(next)}`)
+      },
+      getVisible(): boolean {
+        return this.visible
+      },
+    }
+    const unregister = surface.registerOverlayParticipant({
+      id: 'browser-2',
+      owner: shell as never,
+      view: view as never,
+      shown: () => true,
+      conceal: () => {
+        order.push(holding ? 'conceal:holding' : 'conceal')
+        holding = false
+      },
+    })
+    const setVisible = handlers.get('workbench:setVisible')
+    try {
+      order.length = 0
+      const hiding = setVisible?.({ sender: shell }, { visible: false })
+      await new Promise<void>((resolve) => {
+        setTimeout(resolve, 0)
+      })
+      expect(order).toEqual(['conceal', 'capture'])
+      holding = true
+      finish()
+      await hiding
+      expect(order).toEqual(['conceal', 'capture', 'conceal:holding', 'visible:false'])
+      expect(holding).toBe(false)
+    } finally {
+      await setVisible?.({ sender: shell }, { visible: true })
+      unregister()
+    }
   })
 })

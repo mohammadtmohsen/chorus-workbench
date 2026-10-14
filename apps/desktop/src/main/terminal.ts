@@ -534,7 +534,7 @@ export class TerminalService {
 
   interrupt(ref: ProjectTerminalRef, generation: number): boolean {
     const session = this.find(ref)
-    if (session === null || session.generation !== generation || session.exited) return false
+    if (session?.generation !== generation || session.exited) return false
     session.pty.write('\x03')
     return true
   }
