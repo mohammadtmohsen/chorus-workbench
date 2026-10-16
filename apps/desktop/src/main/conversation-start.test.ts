@@ -171,6 +171,79 @@ describe('beginning a conversation', () => {
     expect(participant?.sent[0]?.text).toContain('remember the blue door')
   })
 
+  it('pins a side task before asynchronous startup and keeps later parent messages explicit', async () => {
+    const source = await runtime.startConversation({ projectId, agents: BOTH })
+    await runtime.send(source.conversationId, '@codex Investigate API retries.')
+    const decision = runtime.store.append({
+      conversationId: source.conversationId,
+      actor: 'codex',
+      payload: {
+        type: 'agent.message.completed',
+        itemRef: 'api-decision',
+        text: 'API calls must retry three times. Preserve authentication headers.',
+      },
+    })
+    const pin = runtime.store.read(source.conversationId).at(-1)?.seq
+    const begun = runtime.beginConversation({
+      projectId,
+      agents: BOTH,
+      continueFrom: source.conversationId,
+      objective: 'Fix API calls',
+    })
+    runtime.store.append({
+      conversationId: source.conversationId,
+      actor: 'user',
+      payload: { type: 'user.message', text: 'LATER_PARENT_CHANGE: use a different retry policy.' },
+    })
+    await runtime.awaitStart(begun.conversationId)
+    const creation = runtime.store
+      .read(begun.conversationId)
+      .find((entry) => entry.payload.type === 'conversation.created')
+    expect(creation?.payload).toMatchObject({
+      continuedFrom: source.conversationId,
+      forward: { throughSeq: pin, objective: 'Fix API calls', sourceEventIds: [decision?.id] },
+    })
+    expect(
+      runtime.store
+        .read(begun.conversationId)
+        .find(
+          (entry) =>
+            entry.payload.type === 'notice.raised' && entry.payload.code === 'contextCarried'
+        )?.payload
+    ).toMatchObject({ detail: 'Fix API calls' })
+    expect(
+      runtime.activeSessions().some((room) => room.conversationId === source.conversationId)
+    ).toBe(true)
+    expect(
+      runtime.activeSessions().find((room) => room.conversationId === begun.conversationId)?.draft
+    ).toBe('')
+    const routed = await runtime.send(begun.conversationId, 'Continue the selected task.')
+    expect(routed.targets).toEqual(['codex'])
+    const worker = codex.sessions.findLast((session) =>
+      session.sent.some((input) => input.text.includes('Continue the selected task.'))
+    )
+    expect(worker?.sent[0]?.text).toContain('three times')
+    expect(worker?.sent[0]?.text).toContain('Fix API calls')
+    expect(worker?.sent[0]?.text).not.toContain('LATER_PARENT_CHANGE')
+    const snapshot = worker?.startedWith?.transcript?.({
+      skip: 0,
+      count: 20,
+      query: 'LATER_PARENT_CHANGE',
+    })
+    expect(snapshot).toContain('0 matching records')
+    const updates = worker?.startedWith?.transcript?.({
+      skip: 0,
+      count: 20,
+      query: 'LATER_PARENT_CHANGE',
+      scope: 'updates',
+    })
+    expect(updates).toContain('LATER_PARENT_CHANGE')
+    expect(updates).toContain('not part of this conversation')
+    expect(
+      worker?.startedWith?.transcript?.({ skip: 0, count: 20, conversationId: 'unrelated' })
+    ).toContain('No conversation unrelated is readable')
+  })
+
   it('names no source when the room it continues has nothing to carry', async () => {
     const begun = runtime.beginConversation({
       projectId,
@@ -184,6 +257,111 @@ describe('beginning a conversation', () => {
       .find((event) => event.payload.type === 'conversation.created')
     expect(created?.payload).not.toHaveProperty('continuedFrom')
     expect(eventTypes(begun.conversationId)).not.toContain('notice.raised')
+  })
+
+  it('opens an empty composer without claiming background when its parent is empty', async () => {
+    const source = await runtime.startConversation({ projectId, agents: ['claude'] })
+    const child = runtime.beginConversation({
+      projectId,
+      agents: ['claude'],
+      continueFrom: source.conversationId,
+      objective: 'Investigate API retries',
+    })
+    await runtime.awaitStart(child.conversationId)
+    const events = runtime.store.read(child.conversationId)
+    expect(
+      events.find((entry) => entry.payload.type === 'conversation.created')?.payload
+    ).not.toHaveProperty('continuedFrom')
+    expect(
+      events.some(
+        (entry) => entry.payload.type === 'notice.raised' && entry.payload.code === 'contextCarried'
+      )
+    ).toBe(false)
+    expect(
+      runtime.activeSessions().find((room) => room.conversationId === child.conversationId)?.draft
+    ).toBe('')
+  })
+
+  it('titles a forwarded selection by its first line without splitting its final emoji', async () => {
+    const objective = `  \n  ${'x'.repeat(79)}🌍 trailing detail\nsecond line of the selection`
+    const child = runtime.beginConversation({ projectId, agents: ['claude'], objective })
+    await runtime.awaitStart(child.conversationId)
+    expect(child.title).toBe(`${'x'.repeat(79)}🌍`)
+    expect(Array.from(child.title)).toHaveLength(80)
+    expect(child.title).not.toMatch(/[\uD800-\uDFFF]/u)
+    expect(
+      runtime.activeSessions().find((room) => room.conversationId === child.conversationId)?.draft
+    ).toBe('')
+  })
+
+  it('anchors the selected messages of the parent and drops ids from anywhere else', async () => {
+    const source = await runtime.startConversation({ projectId, agents: BOTH })
+    const early = runtime.store.append({
+      conversationId: source.conversationId,
+      actor: 'user',
+      payload: { type: 'user.message', text: 'Keep the bullet points on separate lines.' },
+    })
+    runtime.store.append({
+      conversationId: source.conversationId,
+      actor: 'codex',
+      payload: {
+        type: 'agent.message.completed',
+        itemRef: 'later',
+        text: 'Unrelated later reply.',
+      },
+    })
+    const elsewhere = await runtime.startConversation({ projectId, agents: ['claude'] })
+    const foreign = runtime.store.append({
+      conversationId: elsewhere.conversationId,
+      actor: 'user',
+      payload: { type: 'user.message', text: 'Not part of the parent.' },
+    })
+    const child = runtime.beginConversation({
+      projectId,
+      agents: BOTH,
+      continueFrom: source.conversationId,
+      objective: 'Keep the bullet points on separate lines.',
+      sourceEventIds: [early?.id ?? '', foreign?.id ?? '', early?.id ?? ''],
+    })
+    await runtime.awaitStart(child.conversationId)
+    const created = runtime.store
+      .read(child.conversationId)
+      .find((entry) => entry.payload.type === 'conversation.created')
+    expect(created?.payload).toMatchObject({ forward: { sourceEventIds: [early?.id] } })
+  })
+
+  it('continues with the source agent, title, profile, plan mode and answer style', async () => {
+    writeSettings(dataPath, { ...DEFAULT_SETTINGS, styleOnByDefault: false })
+    const source = await runtime.startConversation({
+      projectId,
+      agents: BOTH,
+      title: 'Home comparison',
+      profileId: 'workspace-write',
+    })
+    await runtime.send(source.conversationId, '@codex Remember the Home comparison.')
+    await runtime.setAnswerStyle(source.conversationId, true)
+    await runtime.setPlanMode(source.conversationId, true)
+    const continued = await runtime.startConversation({
+      projectId,
+      agents: BOTH,
+      continueFrom: source.conversationId,
+      profileId: 'read-only',
+    })
+    expect(continued.title).toBe('Home comparison')
+    expect(continued.profileId).toBe('workspace-write')
+    expect(runtime.answerStyle(continued.conversationId)).toBe(true)
+    expect(runtime.planning(continued.conversationId)).toBe(true)
+    const result = await runtime.send(continued.conversationId, 'Continue the comparison.')
+    expect(result.targets).toEqual(['codex'])
+    const reader = runtime.store
+      .read(continued.conversationId)
+      .find(
+        (event) => event.payload.type === 'session.started' && event.payload.agentId === 'codex'
+      )
+    const ref = reader?.payload.type === 'session.started' ? reader.payload.sessionRef : undefined
+    const session = codex.sessions.find((candidate) => candidate.sessionRef === ref)
+    expect(session?.permissionModes.at(-1)).toBe('plan')
+    expect(session?.sent[0]?.text).toContain('Remember the Home comparison.')
   })
 
   it('refuses under the read-only flag before minting anything', () => {

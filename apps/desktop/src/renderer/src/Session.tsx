@@ -6,6 +6,8 @@ import { NOTE_IMAGE_DRAG_TYPE, noteImageUrls } from './attach.js'
 import { formatDiagnosticBlock } from './editor-context.js'
 import { fitCard, type AsidePurpose } from './aside.js'
 import { Composer, type ComposerHandle, type ComposerState } from './Composer.js'
+import { ConversationNote } from './ConversationNote.js'
+import { useConversationNote } from './useConversationNote.js'
 import { isLiveReply } from '../../shared/live-message.js'
 import { Entry, ToolPatch } from './Entry.js'
 import { ErrorNotice } from './ErrorNotice.js'
@@ -13,6 +15,8 @@ import { focusedNow, fullyVisible, mayTakeCaret } from './focus.js'
 import { profileHas, profileMark, profileMarkAfterPaint } from './profile-marks.js'
 import { thinkingWord, offsetForActor, THINKING_WORD_MS, AWAITING_MAX_MS } from './thinking-word.js'
 import { QuickQuestion } from './QuickQuestion.js'
+import { TaskProgress } from './TaskProgress.js'
+import type { LiveSource } from './task-strip.js'
 import {
   anchorOf,
   askableSource,
@@ -31,6 +35,7 @@ import {
   EMPTY_VIEW,
   finalAnswerKey,
   applyTranscriptState,
+  mergeTaskState,
   prependEvents,
   reduceEvents,
   reduceTranscriptRead,
@@ -67,7 +72,7 @@ import {
  * its text separately from its input needs naming, not inferring.
  */
 const FOCUS_KEEPS_ITS_OWN =
-  'button, a, input, textarea, select, summary, [role="button"], [contenteditable], .approval, .question, .terminal-panel, .monaco-editor'
+  'button, a, input, textarea, select, summary, [role="button"], [contenteditable], .approval, .question, .terminal-panel, .monaco-editor, .conversation-note'
 
 /**
  * The transcript entry a DOM node sits inside, in the shape `askableSource`
@@ -109,6 +114,11 @@ export type { AgentId }
  */
 export const ALL_AGENTS: AgentId[] = ['codex', 'claude', 'deepseek']
 
+export interface ForwardSelection {
+  readonly text: string
+  readonly sourceEventIds: readonly string[]
+}
+
 export interface SessionInfo {
   readonly conversationId: string
   readonly participants: AgentId[]
@@ -122,6 +132,7 @@ export interface SessionInfo {
   readonly profileId: string
   readonly title: string
   readonly starting?: boolean | undefined
+  readonly restarting?: boolean | undefined
 }
 
 /**
@@ -147,6 +158,7 @@ export interface SessionCarry {
   readonly view: TranscriptView
   readonly draft: string
   readonly attached: readonly Attachment[]
+  readonly mode?: 'work' | 'discussion'
   readonly following: boolean
   /**
    * Where the reader was, as a row and an offset into it — not a pixel offset.
@@ -238,7 +250,7 @@ export function Session(props: {
    * only `App` knows how to put one in the workspace. The pane knows which room
    * is being continued and nothing else about it.
    */
-  onContinue: () => void
+  onForward: (selection: ForwardSelection) => void
   /*
    * Undefined is spelled out because `exactOptionalPropertyTypes` is on: the
    * caller reads this out of a Map, and a miss is a real value it has to be
@@ -282,13 +294,22 @@ export function Session(props: {
 }): React.JSX.Element {
   const { t } = useTranslation()
   const { conversationId, participants, cwd } = props.session
-  const [view, setView] = useState<TranscriptView>(props.carry?.view ?? EMPTY_VIEW)
+  const restarting = props.session.restarting === true
+  const preparing = props.session.starting === true || restarting
+  const [view, setView] = useState<TranscriptView>(() =>
+    props.carry === undefined ? EMPTY_VIEW : { ...EMPTY_VIEW, ...props.carry.view }
+  )
+  const pendingReplies = Object.values(view.replies)
+  const workingAgents = [
+    ...new Set([...view.working, ...pendingReplies.map((reply) => reply.agentId)]),
+  ]
   /** The composer holds the draft now; the pane only reads it on unmount. */
   const composer = useRef<ComposerHandle | null>(null)
   /** Where the composer leaves its draft, so the pane can carry it out. */
   const box = useRef<ComposerState>({
     draft: props.carry?.draft ?? '',
     attached: [...(props.carry?.attached ?? [])],
+    mode: props.carry?.mode ?? 'work',
   })
   const [error, setError] = useState<string | null>(null)
 
@@ -315,6 +336,7 @@ export function Session(props: {
    */
   const activityByAgent = useSessionActivity(conversationId)
   const backgroundAgents = useBackgroundAgents(conversationId)
+  const note = useConversationNote(conversationId, props.session.starting === true)
   /** A passage selected in this pane's transcript, and where to offer to quote it. */
   const [selected, setSelected] = useState<{
     text: string
@@ -332,6 +354,7 @@ export function Session(props: {
      * to expand on — `null` when it can only be quoted.
      */
     source: SourceEntry | null
+    sourceEventIds: string[]
   } | null>(null)
   /**
    * The open quick-question card, if any.
@@ -402,6 +425,25 @@ export function Session(props: {
     pending.current = []
   }, [conversationId])
 
+  const refreshTaskOnMount = useRef((props.carry?.view.lastSeq ?? 0) > 0)
+  const taskEpoch = view.taskEpoch
+  const taskBehind = view.taskEpoch !== view.taskSyncedEpoch
+  useEffect(() => {
+    if (!taskBehind && !refreshTaskOnMount.current) return undefined
+    let current = true
+    window.chorus
+      .taskState({ conversationId })
+      .then(({ task, throughSeq }) => {
+        if (!current) return
+        refreshTaskOnMount.current = false
+        setView((held) => mergeTaskState(held, task, taskEpoch, throughSeq))
+      })
+      .catch(fail(setError))
+    return () => {
+      current = false
+    }
+  }, [conversationId, taskEpoch, taskBehind])
+
   useEffect(
     () =>
       window.chorus.onEvents((events) => {
@@ -438,7 +480,7 @@ export function Session(props: {
         view.lastSeq > 0
           ? // Coming back to a pane that still holds its transcript: catch up on
             // what was missed rather than re-reading a page it already has.
-            { conversationId, afterSeq: view.lastSeq }
+            { conversationId, afterSeq: view.lastSeq, live: true }
           : // A cold open reads the newest page, not the conversation.
             { conversationId, limit: PAGE_EVENTS }
       )
@@ -463,7 +505,10 @@ export function Session(props: {
            * may have decided an approval or answered a question, and applying
            * the snapshot last would put the card back.
            */
-          const withState = state === undefined ? read : applyTranscriptState(read, state)
+          const withState =
+            state === undefined
+              ? read
+              : applyTranscriptState(read, { ...state, replies: state.replies ?? [] })
           const next = held.length === 0 ? withState : reduceEvents(withState, held)
           // Inside the updater, which React runs during the render pass — so
           // this is genuinely when the fold finished, not when it was queued.
@@ -725,27 +770,6 @@ export function Session(props: {
     }
   }, [view.busy])
 
-  /**
-   * Agents already writing: their words say more than a label would.
-   *
-   * **`kind === 'message'` is load-bearing, and leaving it out cost the feature
-   * entirely.** Nothing ever completes a reasoning row — there is no
-   * `agent.reasoning.completed` event, and `transcript.test.ts` pins that on
-   * purpose — so a reasoning row is `streaming` for the rest of the session.
-   * Without this filter the first `Show thinking` Claude emitted put that agent
-   * in here permanently, and the working line was never drawn again however long
-   * the turn ran or whatever `busy` said. Reported as silent stretches where
-   * commands scroll past with nothing saying anyone is working.
-   *
-   * `Entry.tsx` already guards the avatar's pulse the same way and for the same
-   * reason; this is the copy that was missing.
-   */
-  const streaming = new Set(
-    view.messages
-      .filter((m) => m.kind === 'message' && m.status === 'streaming')
-      .map((m) => m.actor)
-  )
-
   /*
    * The transcript is split at the last thing you said.
    *
@@ -907,7 +931,11 @@ export function Session(props: {
       sourceEntryAt(range.endContainer),
       text
     )
-    setSelected(anchor === null ? null : { text, source, anchor })
+    const sourceEventIds = [
+      sourceEntryAt(range.startContainer)?.eventId ?? '',
+      sourceEntryAt(range.endContainer)?.eventId ?? '',
+    ].filter((id, index, all) => id !== '' && all.indexOf(id) === index)
+    setSelected(anchor === null ? null : { text, source, anchor, sourceEventIds })
   }, [])
 
   useEffect(() => {
@@ -1408,10 +1436,11 @@ export function Session(props: {
      * an error or a refusal arrives as a notice, and the row must not outlive
      * the turn it was waiting for.
      */
+    const latest = view.messages.at(-1)
     if (
       view.working.length === 0 &&
-      view.messages.at(-1)?.actor !== 'system' &&
-      !isLiveReply(view.messages.at(-1)?.key ?? '')
+      !(latest?.actor === 'system' && (latest.level === 'error' || latest.level === 'warn')) &&
+      !(latest?.kind === 'message' && isAgentId(latest.actor))
     )
       return
     setAwaiting(false)
@@ -1455,6 +1484,15 @@ export function Session(props: {
       clearTimeout(timer)
     }
   }, [awaiting])
+
+  const { onForward } = props
+  const forwardSelection = useCallback(() => {
+    const passage = selected
+    if (passage === null) return
+    setSelected(null)
+    window.getSelection()?.removeAllRanges()
+    onForward({ text: passage.text, sourceEventIds: passage.sourceEventIds })
+  }, [onForward, selected])
 
   const sendSelection = useCallback(() => {
     const passage = selected
@@ -1743,14 +1781,20 @@ export function Session(props: {
    * re-render every row it has ever written if it were passed to all of them.
    * One row per working agent changes; the rest keep their stable element.
    */
-  const liveKeys = new Set(
-    view.working.map(
+  const liveKeys = new Set([
+    ...view.working.map(
       (actor) =>
         view.messages.findLast(
           (m) => m.actor === actor && m.kind === 'message' && !isLiveReply(m.key)
         )?.key
-    )
-  )
+    ),
+    ...pendingReplies.map(
+      (reply) =>
+        view.messages.findLast(
+          (message) => message.kind === 'message' && message.key.startsWith(`${reply.requestId}:`)
+        )?.key
+    ),
+  ])
 
   const entry = (message: TranscriptMessage, index: number): React.JSX.Element => (
     <Entry
@@ -1863,9 +1907,6 @@ export function Session(props: {
    * happening, and from whom" is answered where you are already looking. Two
    * agents waiting stack, in the order the conversation put them in.
    *
-   * Only until the first words arrive: once an agent is writing, its text is a
-   * better indicator than any label, and leaving both would say the same thing
-   * twice.
    */
   /*
    * Who will answer is not ours to say.
@@ -1877,7 +1918,7 @@ export function Session(props: {
    */
   const soleAgent = participants.length === 1 ? participants[0] : undefined
   const waitingRow =
-    awaiting && view.working.length === 0 ? (
+    awaiting && view.working.length === 0 && pendingReplies.length === 0 ? (
       <WaitingRow soleAgent={soleAgent} stalled={stalled} />
     ) : null
 
@@ -1890,30 +1931,71 @@ export function Session(props: {
     return found === undefined || found === '' ? null : (found as ActivityPush['activity'])
   }
 
-  const thinking = view.working
-    .filter((agent) => !streaming.has(agent))
-    .map((agent) => (
-      <article key={`thinking:${agent}`} className={`entry entry--${agent} entry--thinking`}>
-        <span className="entry-mark" aria-hidden="true">
-          <span className="tick" />
-        </span>
-        <div className="entry-head">
-          <span className="speaker">{t(`actor.${agent}`)}</span>
-        </div>
-        <p className="said thinking" role="status">
+  const liveSource: LiveSource = {
+    working: view.working,
+    workingSince: view.workingSince,
+    turns: view.turns,
+    replies: pendingReplies,
+    operations: Object.values(view.operations),
+    evidenceAt: view.evidenceAt,
+    handoffs: Object.values(view.handoffs),
+    approvals: view.approvals,
+    questions: view.questions,
+    activity: Object.fromEntries(view.working.map((agent) => [agent, activityOf(agent)])),
+  }
+
+  const thinking = view.working.map((agent) => (
+    <article key={`thinking:${agent}`} className={`entry entry--${agent} entry--thinking`}>
+      <span className="entry-mark" aria-hidden="true">
+        <span className="tick" />
+      </span>
+      <div className="entry-head">
+        <span className="speaker">{t(`actor.${agent}`)}</span>
+      </div>
+      <p className="said thinking" role="status">
+        {activityOf(agent) === null ? (
+          t('workspace.working')
+        ) : (
           <ThinkingWord
             kind="thinking"
             offset={offsetForActor(agent)}
             activity={activityOf(agent)}
           />
-          <span className="thinking-dots" aria-hidden="true">
-            <i />
-            <i />
-            <i />
-          </span>
-        </p>
-      </article>
-    ))
+        )}
+        <span className="thinking-dots" aria-hidden="true">
+          <i />
+          <i />
+          <i />
+        </span>
+      </p>
+    </article>
+  ))
+
+  const discussionThinking = pendingReplies.map((reply) => (
+    <article key={reply.requestId} className={`entry entry--${reply.agentId} entry--thinking`}>
+      <span className="entry-mark" aria-hidden="true">
+        <span className="tick" />
+      </span>
+      <div className="entry-head">
+        <span className="speaker">{t(`actor.${reply.agentId}`)}</span>
+        <span className="entry-live-label">{t('live.chat')}</span>
+      </div>
+      <p className="said thinking" role="status">
+        {reply.phase === 'waiting' ? (
+          t('live.waiting')
+        ) : reply.phase === 'replying' ? (
+          t('live.replying')
+        ) : (
+          <ThinkingWord kind="thinking" offset={offsetForActor(reply.agentId)} activity={null} />
+        )}
+        <span className="thinking-dots" aria-hidden="true">
+          <i />
+          <i />
+          <i />
+        </span>
+      </p>
+    </article>
+  ))
 
   const waitingOnBackground =
     view.working.length === 0 && !awaiting
@@ -1943,6 +2025,43 @@ export function Session(props: {
             </article>
           ))
       : null
+
+  const readiness =
+    preparing || (spoken.length === 0 && !view.busy && !awaiting && participants.length > 0) ? (
+      <article
+        className="entry entry--system session-readiness"
+        data-preparing={preparing ? 'true' : undefined}
+        role="status"
+        aria-live="polite"
+        aria-atomic="true"
+      >
+        <span className="entry-mark" aria-hidden="true">
+          <span className="tick" />
+        </span>
+        <div className="entry-head">
+          <span className="speaker">{t('actor.system')}</span>
+        </div>
+        <div className="said">
+          <p className="session-readiness-line">
+            {preparing && <span className="composer-spinner" aria-hidden="true" />}
+            <span>
+              {t(
+                restarting
+                  ? 'conversation.restarting'
+                  : preparing
+                    ? 'conversation.agentsStarting'
+                    : 'conversation.readyToSend'
+              )}
+            </span>
+          </p>
+          {preparing && (
+            <p className="session-readiness-hint">
+              {t(restarting ? 'conversation.restartingHint' : 'conversation.startingHint')}
+            </p>
+          )}
+        </div>
+      </article>
+    ) : null
 
   return (
     <section
@@ -2137,6 +2256,7 @@ export function Session(props: {
           }}
         >
           <div className="score-content" ref={transcript}>
+            {readiness}
             {/* History: everything said before the question now being answered. */}
             {(currentTurn === undefined ? rows : rows.filter((r) => startOf(r) < turnAt)).map(row)}
 
@@ -2145,6 +2265,7 @@ export function Session(props: {
               // can still be working, and says so at the foot as it always did.
               <>
                 {thinking}
+                {discussionThinking}
                 {waitingRow}
                 {waitingOnBackground}
               </>
@@ -2178,6 +2299,7 @@ export function Session(props: {
                   still exactly one of it per working agent.
                 */}
                 {thinking}
+                {discussionThinking}
                 {waitingRow}
                 {waitingOnBackground}
               </div>
@@ -2225,6 +2347,9 @@ export function Session(props: {
                 </button>
                 <button type="button" className="quote-offer-action" onClick={quoteSelection}>
                   {t('conversation.quoteInMessage')}
+                </button>
+                <button type="button" className="quote-offer-action" onClick={forwardSelection}>
+                  {t('conversation.forwardSelection')}
                 </button>
                 {/*
                   Offered only where an aside can actually be answered. A passage that
@@ -2291,6 +2416,7 @@ export function Session(props: {
          * the work under discussion, and giving it the same axis switch would
          * mean two grips changing meaning together for no gain.
          */}
+        {note.view.visible ? <ConversationNote note={note} /> : null}
       </div>
 
       {askingAbout !== null && (
@@ -2400,6 +2526,17 @@ export function Session(props: {
           />
         )}
 
+        <TaskProgress
+          conversationId={conversationId}
+          task={view.task}
+          assignment={view.assignment}
+          syncing={taskBehind}
+          working={view.working}
+          workingSince={view.workingSince}
+          live={liveSource}
+          onError={fail(setError)}
+        />
+
         <Composer
           ref={composer}
           conversationId={conversationId}
@@ -2413,12 +2550,13 @@ export function Session(props: {
            */
           participants={ALL_AGENTS}
           starting={props.session.starting === true}
+          restarting={props.session.restarting === true}
           busy={view.busy}
-          working={view.working}
+          workBusy={view.working.length > 0}
+          working={workingAgents}
           backgroundAgents={backgroundAgents}
           ide={ide}
           onRestart={props.onRestart}
-          onContinue={props.onContinue}
           report={box}
           history={spoken}
           {...(props.carry === undefined
@@ -2427,6 +2565,7 @@ export function Session(props: {
                 initial: {
                   draft: props.carry.draft,
                   attached: props.carry.attached,
+                  ...(props.carry.mode === undefined ? {} : { mode: props.carry.mode }),
                 },
               })}
           onError={fail(setError)}
@@ -2437,6 +2576,12 @@ export function Session(props: {
           }}
           onSendFailed={() => {
             setAwaiting(false)
+          }}
+          note={{
+            visible: note.view.visible,
+            load: note.state.load,
+            attention: note.attention,
+            onToggle: note.toggle,
           }}
         />
       </div>

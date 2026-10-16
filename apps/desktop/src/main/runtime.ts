@@ -12,13 +12,45 @@ import type {
   HealthStatus,
   McpServerHealth,
   ModelChoice,
+  NativePlanStep,
+  ProgressReport,
+  ProgressStep,
+  ProjectToolResult,
   SessionOpts,
   SlashCommandInfo,
+  TranscriptRequest,
   UsageWindow,
   UserInputResponse,
   EditorEditCapability,
 } from '@chorus/agent-protocol'
-import { mergeUsageWindows } from '@chorus/agent-protocol'
+import {
+  mergeUsageWindows,
+  nativeProgressSteps,
+  noteReminder,
+  PROGRESS_INSTRUCTION,
+  readOnlyNote,
+  validateProgressReport,
+} from '@chorus/agent-protocol'
+import {
+  reduceTask,
+  TASK_IGNORED_ITEM_REF_PREFIXES,
+  taskBundleFrom,
+  taskOutcomeOf,
+  type TaskBundle,
+  type TaskSnapshot,
+} from '../shared/task-progress.js'
+import {
+  digestAssignment,
+  interruptedTurns,
+  renderDigest,
+  renderForwardedList,
+  renderForwardedRefusal,
+  renderNotForwarded,
+  renderRecord,
+  renderSearch,
+  type BindAssignmentResult,
+  type ForwardedReadContext,
+} from './forwarded-work.js'
 import {
   hasWorkbenchSurface,
   refreshWorkbenchTerminalEnv,
@@ -29,7 +61,9 @@ import {
 } from './workbench-surface.js'
 import {
   AppNoteStore,
+  ConversationNoteStore,
   EventStore,
+  FORWARDED_PAGE,
   KeptNoteStore,
   LOCAL_HOST,
   openSqlite,
@@ -38,15 +72,19 @@ import {
   type AsideSummary,
   type ConversationSummary,
   type KeptNote,
+  type LiveState,
   type RunCommands,
   type SqliteHandle,
   type StoredEvent,
+  type TaskStepPayload,
   type TranscriptState,
 } from '@chorus/event-store'
 import {
   callRule,
   composeCarryover,
-  composeHistory,
+  composeCatchup,
+  composeTranscript,
+  CONTEXT_DEFERRED_PREFIX,
   ConversationService,
   DEFAULT_PROFILE_ID,
   findReplyHandoff,
@@ -55,7 +93,9 @@ import {
   PROFILES,
   SessionGrants,
   SupervisedSession,
+  withCallRule,
   withCatchup,
+  type CarryoverOptions,
   type CarryoverSource,
   type PermissionProfile,
   type ReplyHandoff,
@@ -65,8 +105,13 @@ import {
   isAgentId,
   newConversationId,
   newHandoffId,
+  redactText,
+  uuidv7,
   type AgentId,
   type ApprovalId,
+  type ConversationNote,
+  type ConversationNoteView,
+  type ConversationNoteWrite,
   type Logger,
 } from '@chorus/shared'
 import { relativeWithin } from '@chorus/workspace'
@@ -75,6 +120,7 @@ import {
   type ActivityPush,
   type AttentionEvent,
   type ContextUsagePush,
+  type ConversationNotePush,
   type TasksPush,
   type TrafficSourceShape,
 } from '../shared/ipc.js'
@@ -126,13 +172,27 @@ import type { WorkspaceSnapshot } from '../shared/workspace-layout.js'
 import { sdkExecutablePath, spawnSpec } from './command.js'
 import { resolveCommand } from './which.js'
 import {
+  isDiscussion,
   isLiveReply,
   liveMessageAction,
   liveMessageText,
   type LiveMessageMode,
 } from '../shared/live-message.js'
-import { LiveReplies } from './live-replies.js'
+import {
+  LIVE_QUESTION_CONTEXT_BYTES,
+  LiveReplies,
+  type DiscussionContextOptions,
+} from './live-replies.js'
 import { mainT } from './i18n.js'
+import { conversationChain, forwardContext, type ForwardContext } from './conversation-context.js'
+import {
+  contextBudget,
+  deferredContext,
+  fitContextExcerpt,
+  fitContextTail,
+  hasTranscript,
+  type ContextWindow,
+} from './context-budget.js'
 
 /**
  * Wires the domain to real agents inside the main process.
@@ -187,6 +247,8 @@ export interface StartConversationOptions {
    * so restarting is the one gesture that reliably clears what was carried.
    */
   readonly continueFrom?: string
+  readonly objective?: string
+  readonly sourceEventIds?: readonly string[]
 }
 
 const FAILED_START_LIMIT = 64
@@ -220,6 +282,7 @@ interface Participant {
    * time the agent is addressed.
    */
   seenSeq: number
+  deferredMessages?: { readonly sessionRef: string; readonly seqs: Set<number> }
   /**
    * Context this agent must be given, prepended to the **next** real message.
    *
@@ -235,6 +298,7 @@ interface Participant {
    * So it waits here, costs nothing, and rides along when the user next speaks.
    */
   seedContext?: string
+  continuationPending?: boolean
   /**
    * A larger catch-up allowance, used once.
    *
@@ -248,6 +312,53 @@ interface Participant {
   commands?: readonly SlashCommandInfo[]
   lastReply?: { readonly eventId: string; readonly text: string }
   dispatchEpoch?: number
+  origin?: TaskOrigin
+}
+
+interface TaskOrigin {
+  readonly eventId: string
+  readonly at: number
+}
+
+type TaskPayload = Extract<
+  StoredEvent['payload'],
+  { type: 'task.opened' | 'task.revised' | 'task.closed' }
+>
+
+type TaskClosedReason = Extract<TaskPayload, { type: 'task.closed' }>['reason']
+
+type HandoffOutcome = Extract<StoredEvent['payload'], { type: 'handoff.outcome' }>
+
+function discussionOpts(opts: SessionOpts): SessionOpts {
+  const { progress: _progress, instructions, note, ...rest } = opts
+  const kept = (instructions ?? '')
+    .split('\n\n')
+    .filter((part) => part !== PROGRESS_INSTRUCTION)
+    .join('\n\n')
+  const readable = note === undefined ? rest : { ...rest, note: readOnlyNote(note) }
+  return kept === '' ? readable : { ...readable, instructions: kept }
+}
+
+function redactedStep(step: ProgressStep): TaskStepPayload {
+  return {
+    id: step.id,
+    title: redactText(step.title).text,
+    status: step.status,
+    ...(step.label === undefined ? {} : { label: step.label }),
+    ...(step.parentId === undefined ? {} : { parentId: step.parentId }),
+    ...(step.estimateMinutes === undefined ? {} : { estimateMinutes: step.estimateMinutes }),
+    ...(step.dependsOn === undefined ? {} : { dependsOn: [...step.dependsOn] }),
+  }
+}
+
+function sameNativeSteps(a: readonly TaskStepPayload[], b: readonly TaskStepPayload[]): boolean {
+  return (
+    a.length === b.length &&
+    a.every((step, index) => {
+      const other = b[index]
+      return step.id === other?.id && step.title === other.title && step.status === other.status
+    })
+  )
 }
 
 /**
@@ -391,7 +502,6 @@ interface ActiveConversation {
    */
   readonly cwd: string
   title: string
-  /** Who the user last addressed, so an unaddressed follow-up stays with them. */
   lastAddressed: AgentId | undefined
   /** How far this conversation's card had been read. See `OpenSession`. */
   lastSeenSeq: number
@@ -427,7 +537,10 @@ interface StartingConversation {
   readonly profile: PermissionProfile
   readonly grants: SessionGrants
   readonly styleOn: boolean
+  readonly lastAddressed: AgentId | undefined
+  readonly planning: boolean
   readonly continueFrom: string | undefined
+  readonly forward: ForwardContext | undefined
   readonly settled: Promise<StartOutcome>
   readonly settle: (outcome: StartOutcome) => void
   readonly started: Participant[]
@@ -443,8 +556,6 @@ interface StartingConversation {
  * it does not know which half it is missing.
  */
 const JOINING_CATCHUP_CHARS = 60_000
-
-const HANDOFF_CONTEXT_CHARS = 20_000
 
 /**
  * What the fork is actually asked.
@@ -1115,6 +1226,7 @@ export function recapLedger(events: readonly StoredEvent[], cwd = ''): RecapLedg
        * to `approval.requested` and "the user refused something" reads as blocked
        * far more often than it is. See the plan's open questions.
        */
+      case 'reply.status':
       case 'conversation.created':
       case 'session.started':
       case 'session.ended':
@@ -1132,6 +1244,8 @@ export function recapLedger(events: readonly StoredEvent[], cwd = ''): RecapLedg
       case 'userinput.requested':
       case 'userinput.answered':
       case 'handoff.created':
+      case 'handoff.outcome':
+      case 'assignment.bound':
       case 'context.compacted':
       case 'usage.updated':
       case 'conversation.renamed':
@@ -1140,6 +1254,10 @@ export function recapLedger(events: readonly StoredEvent[], cwd = ''): RecapLedg
       case 'policy.changed':
       case 'tool.progress':
       case 'notice.raised':
+      case 'task.opened':
+      case 'task.revised':
+      case 'task.closed':
+      case 'usage.blocked':
       case 'approval.withdrawn':
         /*
          * A withdrawal joins this group for the group's own reason: the ledger
@@ -1582,7 +1700,12 @@ export class ChorusRuntime {
   private readonly limits = new Map<AgentId, readonly UsageWindow[]>()
   private onLimits: ((push: { agentId: AgentId; windows: UsageWindow[] }) => void) | undefined
   private onContextUsage: ((push: ContextUsagePush) => void) | undefined
+  private readonly contextWindows = new Map<
+    string,
+    { readonly sessionRef: string; readonly usage: ContextWindow }
+  >()
   private onTasks: ((push: TasksPush) => void) | undefined
+  private readonly noteListeners = new Set<(push: ConversationNotePush) => void>()
   private onConversations: (() => void) | undefined
   private onActivity: ((push: ActivityPush) => void) | undefined
   private onAttention: ((push: AttentionEvent) => void) | undefined
@@ -1644,6 +1767,7 @@ export class ChorusRuntime {
      * addressed by id, made and deleted one at a time.
      */
     private readonly keptNotes: KeptNoteStore,
+    private readonly conversationNotes: ConversationNoteStore,
     private readonly deferRestoredAgents: boolean
   ) {
     this.liveReplies = new LiveReplies(this.store)
@@ -1808,6 +1932,7 @@ export class ChorusRuntime {
       projects,
       new AppNoteStore(db),
       new KeptNoteStore(db),
+      new ConversationNoteStore(db),
       options.deferRestoredAgents ?? false
     )
   }
@@ -1856,6 +1981,13 @@ export class ChorusRuntime {
    */
   onTasksReported(listener: (push: TasksPush) => void): void {
     this.onTasks = listener
+  }
+
+  onNoteChanged(listener: (push: ConversationNotePush) => void): () => void {
+    this.noteListeners.add(listener)
+    return () => {
+      this.noteListeners.delete(listener)
+    }
   }
 
   onConversationsChanged(listener: () => void): void {
@@ -2018,7 +2150,36 @@ export class ChorusRuntime {
     }
 
     const conversationId = newConversationId()
-    const profile = profileById(options.profileId ?? '')
+    const source =
+      options.continueFrom === undefined ? undefined : this.active.get(options.continueFrom)
+    const sourceEvents =
+      options.continueFrom === undefined ? [] : this.store.read(options.continueFrom)
+    const latestRequest = sourceEvents.findLast((event) => event.payload.type === 'user.message')
+    const objective = (
+      options.objective ??
+      (latestRequest?.payload.type === 'user.message' ? latestRequest.payload.text : undefined) ??
+      ''
+    )
+      .trim()
+      .slice(0, 2000)
+    const anchored = [...new Set(options.sourceEventIds ?? [])]
+      .filter((id) => sourceEvents.some((event) => event.id === id))
+      .slice(0, 20)
+    const forward =
+      options.continueFrom === undefined || objective === ''
+        ? undefined
+        : {
+            throughSeq: sourceEvents.at(-1)?.seq ?? 0,
+            objective,
+            sourceEventIds:
+              anchored.length > 0
+                ? anchored
+                : sourceEvents
+                    .filter((event) => event.payload.type === 'agent.message.completed')
+                    .slice(-1)
+                    .map((event) => event.id),
+          }
+    const profile = profileById(source?.profile.id ?? options.profileId ?? '')
 
     // One set of grants for the whole conversation: allowing something for
     // Codex should not mean being asked again the moment Claude does the same.
@@ -2039,7 +2200,7 @@ export class ChorusRuntime {
      * nothing on its first click, because `setAnswerStyle` returns early when the
      * flag already matches what was asked for.
      */
-    const styleOn = this.defaultStyleOn()
+    const styleOn = source?.styleOn ?? this.defaultStyleOn()
 
     let settle: (outcome: StartOutcome) => void = () => undefined
     const settled = new Promise<StartOutcome>((resolve) => {
@@ -2050,11 +2211,29 @@ export class ChorusRuntime {
       agents,
       projectId: options.projectId,
       cwd,
-      title: options.title ?? folderName(cwd),
+      title:
+        options.title ??
+        (options.objective === undefined
+          ? (source?.title ?? folderName(cwd))
+          : Array.from(
+              (
+                options.objective
+                  .trim()
+                  .split(/\r?\n/u)
+                  .find((line) => line.trim() !== '') ?? ''
+              )
+                .trim()
+                .replace(/\s+/gu, ' ')
+            )
+              .slice(0, 80)
+              .join('')),
       profile,
       grants,
       styleOn,
+      lastAddressed: source?.lastAddressed,
+      planning: source?.planning ?? false,
       continueFrom: options.continueFrom,
+      forward,
       settled,
       settle,
       started: [],
@@ -2123,7 +2302,15 @@ export class ChorusRuntime {
     const carryover =
       starting.continueFrom === undefined
         ? null
-        : composeCarryover(this.carriedChain(starting.continueFrom))
+        : composeCarryover(
+            this.carriedChain(starting.continueFrom, starting.forward?.throughSeq),
+            starting.forward === undefined
+              ? {}
+              : {
+                  objective: starting.forward.objective,
+                  sourceEventIds: starting.forward.sourceEventIds,
+                }
+          )
 
     this.store.append({
       conversationId,
@@ -2135,7 +2322,10 @@ export class ChorusRuntime {
         // a seed that does not exist, every launch, forever.
         ...(carryover === null || starting.continueFrom === undefined
           ? {}
-          : { continuedFrom: starting.continueFrom }),
+          : {
+              continuedFrom: starting.continueFrom,
+              ...(starting.forward === undefined ? {} : { forward: starting.forward }),
+            }),
         /*
          * A real project id at last. This read `options.projectId ?? cwd`, so
          * every conversation ever started without one recorded its *path* in the
@@ -2174,7 +2364,7 @@ export class ChorusRuntime {
           // The words live in `en.json`; this is the fallback a coded notice
           // falls back to, never the string anyone is expected to read.
           text: 'Continued from the previous conversation.',
-          detail: null,
+          detail: starting.forward?.objective ?? null,
         },
       })
     }
@@ -2228,13 +2418,13 @@ export class ChorusRuntime {
       projectId: starting.projectId,
       cwd,
       title: starting.title,
-      lastAddressed: undefined,
+      lastAddressed: starting.lastAddressed,
       handoffEpoch: 0, // A new room has nothing unread in it, and the log's end is what "nothing"
       // means — seeding 0 would count the whole database as news.
       working: new Set(),
       lastSeenSeq: this.store.lastSeq(),
       draft: starting.draft,
-      planning: false,
+      planning: starting.planning,
       // The same value the agents above were spawned under, not a second read.
       styleOn,
     }
@@ -2251,6 +2441,15 @@ export class ChorusRuntime {
     }
 
     if (conversation.participants.size === 0) return this.failStart(starting, failures)
+
+    if (conversation.planning) {
+      await Promise.all(
+        [...conversation.participants.values()].map((participant) =>
+          participant.session.setPermissionMode('plan')
+        )
+      )
+    }
+    if (stopped()) return { status: 'cancelled' }
 
     /*
      * The carried transcript waits with the agents rather than being sent.
@@ -2269,6 +2468,7 @@ export class ChorusRuntime {
     if (carryover !== null) {
       for (const participant of conversation.participants.values()) {
         participant.seedContext = carryover
+        participant.continuationPending = true
       }
     }
 
@@ -2466,19 +2666,35 @@ export class ChorusRuntime {
     )
     const wasWorking = route.targets.some((id) => conversation.working.has(id))
 
+    const requestedAction = liveMessageAction(route.text, mode, wasWorking)
     const action =
-      intent !== undefined || team || pair !== null
-        ? 'guide'
-        : liveMessageAction(route.text, mode, wasWorking)
+      requestedAction === 'discussion' ||
+      requestedAction === 'stopAndDiscuss' ||
+      requestedAction === 'stop' ||
+      mode === 'work'
+        ? requestedAction
+        : intent !== undefined || team || pair !== null
+          ? 'guide'
+          : requestedAction
+    const discussion = action === 'discussion' || action === 'stopAndDiscuss'
     const liveText = liveMessageText(route.text)
-    if ((action === 'ask' || action === 'guide') && liveText === '') {
+    if ((action === 'ask' || action === 'guide' || action === 'discussion') && liveText === '') {
       throw new Error(mainT('live.empty'))
     }
 
     const stored = this.store.append({
       conversationId,
       actor: 'user',
-      payload: { type: 'user.message', text: task, ...(action === 'guide' ? {} : { live: true }) },
+      payload: {
+        type: 'user.message',
+        text: task,
+        ...(action === 'guide' ? {} : { live: true }),
+        ...(discussion || mode === 'discussion'
+          ? { mode: 'discussion' as const }
+          : mode === 'work'
+            ? { mode: 'work' as const }
+            : {}),
+      },
     })
     // Null only once the store is closed, which means the app is quitting.
     // Delivering a message the log has no record of would be worse than not.
@@ -2548,6 +2764,120 @@ export class ChorusRuntime {
       return { targets }
     }
 
+    if (discussion) {
+      if (action === 'stopAndDiscuss') await this.interrupt(conversationId)
+      if (this.active.get(conversationId) !== conversation) throw new Error(mainT('live.closed'))
+      const readContext = (
+        afterSeq = 0,
+        recipient?: AgentId,
+        options?: DiscussionContextOptions
+      ): string => {
+        const events = this.store.read(conversationId, { afterSeq }).filter((event) => {
+          if (event.seq >= (options?.beforeSeq ?? stored.seq)) return false
+          if (options?.excludeSeqs?.has(event.seq) === true) return false
+          if (afterSeq === 0 || event.actor !== recipient) return true
+          const payload = event.payload
+          return !(
+            (payload.type === 'agent.message.completed' && payload.mode === 'discussion') ||
+            ('itemRef' in payload && isDiscussion(payload.itemRef))
+          )
+        })
+        return (
+          composeCatchup({
+            recipient: recipient ?? AGENT_IDS[0],
+            participants: this.roster(conversation),
+            events,
+            includeOwnDiscussion: true,
+            includeOwnMessages: true,
+            ...(options === undefined
+              ? {}
+              : { maxTotalBytes: options.maxTotalBytes, retrieval: options.retrieval }),
+          }) ?? ''
+        )
+      }
+      const participants = AGENT_IDS.flatMap((agentId) => {
+        const adapter = this.adapters.get(agentId)
+        if (adapter === undefined) return []
+        return [
+          {
+            agentId,
+            adapter,
+            opts: discussionOpts(this.sessionOptsFor(conversation, agentId)),
+          },
+        ]
+      })
+      const targets = team ? route.targets.slice(0, 1) : route.targets
+      for (const agentId of targets) {
+        const participant = participants.find((candidate) => candidate.agentId === agentId)
+        if (participant === undefined) {
+          this.liveNotice(conversationId, mainT('live.discussionUnavailable', { agent: agentId }))
+          continue
+        }
+        const question = team
+          ? `Discuss this with the other discussion agents and combine their findings.\n\n${liveText.replace(/^\/team\s*/, '')}`
+          : liveText === ''
+            ? 'Discuss the current task.'
+            : liveText
+        this.liveReplies.ask({
+          conversationId,
+          ...participant,
+          sourceId: stored.id,
+          sessionRef: '',
+          question,
+          context: '',
+          readNote: () => this.pinnedNote(conversationId),
+          discussion: {
+            participants,
+            readContext,
+            contextThroughSeq: stored.seq,
+            readInitialContext: (options) =>
+              this.continuationContext(
+                conversationId,
+                options?.beforeSeq ?? stored.seq,
+                {
+                  ...(options === undefined
+                    ? {}
+                    : { maxTotalBytes: options.maxTotalBytes, retrieval: options.retrieval }),
+                },
+                undefined,
+                options?.excludeSeqs
+              ),
+            createService: (agent, store, onContextUsage) =>
+              new ConversationService({
+                store,
+                conversationId,
+                adapter: this.adapters.get(agent) ?? participant.adapter,
+                profile: conversation.profile,
+                grants: conversation.grants,
+                ...(onContextUsage === undefined ? {} : { onContextUsage }),
+                onApprovalQueued: (request) =>
+                  this.onAttention?.({
+                    reason: 'approval',
+                    conversationId,
+                    projectId: conversation.projectId,
+                    title: conversation.title,
+                    agentId: agent,
+                    approvalId: request.id,
+                    kind: request.kind,
+                    request,
+                  }),
+                onQuestionQueued: (request) =>
+                  this.onAttention?.({
+                    reason: 'question',
+                    conversationId,
+                    projectId: conversation.projectId,
+                    title: conversation.title,
+                    agentId: agent,
+                    userInputId: request.id,
+                    request,
+                  }),
+              }),
+          },
+        })
+      }
+      return { targets }
+    }
+
     /*
      * Logged before the delivery is awaited, and again after it returns.
      *
@@ -2605,7 +2935,12 @@ export class ChorusRuntime {
           'notice.raised',
         ],
       })
-      const context = composeHistory(events, { skip: 0, count: 100 }).slice(-24_000)
+      const context =
+        composeCarryover([{ title: conversation.title, conversationId, events }], {
+          maxTotalBytes: LIVE_QUESTION_CONTEXT_BYTES,
+          retrieval: false,
+          currentConversationId: conversationId,
+        }) ?? ''
       for (const agentId of targets) {
         const participant = conversation.participants.get(agentId)
         const adapter = this.adapters.get(agentId)
@@ -2616,16 +2951,20 @@ export class ChorusRuntime {
           sourceId: stored.id,
           adapter,
           sessionRef: participant.session.sessionRef,
-          opts: { cwd: conversation.cwd },
+          opts: {
+            cwd: conversation.cwd,
+            note: { read: () => this.conversationNotes.read(conversationId) },
+          },
           question: liveText,
           context,
+          readNote: () => this.pinnedNote(conversationId),
           onAnswered: (answer) => {
             if (this.active.get(conversationId)?.participants.get(agentId) !== participant) return
             const exchange = `A live question was already answered while you worked. Context only, not a new task.\nQuestion: ${liveText.slice(0, 4_000)}\nAnswer: ${answer.slice(0, 12_000)}`
-            participant.seedContext =
-              participant.seedContext === undefined
-                ? exchange
-                : `${participant.seedContext}\n\n${exchange}`.slice(-24_000)
+            participant.seedContext = fitContextTail(
+              `${participant.seedContext ?? ''}\n\n${exchange}`,
+              8_000
+            )
           },
         })
       }
@@ -2645,9 +2984,6 @@ export class ChorusRuntime {
            * keeps a higher `seq` than the watermark below, so it is caught up
            * next time rather than lost.
            */
-          const missed = this.store
-            .read(conversationId, { afterSeq: p.seenSeq })
-            .filter((e) => e.seq < stored.seq)
 
           /*
            * The seed goes before the user's words, once.
@@ -2675,23 +3011,18 @@ export class ChorusRuntime {
                 : pair === null
                   ? liveText
                   : collaborationPrompt(pair, task)
-          const seeded = p.seedContext === undefined ? body : `${p.seedContext}\n\n${body}`
-          delete p.seedContext
           p.dispatchEpoch = conversation.handoffEpoch
-
-          await p.service.deliver(
-            withCatchup(
-              {
-                recipient: p.agentId,
-                participants: roster,
-                events: missed,
-                ...(p.catchupBudget === undefined ? {} : { maxTotalChars: p.catchupBudget }),
-              },
-              seeded
-            )
-          )
-          p.seenSeq = stored.seq
-          delete p.catchupBudget
+          p.origin = { eventId: stored.id, at: stored.createdAt }
+          const recoveryText = withCallRule(roster, body)
+          try {
+            await p.service.deliver(recoveryText, recoveryText, {
+              recoveryBeforeSeq: stored.seq,
+              prepare: () => this.contextualMessage(conversation, p, body, stored.seq),
+            })
+          } catch (error) {
+            p.deferredMessages?.seqs.delete(stored.seq)
+            throw error
+          }
         })
     )
     this.log.info('message delivered', { conversationId, targets: targets.join(',') })
@@ -3471,8 +3802,11 @@ export class ChorusRuntime {
       const from = event.actor
       if (!isAgentId(from)) continue
       const conversation = this.active.get(event.conversationId)
-      const participant = conversation?.participants.get(from)
-      if (conversation === undefined || participant === undefined) continue
+      if (conversation === undefined) continue
+      if (payload.type === 'agent.message.completed' && payload.text.trim() !== '')
+        conversation.lastAddressed = from
+      const participant = conversation.participants.get(from)
+      if (participant === undefined) continue
       if (payload.type === 'turn.started') {
         delete participant.lastReply
         conversation.working.add(from)
@@ -3484,14 +3818,23 @@ export class ChorusRuntime {
         const reply = participant.lastReply
         delete participant.lastReply
         if (payload.status !== 'completed') continue
-        if (reply !== undefined && participant.dispatchEpoch === conversation.handoffEpoch) {
-          const handoff = findReplyHandoff(reply.text, from, AGENT_IDS)
-          if (handoff !== null) {
+        const handoff = reply === undefined ? null : findReplyHandoff(reply.text, from, AGENT_IDS)
+        if (reply !== undefined && handoff !== null) {
+          const handoffId = newHandoffId()
+          if (participant.dispatchEpoch === conversation.handoffEpoch) {
+            const epoch = conversation.handoffEpoch
             queueMicrotask(() => {
-              void this.handOffOnward(conversation, from, reply, handoff)
+              void this.handOffOnward(conversation, from, reply, handoff, handoffId, epoch)
             })
             continue
           }
+          this.recordHandoffOutcome(event.conversationId, {
+            handoffId,
+            from,
+            to: handoff.to,
+            sourceEventIds: [reply.eventId],
+            outcome: 'cancelled',
+          })
         }
         settled.set(event.conversationId, from)
       }
@@ -3500,6 +3843,7 @@ export class ChorusRuntime {
     for (const [conversationId, agentId] of settled) {
       const conversation = this.active.get(conversationId)
       if (conversation === undefined) continue
+      this.settleTask(conversation)
       this.announceIdle(conversation, agentId)
     }
   }
@@ -3521,27 +3865,54 @@ export class ChorusRuntime {
     conversation: ActiveConversation,
     from: AgentId,
     reply: { readonly eventId: string; readonly text: string },
-    handoff: ReplyHandoff
+    handoff: ReplyHandoff,
+    handoffId: string,
+    epoch: number
   ): Promise<void> {
     const { conversationId } = conversation
 
-    const epoch = conversation.handoffEpoch
+    let attempted: Participant | undefined
+    const owned = (): boolean =>
+      conversation.handoffEpoch === epoch &&
+      this.active.get(conversationId) === conversation &&
+      (attempted === undefined || conversation.participants.get(handoff.to) === attempted)
+    let recorded = false
+    const settle = (outcome: HandoffOutcome['outcome']): void => {
+      if (recorded) return
+      recorded = true
+      this.recordHandoffOutcome(conversationId, {
+        handoffId,
+        from,
+        to: handoff.to,
+        sourceEventIds: [reply.eventId],
+        outcome,
+      })
+    }
+    let created = false
+    if (!owned()) {
+      settle('cancelled')
+      return
+    }
     try {
       await this.ensureSeated(conversation, [handoff.to])
       const target = conversation.participants.get(handoff.to)
       if (target === undefined) {
+        settle(owned() ? 'unavailable' : 'cancelled')
         this.announceIdle(conversation, from)
         return
       }
-      if (conversation.handoffEpoch !== epoch) return
-      if (this.active.get(conversationId) !== conversation) return
+      if (!owned()) {
+        settle('cancelled')
+        return
+      }
+      attempted = target
 
       const stored = this.store.append({
         conversationId,
         actor: from,
         payload: {
           type: 'handoff.created',
-          handoffId: newHandoffId(),
+          handoffId,
           from,
           to: handoff.to,
           sourceEventIds: [reply.eventId],
@@ -3549,38 +3920,42 @@ export class ChorusRuntime {
         },
       })
       if (stored === null) return
+      created = true
       conversation.lastAddressed = handoff.to
       target.dispatchEpoch = epoch
+      const origin = conversation.participants.get(from)?.origin
+      if (origin !== undefined) target.origin = origin
 
-      const missed = this.store
-        .read(conversationId, { afterSeq: target.seenSeq })
-        .filter((e) => e.seq < stored.seq && e.id !== reply.eventId)
-      const cut = handoff.above.length > HANDOFF_CONTEXT_CHARS
-      const above = cut ? handoff.above.slice(-HANDOFF_CONTEXT_CHARS) : handoff.above
-      const note = cut
-        ? `(only the last ${String(HANDOFF_CONTEXT_CHARS)} characters of it are shown)\n`
-        : ''
-      const body =
-        above === ''
-          ? handoff.prompt
-          : `${from}'s reply before calling you:\n${note}${above}\n\n${from} asks you:\n${handoff.prompt}`
-      const seeded = target.seedContext === undefined ? body : `${target.seedContext}\n\n${body}`
-      delete target.seedContext
-      await target.service.deliver(
-        withCatchup(
-          {
-            recipient: handoff.to,
-            participants: this.roster(conversation),
-            events: missed,
-            ...(target.catchupBudget === undefined ? {} : { maxTotalChars: target.catchupBudget }),
-          },
-          seeded,
-          from
-        )
+      const original = this.store.read(conversationId).find((event) => event.id === reply.eventId)
+      const callingReply =
+        original?.payload.type === 'agent.message.completed'
+          ? { ...original, payload: { ...original.payload, text: handoff.above } }
+          : undefined
+      const recoveryText = withCatchup(
+        { recipient: handoff.to, participants: this.roster(conversation), events: [] },
+        handoff.prompt,
+        from
       )
-      target.seenSeq = stored.seq
-      delete target.catchupBudget
+      try {
+        await target.service.deliver(recoveryText, recoveryText, {
+          recoveryBeforeSeq: stored.seq,
+          prepare: () =>
+            this.contextualMessage(
+              conversation,
+              target,
+              handoff.prompt,
+              stored.seq,
+              from,
+              callingReply
+            ),
+        })
+      } catch (error) {
+        target.deferredMessages?.seqs.delete(stored.seq)
+        throw error
+      }
+      settle(owned() ? 'submitted' : 'cancelled')
     } catch (error) {
+      settle(owned() ? (created ? 'failed' : 'unavailable') : 'cancelled')
       this.announceIdle(conversation, from)
       const message = error instanceof Error ? error.message : String(error)
       this.log.error('a hand-off could not be delivered', undefined, {
@@ -3597,6 +3972,17 @@ export class ChorusRuntime {
     }
   }
 
+  private recordHandoffOutcome(
+    conversationId: string,
+    outcome: Omit<HandoffOutcome, 'type'>
+  ): void {
+    this.store.append({
+      conversationId,
+      actor: 'system',
+      payload: { type: 'handoff.outcome', ...outcome },
+    })
+  }
+
   /**
    * Ends one conversation, leaving every other one running.
    *
@@ -3606,12 +3992,22 @@ export class ChorusRuntime {
   async closeConversation(conversationId: string): Promise<void> {
     const starting = this.starting.get(conversationId)
     if (starting !== undefined) {
+      const noteFailure = this.forgetConversationNote(conversationId)
       this.cancelStarting(starting)
+      if (noteFailure !== undefined) throw noteFailure
       return
     }
-    if (this.failedStarts.delete(conversationId)) return
+    if (this.failedStarts.delete(conversationId)) {
+      const noteFailure = this.forgetConversationNote(conversationId)
+      if (noteFailure !== undefined) throw noteFailure
+      return
+    }
     const conversation = this.require(conversationId)
     this.active.delete(conversationId)
+    const noteFailure = this.forgetConversationNote(conversationId)
+    for (const key of this.contextWindows.keys()) {
+      if (key.startsWith(`${conversationId}:`)) this.contextWindows.delete(key)
+    }
     this.rememberOpen()
     this.onConversations?.()
 
@@ -3646,6 +4042,7 @@ export class ChorusRuntime {
       conversationId,
       remaining: this.active.size,
     })
+    if (noteFailure !== undefined) throw noteFailure
   }
 
   /**
@@ -3864,6 +4261,7 @@ export class ChorusRuntime {
         if (ref === undefined || participant.session.sessionRef !== ref) {
           participant.seenSeq = 0
           participant.catchupBudget = JOINING_CATCHUP_CHARS
+          participant.continuationPending = true
         }
         return participant
       })
@@ -3896,41 +4294,194 @@ export class ChorusRuntime {
 
   /**
    * Puts back a carried transcript that a relaunch would otherwise have eaten.
-   *
-   * A continued conversation holds its seed in memory until the person speaks,
-   * which is the whole reason it costs nothing — and it is also why quitting
-   * before that first message loses it. The log says the room was continued;
-   * this rebuilds the seed from the source it names.
-   *
-   * **Only while the room is still silent.** One `user.message` means the seed
-   * was already handed over, and a resumed provider thread is still holding it;
-   * re-seeding then would deliver the same transcript a second time, in front
-   * of an unrelated message, and the agent would read it as new history. That
-   * is worse than the loss this repairs, so the check is the guard rather than
-   * an optimisation.
-   *
-   * Nothing here distinguishes a resumed agent from a restarted one, and it
-   * should not: neither ever received the seed, because nothing has been
-   * delivered to either.
    */
   private reseedCarriedContext(conversation: ActiveConversation): void {
     const events = this.store.read(conversation.conversationId)
-    if (events.some((event) => event.payload.type === 'user.message')) return
 
     const created = events.find((event) => event.payload.type === 'conversation.created')
     const source =
       created?.payload.type === 'conversation.created' ? created.payload.continuedFrom : undefined
     if (source === undefined) return
 
-    const carryover = composeCarryover(this.carriedChain(source))
-    if (carryover === null) return
+    const carryover = this.continuationContext(conversation.conversationId)
+    if (carryover === undefined) return
 
     for (const participant of conversation.participants.values()) {
+      if (
+        participant.seenSeq !== 0 &&
+        events.some(
+          (event) => event.actor === participant.agentId && event.payload.type === 'turn.started'
+        )
+      )
+        continue
       participant.seedContext = carryover
+      participant.continuationPending = true
     }
     for (const [agentId, record] of conversation.dormant) {
+      if (
+        record.ref !== undefined &&
+        events.some((event) => event.actor === agentId && event.payload.type === 'turn.started')
+      )
+        continue
       conversation.dormant.set(agentId, { ...record, carry: carryover })
     }
+  }
+
+  private continuationContext(
+    conversationId: string,
+    beforeSeq?: number,
+    options: CarryoverOptions = {},
+    excludeId?: string,
+    excludeSeqs?: ReadonlySet<number>
+  ): string | undefined {
+    const chain = this.carriedChain(conversationId).map((source) => ({
+      ...source,
+      events:
+        source.conversationId !== conversationId
+          ? source.events
+          : source.events.filter(
+              (event) =>
+                (beforeSeq === undefined || event.seq < beforeSeq) &&
+                event.id !== excludeId &&
+                excludeSeqs?.has(event.seq) !== true
+            ),
+    }))
+    const forward = forwardContext(this.store.read(conversationId))
+    return (
+      composeCarryover(chain, {
+        currentConversationId: conversationId,
+        ...(forward === undefined
+          ? {}
+          : { objective: forward.objective, sourceEventIds: forward.sourceEventIds }),
+        ...options,
+      }) ?? undefined
+    )
+  }
+
+  private contextWindow(conversationId: string, agentId: AgentId): ContextWindow | undefined {
+    const participant = this.active.get(conversationId)?.participants.get(agentId)
+    const held = this.contextWindows.get(`${conversationId}:${agentId}`)
+    return held?.sessionRef === participant?.session.sessionRef ? held?.usage : undefined
+  }
+
+  private contextualMessage(
+    conversation: ActiveConversation,
+    participant: Participant,
+    body: string,
+    beforeSeq: number,
+    from?: AgentId,
+    callingReply?: StoredEvent
+  ): string {
+    const participants = this.roster(conversation)
+    const retrieval = hasTranscript(participant.session)
+    const deliveredMessageSeqs =
+      participant.deferredMessages?.sessionRef === participant.session.sessionRef
+        ? participant.deferredMessages.seqs
+        : new Set<number>()
+    const reminder = this.pinnedNote(conversation.conversationId)
+    const reserved = reminder === '' ? 0 : Buffer.byteLength(reminder, 'utf8') + 2
+    const frame = withCatchup(
+      { recipient: participant.agentId, participants, events: [] },
+      body,
+      from
+    )
+    const overhead = Buffer.byteLength(frame, 'utf8') - Buffer.byteLength(body, 'utf8')
+    const budget = contextBudget(
+      reminder === '' ? frame : `${reminder}\n\n${frame}`,
+      this.contextWindow(conversation.conversationId, participant.agentId),
+      24_000 - overhead - reserved - 2
+    )
+    const parts: string[] = []
+    let quotedReply: string | undefined
+    let remaining = budget
+    let deferred = budget < 1_024 && (participant.seedContext?.length ?? 0) > 0
+    const room = (): number => Math.max(remaining - (parts.length === 0 ? 0 : 2), 0)
+    const add = (text: string | undefined | null): void => {
+      if (text === undefined || text === null || text === '') return
+      const cost = Buffer.byteLength(text, 'utf8') + (parts.length === 0 ? 0 : 2)
+      if (text.startsWith(CONTEXT_DEFERRED_PREFIX) || cost > remaining) {
+        deferred = true
+        return
+      }
+      parts.push(text)
+      remaining -= cost
+    }
+    if (
+      callingReply?.payload.type === 'agent.message.completed' &&
+      callingReply.payload.text !== ''
+    ) {
+      const header =
+        `${from ?? callingReply.actor}'s reply before calling you:\n` +
+        `[conversation ${callingReply.conversationId}, #${String(callingReply.seq)} ${callingReply.id}]\n`
+      const hint = retrieval
+        ? `\n(full original reply: read_transcript eventId ${callingReply.id})`
+        : ''
+      const quoteRoom =
+        Math.min(6_000, Math.floor(room() / 3)) - Buffer.byteLength(header + hint, 'utf8')
+      quotedReply =
+        header + fitContextExcerpt(callingReply.payload.text, Math.max(quoteRoom, 0)) + hint
+      add(quotedReply)
+    }
+    const continuation =
+      participant.continuationPending === true
+        ? this.continuationContext(
+            conversation.conversationId,
+            beforeSeq,
+            {
+              maxTotalBytes: room(),
+              retrieval,
+            },
+            callingReply?.id,
+            deliveredMessageSeqs
+          )
+        : undefined
+    add(
+      continuation ??
+        (participant.seedContext === undefined
+          ? undefined
+          : fitContextTail(participant.seedContext, Math.min(Math.floor(room() * 0.6), 8_000)))
+    )
+    if (continuation === undefined) {
+      const missed = this.store
+        .read(conversation.conversationId, { afterSeq: participant.seenSeq })
+        .filter(
+          (event) =>
+            event.seq < beforeSeq &&
+            event.id !== callingReply?.id &&
+            !deliveredMessageSeqs.has(event.seq)
+        )
+      add(
+        composeCatchup({
+          recipient: participant.agentId,
+          participants,
+          events: missed,
+          retrieval,
+          includeOwnDiscussion: true,
+          maxTotalBytes: Math.min(room(), participant.catchupBudget ?? 12_000),
+        })
+      )
+    }
+    const ordered = quotedReply === undefined ? parts : [...parts.slice(1), quotedReply]
+    const context = deferred ? deferredContext(retrieval) : ordered.join('\n\n')
+    const delivered = withCatchup(
+      { recipient: participant.agentId, participants, events: [] },
+      context === '' ? body : `${context}\n\n${body}`,
+      from
+    )
+    if (deferred) {
+      deliveredMessageSeqs.add(beforeSeq)
+      participant.deferredMessages = {
+        sessionRef: participant.session.sessionRef,
+        seqs: deliveredMessageSeqs,
+      }
+    } else {
+      delete participant.deferredMessages
+      delete participant.seedContext
+      delete participant.continuationPending
+      delete participant.catchupBudget
+      participant.seenSeq = Math.max(participant.seenSeq, beforeSeq)
+    }
+    return reminder === '' ? delivered : `${reminder}\n\n${delivered}`
   }
 
   /**
@@ -3952,37 +4503,8 @@ export class ChorusRuntime {
    * a file on disk, and a corrupt or hand-edited row pointing backwards would
    * otherwise spin the main thread with the whole app on it.
    */
-  private carriedChain(from: string): CarryoverSource[] {
-    const chain: CarryoverSource[] = []
-    const seen = new Set<string>()
-    let id: string | undefined = from
-
-    while (id !== undefined && !seen.has(id)) {
-      seen.add(id)
-      const events = this.store.read(id)
-      // An id the store knows nothing about. Stopping is the whole response —
-      // an ancestor that is gone cannot be reported as an empty room.
-      if (events.length === 0) break
-
-      const created = events.find((event) => event.payload.type === 'conversation.created')
-      const meta = created?.payload.type === 'conversation.created' ? created.payload : undefined
-      /*
-       * The name it goes by now, not the one it was born with. A person who
-       * renamed a room to say what it was about did so to be able to tell it
-       * apart, and a chain of blocks headed by the same folder name is the
-       * case where that matters most.
-       */
-      const renamed = events.filter((event) => event.payload.type === 'conversation.renamed').at(-1)
-      const title =
-        renamed?.payload.type === 'conversation.renamed'
-          ? renamed.payload.title
-          : (meta?.title ?? '')
-
-      chain.unshift({ title, events })
-      id = meta?.continuedFrom
-    }
-
-    return chain
+  private carriedChain(from: string, throughSeq?: number): CarryoverSource[] {
+    return conversationChain((id) => this.store.read(id), from, throughSeq)
   }
 
   /** Written after anything that changes what is open, or what it is. */
@@ -4412,6 +4934,18 @@ export class ChorusRuntime {
        */
       if (previous.catchupBudget !== undefined) participant.catchupBudget = previous.catchupBudget
       if (previous.seedContext !== undefined) participant.seedContext = previous.seedContext
+      if (previous.continuationPending === true) participant.continuationPending = true
+      if (previous.origin !== undefined) participant.origin = previous.origin
+      if (previous.deferredMessages?.sessionRef === participant.session.sessionRef) {
+        participant.deferredMessages = previous.deferredMessages
+      }
+      if (participant.session.sessionRef !== resumeFrom) {
+        const context = this.continuationContext(conversationId)
+        if (context !== undefined) {
+          participant.seedContext = context
+          participant.continuationPending = true
+        }
+      }
       conversation.participants.set(agentId, participant)
       if (conversation.planning) await participant.session.setPermissionMode('plan')
     }
@@ -4634,8 +5168,18 @@ export class ChorusRuntime {
     } else {
       participant.seenSeq = 0
       participant.catchupBudget = JOINING_CATCHUP_CHARS
+      participant.continuationPending = true
     }
-    if (dormant?.carry !== undefined) participant.seedContext = dormant.carry
+    if (dormant?.carry !== undefined) {
+      participant.seedContext = dormant.carry
+      participant.continuationPending = true
+    } else if (participant.seenSeq === 0) {
+      const context = this.continuationContext(conversationId)
+      if (context !== undefined) {
+        participant.seedContext = context
+        participant.continuationPending = true
+      }
+    }
     let applied = false
     try {
       while (conversation.planning !== applied) {
@@ -4765,6 +5309,7 @@ export class ChorusRuntime {
     const instructions = [
       where.styleOn === true ? DEFAULT_STYLE_INSTRUCTION : '',
       where.styleOn === undefined ? '' : callRule(AGENT_IDS),
+      where.conversationId === undefined ? '' : PROGRESS_INSTRUCTION,
     ]
       .filter((part) => part !== '')
       .join('\n\n')
@@ -4772,8 +5317,26 @@ export class ChorusRuntime {
     const transcript: SessionOpts['transcript'] =
       conversationId === undefined
         ? undefined
-        : (request) => composeHistory(this.store.read(conversationId), request)
+        : (request, maximum) => {
+            const maxTotalBytes =
+              maximum ?? contextBudget('', this.contextWindow(conversationId, agentId), 16_000)
+            return request.scope === 'forwarded'
+              ? this.readForwarded(conversationId, request, maxTotalBytes)
+              : composeTranscript(this.carriedChain(conversationId), request, { maxTotalBytes })
+          }
     const reader = this.projectReaderFor(where.projectId)
+    const progress: SessionOpts['progress'] =
+      conversationId === undefined
+        ? undefined
+        : (report) => this.recordProgress(conversationId, agentId, report, null)
+    const note: SessionOpts['note'] =
+      conversationId === undefined
+        ? undefined
+        : {
+            read: () => this.conversationNotes.read(conversationId),
+            write: (text, expectedRevision) =>
+              this.writeAgentNote(conversationId, agentId, text, expectedRevision, null),
+          }
     return {
       cwd: where.cwd,
       ...(preferred === '' ? {} : { model: preferred }),
@@ -4781,6 +5344,8 @@ export class ChorusRuntime {
       ...(transcript === undefined ? {} : { transcript }),
       ...(editorPlace === undefined ? {} : { editorPlace }),
       ...(reader === undefined ? {} : { project: reader }),
+      ...(progress === undefined ? {} : { progress }),
+      ...(note === undefined ? {} : { note }),
       sandbox:
         where.profile.id === 'read-only'
           ? { mode: 'readOnly', writableRoots: [], networkAccess: false }
@@ -4867,15 +5432,14 @@ export class ChorusRuntime {
           }
 
           const outcome = await this.askNamer(held, session, text)
-          if (outcome.kind !== 'title') {
+          const title = outcome.kind === 'title' ? cleanTitle(outcome.text) : null
+          if (title === null) {
             held.sessions.delete(agentId)
             void session.close().catch(() => undefined)
-            if (outcome.kind === 'failed') held.demoted.add(agentId)
+            if (outcome.kind !== 'timeout') held.demoted.add(agentId)
             continue
           }
 
-          const title = cleanTitle(outcome.text)
-          if (title === null) return
           // Closed while the namer was thinking. `renameConversation` would throw
           // on a conversation `require` can no longer find.
           if (!this.active.has(conversationId)) return
@@ -4930,12 +5494,23 @@ export class ChorusRuntime {
     }
 
     void (async () => {
+      let reply: string | null = null
       try {
         for await (const event of session.events) {
-          if (event.type === 'message.completed') {
-            settle({ kind: 'title', text: event.text })
-          } else if (event.type === 'turn.completed' && event.status !== 'completed') {
+          if (event.type === 'turn.started') {
+            reply = null
+          } else if (event.type === 'message.completed') {
+            reply = event.text
+          } else if (event.type === 'error' && !event.recoverable) {
+            reply = null
             settle({ kind: 'failed' })
+          } else if (event.type === 'turn.completed') {
+            const outcome: NamerOutcome =
+              event.status === 'completed' && reply !== null
+                ? { kind: 'title', text: reply }
+                : { kind: 'failed' }
+            reply = null
+            settle(outcome)
           }
         }
       } catch {
@@ -5252,6 +5827,120 @@ export class ChorusRuntime {
     return { width: saved.width ?? width, height: saved.height }
   }
 
+  getConversationNote(conversationId: string): ConversationNote {
+    return this.conversationNotes.read(conversationId)
+  }
+
+  readConversationNoteJournal(conversationId: string): string | null {
+    return this.conversationNotes.readJournal(conversationId)
+  }
+
+  compareConversationNoteJournal(
+    conversationId: string,
+    expected: string | null,
+    next: string | null
+  ): { readonly matched: boolean; readonly current: string | null } {
+    this.require(conversationId)
+    return this.conversationNotes.compareJournal(conversationId, expected, next)
+  }
+
+  setConversationNoteText(
+    conversationId: string,
+    text: string,
+    baseRevision: number
+  ): ConversationNoteWrite {
+    return this.writeConversationNoteText(conversationId, text, baseRevision, 'user')
+  }
+
+  setConversationNoteView(conversationId: string, view: ConversationNoteView): ConversationNote {
+    this.require(conversationId)
+    const before = this.conversationNotes.read(conversationId)
+    const note = this.conversationNotes.setView(conversationId, view)
+    if (note.version !== before.version) this.publishConversationNote(conversationId, note)
+    return note
+  }
+
+  private writeConversationNoteText(
+    conversationId: string,
+    text: string,
+    expectedRevision: number,
+    author: 'user' | AgentId
+  ): ConversationNoteWrite {
+    this.require(conversationId)
+    const before = this.conversationNotes.read(conversationId)
+    const written = this.conversationNotes.setText(
+      conversationId,
+      text,
+      expectedRevision,
+      author,
+      Date.now()
+    )
+    if (written.status === 'saved' && written.note.version !== before.version) {
+      this.publishConversationNote(conversationId, written.note)
+    }
+    return written
+  }
+
+  private writeAgentNote(
+    conversationId: string,
+    agentId: AgentId,
+    text: string,
+    expectedRevision: number,
+    owner: { readonly service?: ConversationService } | null
+  ): ConversationNoteWrite {
+    const participant = this.active.get(conversationId)?.participants.get(agentId)
+    if (
+      participant === undefined ||
+      owner?.service === undefined ||
+      owner.service !== participant.service
+    ) {
+      throw new Error(
+        'The note was not saved: this session is no longer the active one for this conversation.'
+      )
+    }
+    return this.writeConversationNoteText(conversationId, text, expectedRevision, agentId)
+  }
+
+  private pinnedNote(conversationId: string): string {
+    try {
+      return noteReminder(this.conversationNotes.read(conversationId))
+    } catch (error) {
+      this.log.warn('the pinned note could not be read for delivery', {
+        conversationId,
+        error: error instanceof Error ? error.message : String(error),
+      })
+      return ''
+    }
+  }
+
+  private forgetConversationNote(conversationId: string): Error | undefined {
+    let failure: Error | undefined
+    try {
+      this.conversationNotes.delete(conversationId)
+    } catch (error) {
+      failure = error instanceof Error ? error : new Error(String(error))
+      this.log.warn('a closed conversation note could not be deleted', {
+        conversationId,
+        error: failure.message,
+      })
+    }
+    this.publishConversationNote(conversationId, null)
+    return failure
+  }
+
+  private publishConversationNote(conversationId: string, note: ConversationNote | null): void {
+    for (const listener of this.noteListeners) {
+      try {
+        listener({ conversationId, note })
+      } catch (error) {
+        this.log.warn('a conversation note push failed', {
+          conversationId,
+          error: error instanceof Error ? error.message : String(error),
+        })
+      }
+    }
+  }
+
   /**
    * The notes the masthead's menu lists, whole.
    *
@@ -5461,6 +6150,7 @@ export class ChorusRuntime {
     })
 
     conversation.profile = profile
+    this.liveReplies.setProfile(conversationId, profile)
     for (const participant of conversation.participants.values()) {
       participant.service.setProfile(profile)
     }
@@ -5515,12 +6205,12 @@ export class ChorusRuntime {
     approvalId: string,
     decision: ApprovalDecision
   ): Promise<void> {
-    const participant = this.require(conversationId).participants.get(agentId)
-    if (participant === undefined) throw new Error(`"${agentId}" is not in this conversation`)
-    await participant.service.decideApproval(
-      approvalId,
-      await this.withSelection(decision, approvalId)
-    )
+    const conversation = this.require(conversationId)
+    const service =
+      this.liveReplies.approvalService(conversationId, agentId, approvalId) ??
+      conversation.participants.get(agentId)?.service
+    if (service === undefined) throw new Error(`"${agentId}" is not in this conversation`)
+    await service.decideApproval(approvalId, await this.withSelection(decision, approvalId))
   }
 
   /**
@@ -5592,9 +6282,12 @@ export class ChorusRuntime {
     userInputId: string,
     response: UserInputResponse
   ): Promise<void> {
-    const participant = this.require(conversationId).participants.get(agentId)
-    if (participant === undefined) throw new Error(`"${agentId}" is not in this conversation`)
-    await participant.service.answerUserInput(userInputId, response)
+    const conversation = this.require(conversationId)
+    const service =
+      this.liveReplies.questionService(conversationId, agentId, userInputId) ??
+      conversation.participants.get(agentId)?.service
+    if (service === undefined) throw new Error(`"${agentId}" is not in this conversation`)
+    await service.answerUserInput(userInputId, response)
   }
 
   /** Replays a conversation from the log — the only complete record (S3). */
@@ -5634,8 +6327,368 @@ export class ChorusRuntime {
   }
 
   /** Approvals, questions, who is mid-turn and what has been spent — queried. */
-  transcriptState(conversationId: string): TranscriptState {
-    return this.store.transcriptState(conversationId)
+  transcriptState(conversationId: string): TranscriptState & {
+    replies: readonly StoredEvent[]
+    task: TaskBundle | null
+    live: LiveState
+  } {
+    const replies = this.liveReplies.pendingReplies(conversationId)
+    return {
+      ...this.store.transcriptState(conversationId),
+      replies,
+      task: this.taskState(conversationId),
+      live: this.store.liveState(conversationId, {
+        chatRequests: replies.flatMap((event) =>
+          event.payload.type === 'reply.status'
+            ? [{ requestId: event.payload.requestId, agentId: event.payload.agentId }]
+            : []
+        ),
+        ignoredItemRefPrefixes: TASK_IGNORED_ITEM_REF_PREFIXES,
+      }),
+    }
+  }
+
+  taskState(conversationId: string): TaskBundle | null {
+    return taskBundleFrom(this.taskRecordsOf(conversationId), this.store.taskOutcomes())
+  }
+
+  closeTask(conversationId: string, taskId: string, reason: 'completed' | 'abandoned'): boolean {
+    const latest = this.latestTaskOf(conversationId)
+    if (latest === null || latest.closed || latest.taskId !== taskId) return false
+    this.closeTaskNow(conversationId, latest.taskId, reason)
+    return true
+  }
+
+  bindAssignment(conversationId: string, taskId: string): BindAssignmentResult {
+    const asOfSeq = this.logPosition()
+    const created = this.store.read(conversationId, {
+      types: ['conversation.created'],
+      limit: 1,
+    })[0]
+    const parent =
+      created?.payload.type === 'conversation.created' ? created.payload.continuedFrom : undefined
+    if (
+      parent === undefined ||
+      this.store.forwardedChild(parent, conversationId, asOfSeq) === null
+    ) {
+      return { outcome: 'refused', reason: 'not-forwarded' }
+    }
+    const latest = this.latestTaskOf(conversationId)
+    if (latest === null) return { outcome: 'refused', reason: 'no-task' }
+    if (latest.taskId !== taskId) return { outcome: 'refused', reason: 'not-latest' }
+    const { current } = this.store.assignmentBinding(conversationId, asOfSeq)
+    if (current?.taskId === taskId) return { outcome: 'unchanged', taskId, ref: current.ref }
+    const previousTaskId = current?.taskId ?? null
+    const stored = this.store.append({
+      conversationId,
+      actor: 'user',
+      payload: { type: 'assignment.bound', taskId, previousTaskId },
+    })
+    if (stored === null) return { outcome: 'refused', reason: 'unavailable' }
+    return {
+      outcome: 'bound',
+      taskId,
+      previousTaskId,
+      ref: { seq: stored.seq, eventId: stored.id, at: stored.createdAt },
+    }
+  }
+
+  private readForwarded(parentId: string, request: TranscriptRequest, maxBytes: number): string {
+    const asOfSeq = this.logPosition()
+    const ignoredItemRefPrefixes = TASK_IGNORED_ITEM_REF_PREFIXES
+    const childId = request.conversationId
+    if (childId === undefined) {
+      if (
+        request.query !== undefined ||
+        request.eventId !== undefined ||
+        request.offset !== undefined
+      ) {
+        return renderForwardedRefusal(
+          'query, eventId and offset are not accepted when listing forwarded conversations; pass conversationId to read one.',
+          maxBytes
+        )
+      }
+      const page = this.store.forwardedChildren(parentId, {
+        skip: request.skip,
+        count: request.count,
+        asOfSeq,
+      })
+      const entries = page.children.map((child) => {
+        const binding = this.store.assignmentBinding(child.conversationId, asOfSeq)
+        const bound = binding.current?.taskId
+        const window =
+          bound === undefined ? null : this.store.taskWindow(child.conversationId, bound, asOfSeq)
+        return { child, binding, window }
+      })
+      return renderForwardedList(page, entries, maxBytes)
+    }
+    const child = this.store.forwardedChild(parentId, childId, asOfSeq)
+    if (child === null) {
+      const readable = this.store.forwardedChildren(parentId, {
+        skip: 0,
+        count: FORWARDED_PAGE.fallback,
+        asOfSeq,
+      })
+      return renderNotForwarded(childId, readable, maxBytes)
+    }
+    const binding = this.store.assignmentBinding(childId, asOfSeq)
+    const taskId = binding.current?.taskId ?? binding.suggestion?.taskId ?? null
+    const window = taskId === null ? null : this.store.taskWindow(childId, taskId, asOfSeq)
+    const context: ForwardedReadContext = {
+      conversationId: childId,
+      taskId,
+      bound: binding.current !== null,
+      window,
+      asOfSeq,
+    }
+    if (request.eventId !== undefined) {
+      const record = this.store.assignmentRecord(childId, request.eventId, {
+        taskIds: taskId === null ? [] : [taskId],
+        window,
+        asOfSeq,
+        ignoredItemRefPrefixes,
+      })
+      return renderRecord(record, request.eventId, context, request.offset ?? 0, maxBytes)
+    }
+    if (request.query !== undefined) {
+      const query = request.query.trim()
+      if (query === '') {
+        return renderForwardedRefusal(
+          'The query is empty once trimmed, so nothing was searched.',
+          maxBytes
+        )
+      }
+      const page =
+        window === null
+          ? { matches: [], total: 0, skip: request.skip, count: request.count }
+          : this.store.searchWindow(window, query, {
+              skip: request.skip,
+              count: request.count,
+              ignoredItemRefPrefixes,
+            })
+      return renderSearch(page, query, context, maxBytes)
+    }
+    const bound = binding.current === null ? null : window
+    const current = bound === null ? null : this.store.currentWork(bound)
+    const records =
+      bound === null || current === null
+        ? null
+        : this.store.taskRecordsFor(bound, { ignoredItemRefPrefixes })
+    const digest = digestAssignment(
+      {
+        child,
+        binding,
+        window,
+        facts: bound === null ? null : this.store.taskFacts(bound),
+        observations:
+          window === null
+            ? null
+            : this.store.windowObservations(window, { ignoredItemRefPrefixes }),
+        current,
+        interrupted:
+          bound === null || records === null ? [] : interruptedTurns(records.events, bound.fromSeq),
+      },
+      asOfSeq
+    )
+    return renderDigest(digest, maxBytes)
+  }
+
+  private taskRecordsOf(conversationId: string): ReturnType<EventStore['taskRecords']> {
+    return this.store.taskRecords(conversationId, {
+      ignoredItemRefPrefixes: TASK_IGNORED_ITEM_REF_PREFIXES,
+    })
+  }
+
+  private latestTaskOf(conversationId: string): {
+    readonly taskId: string
+    readonly originEventId: string
+    readonly closed: boolean
+    readonly revisions: readonly Extract<TaskPayload, { type: 'task.revised' }>[]
+  } | null {
+    const events = this.store.taskEvents(conversationId)
+    const opened = events[0]?.payload
+    if (opened?.type !== 'task.opened') return null
+    const { taskId, originEventId } = opened
+    const revisions: Extract<TaskPayload, { type: 'task.revised' }>[] = []
+    let closed = false
+    for (const event of events) {
+      const { payload } = event
+      if (payload.type === 'task.closed' && payload.taskId === taskId) closed = true
+      if (payload.type === 'task.revised' && payload.taskId === taskId) revisions.push(payload)
+    }
+    return { taskId, originEventId, closed, revisions }
+  }
+
+  private workOrigin(conversationId: string, participant: Participant): TaskOrigin | null {
+    if (participant.origin !== undefined) return participant.origin
+    const found = this.store
+      .readPage(conversationId, { limit: 50, types: ['user.message'] })
+      .findLast(
+        (event) =>
+          event.payload.type === 'user.message' &&
+          event.payload.mode !== 'discussion' &&
+          event.payload.live !== true
+      )
+    return found === undefined ? null : { eventId: found.id, at: found.createdAt }
+  }
+
+  private openTask(participant: Participant, origin: TaskOrigin): string {
+    const taskId = uuidv7()
+    participant.service.recordTask({
+      type: 'task.opened',
+      taskId,
+      originEventId: origin.eventId,
+      startedAt: origin.at,
+    })
+    return taskId
+  }
+
+  private recordProgress(
+    conversationId: string,
+    agentId: AgentId,
+    report: ProgressReport,
+    owner: { readonly service?: ConversationService } | null
+  ): ProjectToolResult {
+    const participant = this.active.get(conversationId)?.participants.get(agentId)
+    if (
+      participant === undefined ||
+      owner?.service === undefined ||
+      owner.service !== participant.service
+    ) {
+      return {
+        ok: false,
+        text: 'Progress was not recorded: this session is no longer the active one for this conversation.',
+      }
+    }
+    const validation = validateProgressReport(report)
+    if (!validation.ok) {
+      return {
+        ok: false,
+        text: `Progress was not recorded: ${validation.issues.join('; ')}`,
+      }
+    }
+    const origin = this.workOrigin(conversationId, participant)
+    const latest = this.latestTaskOf(conversationId)
+    let open = latest !== null && !latest.closed ? latest : null
+    if (open === null && latest !== null && latest.originEventId === origin?.eventId) {
+      return {
+        ok: false,
+        text: 'Progress was not recorded: the task for this request is already closed. A plan for new work is recorded once the user asks for it.',
+      }
+    }
+    let kept = false
+    if (open !== null && report.scope === 'new') {
+      if (origin !== null && origin.eventId !== open.originEventId) {
+        this.closeTaskNow(conversationId, open.taskId, 'superseded', participant.service)
+        open = null
+      } else {
+        kept = true
+      }
+    }
+    if (open === null && origin === null) {
+      return {
+        ok: false,
+        text: 'Progress was not recorded: there is no work request in this conversation to attach it to.',
+      }
+    }
+    const taskId = open?.taskId ?? (origin === null ? null : this.openTask(participant, origin))
+    if (taskId === null) {
+      return { ok: false, text: 'Progress was not recorded: no task could be opened.' }
+    }
+    const revision = (open?.revisions.length ?? 0) + 1
+    participant.service.recordTask({
+      type: 'task.revised',
+      taskId,
+      agentId,
+      revision,
+      source: 'chorus',
+      steps: report.steps.map(redactedStep),
+      ...(report.reason === undefined ? {} : { reason: redactText(report.reason).text }),
+      ...(report.parallel === undefined ? {} : { parallel: report.parallel }),
+      ...(report.awaitingUser === undefined ? {} : { awaitingUser: report.awaitingUser }),
+      ...(report.complete === undefined ? {} : { complete: report.complete }),
+    })
+    const finished = report.steps.filter(
+      (step) => step.status === 'done' || step.status === 'skipped'
+    ).length
+    return {
+      ok: true,
+      text: [
+        `Recorded revision ${String(revision)}: ${String(report.steps.length)} steps, ${String(finished)} finished.`,
+        kept
+          ? 'It stays in the current task, because the user has not asked for new work since that task began.'
+          : '',
+        report.complete === true
+          ? 'The task closes once every agent working on it has finished its turn and its steps.'
+          : '',
+      ]
+        .filter((line) => line !== '')
+        .join(' '),
+    }
+  }
+
+  private recordNativePlan(
+    conversationId: string,
+    agentId: AgentId,
+    plan: readonly NativePlanStep[],
+    service: ConversationService
+  ): void {
+    const participant = this.active.get(conversationId)?.participants.get(agentId)
+    if (participant?.service !== service) return
+    const steps = nativeProgressSteps(plan).map(redactedStep)
+    if (steps.length === 0) return
+    const origin = this.workOrigin(conversationId, participant)
+    const latest = this.latestTaskOf(conversationId)
+    const open = latest !== null && !latest.closed ? latest : null
+    if (open === null && (origin === null || latest?.originEventId === origin.eventId)) return
+    const own = open?.revisions.filter((revision) => revision.agentId === agentId) ?? []
+    if (own.some((revision) => revision.source === 'chorus')) return
+    const last = own.at(-1)
+    if (last !== undefined && sameNativeSteps(last.steps, steps)) return
+    const taskId = open?.taskId ?? (origin === null ? null : this.openTask(participant, origin))
+    if (taskId === null) return
+    service.recordTask({
+      type: 'task.revised',
+      taskId,
+      agentId,
+      revision: (open?.revisions.length ?? 0) + 1,
+      source: 'native',
+      steps,
+    })
+  }
+
+  private settleTask(conversation: ActiveConversation): void {
+    if (conversation.working.size > 0) return
+    const latest = this.latestTaskOf(conversation.conversationId)
+    if (latest === null || latest.closed) return
+    const bundle = taskBundleFrom(this.taskRecordsOf(conversation.conversationId), [])
+    const snapshot = bundle === null ? null : reduceTask(bundle, Date.now())
+    if (snapshot?.taskId !== latest.taskId || !snapshot.readyToClose) return
+    this.closeTaskNow(conversation.conversationId, latest.taskId, 'completed', undefined, snapshot)
+  }
+
+  private closeTaskNow(
+    conversationId: string,
+    taskId: string,
+    reason: TaskClosedReason,
+    service?: ConversationService,
+    measured?: TaskSnapshot
+  ): void {
+    const bundle =
+      measured === undefined ? taskBundleFrom(this.taskRecordsOf(conversationId), []) : null
+    const snapshot = measured ?? (bundle === null ? null : reduceTask(bundle, Date.now()))
+    const outcome = snapshot?.taskId === taskId ? taskOutcomeOf(snapshot) : undefined
+    const payload: TaskPayload = {
+      type: 'task.closed',
+      taskId,
+      reason,
+      ...(outcome === undefined ? {} : { outcome }),
+    }
+    if (service !== undefined) {
+      service.recordTask(payload)
+      return
+    }
+    this.store.append({ conversationId, actor: 'system', payload })
   }
 
   /**
@@ -5935,6 +6988,64 @@ export class ChorusRuntime {
       throw new Error(`${agentId} is not ready: ${detail}`)
     }
 
+    const owner: { service?: ConversationService } = {}
+    const owned = (opts: SessionOpts): SessionOpts => {
+      const { note } = opts
+      return {
+        ...opts,
+        ...(opts.progress === undefined
+          ? {}
+          : {
+              progress: (report: ProgressReport) =>
+                this.recordProgress(conversationId, agentId, report, owner),
+            }),
+        ...(note?.write === undefined
+          ? {}
+          : {
+              note: {
+                read: note.read,
+                write: (text: string, expectedRevision: number) =>
+                  this.writeAgentNote(conversationId, agentId, text, expectedRevision, owner),
+              },
+            }),
+      }
+    }
+
+    const supervision = {
+      recover: () => {
+        if (stopped() || this.closing) throw new Error(STARTUP_CANCELLED)
+        const conversation = this.active.get(conversationId)
+        this.contextWindows.delete(`${conversationId}:${agentId}`)
+        return {
+          opts: owned(
+            conversation === undefined
+              ? sessionOpts(false)
+              : this.sessionOptsFor(conversation, agentId, false)
+          ),
+          context: (input: string, session: AgentSession, beforeSeq?: number) => {
+            const reminder = this.pinnedNote(conversationId)
+            const reserved = reminder === '' ? 0 : Buffer.byteLength(reminder, 'utf8') + 2
+            const continuation =
+              this.continuationContext(conversationId, beforeSeq, {
+                maxTotalBytes: contextBudget(input, undefined, 22_976 - reserved),
+                retrieval: hasTranscript(session),
+              }) ?? ''
+            return [reminder, continuation].filter((part) => part !== '').join('\n\n')
+          },
+        }
+      },
+      onRecovery: (state: 'starting' | 'ready') => {
+        if (stopped() || this.closing) return
+        this.liveNotice(
+          conversationId,
+          mainT(state === 'starting' ? 'live.agentRecovering' : 'live.agentRecovered', {
+            agent: agentId,
+          })
+        )
+        if (state === 'ready') this.rememberOpen()
+      },
+    }
+
     /*
      * Resume when there is a thread to resume.
      *
@@ -5946,43 +7057,60 @@ export class ChorusRuntime {
      */
     const opened = await (forkFrom !== undefined
       ? (async () => {
-          const opts = sessionOpts(false)
+          const opts = owned(sessionOpts(false))
           return {
-            session: await SupervisedSession.fork(adapter, forkFrom, {
-              ...opts,
-              // The user's own hooks, skills and project instructions, as
-              // everywhere else. A promoted room is an ordinary room.
-              inherits: 'config' as const,
-              // Kept, because this one is going to be saved and reopened.
-              persist: true,
-            }),
+            session: await SupervisedSession.fork(
+              adapter,
+              forkFrom,
+              {
+                ...opts,
+                // The user's own hooks, skills and project instructions, as
+                // everywhere else. A promoted room is an ordinary room.
+                inherits: 'config' as const,
+                // Kept, because this one is going to be saved and reopened.
+                persist: true,
+              },
+              undefined,
+              supervision
+            ),
             opts,
           }
         })()
       : resumeFrom === undefined
         ? (async () => {
-            const opts = sessionOpts(false)
-            return { session: await SupervisedSession.start(adapter, opts), opts }
+            const opts = owned(sessionOpts(false))
+            return {
+              session: await SupervisedSession.start(adapter, opts, undefined, supervision),
+              opts,
+            }
           })()
         : (async () => {
-            const resumeOpts = sessionOpts(true)
+            const resumeOpts = owned(sessionOpts(true))
             try {
               return {
-                session: await SupervisedSession.resume(adapter, resumeFrom, resumeOpts),
+                session: await SupervisedSession.resume(
+                  adapter,
+                  resumeFrom,
+                  resumeOpts,
+                  undefined,
+                  supervision
+                ),
                 opts: resumeOpts,
               }
             } catch {
               if (stopped()) throw new Error(STARTUP_CANCELLED)
               // Fresh options on the fallback: this is now a new session, and it
               // should start with what the sheet says new sessions start with.
-              const opts = sessionOpts(false)
-              return { session: await SupervisedSession.start(adapter, opts), opts }
+              const opts = owned(sessionOpts(false))
+              return {
+                session: await SupervisedSession.start(adapter, opts, undefined, supervision),
+                opts,
+              }
             }
           })())
     // The options actually used, so what is attached matches what was opened
     // rather than a second guess at which branch ran.
     const { session, opts: usedOpts } = opened
-    const owner: { service?: ConversationService } = {}
     try {
       return await this.joinParticipant({
         agentId,
@@ -6113,6 +7241,10 @@ export class ChorusRuntime {
       },
       // Conversation state, not account state: it goes to the pane that asked.
       onContextUsage: (usage) => {
+        this.contextWindows.set(`${conversationId}:${agentId}`, {
+          sessionRef: session.sessionRef,
+          usage,
+        })
         this.onContextUsage?.({ conversationId, agentId, ...usage })
       },
       /*
@@ -6134,6 +7266,7 @@ export class ChorusRuntime {
        * working line insisting on a word that stopped being true.
        */
       onActivity: (activity) => {
+        if (this.active.get(conversationId)?.participants.get(agentId)?.service !== service) return
         this.onActivity?.({ conversationId, agentId, activity })
       },
       // An approved plan ends the mode for the room, not just for the agent
@@ -6141,6 +7274,9 @@ export class ChorusRuntime {
       onPlanExited: () => {
         const conversation = this.active.get(conversationId)
         if (conversation !== undefined) conversation.planning = false
+      },
+      onPlan: (steps) => {
+        this.recordNativePlan(conversationId, agentId, steps, service)
       },
       /*
        * A card was raised for a person, so work out what the edit would do.

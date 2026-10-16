@@ -16,7 +16,7 @@ import type { WorkbenchRect } from '../shared/workbench-ipc.js'
 import { currentScale, onScaleChange } from './scale.js'
 import { isShellSender, registerShellChildWindow } from './shell-windows.js'
 
-type ToastWindow = {
+interface ToastWindow {
   readonly parent: BrowserWindow
   child: BrowserWindow | null
   rect: WorkbenchRect | null

@@ -6,7 +6,7 @@
 | -------------- | --------------------------------------------------------------------------------------------- |
 | Scope          | Detect changing LAN addresses, expose the injected host, retain a manual override             |
 | Implementation | Prepared: five-second refresh, validated host controls, next-run injection and restart notice |
-| Capture setup  | Prepared: both rows are inside the collapsible Capture setup section                           |
+| Capture setup  | Prepared: both rows are inside the collapsible Capture setup section                          |
 | Verification   | Local build and installation passed; tests, typechecks and live behavior unrun                |
 
 ## Current / Issue

@@ -1854,8 +1854,12 @@ describe('web tab swipe navigation', () => {
     if (gone === undefined) throw new Error('No renderer crash listener')
     harness.sent.length = 0
     harness.detached = true
-    expect(() => gone({}, { reason: 'crashed' })).not.toThrow()
-    expect(() => page.input({}, { type: 'gestureScrollBegin' })).not.toThrow()
+    expect(() => {
+      gone({}, { reason: 'crashed' })
+    }).not.toThrow()
+    expect(() => {
+      page.input({}, { type: 'gestureScrollBegin' })
+    }).not.toThrow()
     expect(sentOn(BROWSER_PAGE_SWIPE_STATE_CHANNEL)).toEqual([])
     expect(sentOn(BROWSER_PAGE_SWIPE_SEQUENCE_CHANNEL)).toEqual([])
   })

@@ -23,7 +23,12 @@ import { GlobalNotes } from './GlobalNotes.js'
 import { KeptNotes } from './KeptNotes.js'
 import type { NoteSize } from './noteSize.js'
 import { ConfirmEndSession } from './ConfirmEndSession.js'
-import { sameWorkspaceSnapshot, useWorkspaceStore, workspaceSnapshot } from './workspace/store.js'
+import {
+  pulseWorking,
+  sameWorkspaceSnapshot,
+  useWorkspaceStore,
+  workspaceSnapshot,
+} from './workspace/store.js'
 import {
   applyDetachedEntries,
   detachTab,
@@ -980,7 +985,7 @@ export function App({ role }: { readonly role: WindowRole }): React.JSX.Element 
   const wouldLose = useCallback(
     (conversationId: string): { working: string[]; decisions: number; draft: boolean } | null => {
       const pulse = useWorkspaceStore.getState().pulses[conversationId]
-      const working = [...(pulse?.working ?? [])]
+      const working = pulseWorking(pulse)
       const decisions = (pulse?.approvalIds.length ?? 0) + (pulse?.questionIds.length ?? 0)
       const read = draftReaders.current.get(conversationId)
       const draft = (read === undefined ? carries.current.get(conversationId)?.draft : read()) ?? ''

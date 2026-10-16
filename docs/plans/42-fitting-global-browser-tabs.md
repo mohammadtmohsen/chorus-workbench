@@ -2,23 +2,33 @@
 
 ## Status
 
-| Unit | Result |
-| --- | --- |
-| Scope | Global browser tabs share their available width equally without scrolling |
-| Implementation | Equal-width follow-up written and diff reviewed; runtime behavior unverified |
-| Verification | Not run; tests and build have not been requested |
+| Unit           | Result                                                                               |
+| -------------- | ------------------------------------------------------------------------------------ |
+| Scope          | Global browser tabs share their available width equally without scrolling            |
+| Implementation | Equal-width follow-up written and diff reviewed; runtime behavior unverified         |
+| Tab boundaries | Written and diff reviewed: visible tab outlines and gaps; live appearance unverified |
+| Verification   | Local build and installation passed; tests and live appearance unverified            |
 
 ## Current / Issue
 
 ```css
-.web-tabs { overflow: clip; }
-.web-tab { flex: 0 1 auto; max-width: 220px; }
-.web-tab-main { max-width: 186px; }
+.web-tabs {
+  overflow: clip;
+}
+.web-tab {
+  flex: 0 1 auto;
+  max-width: 220px;
+}
+.web-tab-main {
+  max-width: 186px;
+}
 ```
 
 Tabs already shrink without scrolling, but their title lengths still determine their relative widths.
 
 ## Proposed
+
+Each tab has a persistent rounded border enclosing its title and close button. A small gap separates neighboring tabs. The active tab retains its accent border.
 
 ```mermaid
 flowchart LR
@@ -35,6 +45,7 @@ flowchart LR
 ```css
 .web-tabs {
   flex: 1 1 auto;
+  gap: var(--step);
   min-width: 0;
   overflow: clip;
 }
@@ -43,6 +54,7 @@ flowchart LR
   flex: 1 1 0;
   min-width: 0;
   overflow: clip;
+  border: 1px solid var(--border-strong);
 }
 
 .web-tab-main {
@@ -72,4 +84,4 @@ sequenceDiagram
 
 Manual verification remains: equal widths with mixed title lengths, few and many browser tabs, narrow windows, selection, keyboard focus, closing, adding, and drag reordering.
 
-Source and diffs were reviewed against the pre-edit working copies. Existing changes were retained. No tests, typecheck, build, installation, or app launch ran for this update.
+Source and diffs were reviewed against the pre-edit working copies. Existing changes were retained. On 2026-10-15, the dependency build, signed arm64 packaging and installation passed. The current session was kept running; a relaunch loads the new tab boundaries. Tests, standalone typechecks and live UI checks were not run.

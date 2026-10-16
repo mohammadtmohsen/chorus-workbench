@@ -2,13 +2,13 @@
 
 ## Status
 
-| Step | Status |
-| --- | --- |
-| Scope | Width and open/closed state are shared across projects, confirmed by the user |
-| Investigation | Installed Code-OSS layout and Chorus storage/broadcast paths read |
-| Implementation | Written in `storage.ts` and `entry.ts`; pre-existing changes preserved |
-| Verification | Incremental source diff reviewed; build and installer signature verification passed; sidebar runtime behavior unverified |
-| Build and install | `CHORUS_INSTALL_KEEP_RUNNING=1 pnpm app:install` completed; signed arm64 app installed at `/Applications/Chorus.app` |
+| Step              | Status                                                                                                                   |
+| ----------------- | ------------------------------------------------------------------------------------------------------------------------ |
+| Scope             | Width and open/closed state are shared across projects, confirmed by the user                                            |
+| Investigation     | Installed Code-OSS layout and Chorus storage/broadcast paths read                                                        |
+| Implementation    | Written in `storage.ts` and `entry.ts`; pre-existing changes preserved                                                   |
+| Verification      | Incremental source diff reviewed; build and installer signature verification passed; sidebar runtime behavior unverified |
+| Build and install | `CHORUS_INSTALL_KEEP_RUNNING=1 pnpm app:install` completed; signed arm64 app installed at `/Applications/Chorus.app`     |
 
 ## Current / Issue
 

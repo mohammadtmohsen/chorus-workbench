@@ -11,6 +11,7 @@ import type {
 } from '../../shared/traffic-ipc.js'
 import { TrafficPanel, type TrafficRunHost } from './TrafficPanel.js'
 import { useProjectRun, useTrafficLive } from './workspace/hooks.js'
+import { useWorkspaceStore } from './workspace/store.js'
 
 /**
  * A refused change must not be left sitting in the field as though it had been
@@ -61,6 +62,8 @@ const bridge = (
   rows: Record<string, readonly TrafficRowShape[]> = {}
 ): Partial<Chorus> => ({
   onTraffic: () => () => undefined,
+  onSettings: () => () => undefined,
+  readSettings: () => Promise.reject(new Error('settings are not part of this test')),
   /* Per project, because the attach is what carries a project's rows. */
   attachTraffic: (request) =>
     Promise.resolve({
@@ -72,6 +75,7 @@ const bridge = (
     }),
   ackTraffic: () => Promise.resolve({ ok: true as const }),
   detachTraffic: () => Promise.resolve({ ok: true as const }),
+  setWorkbenchVisible: () => Promise.resolve({ ok: true as const, stills: [] }),
   /*
    * Needed as soon as a row exists, because a selected row mounts the
    * inspector. `not-found` rather than a detail: what these tests assert is
@@ -103,6 +107,7 @@ const installed: Partial<Chorus> = {}
 
 beforeEach(() => {
   Object.assign(window, { chorus: installed })
+  useWorkspaceStore.setState({ trafficPanels: {} })
 })
 
 afterEach(() => {
@@ -211,6 +216,52 @@ const httpRow = (seq: number): TrafficRowShape => ({
   code: 'OK',
   nextAction: null,
   transport: null,
+})
+
+describe('hiding a project path prefix', () => {
+  it('updates the table, preserves the full URL and restores each project preference', async () => {
+    const configure = vi.fn<Chorus['configureTraffic']>(() =>
+      Promise.resolve({ state: state(), failure: null })
+    )
+    Object.assign(installed, bridge(configure, { p1: [httpRow(1)], p2: [httpRow(2)] }))
+    const { container, getByLabelText, rerender } = render(
+      <TrafficPanel projectId="p1" terminals={[]} />
+    )
+    await act(() => Promise.resolve())
+
+    const field = getByLabelText('traffic.hiddenPathPrefix')
+    expect(field.closest('.traffic-setup')).not.toBeNull()
+    expect(field).toHaveProperty('value', '')
+    fireEvent.change(field, { target: { value: '/n' } })
+    const cell = container.querySelector('.traffic-url')
+    expect(cell?.textContent).toBe('/1')
+    if (cell === null) throw new Error('the endpoint cell is not drawn')
+    expect(cell.getAttribute('title')).toBeNull()
+    fireEvent.pointerEnter(cell)
+    expect(document.querySelector('[role="tooltip"]')?.textContent).toBe('/1')
+    fireEvent.keyDown(window, { key: 'Escape' })
+    expect(document.querySelector('[role="tooltip"]')).toBeNull()
+    expect(configure).not.toHaveBeenCalled()
+
+    fireEvent.change(getByLabelText('traffic.search'), {
+      target: { value: 'http://127.0.0.1:9000/n/1' },
+    })
+    expect(container.querySelector('.traffic-url')?.textContent).toBe('/1')
+    fireEvent.change(getByLabelText('traffic.search'), { target: { value: '' } })
+
+    rerender(<TrafficPanel projectId="p2" terminals={[]} />)
+    await act(() => Promise.resolve())
+    expect(getByLabelText('traffic.hiddenPathPrefix')).toHaveProperty('value', '')
+    expect(container.querySelector('.traffic-url')?.textContent).toBe('/n/2')
+
+    rerender(<TrafficPanel projectId="p1" terminals={[]} />)
+    await act(() => Promise.resolve())
+    const restored = getByLabelText('traffic.hiddenPathPrefix')
+    expect(restored).toHaveProperty('value', '/n')
+    expect(container.querySelector('.traffic-url')?.textContent).toBe('/1')
+    fireEvent.change(restored, { target: { value: '' } })
+    expect(container.querySelector('.traffic-url')?.textContent).toBe('/n/1')
+  })
 })
 
 describe('switching project', () => {
@@ -535,11 +586,15 @@ describe('Run in Traffic', () => {
     expect(calls.startRun).toHaveBeenCalledWith({ projectId: 'p1' })
   })
 
-  it('keeps every Run control in the Traffic header, with no menu or Capture only', async () => {
+  it('keeps Run, its status and Edit command inside Capture setup, with no menu or Capture only', async () => {
     const { container } = await drawRun(runState())
     const head = container.querySelector('.traffic-head')
-    expect(head?.querySelector('[data-run-action="run"]')).not.toBeNull()
-    expect(head?.querySelector('[data-run-action="edit"]')).not.toBeNull()
+    const setup = container.querySelector('.traffic-setup .traffic-source-row')
+    expect(head?.querySelector('[data-run-action="run"]')).toBeNull()
+    expect(head?.querySelector('[data-run-action="edit"]')).toBeNull()
+    expect(setup?.querySelector('[data-run-action="run"]')).not.toBeNull()
+    expect(setup?.querySelector('[data-run-action="edit"]')).not.toBeNull()
+    expect(setup?.querySelector('.run-status')).not.toBeNull()
     expect(head?.querySelector('details')).toBeNull()
     expect(container.querySelector('[data-run-action="capture-only"]')).toBeNull()
     expect(container.querySelector('[data-run-command]')).toBeNull()
@@ -1161,10 +1216,10 @@ describe('Run beside Notes', () => {
     expect(element.querySelector('[data-run-action="edit"]')).toBeNull()
     expect(container.querySelector('[data-run-action="run"]')).toBeNull()
     expect(document.querySelectorAll('[data-run-action="run"]')).toHaveLength(1)
-    expect(container.querySelector('.traffic-head [data-run-action="edit"]')).not.toBeNull()
-    const head = container.querySelector('.traffic-head')
-    expect(head?.querySelector('[data-run-action="stop-recording"]')).not.toBeNull()
-    expect(container.querySelector('.traffic-head .run-status')).not.toBeNull()
+    const setup = container.querySelector('.traffic-setup .traffic-source-row')
+    expect(setup?.querySelector('[data-run-action="edit"]')).not.toBeNull()
+    expect(setup?.querySelector('[data-run-action="stop-recording"]')).not.toBeNull()
+    expect(setup?.querySelector('.run-status')).not.toBeNull()
 
     await press(element.querySelector<HTMLElement>('[data-run-action="run"]'))
     expect(calls.startRun).toHaveBeenCalledWith({ projectId: 'p1' })

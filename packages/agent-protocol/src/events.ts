@@ -46,7 +46,11 @@ export interface ReasoningDelta extends AgentEventBase {
 
 export interface PlanUpdated extends AgentEventBase {
   readonly type: 'plan.updated'
-  readonly steps: readonly { readonly text: string; readonly done: boolean }[]
+  readonly steps: readonly {
+    readonly text: string
+    readonly done: boolean
+    readonly active?: boolean
+  }[]
 }
 
 export interface CommandStarted extends AgentEventBase {
@@ -163,6 +167,11 @@ export interface UsageUpdated extends AgentEventBase {
  */
 export interface ContextCompacted extends AgentEventBase {
   readonly type: 'context.compacted'
+}
+
+export interface UsageBlocked extends AgentEventBase {
+  readonly type: 'usage.blocked'
+  readonly resetsAt: number | null
 }
 
 export interface TurnCompleted extends AgentEventBase {
@@ -465,6 +474,7 @@ export type AgentEvent =
   | ApprovalWithdrawn
   | UserInputRequested
   | UsageUpdated
+  | UsageBlocked
   | TurnCompleted
   | AgentError
   | Notice
@@ -498,6 +508,7 @@ const UNDROPPABLE = new Set<AgentEventType>([
   // leaves one spinning forever. `tool.progress` is the only part that repeats.
   'tool.started',
   'tool.completed',
+  'usage.blocked',
 ])
 
 export function isCoalescable(type: AgentEventType): boolean {

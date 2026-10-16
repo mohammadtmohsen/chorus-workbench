@@ -1,10 +1,10 @@
 import type { AgentAdapter } from '@chorus/agent-protocol'
-import { FakeAdapter } from '@chorus/orchestrator'
+import { FakeAdapter, type FakeAgentSession } from '@chorus/orchestrator'
 import { AGENT_IDS, Logger, type AgentId } from '@chorus/shared'
 import { mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { isExpandedCollaboration, originalCollaborationText } from '../shared/collaboration.js'
 import { IPC_CONTRACT } from '../shared/ipc.js'
 import { applyMention, teamCommandOption } from '../renderer/src/mention-menu.js'
@@ -194,5 +194,278 @@ describe('team introduction', () => {
       expect(sentTo(agent)[0]).toContain('This conversation has')
       expect(sentTo(agent)[0]).not.toContain('# ROLES AND SCOPE')
     }
+  })
+})
+
+describe('what became of a Work handoff', () => {
+  const DISCUSSION = 'You are in Discussion mode.'
+  const HANDOFF = 'Drafted.\n\n@codex Review the parser.'
+
+  const workSession = (agent: AgentId): FakeAgentSession => {
+    const found = adapters
+      .get(agent)
+      ?.sessions.filter(
+        (session) =>
+          session.startedWith !== undefined &&
+          session.startedWith.instructions !== NAMER_INSTRUCTIONS &&
+          session.startedWith.instructions?.startsWith(DISCUSSION) !== true
+      )
+      .at(-1)
+    if (found === undefined) throw new Error(`no work session for ${agent}`)
+    return found
+  }
+
+  const answer = (agent: AgentId, turnRef: string, text: string): void => {
+    const session = workSession(agent)
+    session.emit({ type: 'turn.started', turnRef })
+    session.emit({ type: 'message.completed', itemRef: `${turnRef}-reply`, text })
+    session.emit({ type: 'turn.completed', turnRef, status: 'completed' })
+  }
+
+  const payloads = () => runtime.store.read(conversationId).map((event) => event.payload)
+  const created = () =>
+    payloads().flatMap((payload) => (payload.type === 'handoff.created' ? [payload] : []))
+  const outcomes = () =>
+    payloads().flatMap((payload) => (payload.type === 'handoff.outcome' ? [payload] : []))
+  const replyId = (text: string): string | undefined =>
+    runtime.store
+      .read(conversationId)
+      .find(
+        (event) => event.payload.type === 'agent.message.completed' && event.payload.text === text
+      )?.id
+
+  const onlyClaudeSeated = async (): Promise<FakeAdapter> => {
+    await runtime.closeConversation(conversationId)
+    const started = await runtime.startConversationIn({ agents: ['claude'], cwd: process.cwd() })
+    conversationId = started.conversationId
+    const codex = adapters.get('codex')
+    if (codex === undefined) throw new Error('no codex adapter')
+    return codex
+  }
+
+  it('records a submitted outcome against the handoff it created, and nothing for later turns', async () => {
+    await runtime.send(conversationId, '@claude Draft the parser.')
+    answer('claude', 'c1', HANDOFF)
+    await vi.waitFor(() => {
+      expect(outcomes()).toHaveLength(1)
+    })
+    const [made] = created()
+    expect(made?.sourceEventIds).toEqual([replyId(HANDOFF)])
+    expect(outcomes()).toEqual([
+      {
+        type: 'handoff.outcome',
+        handoffId: made?.handoffId,
+        from: 'claude',
+        to: 'codex',
+        sourceEventIds: [replyId(HANDOFF)],
+        outcome: 'submitted',
+      },
+    ])
+    expect(
+      payloads()
+        .map((payload) => payload.type)
+        .filter((type) => type.startsWith('handoff.'))
+    ).toEqual(['handoff.created', 'handoff.outcome'])
+    expect(sentTo('codex').some((text) => text.includes('Review the parser.'))).toBe(true)
+
+    answer('codex', 'x1', 'Reviewed, nothing to change.')
+    await vi.waitFor(() => {
+      expect(replyId('Reviewed, nothing to change.')).toBeDefined()
+    })
+    expect(outcomes()).toHaveLength(1)
+  })
+
+  it('records a failed outcome when the recipient session refuses the input', async () => {
+    await runtime.send(conversationId, '@claude Draft the parser.')
+    vi.spyOn(workSession('codex'), 'send').mockRejectedValueOnce(new Error('pipe closed'))
+    answer('claude', 'c1', HANDOFF)
+    await vi.waitFor(() => {
+      expect(outcomes()).toHaveLength(1)
+    })
+    expect(created()).toHaveLength(1)
+    expect(outcomes()[0]).toMatchObject({
+      handoffId: created()[0]?.handoffId,
+      to: 'codex',
+      outcome: 'failed',
+    })
+    expect(
+      payloads().some(
+        (payload) => payload.type === 'error.raised' && payload.message.includes('pipe closed')
+      )
+    ).toBe(true)
+  })
+
+  it('records an unavailable outcome, with no created handoff, when the recipient cannot be seated', async () => {
+    const codex = await onlyClaudeSeated()
+    vi.spyOn(codex, 'start').mockRejectedValue(new Error('codex is not installed'))
+    await runtime.send(conversationId, '@claude Draft the parser.')
+    answer('claude', 'c1', HANDOFF)
+    await vi.waitFor(() => {
+      expect(outcomes()).toHaveLength(1)
+    })
+    expect(created()).toEqual([])
+    expect(outcomes()[0]).toMatchObject({
+      from: 'claude',
+      to: 'codex',
+      sourceEventIds: [replyId(HANDOFF)],
+      outcome: 'unavailable',
+    })
+  })
+
+  it('records a cancelled outcome tied to its source reply when the user redirected first', async () => {
+    await runtime.send(conversationId, '@claude Draft the parser.')
+    const claude = workSession('claude')
+    claude.emit({ type: 'turn.started', turnRef: 'c1' })
+    await runtime.send(conversationId, '@codex Use the cached grammar instead.')
+    claude.emit({ type: 'message.completed', itemRef: 'c1-reply', text: HANDOFF })
+    claude.emit({ type: 'turn.completed', turnRef: 'c1', status: 'completed' })
+    await vi.waitFor(() => {
+      expect(outcomes()).toHaveLength(1)
+    })
+    expect(created()).toEqual([])
+    expect(outcomes()[0]).toMatchObject({
+      from: 'claude',
+      to: 'codex',
+      sourceEventIds: [replyId(HANDOFF)],
+      outcome: 'cancelled',
+    })
+    expect(outcomes()[0]?.handoffId).not.toBe('')
+  })
+
+  it('records cancelled, not submitted, when Stop lands while the recipient is being seated', async () => {
+    const codex = await onlyClaudeSeated()
+    await runtime.send(conversationId, '@claude Draft the parser.')
+    let release = (): void => undefined
+    const seated = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    const start = codex.start.bind(codex)
+    const starting = vi.spyOn(codex, 'start').mockImplementation(async (opts) => {
+      if (opts.instructions !== NAMER_INSTRUCTIONS) await seated
+      return start(opts)
+    })
+    answer('claude', 'c1', HANDOFF)
+    await vi.waitFor(() => {
+      expect(starting.mock.calls.some(([opts]) => opts.instructions !== NAMER_INSTRUCTIONS)).toBe(
+        true
+      )
+    })
+    const stopping = runtime.interrupt(conversationId)
+    release()
+    await stopping
+    await vi.waitFor(() => {
+      expect(outcomes()).toHaveLength(1)
+    })
+    expect(created()).toEqual([])
+    expect(outcomes()[0]).toMatchObject({ to: 'codex', outcome: 'cancelled' })
+  })
+
+  it('records cancelled, not submitted, when Stop lands while the input is being delivered', async () => {
+    await runtime.send(conversationId, '@claude Draft the parser.')
+    let release = (): void => undefined
+    const delivered = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    const sending = vi.spyOn(workSession('codex'), 'send').mockImplementationOnce(async () => {
+      await delivered
+    })
+    answer('claude', 'c1', HANDOFF)
+    await vi.waitFor(() => {
+      expect(sending).toHaveBeenCalled()
+    })
+    const stopping = runtime.interrupt(conversationId)
+    release()
+    await stopping
+    await vi.waitFor(() => {
+      expect(outcomes()).toHaveLength(1)
+    })
+    expect(created()).toHaveLength(1)
+    expect(outcomes()[0]).toMatchObject({
+      handoffId: created()[0]?.handoffId,
+      outcome: 'cancelled',
+    })
+  })
+
+  it('cancels a handoff whose Stop landed after it was scheduled and before it began', async () => {
+    const codex = await onlyClaudeSeated()
+    await runtime.send(conversationId, '@claude Draft the parser.')
+    const starting = vi.spyOn(codex, 'start')
+    let stopping: Promise<void> | undefined
+    runtime.subscribe((events) => {
+      const ended = events.some(
+        (event) =>
+          event.conversationId === conversationId &&
+          event.actor === 'claude' &&
+          event.payload.type === 'turn.completed'
+      )
+      if (ended && stopping === undefined) stopping = runtime.interrupt(conversationId)
+    })
+    answer('claude', 'c1', HANDOFF)
+    await vi.waitFor(() => {
+      expect(outcomes()).toHaveLength(1)
+    })
+    await stopping
+    expect(outcomes()[0]).toMatchObject({
+      from: 'claude',
+      to: 'codex',
+      sourceEventIds: [replyId(HANDOFF)],
+      outcome: 'cancelled',
+    })
+    expect(created()).toEqual([])
+    const workStarts = starting.mock.calls.filter(
+      ([opts]) => opts.instructions !== NAMER_INSTRUCTIONS
+    )
+    expect(workStarts).toEqual([])
+    expect(sentTo('codex')).toEqual([])
+  })
+
+  it('records cancelled, not failed, when the recipient was replaced before its send rejected', async () => {
+    await runtime.send(conversationId, '@claude Draft the parser.')
+    const original = workSession('codex')
+    let refuse: (error: Error) => void = () => undefined
+    const refused = new Promise<void>((_resolve, reject) => {
+      refuse = reject
+    })
+    const sending = vi.spyOn(original, 'send').mockImplementationOnce(() => refused)
+    answer('claude', 'c1', HANDOFF)
+    await vi.waitFor(() => {
+      expect(sending).toHaveBeenCalled()
+    })
+    await runtime.setAnswerStyle(conversationId, true)
+    expect(workSession('codex')).not.toBe(original)
+    refuse(new Error('session closed'))
+    await vi.waitFor(() => {
+      expect(outcomes()).toHaveLength(1)
+    })
+    expect(created()).toHaveLength(1)
+    expect(outcomes()[0]).toMatchObject({
+      handoffId: created()[0]?.handoffId,
+      outcome: 'cancelled',
+    })
+    expect(
+      payloads().some(
+        (payload) => payload.type === 'error.raised' && payload.message.includes('session closed')
+      )
+    ).toBe(true)
+  }, 15_000)
+
+  it('keeps each of several handoffs with its own id and outcome', async () => {
+    await runtime.send(conversationId, '@claude Draft the parser.')
+    answer('claude', 'c1', HANDOFF)
+    await vi.waitFor(() => {
+      expect(outcomes()).toHaveLength(1)
+    })
+    answer('codex', 'x1', 'Reviewed.\n\n@claude Apply the two fixes.')
+    await vi.waitFor(() => {
+      expect(outcomes()).toHaveLength(2)
+    })
+    const ids = created().map((payload) => payload.handoffId)
+    expect(new Set(ids).size).toBe(2)
+    expect(
+      outcomes().map((payload) => [payload.handoffId, payload.from, payload.to, payload.outcome])
+    ).toEqual([
+      [ids[0], 'claude', 'codex', 'submitted'],
+      [ids[1], 'codex', 'claude', 'submitted'],
+    ])
   })
 })

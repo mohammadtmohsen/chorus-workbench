@@ -17,6 +17,8 @@ import {
   WORKBENCH_ROW_REVEAL_PUSH_CHANNEL,
   WORKBENCH_ROW_SCROLL_REQUEST_CHANNEL,
   WORKBENCH_ROW_SCROLL_PUSH_CHANNEL,
+  WORKBENCH_STORAGE_FLUSH_CHANNEL,
+  WORKBENCH_STORAGE_FLUSH_RESULT_CHANNEL,
   WORKBENCH_TERMINAL_ENV_CHANNEL,
   WorkbenchConnection,
 } from '../shared/workbench-ipc.js'
@@ -83,6 +85,16 @@ class FakeWebContents {
     this.listeners.set(event, [...(this.listeners.get(event) ?? []), listener])
     return this
   }
+  once(event: string, listener: (...args: unknown[]) => void): this {
+    return this.on(event, listener)
+  }
+  removeListener(event: string, listener: (...args: unknown[]) => void): this {
+    this.listeners.set(
+      event,
+      (this.listeners.get(event) ?? []).filter((each) => each !== listener)
+    )
+    return this
+  }
   readonly setWindowOpenHandler = vi.fn()
   /**
    * Recorded for the same reason `setBounds` is: the factor a workbench view is
@@ -103,6 +115,9 @@ class FakeWebContents {
   send(channel: string, payload?: unknown): void {
     this.channels.push(channel)
     this.sent.push(payload)
+    if (channel === WORKBENCH_STORAGE_FLUSH_CHANNEL) {
+      pushes.get(WORKBENCH_STORAGE_FLUSH_RESULT_CHANNEL)?.({ sender: this }, payload, null)
+    }
   }
   sentOn(channel: string): unknown[] {
     return this.sent.filter((_payload, index) => this.channels[index] === channel)
@@ -166,7 +181,7 @@ const handlers = new Map<string, (event: unknown, request?: unknown) => unknown>
  * is missing a method the production code calls is a suite that silently stops
  * covering anything, which is worth more comment than the two lines below.
  */
-const pushes = new Map<string, (event: unknown, payload?: unknown) => void>()
+const pushes = new Map<string, (event: unknown, ...payload: unknown[]) => void>()
 
 /**
  * Unpackaged by default, which is what makes the gate's seeded chooser reachable
@@ -194,7 +209,7 @@ vi.mock('electron', () => ({
     handle: vi.fn((channel: string, handler: (event: unknown, request?: unknown) => unknown) => {
       handlers.set(channel, handler)
     }),
-    on: vi.fn((channel: string, listener: (event: unknown, payload?: unknown) => void) => {
+    on: vi.fn((channel: string, listener: (event: unknown, ...payload: unknown[]) => void) => {
       pushes.set(channel, listener)
     }),
   },
@@ -269,6 +284,7 @@ vi.mock('./workbench-host.js', () => ({
   releaseWorkbenchRuntime: (root: string) => {
     releaseWorkbenchRuntime(root)
   },
+  workbenchHostLog: () => ({ info: () => undefined, warn: () => undefined }),
 }))
 
 /**
@@ -356,10 +372,10 @@ surface.registerWorkbenchHandlers(undefined)
 /** One shell, unless a test needs two. Ownership is decided by this object. */
 let shell: FakeWebContents
 
-beforeEach(() => {
+beforeEach(async () => {
   // Module state is shared across this file; a leaked surface would make the
   // next test's "the last constructed view" the wrong one.
-  surface.closeAllSurfaces()
+  await surface.closeAllSurfaces()
   surface.setDetachedAccessPredicate(null)
   surface.setHandoffExpiredSink(null)
   surface.setWorkbenchTerminalEnvSource(null)
@@ -676,7 +692,7 @@ describe('who may drive a surface', () => {
       surface.setSurfaceBounds(other as never, viewId, { x: 9, y: 9, width: 9, height: 9 })
     }).toThrow(/belongs to this window/)
     expect(() => {
-      surface.closeSurface(other as never, viewId)
+      void surface.closeSurface(other as never, viewId)
     }).toThrow(/belongs to this window/)
 
     // The refusal has to be a refusal, not a message: the view is where its owner
@@ -695,14 +711,14 @@ describe('who may drive a surface', () => {
     // Two different messages would answer "does this id exist?", which is the
     // only thing an id-guessing caller could learn here.
     expect(() => {
-      surface.closeSurface(shell as never, 'not-an-id')
+      void surface.closeSurface(shell as never, 'not-an-id')
     }).toThrow(/belongs to this window/)
   })
 
   it('lets the owner close its own surface', async () => {
     const viewId = await openAt(shell, ROOT_A)
     const view = lastView()
-    surface.closeSurface(shell as never, viewId)
+    await surface.closeSurface(shell as never, viewId)
     expect(view.webContents.close).toHaveBeenCalled()
     expect(fakeWindow.contentView.children).not.toContain(view)
   })
@@ -725,7 +741,9 @@ describe('a shell that goes away without saying so', () => {
       isSameDocument: false,
     })
 
-    expect(view.webContents.close).toHaveBeenCalled()
+    await vi.waitFor(() => {
+      expect(view.webContents.close).toHaveBeenCalled()
+    })
     expect(fakeWindow.contentView.children).not.toContain(view)
   })
 
@@ -733,7 +751,9 @@ describe('a shell that goes away without saying so', () => {
     await openAt(shell, ROOT_B)
     const view = lastView()
     shell.emit('destroyed')
-    expect(view.webContents.close).toHaveBeenCalled()
+    await vi.waitFor(() => {
+      expect(view.webContents.close).toHaveBeenCalled()
+    })
   })
 
   it('leaves them alone for a same-document navigation', async () => {
@@ -766,7 +786,9 @@ describe('a shell that goes away without saying so', () => {
 
     other.emit('destroyed')
 
-    expect(theirs.webContents.close).toHaveBeenCalled()
+    await vi.waitFor(() => {
+      expect(theirs.webContents.close).toHaveBeenCalled()
+    })
     expect(mine.webContents.close).not.toHaveBeenCalled()
   })
 })
@@ -813,7 +835,7 @@ describe('a surface changing hands', () => {
       surface.setSurfaceBounds(shell as never, viewId, placed)
     }).toThrow(/belongs to this window/)
     expect(() => {
-      surface.closeSurface(shell as never, viewId)
+      void surface.closeSurface(shell as never, viewId)
     }).toThrow(/belongs to this window/)
     expect(view.webContents.close).not.toHaveBeenCalled()
     expect(fakeWindow.contentView.children).not.toContain(view)
@@ -995,7 +1017,9 @@ describe('a surface changing hands', () => {
       expect(view.webContents.close).not.toHaveBeenCalled()
 
       vi.advanceTimersByTime(1)
-      expect(view.webContents.close).toHaveBeenCalled()
+      await vi.waitFor(() => {
+        expect(view.webContents.close).toHaveBeenCalled()
+      })
       expect(fakeWindow.contentView.children).not.toContain(view)
     } finally {
       vi.useRealTimers()
@@ -1180,7 +1204,7 @@ describe('the shared server lease', () => {
         { ...RUNTIME, remoteAuthority: '127.0.0.1:48000', projectRoot: '/C:/api' },
       ])
 
-      surface.closeSurface(shell as never, viewId)
+      await surface.closeSurface(shell as never, viewId)
       expect(releaseRemoteWorkbenchRuntime).toHaveBeenCalledWith('officepc', 'C:/api')
       expect(releaseWorkbenchRuntime).not.toHaveBeenCalled()
     } finally {
@@ -1243,7 +1267,7 @@ describe('the shared server lease', () => {
       )
       await expect(pending).resolves.toEqual({ requestId: sent?.requestId, ok: true, version: 4 })
 
-      surface.closeSurface(shell as never, viewId)
+      await surface.closeSurface(shell as never, viewId)
     } finally {
       surface.registerWorkbenchHandlers(undefined)
     }
@@ -1253,12 +1277,12 @@ describe('the shared server lease', () => {
     const first = await openAt(shell, ROOT_A)
     const second = await openAt(shell, ROOT_A)
 
-    surface.closeSurface(shell as never, first)
+    await surface.closeSurface(shell as never, first)
     // Still open elsewhere, so the project is still open. Releasing here would be
     // the refcount counting views again, one level in.
     expect(releaseWorkbenchRuntime).not.toHaveBeenCalled()
 
-    surface.closeSurface(shell as never, second)
+    await surface.closeSurface(shell as never, second)
     expect(releaseWorkbenchRuntime).toHaveBeenCalledWith(ROOT_A)
   })
 

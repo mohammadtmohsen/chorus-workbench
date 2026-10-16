@@ -2,10 +2,10 @@
 
 ## Status
 
-| Unit           | Result                                                        |
-| -------------- | ------------------------------------------------------------- |
+| Unit           | Result                                                         |
+| -------------- | -------------------------------------------------------------- |
 | Scope          | Place shell views below Run while retaining tool shrink arrows |
-| Implementation | Written and diff reviewed; runtime behavior unverified        |
+| Implementation | Written and diff reviewed; runtime behavior unverified         |
 | Verification   | Not run; the user has not requested tests                      |
 
 ## Current / Issue

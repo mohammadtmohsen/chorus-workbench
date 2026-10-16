@@ -18,6 +18,7 @@ import {
   forwardIdeContextToRenderer,
   forwardContextUsageToRenderer,
   forwardTasksToRenderer,
+  forwardConversationNotesToRenderer,
   forwardActivityToRenderer,
   forwardAttentionToRenderer,
   forwardDiagnosticsToRenderer,
@@ -75,6 +76,7 @@ let trafficIpc: TrafficIpc | null = null
 let runIpc: RunIpc | null = null
 let browserIpc: BrowserIpc | null = null
 let browserDownloads: BrowserDownloads | null = null
+let stopConversationNotes: (() => void) | null = null
 
 /** The shell's one document, named once so the load and the allowlist agree. */
 const SHELL_ENTRY_FILE = join(__dirname, '../renderer/index.html')
@@ -412,6 +414,8 @@ void app.whenReady().then(async () => {
   forwardLimitsToRenderer(runtime)
   forwardContextUsageToRenderer(runtime)
   forwardTasksToRenderer(runtime)
+  stopConversationNotes?.()
+  stopConversationNotes = forwardConversationNotesToRenderer(runtime)
   forwardActivityToRenderer(runtime)
   forwardAttentionToRenderer(runtime)
   forwardTerminalToRenderer(runtime)
@@ -692,6 +696,8 @@ async function shutDownEverything(): Promise<void> {
   ideBridge = null
   runIpc?.close()
   runIpc = null
+  stopConversationNotes?.()
+  stopConversationNotes = null
   browserDownloads?.dispose()
   browserDownloads = null
   const browserClosed = browserIpc?.close()

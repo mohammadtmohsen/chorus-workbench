@@ -2,14 +2,14 @@
 
 ## Status
 
-| Unit | Result |
-| --- | --- |
-| Scope | Scrolling toward the editor can expand it to 100% of the window and hide the first chat |
-| Evidence | The workbench column ends at its configured width; `scrollLeft` cannot move below zero to reveal more editor |
-| Implementation | Written: full-width editor capacity, initial offset, relative scroll persistence, resize/reset positioning and native gesture ownership |
-| Review | Product and regression diffs reviewed against `/private/tmp/editor-scroll-width-yfyu5ku2`; existing Traffic and workspace changes preserved |
-| Verification | Desktop build, local packaging, signing and installation passed; regression tests, separate typechecks and live UI checks unrun |
-| Installation | 2026-10-11: signed arm64 app installed at `/Applications/Chorus.app`; current session kept running |
+| Unit           | Result                                                                                                                                      |
+| -------------- | ------------------------------------------------------------------------------------------------------------------------------------------- |
+| Scope          | Scrolling toward the editor can expand it to 100% of the window and hide the first chat                                                     |
+| Evidence       | The workbench column ends at its configured width; `scrollLeft` cannot move below zero to reveal more editor                                |
+| Implementation | Written: full-width editor capacity, initial offset, relative scroll persistence, resize/reset positioning and native gesture ownership     |
+| Review         | Product and regression diffs reviewed against `/private/tmp/editor-scroll-width-yfyu5ku2`; existing Traffic and workspace changes preserved |
+| Verification   | Desktop build, local packaging, signing and installation passed; regression tests, separate typechecks and live UI checks unrun             |
+| Installation   | 2026-10-11: signed arm64 app installed at `/Applications/Chorus.app`; current session kept running                                          |
 
 The build and installation record is in [the Traffic width plan](33-traffic-default-reset.md#status). Quit and reopen Chorus to load both updates.
 

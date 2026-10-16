@@ -2,11 +2,19 @@ import { parseDiff } from '@chorus/workspace/diff'
 import { agentRecord, isAgentId, type AgentId } from '@chorus/shared'
 import { trailingSummary } from '../../shared/markdown.js'
 import { originalCollaborationText } from '../../shared/collaboration.js'
-import { isLiveInteraction, isLiveReply, LIVE_USER_PREFIX } from '../../shared/live-message.js'
+import {
+  DISCUSSION_REPLY_PREFIX,
+  DISCUSSION_USER_PREFIX,
+  isLiveInteraction,
+  isLiveReply,
+  LIVE_REPLY_PREFIX,
+  LIVE_USER_PREFIX,
+} from '../../shared/live-message.js'
 import { questionFields, type QuestionField } from '../../shared/question-text.js'
 import { TRANSCRIPT_DISPOSITION } from '../../shared/transcript-events.js'
 import type { ChorusEventType } from '@chorus/event-store'
-import type { TranscriptEvent } from '../../shared/ipc.js'
+import type { LiveStateWire, TranscriptAssignment, TranscriptEvent } from '../../shared/ipc.js'
+import { appendTaskMarks, mergeTaskMarks, type TaskBundle } from '../../shared/task-progress.js'
 
 /**
  * Folds the event log into something renderable.
@@ -197,6 +205,8 @@ export interface PendingApproval {
   readonly version?: number
   /** 1-based, `startLine:startColumn`-ish, already formatted for display. */
   readonly where?: string
+  readonly mode?: 'chat'
+  readonly requestId?: string
 }
 
 /**
@@ -224,6 +234,8 @@ export interface PendingQuestion {
   readonly agentId: TranscriptEvent['actor']
   readonly questions: readonly QuestionField[]
   readonly expiresAt: number
+  readonly mode?: 'chat'
+  readonly requestId?: string
 }
 
 /*
@@ -242,6 +254,44 @@ export interface Spend {
   readonly costUsd: number | null
 }
 
+export interface PendingReply {
+  readonly requestId: string
+  readonly sourceId: string
+  readonly agentId: AgentId
+  readonly phase: 'waiting' | 'thinking' | 'replying'
+  readonly startedAt: number
+  readonly phaseSince: number
+  readonly from: AgentId | null
+}
+
+export interface LiveTurn {
+  readonly generation: number
+  readonly startedAt: number
+}
+
+export interface LiveOperation {
+  readonly agentId: AgentId
+  readonly requestId: string | null
+  readonly generation: number
+  readonly itemRef: string
+  readonly kind: 'tool' | 'command'
+  readonly name: string
+  readonly detail: string | null
+  readonly startedAt: number
+}
+
+export type HandoffOutcome = 'submitted' | 'failed' | 'cancelled' | 'unavailable'
+
+export interface LiveHandoff {
+  readonly handoffId: string
+  readonly from: AgentId
+  readonly to: AgentId
+  readonly sourceEventIds: readonly string[]
+  readonly createdAt: number | null
+  readonly outcome: HandoffOutcome | null
+  readonly outcomeAt: number | null
+}
+
 export interface TranscriptView {
   readonly messages: readonly TranscriptMessage[]
   readonly approvals: readonly PendingApproval[]
@@ -249,6 +299,7 @@ export interface TranscriptView {
   readonly questions: readonly PendingQuestion[]
   /** Agents currently mid-turn. Drives the live indicator on each voice. */
   readonly working: readonly TranscriptEvent['actor'][]
+  readonly replies: Readonly<Record<string, PendingReply>>
   readonly busy: boolean
   readonly lastSeq: number
   /**
@@ -276,19 +327,40 @@ export interface TranscriptView {
    * `Record` initialised to `{}` would be lying about its keys.
    */
   readonly openChanges: Readonly<Record<AgentId, string | null>>
+  readonly workingSince: Readonly<Record<string, number>>
+  readonly turns: Readonly<Record<string, LiveTurn>>
+  readonly operations: Readonly<Record<string, LiveOperation>>
+  readonly evidenceAt: Readonly<Record<string, number>>
+  readonly handoffs: Readonly<Record<string, LiveHandoff>>
+  readonly task: TaskBundle | null
+  readonly taskEpoch: number
+  readonly taskSyncedEpoch: number
+  readonly assignment: TranscriptAssignment
 }
+
+export const NO_ASSIGNMENT: TranscriptAssignment = { linked: false, boundTaskId: null }
 
 export const EMPTY_VIEW: TranscriptView = {
   messages: [],
   approvals: [],
   questions: [],
   working: [],
+  replies: {},
   busy: false,
   lastSeq: 0,
   firstSeq: 0,
   spend: { inputTokens: 0, outputTokens: 0, costUsd: null },
   usageByActor: {},
   openChanges: agentRecord(() => null),
+  workingSince: {},
+  turns: {},
+  operations: {},
+  evidenceAt: {},
+  handoffs: {},
+  task: null,
+  taskEpoch: 0,
+  taskSyncedEpoch: 0,
+  assignment: NO_ASSIGNMENT,
 }
 
 interface Mutable {
@@ -299,9 +371,66 @@ interface Mutable {
   approvals: PendingApproval[]
   questions: PendingQuestion[]
   working: TranscriptEvent['actor'][]
+  replies: Record<string, PendingReply>
   busy: boolean
   lastSeq: number
   firstSeq: number
+  workingSince: Record<string, number>
+  turns: Record<string, LiveTurn>
+  operations: Record<string, LiveOperation>
+  evidenceAt: Record<string, number>
+  handoffs: Record<string, LiveHandoff>
+  assignment: TranscriptAssignment
+}
+
+function latestTaskId(bundle: TaskBundle | null): string | null {
+  const opened = bundle?.marks.findLast((mark) => mark.kind === 'opened')
+  return opened?.kind === 'opened' ? opened.taskId : null
+}
+
+function latestTaskClosed(bundle: TaskBundle): boolean {
+  const taskId = latestTaskId(bundle)
+  return bundle.marks.some((mark) => mark.kind === 'closed' && mark.taskId === taskId)
+}
+
+export function foldTask(
+  view: Pick<TranscriptView, 'task' | 'taskEpoch'>,
+  events: readonly TranscriptEvent[]
+): Pick<TranscriptView, 'task' | 'taskEpoch'> {
+  const known = latestTaskId(view.task)
+  const opensNew = events.some(
+    (event) =>
+      event.type === 'task.opened' &&
+      typeof event.payload['taskId'] === 'string' &&
+      event.payload['taskId'] !== known
+  )
+  if (view.task === null && !opensNew) return view
+  const base = view.task ?? { marks: [], history: [] }
+  const relevant =
+    !opensNew && latestTaskClosed(base)
+      ? events.filter((event) => event.type === 'user.message' || event.type === 'task.opened')
+      : events
+  const task = appendTaskMarks(base, relevant)
+  const taskEpoch = opensNew ? view.taskEpoch + 1 : view.taskEpoch
+  return task === view.task && taskEpoch === view.taskEpoch ? view : { task, taskEpoch }
+}
+
+export function mergeTaskState(
+  view: TranscriptView,
+  fresh: TaskBundle | null,
+  epoch: number,
+  throughSeq: number
+): TranscriptView {
+  const taskSyncedEpoch = Math.max(view.taskSyncedEpoch, epoch)
+  if (fresh !== null) {
+    return { ...view, task: mergeTaskMarks(fresh, view.task, throughSeq), taskSyncedEpoch }
+  }
+  const newer = (view.task?.marks ?? []).filter((mark) => mark.seq > throughSeq)
+  return {
+    ...view,
+    task: newer.length === 0 ? null : { marks: newer, history: view.task?.history ?? [] },
+    taskSyncedEpoch,
+  }
 }
 
 export function reduceEvents(
@@ -313,13 +442,21 @@ export function reduceEvents(
     approvals: [...view.approvals],
     questions: [...view.questions],
     working: [...view.working],
+    replies: { ...view.replies },
     busy: view.busy,
     lastSeq: view.lastSeq,
     firstSeq: view.firstSeq,
     spend: view.spend,
     usageByActor: { ...view.usageByActor },
     openChanges: { ...view.openChanges },
+    workingSince: { ...view.workingSince },
+    turns: { ...view.turns },
+    operations: { ...view.operations },
+    evidenceAt: { ...view.evidenceAt },
+    handoffs: { ...view.handoffs },
+    assignment: view.assignment,
   }
+  const fresh: TranscriptEvent[] = []
 
   for (const event of events) {
     // Pushes and history replays can overlap; the log's ordering makes
@@ -327,6 +464,7 @@ export function reduceEvents(
     if (event.seq <= next.lastSeq) continue
     next.lastSeq = event.seq
     if (next.firstSeq === 0) next.firstSeq = event.seq
+    fresh.push(event)
     /*
      * The disposition map decides, here, rather than the switch below quietly
      * having no case.
@@ -344,12 +482,22 @@ export function reduceEvents(
      * advancing the high-water mark; skipping them earlier would re-query them
      * forever.
      */
-    if (TRANSCRIPT_DISPOSITION[event.type as ChorusEventType] === 'ignore') continue
+    if (TRANSCRIPT_DISPOSITION[event.type as ChorusEventType] === 'ignore') {
+      foldLive(next, event)
+      continue
+    }
     apply(next, event)
+    foldLive(next, event)
   }
 
-  next.busy = next.working.length > 0
-  return next
+  next.busy = next.working.length > 0 || Object.keys(next.replies).length > 0
+  const task = foldTask(view, fresh)
+  return {
+    ...next,
+    task: task.task,
+    taskEpoch: task.taskEpoch,
+    taskSyncedEpoch: view.taskSyncedEpoch,
+  }
 }
 
 /**
@@ -377,6 +525,8 @@ export function applyTranscriptState(
       kind: string
       request: unknown
       expiresAt: number
+      mode?: 'discussion' | undefined
+      requestId?: string | undefined
     }[]
     readonly questions: readonly {
       userInputId: string
@@ -384,9 +534,16 @@ export function applyTranscriptState(
       agentId: string
       request: unknown
       expiresAt: number
+      mode?: 'discussion' | undefined
+      requestId?: string | undefined
     }[]
     readonly working: readonly string[]
+    readonly workingSince?: Readonly<Record<string, number>> | undefined
+    readonly replies?: readonly TranscriptEvent[]
     readonly usageByActor: Readonly<Record<string, Spend>>
+    readonly task?: TaskBundle | null | undefined
+    readonly live?: LiveStateWire | undefined
+    readonly assignment?: TranscriptAssignment | undefined
   }
 ): TranscriptView {
   const approvals: PendingApproval[] = state.approvals.map((a) => {
@@ -399,6 +556,7 @@ export function applyTranscriptState(
       detail: detailOf(payload),
       ...editorEditFields(payload),
       expiresAt: a.expiresAt,
+      ...waitProvenance(a.mode, a.requestId),
     }
   })
 
@@ -409,12 +567,31 @@ export function applyTranscriptState(
       agentId: q.agentId as TranscriptEvent['actor'],
       questions: questionFields(q.request),
       expiresAt: q.expiresAt,
+      ...waitProvenance(q.mode, q.requestId),
     }))
     // A question set with no fields is not something anyone can answer; the
     // reducer drops it for the same reason.
     .filter((q) => q.questions.length > 0)
 
   const working = state.working as readonly TranscriptEvent['actor'][]
+  const requestStarts = new Map(
+    (state.live?.chat ?? []).map((lane) => [lane.requestId, lane.startedAt] as const)
+  )
+  const replies = Object.fromEntries(
+    Object.entries(
+      reduceEvents(
+        EMPTY_VIEW,
+        [...(state.replies ?? [])].sort((a, b) => a.seq - b.seq)
+      ).replies
+    ).map(([requestId, reply]) => [
+      requestId,
+      {
+        ...reply,
+        startedAt:
+          requestStarts.get(requestId) ?? view.replies[requestId]?.startedAt ?? reply.startedAt,
+      },
+    ])
+  )
 
   // Summed here rather than stored, because `spend` is the total across agents
   // and `usageByActor` is what it is a sum of.
@@ -430,14 +607,101 @@ export function applyTranscriptState(
     { inputTokens: 0, outputTokens: 0, costUsd: null }
   )
 
+  const workingSince = Object.fromEntries(
+    working.flatMap((actor) => {
+      const at = state.workingSince?.[actor] ?? view.workingSince[actor]
+      return at === undefined ? [] : [[actor, at] as const]
+    })
+  )
+
   return {
     ...view,
     approvals,
     questions,
     working: [...working],
-    busy: working.length > 0,
+    workingSince,
+    replies,
+    ...liveFromState(view, working, replies, state.live),
+    busy: working.length > 0 || Object.keys(replies).length > 0,
     spend,
     usageByActor: { ...state.usageByActor },
+    ...(state.task === undefined ? {} : { task: state.task, taskSyncedEpoch: view.taskEpoch }),
+    ...(state.assignment === undefined
+      ? {}
+      : {
+          assignment: {
+            linked: state.assignment.linked,
+            boundTaskId: state.assignment.boundTaskId,
+          },
+        }),
+  }
+}
+
+function liveFromState(
+  view: TranscriptView,
+  working: readonly string[],
+  replies: Readonly<Record<string, PendingReply>>,
+  live: LiveStateWire | undefined
+): Pick<TranscriptView, 'turns' | 'operations' | 'evidenceAt' | 'handoffs'> {
+  const workingAgents = new Set<string>(working)
+  const turns: Record<string, LiveTurn> = Object.fromEntries(
+    live === undefined
+      ? Object.entries(view.turns).filter(([agent]) => workingAgents.has(agent))
+      : live.work.flatMap((lane) =>
+          workingAgents.has(lane.agentId)
+            ? [[lane.agentId, { generation: lane.generation, startedAt: lane.startedAt }] as const]
+            : []
+        )
+  )
+  const lanes = new Set([...Object.keys(turns).map(workLane), ...Object.keys(replies)])
+  const current = (operation: LiveOperation): boolean =>
+    lanes.has(laneOfOperation(operation)) &&
+    (operation.requestId !== null || turns[operation.agentId]?.generation === operation.generation)
+
+  if (live === undefined) {
+    return {
+      turns,
+      operations: Object.fromEntries(
+        Object.entries(view.operations).filter(([, operation]) => current(operation))
+      ),
+      evidenceAt: Object.fromEntries(
+        Object.entries(view.evidenceAt).filter(([lane]) => lanes.has(lane))
+      ),
+      handoffs: view.handoffs,
+    }
+  }
+
+  return {
+    turns,
+    operations: Object.fromEntries(
+      live.operations.flatMap((operation) => {
+        const { agentId } = operation
+        if (!isAgentId(agentId)) return []
+        const restored: LiveOperation = { ...operation, agentId }
+        return current(restored)
+          ? [[operationKey(laneOfOperation(restored), restored.itemRef), restored] as const]
+          : []
+      })
+    ),
+    evidenceAt: Object.fromEntries(
+      [
+        ...live.work.map((lane) => [workLane(lane.agentId), lane.evidenceAt] as const),
+        ...live.chat.map((lane) => [lane.requestId, lane.evidenceAt] as const),
+      ].filter(([lane]) => lanes.has(lane))
+    ),
+    handoffs: Object.fromEntries(
+      live.handoffs.flatMap((handoff) => {
+        const { from, to } = handoff
+        return isAgentId(from) && isAgentId(to)
+          ? [
+              [
+                handoff.handoffId,
+                { ...handoff, from, to, sourceEventIds: [...handoff.sourceEventIds] },
+              ] as const,
+            ]
+          : []
+      })
+    ),
   }
 }
 
@@ -466,18 +730,31 @@ export function prependEvents(
   view: TranscriptView,
   older: readonly TranscriptEvent[]
 ): TranscriptView {
-  if (older.length === 0) return view
+  const earlier = older.filter((event) => view.firstSeq === 0 || event.seq < view.firstSeq)
+  if (earlier.length === 0) return view
 
   // Folded from empty so the rows are built by exactly the same cases that build
   // them anywhere else — there is no second row-builder to keep in step.
-  const rows = reduceEvents(EMPTY_VIEW, older).messages
-  if (rows.length === 0) {
+  const previous = reduceEvents(EMPTY_VIEW, earlier).messages
+  if (previous.length === 0) {
     // A page of nothing renderable still moves the boundary, or the next request
     // asks for the same range forever. The same reasoning as `throughSeq`.
-    return { ...view, firstSeq: older[0]?.seq ?? view.firstSeq }
+    return { ...view, firstSeq: earlier[0]?.seq ?? view.firstSeq }
   }
 
-  const head = view.messages[0]
+  const current = new Map(view.messages.map((message) => [message.key, message]))
+  const previousKeys = new Set(previous.map((message) => message.key))
+  const rows = previous.map((prefix) => {
+    const message = current.get(prefix.key)
+    if (message === undefined) return prefix
+    if (prefix.kind !== 'message' || message.kind !== 'message' || prefix.actor !== message.actor)
+      return message
+    if (message.status === 'complete') return { ...message, at: prefix.at }
+    if (prefix.status === 'complete') return prefix
+    return { ...message, at: prefix.at, text: prefix.text + message.text }
+  })
+  const messages = view.messages.filter((message) => !previousKeys.has(message.key))
+  const head = messages[0]
   let joined = rows.length
   if (head !== undefined && isActivityStep(head)) {
     for (let at = rows.length - 1; at >= 0; at -= 1) {
@@ -495,8 +772,8 @@ export function prependEvents(
 
   return {
     ...view,
-    messages: [...marked, ...view.messages],
-    firstSeq: older[0]?.seq ?? view.firstSeq,
+    messages: [...marked, ...messages],
+    firstSeq: earlier[0]?.seq ?? view.firstSeq,
   }
 }
 
@@ -532,9 +809,39 @@ function apply(view: Mutable, event: TranscriptEvent): void {
   const num = (key: string): number => (typeof p[key] === 'number' ? p[key] : 0)
 
   switch (event.type) {
+    case 'reply.status': {
+      const requestId = str('requestId')
+      const phase = str('phase')
+      const agentId = str('agentId')
+      if (!isAgentId(agentId) || requestId === '') return
+      if (phase === 'waiting' || phase === 'thinking' || phase === 'replying') {
+        const previous = view.replies[requestId]
+        const from = p['from']
+        view.replies[requestId] = {
+          requestId,
+          sourceId: str('sourceId'),
+          agentId,
+          phase,
+          startedAt: previous?.startedAt ?? event.createdAt,
+          phaseSince: previous?.phase === phase ? previous.phaseSince : event.createdAt,
+          from: isAgentId(from) ? from : (previous?.from ?? null),
+        }
+      } else {
+        view.replies = Object.fromEntries(
+          Object.entries(view.replies).filter(([key]) => key !== requestId)
+        )
+      }
+      return
+    }
+
     case 'user.message':
       view.messages.push({
-        key: p['live'] === true ? `${LIVE_USER_PREFIX}${event.id}` : event.id,
+        key:
+          p['mode'] === 'discussion'
+            ? `${DISCUSSION_USER_PREFIX}${event.id}`
+            : p['live'] === true
+              ? `${LIVE_USER_PREFIX}${event.id}`
+              : event.id,
         eventId: event.id,
         at: event.createdAt,
         actor: 'user',
@@ -720,10 +1027,14 @@ function apply(view: Mutable, event: TranscriptEvent): void {
       // Tracked per agent: in a shared conversation one can be thinking while
       // another is idle, and a single boolean would flatten that away.
       if (!view.working.includes(event.actor)) view.working.push(event.actor)
+      view.workingSince[event.actor] = event.createdAt
       return
 
     case 'turn.completed':
       view.working = view.working.filter((a) => a !== event.actor)
+      view.workingSince = Object.fromEntries(
+        Object.entries(view.workingSince).filter(([actor]) => actor !== event.actor)
+      )
       // Before the key is dropped, and before an interruption notice is pushed
       // below: this is the only moment the last reply is known to be the last.
       liftChangesAboveFinal(view, event.actor)
@@ -760,6 +1071,7 @@ function apply(view: Mutable, event: TranscriptEvent): void {
         agentId: event.actor,
         questions: asked,
         expiresAt: num('expiresAt'),
+        ...waitProvenance(p['mode'], p['requestId']),
       })
       return
     }
@@ -804,6 +1116,7 @@ function apply(view: Mutable, event: TranscriptEvent): void {
         ...fileChangePath(p),
         detail: detailOf(p),
         expiresAt: typeof p['expiresAt'] === 'number' ? p['expiresAt'] : 0,
+        ...waitProvenance(p['mode'], p['requestId']),
       })
       return
 
@@ -862,32 +1175,6 @@ function apply(view: Mutable, event: TranscriptEvent): void {
      * it permitted. A permission change that left no mark would make the log an
      * incomplete account of why something was allowed.
      */
-    /*
-     * Joining and leaving belong in the transcript. Without them an agent's
-     * first message appears from nowhere, and its last is followed by a silence
-     * with no explanation.
-     */
-    /*
-     * Reopening the app is not somebody joining.
-     *
-     * Every launch closed and restarted each agent, so a conversation collected
-     * a "left" and a "joined" per agent per restart — a transcript that filled
-     * with the app's own lifecycle. The notices are for the cast changing, which
-     * is a thing you did, so a resumed session says nothing.
-     */
-    case 'session.started':
-      if (event.payload['resumed'] === true) return
-      view.messages.push({
-        key: event.id,
-        eventId: event.id,
-        at: event.createdAt,
-        actor: 'system',
-        kind: 'notice',
-        text: `${str('agentId')} joined`,
-        status: 'complete',
-      })
-      return
-
     case 'session.ended': {
       /*
        * Closed by the payload's `agentId`, never by the event's actor.
@@ -899,6 +1186,10 @@ function apply(view: Mutable, event: TranscriptEvent): void {
        */
       const ended = str('agentId')
       if (isAgent(ended)) view.openChanges[ended] = null
+      view.working = view.working.filter((actor) => actor !== ended)
+      view.workingSince = Object.fromEntries(
+        Object.entries(view.workingSince).filter(([actor]) => actor !== ended)
+      )
       if (str('reason') === 'shutdown') return
       view.messages.push({
         key: event.id,
@@ -1041,19 +1332,38 @@ function apply(view: Mutable, event: TranscriptEvent): void {
       const detail = str('detail')
       const omitted = num('detailOmittedBytes')
       const code = str('code')
-      if (
+      const text = str('text')
+      if (isAgent(event.actor) && raw === 'info' && code === '') {
+        if (
+          source === 'hook' &&
+          (text === 'SessionStart' ||
+            text.startsWith('SessionStart:') ||
+            text.endsWith(' · SessionStart'))
+        )
+          return
+        if (
+          source === 'system' &&
+          (text === 'tool_progress' ||
+            text === 'commands_changed' ||
+            text === 'dev_intent' ||
+            text === 'vcs_state_changed') &&
+          detail === '' &&
+          omitted === 0
+        )
+          return
+      }
+      const once =
         isAgent(event.actor) &&
         raw === 'info' &&
         source === 'system' &&
-        str('text') === 'tool_progress' &&
+        code === 'projectToolsUnconfirmed' &&
+        text === '' &&
         detail === '' &&
-        code === '' &&
         omitted === 0
-      ) {
-        return
-      }
+      const key = once ? `notice:${event.actor}:${code}` : event.id
+      if (once && view.messages.some((message) => message.key === key)) return
       const line = {
-        text: str('text'),
+        text,
         ...(code === '' ? {} : { noticeCode: code }),
         ...(detail === '' ? {} : { detail }),
         ...(omitted === 0 ? {} : { detailOmittedBytes: omitted }),
@@ -1096,17 +1406,15 @@ function apply(view: Mutable, event: TranscriptEvent): void {
       }
 
       view.messages.push({
-        key: event.id,
+        key,
         eventId: event.id,
         at: event.createdAt,
         actor: event.actor,
         kind: 'notice',
-        text: line.text,
+        ...line,
         status: 'complete',
         noticeSource: source,
         level,
-        ...(detail === '' ? {} : { detail }),
-        ...(omitted === 0 ? {} : { detailOmittedBytes: omitted }),
       })
       return
     }
@@ -1128,6 +1436,12 @@ function apply(view: Mutable, event: TranscriptEvent): void {
         status: 'complete',
       })
       return
+
+    case 'assignment.bound': {
+      const taskId = str('taskId')
+      if (taskId !== '') view.assignment = { ...view.assignment, boundTaskId: taskId }
+      return
+    }
 
     case 'aside.promoted':
       /*
@@ -1151,6 +1465,187 @@ function apply(view: Mutable, event: TranscriptEvent): void {
 
     default:
       return
+  }
+}
+
+export function workLane(agentId: string): string {
+  return `work:${agentId}`
+}
+
+export function operationKey(lane: string, itemRef: string): string {
+  return `${lane}|${itemRef}`
+}
+
+export function laneOfOperation(operation: Pick<LiveOperation, 'agentId' | 'requestId'>): string {
+  return operation.requestId ?? workLane(operation.agentId)
+}
+
+const HANDOFF_OUTCOMES: readonly HandoffOutcome[] = [
+  'submitted',
+  'failed',
+  'cancelled',
+  'unavailable',
+]
+
+function waitProvenance(mode: unknown, requestId: unknown): { mode?: 'chat'; requestId?: string } {
+  return {
+    ...(mode === 'discussion' ? { mode: 'chat' as const } : {}),
+    ...(typeof requestId === 'string' && requestId !== '' ? { requestId } : {}),
+  }
+}
+
+function liveLane(view: Mutable, event: TranscriptEvent): string | null {
+  const p = event.payload
+  const itemRef = typeof p['itemRef'] === 'string' ? p['itemRef'] : ''
+  const requestId = typeof p['requestId'] === 'string' ? p['requestId'] : ''
+  if (event.type === 'reply.status') {
+    return view.replies[requestId] === undefined ? null : requestId
+  }
+  if (p['mode'] === 'discussion' || itemRef.startsWith(DISCUSSION_REPLY_PREFIX)) {
+    if (requestId !== '') return view.replies[requestId] === undefined ? null : requestId
+    if (itemRef === '') return null
+    return Object.keys(view.replies).find((id) => itemRef.startsWith(`${id}:`)) ?? null
+  }
+  if (itemRef.startsWith(LIVE_REPLY_PREFIX)) return null
+  return isAgentId(event.actor) && view.turns[event.actor] !== undefined
+    ? workLane(event.actor)
+    : null
+}
+
+function touch(view: Mutable, lane: string, at: number): void {
+  view.evidenceAt[lane] = Math.max(view.evidenceAt[lane] ?? 0, at)
+}
+
+function dropLane(view: Mutable, lane: string): void {
+  view.operations = Object.fromEntries(
+    Object.entries(view.operations).filter(([, operation]) => laneOfOperation(operation) !== lane)
+  )
+  view.evidenceAt = Object.fromEntries(
+    Object.entries(view.evidenceAt).filter(([key]) => key !== lane)
+  )
+}
+
+function closeTurn(view: Mutable, agentId: string): void {
+  dropLane(view, workLane(agentId))
+  view.turns = Object.fromEntries(Object.entries(view.turns).filter(([agent]) => agent !== agentId))
+}
+
+function foldHandoff(view: Mutable, event: TranscriptEvent): void {
+  const p = event.payload
+  const handoffId = typeof p['handoffId'] === 'string' ? p['handoffId'] : ''
+  const from = p['from']
+  const to = p['to']
+  if (handoffId === '' || !isAgentId(from) || !isAgentId(to)) return
+  const previous = view.handoffs[handoffId]
+  const sourceEventIds = Array.isArray(p['sourceEventIds'])
+    ? p['sourceEventIds'].filter((id): id is string => typeof id === 'string')
+    : []
+  if (event.type === 'handoff.created') {
+    view.handoffs[handoffId] = {
+      handoffId,
+      from,
+      to,
+      sourceEventIds,
+      createdAt: event.createdAt,
+      outcome: previous?.outcome ?? null,
+      outcomeAt: previous?.outcomeAt ?? null,
+    }
+    return
+  }
+  const outcome = HANDOFF_OUTCOMES.find((value) => value === p['outcome'])
+  if (outcome === undefined || (previous !== undefined && previous.outcome !== null)) return
+  view.handoffs[handoffId] = {
+    handoffId,
+    from: previous?.from ?? from,
+    to: previous?.to ?? to,
+    sourceEventIds: previous?.sourceEventIds ?? sourceEventIds,
+    createdAt: previous?.createdAt ?? null,
+    outcome,
+    outcomeAt: event.createdAt,
+  }
+}
+
+function foldLive(view: Mutable, event: TranscriptEvent): void {
+  const p = event.payload
+  switch (event.type) {
+    case 'turn.started':
+      if (!isAgentId(event.actor)) return
+      closeTurn(view, event.actor)
+      view.turns[event.actor] = { generation: event.seq, startedAt: event.createdAt }
+      touch(view, workLane(event.actor), event.createdAt)
+      return
+    case 'turn.completed':
+      closeTurn(view, event.actor)
+      return
+    case 'session.started':
+    case 'session.ended': {
+      const agentId = p['agentId']
+      if (typeof agentId !== 'string' || agentId === '') return
+      closeTurn(view, agentId)
+      view.working = view.working.filter((actor) => actor !== agentId)
+      view.workingSince = Object.fromEntries(
+        Object.entries(view.workingSince).filter(([actor]) => actor !== agentId)
+      )
+      return
+    }
+    case 'reply.status': {
+      const requestId = typeof p['requestId'] === 'string' ? p['requestId'] : ''
+      if (view.replies[requestId] === undefined) dropLane(view, requestId)
+      else touch(view, requestId, event.createdAt)
+      return
+    }
+    case 'handoff.created':
+    case 'handoff.outcome':
+      foldHandoff(view, event)
+      return
+    case 'user.message':
+      if (p['mode'] !== 'discussion' && p['live'] !== true) view.handoffs = {}
+      return
+    default:
+      break
+  }
+
+  const lane = liveLane(view, event)
+  if (lane === null) return
+  touch(view, lane, event.createdAt)
+  const itemRef = typeof p['itemRef'] === 'string' ? p['itemRef'] : ''
+  if (itemRef === '' || !isAgentId(event.actor)) return
+  const key = operationKey(lane, itemRef)
+  if (event.type === 'tool.completed' || event.type === 'command.completed') {
+    view.operations = Object.fromEntries(
+      Object.entries(view.operations).filter(([candidate]) => candidate !== key)
+    )
+    return
+  }
+  const nested = typeof p['parentRef'] === 'string' && p['parentRef'] !== ''
+  if (event.type !== 'command.started' && (event.type !== 'tool.started' || nested)) return
+  const requestId = lane === workLane(event.actor) ? null : lane
+  const generation = requestId === null ? (view.turns[event.actor]?.generation ?? 0) : 0
+  if (event.type === 'command.started') {
+    const command = Array.isArray(p['command']) ? p['command'] : []
+    view.operations[key] = {
+      agentId: event.actor,
+      requestId,
+      generation,
+      itemRef,
+      kind: 'command',
+      name: command.filter((part): part is string => typeof part === 'string').join(' '),
+      detail: null,
+      startedAt: event.createdAt,
+    }
+    return
+  }
+  const previous = view.operations[key]
+  const detail = typeof p['detail'] === 'string' && p['detail'] !== '' ? p['detail'] : null
+  view.operations[key] = {
+    agentId: event.actor,
+    requestId,
+    generation,
+    itemRef,
+    kind: 'tool',
+    name: typeof p['name'] === 'string' ? p['name'] : '',
+    detail: detail ?? previous?.detail ?? null,
+    startedAt: previous?.startedAt ?? event.createdAt,
   }
 }
 

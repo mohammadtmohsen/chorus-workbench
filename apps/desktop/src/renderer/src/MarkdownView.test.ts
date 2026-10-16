@@ -12,6 +12,13 @@ vi.mock('react-i18next', () => ({
   useTranslation: () => ({ t: (key: string) => key }),
 }))
 
+const loads = vi.hoisted(() => ({ mermaid: 0 }))
+
+vi.mock('mermaid', () => {
+  loads.mermaid += 1
+  return { default: {} }
+})
+
 /**
  * The parser's tests prove the tree; these prove the elements.
  *
@@ -138,5 +145,39 @@ describe('MarkdownView', () => {
     const html = render('see https://example.com')
     expect(html).toContain('rel="noreferrer noopener"')
     expect(html).toContain('target="_blank"')
+  })
+
+  const MERMAID =
+    '```mermaid\nflowchart LR\n  Search["Search text"] -->|"q param"| GET["GET …/visits?q"]\n```'
+
+  it('serves a mermaid fence as its source, with the usual tools, and never loads mermaid', () => {
+    const html = render(MERMAID)
+    expect(html).toContain(
+      '<div class="md-code-wrap"><div class="md-code-tools"><span class="md-lang">mermaid</span>'
+    )
+    expect(html).toContain('aria-label="conversation.copyCode"')
+    expect(html.indexOf('</div><pre class="md-code" dir="ltr"><code>')).toBeGreaterThan(-1)
+    expect(html).toContain('flowchart LR')
+    expect(html).not.toContain('<img')
+    expect(html).not.toContain('md-diagram')
+    expect(loads.mermaid).toBe(0)
+  })
+
+  it('serves a mermaid fence exactly like another labelled fence', () => {
+    const asOther = render(MERMAID.replace('```mermaid', '```mermaidx'))
+    expect(render(MERMAID).replace('>mermaid</span>', '>mermaidx</span>')).toBe(asOther)
+  })
+
+  it('serves the same markup while the message is still live', () => {
+    expect(renderToStaticMarkup(createElement(MarkdownView, { source: MERMAID, live: true }))).toBe(
+      render(MERMAID)
+    )
+    expect(loads.mermaid).toBe(0)
+  })
+
+  it('leaves an ordinary fence on the code path', () => {
+    const html = render('```ts\nconst a = 1\n```')
+    expect(html).not.toContain('md-diagram')
+    expect(html.indexOf('</div><pre class="md-code" dir="ltr"><code>')).toBeGreaterThan(-1)
   })
 })

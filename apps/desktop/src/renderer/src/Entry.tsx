@@ -10,7 +10,7 @@ import type { TranscriptMessage } from './transcript.js'
 import { splitTrailingPaths } from './attach.js'
 import { SentAttachments } from './SentAttachments.js'
 import { useTypewriter } from './useTypewriter.js'
-import { isLiveReply } from '../../shared/live-message.js'
+import { isDiscussion, isLiveReply } from '../../shared/live-message.js'
 
 /**
  * One entry on the score: a dot on the rail, a speaker, and what was said.
@@ -624,6 +624,11 @@ export const Entry = memo(function Entry({
 }): React.JSX.Element {
   const { t } = useTranslation()
   const [open, setOpen] = useState(false)
+  const taskPreview = Array.from(
+    (message.noticeCode === 'contextCarried' ? (message.detail ?? '') : '')
+      .trim()
+      .replace(/\s+/gu, ' ')
+  )
   /** Commands start folded: a turn is mostly steps, and they are skimmed. */
   const [showCommand, setShowCommand] = useState(false)
 
@@ -801,7 +806,11 @@ export const Entry = memo(function Entry({
         at={message.kind === 'message' ? message.at : undefined}
         silent={grouped}
       >
-        {isLiveReply(message.key) && <span className="entry-live-label">{t('live.answer')}</span>}
+        {isDiscussion(message.key) ? (
+          <span className="entry-live-label">{t('live.discussion')}</span>
+        ) : (
+          isLiveReply(message.key) && <span className="entry-live-label">{t('live.answer')}</span>
+        )}
       </EntryHead>
       <div className="said" data-streaming={message.status === 'streaming'}>
         {message.kind === 'command' ? (
@@ -907,11 +916,16 @@ export const Entry = memo(function Entry({
                 the reducer has no translator, so the key travels and the phrase
                 is made here. Anything from a provider still shows what it said.
               */}
-              {message.folded !== undefined
-                ? t('notice.hooksFolded', { count: message.folded.length })
-                : message.noticeCode !== undefined && message.noticeCode !== ''
-                  ? t(`notice.code.${message.noticeCode}`, { defaultValue: message.text })
-                  : message.text}
+              {message.noticeCode === 'contextCarried' && message.detail !== undefined
+                ? t('forwardTask.context', {
+                    objective:
+                      taskPreview.slice(0, 120).join('') + (taskPreview.length > 120 ? '…' : ''),
+                  })
+                : message.folded !== undefined
+                  ? t('notice.hooksFolded', { count: message.folded.length })
+                  : message.noticeCode !== undefined && message.noticeCode !== ''
+                    ? t(`notice.code.${message.noticeCode}`, { defaultValue: message.text })
+                    : message.text}
             </span>
             {message.folded !== undefined && (
               /*
@@ -947,22 +961,24 @@ export const Entry = memo(function Entry({
                 )}
               </details>
             )}
-            {message.folded === undefined && message.detail !== undefined && (
-              /*
-               * Folded, for the same reason commands are: a hook that prints
-               * forty lines of lint output would otherwise push the command it
-               * was gating off the screen.
-               */
-              <details className="notice-detail">
-                <summary>{t('notice.detail')}</summary>
-                <pre>{message.detail}</pre>
-                {message.detailOmittedBytes !== undefined && (
-                  <p className="notice-omitted">
-                    {t('notice.omitted', { bytes: message.detailOmittedBytes })}
-                  </p>
-                )}
-              </details>
-            )}
+            {message.folded === undefined &&
+              message.detail !== undefined &&
+              (message.noticeCode !== 'contextCarried' || taskPreview.length > 120) && (
+                /*
+                 * Folded, for the same reason commands are: a hook that prints
+                 * forty lines of lint output would otherwise push the command it
+                 * was gating off the screen.
+                 */
+                <details className="notice-detail">
+                  <summary>{t('notice.detail')}</summary>
+                  <pre>{message.detail}</pre>
+                  {message.detailOmittedBytes !== undefined && (
+                    <p className="notice-omitted">
+                      {t('notice.omitted', { bytes: message.detailOmittedBytes })}
+                    </p>
+                  )}
+                </details>
+              )}
           </div>
         ) : message.actor === 'user' ? (
           /*
@@ -1006,7 +1022,11 @@ export const Entry = memo(function Entry({
             whole of what makes an agent's `[docs/…/plan.md](docs/…/plan.md)`
             pressable rather than a path you retype into the editor.
           */
-          <MarkdownView source={typed} onOpenFile={onOpenFile} />
+          <MarkdownView
+            source={typed}
+            onOpenFile={onOpenFile}
+            live={message.status === 'streaming' || typed.length < message.text.length}
+          />
         )}
         {/*
           Under the words, inside the same row.

@@ -22,6 +22,7 @@ import { ComposerMenu, type MenuItem } from './ComposerMenu.js'
 import { Attachments, type Attachment } from './Attachments.js'
 import { formatContextBlock, versionFor, withEditorContext } from './editor-context.js'
 import { fullyVisible } from './focus.js'
+import type { NoteLoad } from './useConversationNote.js'
 import {
   applyMention,
   commandOptions,
@@ -39,7 +40,7 @@ import {
 } from './mention-menu.js'
 import { withQuote } from './quote.js'
 import { ConfirmRestart } from './ConfirmRestart.js'
-import { liveMessageAction, type LiveMessageMode } from '../../shared/live-message.js'
+import { liveMessageAction } from '../../shared/live-message.js'
 
 /**
  * The box you type into, and everything that decides what leaves it.
@@ -91,14 +92,17 @@ export interface ComposerHandle {
 export interface ComposerState {
   draft: string
   attached: Attachment[]
+  mode?: 'work' | 'discussion'
 }
 
 export interface ComposerProps {
   readonly conversationId: string
   readonly participants: readonly string[]
   readonly starting: boolean
+  readonly restarting?: boolean
   /** Drives whether the one button offers Send or Stop. */
   readonly busy: boolean
+  readonly workBusy?: boolean
   readonly working: readonly string[]
   readonly backgroundAgents: string
   /** What VS Code is showing for this pane's project. Metadata only. */
@@ -113,7 +117,12 @@ export interface ComposerProps {
    * whole value is being one.
    */
   readonly onRestart: () => void
-  readonly onContinue: () => void
+  readonly note?: {
+    readonly visible: boolean
+    readonly load: NoteLoad
+    readonly attention: boolean
+    readonly onToggle: () => void
+  }
   /**
    * The session's own actions, in the row where the work happens.
    *
@@ -132,6 +141,7 @@ export interface ComposerProps {
   readonly initial?: {
     readonly draft?: string
     readonly attached?: readonly Attachment[]
+    readonly mode?: 'work' | 'discussion'
   }
   /**
    * Where to leave the draft, written on every render.
@@ -188,7 +198,34 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(
   function Composer(props, ref): React.JSX.Element {
     const { t } = useTranslation()
     const { conversationId, participants, starting } = props
-    const [messageMode, setMessageMode] = useState<LiveMessageMode>('auto')
+    const restarting = props.restarting === true
+    const preparing = starting || restarting
+    const preparationLabel = restarting ? 'conversation.restarting' : 'conversation.agentsStarting'
+    const noteLabel =
+      props.note?.load === 'failed'
+        ? t('conversationNote.loadFailedRetry')
+        : props.note?.attention === true
+          ? t('conversationNote.attention')
+          : props.note?.visible === true
+            ? t('conversationNote.hide')
+            : t('conversationNote.show')
+    const [messageMode, setMessageMode] = useState<'work' | 'discussion'>(() => {
+      if (props.initial?.mode !== undefined) return props.initial.mode
+      try {
+        return localStorage.getItem(`chorus:message-mode:${conversationId}`) === 'discussion'
+          ? 'discussion'
+          : 'work'
+      } catch {
+        return 'work'
+      }
+    })
+    useEffect(() => {
+      try {
+        localStorage.setItem(`chorus:message-mode:${conversationId}`, messageMode)
+      } catch {
+        return
+      }
+    }, [conversationId, messageMode])
 
     const [draft, setDraftState] = useState(() =>
       originalCollaborationText(props.initial?.draft ?? '')
@@ -393,7 +430,9 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(
     const active = liveStamp?.query ?? null
 
     const hasDraft = draft.trim() !== '' || attached.length > 0
-    props.report.current = { draft, attached }
+    const showStop = !preparing && props.busy && !hasDraft
+    const workBusy = props.workBusy ?? props.busy
+    props.report.current = { draft, attached, mode: messageMode }
 
     useEffect(() => {
       /*
@@ -606,30 +645,6 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(
           : { query: found, from: el.value, rev: rev.current, caret: el.selectionStart }
       )
     }, [participants])
-
-    /**
-     * Types something into the box at the caret and hands the box back.
-     *
-     * Extracted when `@` became one button per agent: three buttons doing the
-     * same four steps by hand is three places for the caret arithmetic to
-     * disagree. `at + text.length` rather than `at + 1` is the whole reason it
-     * could not stay inline — the old version only ever inserted one character.
-     *
-     * `refreshMention` afterwards because the character may *be* a trigger: `#`
-     * opens the file picker exactly as typing it does, which is the point of the
-     * button. A whole mention with a trailing space parses as no query, so the
-     * agent buttons pass through it harmlessly rather than needing a second path.
-     */
-    const insertAtCaret = (text: string): void => {
-      const box = input.current
-      const at = box?.selectionStart ?? draft.length
-      writeDraft(`${draft.slice(0, at)}${text}${draft.slice(at)}`)
-      box?.focus()
-      window.requestAnimationFrame(() => {
-        box?.setSelectionRange(at + text.length, at + text.length)
-        refreshMention()
-      })
-    }
 
     /*
      * And asked again the moment someone actually wants them.
@@ -957,7 +972,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(
     const { onError, onSending, onSendFailed } = props
 
     const send = useCallback(() => {
-      if (starting) return
+      if (preparing) return
       /*
        * The paths join the message on the way out, not while you are writing it.
        *
@@ -1038,12 +1053,11 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(
           // the draft and its attachments exactly as they were.
           writeDraft('')
           setAttached([])
-          setMessageMode('auto')
           await window.chorus.sendMessage({
             conversationId,
             text: withAttachments(body),
             ...(pair === null ? {} : { intent: 'collaborate' as const }),
-            ...(props.busy ? { mode: messageMode } : {}),
+            mode: messageMode,
           })
         })
         .catch((error: unknown) => {
@@ -1053,7 +1067,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(
           onError(error)
         })
     }, [
-      starting,
+      preparing,
       conversationId,
       task,
       pair,
@@ -1291,6 +1305,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(
             ref={input}
             value={draft}
             rows={1}
+            disabled={restarting}
             aria-label={t('conversation.messageLabel')}
             /*
              * Named, when there is somebody to name.
@@ -1449,155 +1464,213 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(
               send()
             }}
           />
-          {starting ? (
-            <div className="composer-collaboration" role="status">
-              {t('conversation.agentsStarting')}
+          <div className="composer-options-row">
+            <div
+              className="composer-live-modes"
+              role="group"
+              aria-label={t('conversation.styleLabel')}
+            >
+              {([false, true] as const).map((on) => (
+                <button
+                  key={on ? 'bilingual' : 'plain'}
+                  type="button"
+                  className="composer-live-mode composer-style"
+                  aria-pressed={styleOn === on}
+                  disabled={preparing || stylePending || props.busy || props.working.length > 0}
+                  title={t(on ? 'conversation.styleOn' : 'conversation.styleOff')}
+                  onClick={() => {
+                    if (on === styleOn) return
+                    setStylePending(true)
+                    window.chorus
+                      .setAnswerStyle({ conversationId: props.conversationId, on })
+                      /*
+                       * Trust the answer, not the request. The runtime owns whether a
+                       * room ends up styled — it can refuse, and a respawn can fail —
+                       * so a click may legitimately come back as the state it started
+                       * in, and the control must show what happened rather than what
+                       * was asked for.
+                       */
+                      .then((result) => {
+                        setStyleOn(result.styleOn)
+                      })
+                      .catch(() => undefined)
+                      .finally(() => {
+                        setStylePending(false)
+                      })
+                  }}
+                >
+                  {t(on ? 'conversation.styleBadgeOn' : 'conversation.styleBadgeOff')}
+                </button>
+              ))}
             </div>
-          ) : team || pair !== null ? (
-            <div className="composer-collaboration" role="status">
-              {team
-                ? t('conversation.teamPreview')
-                : pair !== null
-                  ? t('conversation.collaborationPreview', {
-                      leader: t(`actor.${pair.leader}`),
-                      partner: t(`actor.${pair.partner}`),
-                    })
-                  : null}
+            <div className="composer-live-modes" role="group" aria-label={t('live.mode')}>
+              {(['work', 'discussion'] as const).map((mode) => (
+                <button
+                  key={mode}
+                  type="button"
+                  className="composer-live-mode"
+                  aria-pressed={messageMode === mode}
+                  title={t(mode === 'discussion' ? 'live.discussionHelp' : 'live.workHelp')}
+                  disabled={restarting}
+                  onClick={() => {
+                    setMessageMode(mode)
+                  }}
+                >
+                  {t(mode === 'discussion' ? 'live.chat' : 'live.work')}
+                </button>
+              ))}
             </div>
-          ) : null}
-          {/*
-          Everything about the session sits in the composer's own row.
+            {/*
+            Everything about the session sits in the composer's own row.
 
-          A separate strip above the transcript put who is here, where they
-          are and what they may do at the top of the pane, while the thing you
-          act with was at the bottom — so changing permissions meant crossing
-          the whole transcript. Here it is all one place, and the keyboard hint
-          that used to live in this row is gone: ↵ sends is the convention, and
-          saying so forever is a label for the first minute.
-        */}
-          <div className="composer-tools">
+            A separate strip above the transcript put who is here, where they
+            are and what they may do at the top of the pane, while the thing you
+            act with was at the bottom — so changing permissions meant crossing
+            the whole transcript. Here it is all one place, and the keyboard hint
+            that used to live in this row is gone: ↵ sends is the convention, and
+            saying so forever is a label for the first minute.
+          */}
             {/*
-              The cast, as one button each, and `#` as the character it inserts.
-              
-              `@` was a single button that typed the character and let the mention
-              menu offer the choice. Two agents is a list of two, and a menu for a
-              two-item list is a click and a read to save typing six letters — so
-              the choice moved onto the row and each button inserts the whole
-              mention. `#` stays a character button, because the thing it opens is
-              a file picker over a list nobody can enumerate in a toolbar.
-              
-              **Every agent, because every room holds every agent.** This said
-              "only the conversation's own participants", and that was right while
-              a cast was something you chose: offering `@codex` where codex had
-              been deliberately removed was offering an empty chair. Nobody
-              removes one now, so the only way an agent is missing from the live
-              map is that it failed to start — and hiding it there is the worst
-              moment to, because asking it is how the person finds out why.
-            */}
-            {/*
-             * Everything that can be added, behind one button — and now the only
-             * one.
+             * What will ride along with the message — restored, with a new
+             * reason, and now on the row it describes.
              *
-             * A paperclip stood beside it and opened the file picker in one
-             * click. That was a second control for the menu's own first item:
-             * `Add file` calls the same `picker.current?.click()` this input is
-             * wired to. Two affordances for one action is a choice the person has
-             * to make before they can do the thing, so the pair became one.
+             * The pill was deleted in Phase 9 as "a read-only pill restating what
+             * is already on screen two inches to the left". That was true when a
+             * coordinate was all that travelled. It is not true now: the embedded
+             * editor sends the selected **text**, so this names what leaves the
+             * machine rather than what is visible on it — and the editor can be
+             * switched off in this pane, in which case nothing is visible at all.
              *
-             * The hidden input travels with the `+` rather than staying on the
-             * context row it was declared in. It is `sr-only`, so where it sits
-             * changes nothing on screen — but the trigger and the control it
-             * drives being adjacent is what stops the next person deleting one
-             * and leaving the other.
+             * Deliberately not a switch. The Included chip is still gone and
+             * context is still always sent; this reports, and reporting is the
+             * thing that was lost.
+             *
+             * **Last, after the controls.** It is the only thing here that is a
+             * statement rather than a button, so it reads as the row's result
+             * rather than as a fifth thing to press — and it is the one item that
+             * comes and goes, which at the end costs no movement to the four that
+             * do not. It had a row of its own above the box until the paperclip
+             * and the `+` left it; one line holding one italic path was chrome
+             * spending a line on what fits in a corner of this one.
              */}
-            <input
-              ref={picker}
-              className="sr-only"
-              type="file"
-              multiple
-              tabIndex={-1}
-              aria-hidden="true"
-              onChange={(event) => {
-                const chosen = [...(event.target.files ?? [])]
-                // Cleared so choosing the same file twice still fires a change.
-                event.target.value = ''
-                void attach(chosen)
-              }}
-            />
-            <button
-              type="button"
-              className="composer-more"
-              aria-haspopup="menu"
-              aria-expanded={menu?.kind === 'add'}
-              aria-label={t('conversation.addContext')}
-              title={t('conversation.addContext')}
-              onClick={(event) => {
-                openMenuFrom('add', event)
-              }}
-            >
-              <svg viewBox="0 0 24 24" aria-hidden="true">
-                <path d="M12 5v14M5 12h14" />
-              </svg>
-            </button>
-            {/*
-              Start over: end this room and open a fresh one in the same project.
+            {ideAttached && props.ide.file !== null && (
+              <span
+                className="composer-ide-pill"
+                title={t('ide.attachedTitle', {
+                  path: props.ide.file.relativePath,
+                  lines: lineLabel(props.ide.file),
+                })}
+              >
+                {/*
+                  The name, not the path. A composer row is narrow and a nested
+                  path spends all of it on directories that are the same for every
+                  file in the project — `apps/desktop/src/renderer/src/Composer.tsx`
+                  truncates to the part that identifies nothing. The full path is
+                  on the title, which is where a person goes when the name is
+                  ambiguous.
+                */}
+                <span className="path">{basename(props.ide.file.relativePath)}</span>
+                <span className="composer-ide-lines">:{lineLabel(props.ide.file)}</span>
+              </span>
+            )}
+            <div className="composer-options-actions">
+              {/*
+               * Everything that can be added, behind one button — and now the only
+               * one.
+               *
+               * A paperclip stood beside it and opened the file picker in one
+               * click. That was a second control for the menu's own first item:
+               * `Add file` calls the same `picker.current?.click()` this input is
+               * wired to. Two affordances for one action is a choice the person has
+               * to make before they can do the thing, so the pair became one.
+               *
+               * The hidden input travels with the `+` rather than staying on the
+               * context row it was declared in. It is `sr-only`, so where it sits
+               * changes nothing on screen — but the trigger and the control it
+               * drives being adjacent is what stops the next person deleting one
+               * and leaving the other.
+               */}
+              <input
+                ref={picker}
+                className="sr-only"
+                type="file"
+                multiple
+                tabIndex={-1}
+                aria-hidden="true"
+                onChange={(event) => {
+                  const chosen = [...(event.target.files ?? [])]
+                  // Cleared so choosing the same file twice still fires a change.
+                  event.target.value = ''
+                  void attach(chosen)
+                }}
+              />
+              <button
+                type="button"
+                className="composer-more"
+                aria-haspopup="menu"
+                aria-expanded={menu?.kind === 'add'}
+                aria-label={t('conversation.addContext')}
+                title={t('conversation.addContext')}
+                disabled={restarting}
+                onClick={(event) => {
+                  openMenuFrom('add', event)
+                }}
+              >
+                <svg viewBox="0 0 24 24" aria-hidden="true">
+                  <path d="M12 5v14M5 12h14" />
+                </svg>
+              </button>
+              {/*
+                Start over: end this room and open a fresh one in the same project.
 
-              **Next to the `+`, and the pairing is the point.** That one adds to
-              what the agent will see; this one empties it. Both are about what
-              the next message carries, which is what the tool row is for.
+                **Next to the `+`, and the pairing is the point.** That one adds to
+                what the agent will see; this one empties it. Both are about what
+                the next message carries, which is what the tool row is for.
 
-              It asks only when something is running. Ending a quiet conversation
-              loses nothing — the log is append-only and the transcript stays in
-              History, which is why ending stopped needing a confirmation at all.
-              A turn in flight is the exception: that work is discarded, and it is
-              the one case where a misclick costs something that cannot be read
-              back.
-            */}
-            <button
-              type="button"
-              className="composer-more"
-              aria-label={t('conversation.restart')}
-              title={t('conversation.restart')}
-              onClick={() => {
-                if (props.busy || props.backgroundAgents !== '') setConfirmingRestart(true)
-                else props.onRestart()
-              }}
-            >
-              <svg viewBox="0 0 24 24" aria-hidden="true">
-                <path d="M20 12a8 8 0 1 1-2.3-5.6M20 4v4h-4" />
-              </svg>
-            </button>
-            {/*
-              Carry on somewhere else: a fresh room that starts holding this
-              transcript, with this one left exactly as it is.
-
-              **Third in a row that is entirely about what the next message
-              carries**, which is the argument for the whole group living here.
-              The `+` adds to what the agent will see, Start over empties it,
-              and this moves it to a new room.
-
-              It never asks, and the contrast with its neighbour is the reason.
-              Start over confirms while a turn is running because that work is
-              discarded; nothing is discarded here. This conversation keeps its
-              agents, its transcript and its turn in flight — the only outcome
-              is one more room beside it, and closing that is a click.
-
-              The source is *this* conversation, named rather than inferred. The
-              button exists on the room being continued, which is what makes
-              "from a specific chat" a thing you can point at instead of a rule
-              you have to remember.
-            */}
-            <button
-              type="button"
-              className="composer-more"
-              aria-label={t('conversation.continue')}
-              title={t('conversation.continue')}
-              onClick={props.onContinue}
-            >
-              <svg viewBox="0 0 24 24" aria-hidden="true">
-                <path d="M13 4H5v15h15v-8M15 4h5v5M20 4l-8 8" />
-              </svg>
-            </button>
+                It asks only when something is running. Ending a quiet conversation
+                loses nothing — the log is append-only and the transcript stays in
+                History, which is why ending stopped needing a confirmation at all.
+                A turn in flight is the exception: that work is discarded, and it is
+                the one case where a misclick costs something that cannot be read
+                back.
+              */}
+              <button
+                type="button"
+                className="composer-more"
+                aria-label={t(restarting ? 'conversation.restarting' : 'conversation.restart')}
+                title={t(restarting ? 'conversation.restarting' : 'conversation.restart')}
+                aria-busy={restarting}
+                disabled={preparing}
+                onClick={() => {
+                  if (props.busy || props.backgroundAgents !== '') setConfirmingRestart(true)
+                  else props.onRestart()
+                }}
+              >
+                {restarting ? (
+                  <span className="composer-spinner" aria-hidden="true" />
+                ) : (
+                  <svg viewBox="0 0 24 24" aria-hidden="true">
+                    <path d="M20 12a8 8 0 1 1-2.3-5.6M20 4v4h-4" />
+                  </svg>
+                )}
+              </button>
+              {props.note === undefined ? null : (
+                <button
+                  type="button"
+                  className="composer-more composer-note"
+                  aria-pressed={props.note.visible}
+                  aria-label={noteLabel}
+                  title={noteLabel}
+                  data-attention={props.note.attention}
+                  disabled={props.note.load === 'waiting' || props.note.load === 'loading'}
+                  onClick={props.note.onToggle}
+                >
+                  <svg viewBox="0 0 24 24" aria-hidden="true">
+                    <path d="M5 4h14v10l-6 6H5zM13 20v-6h6" />
+                  </svg>
+                </button>
+              )}
+            </div>
             {/*
              * The editor switch, on the same row as the cast.
              *
@@ -1643,106 +1716,6 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(
               unavailable says "not now"; one that vanishes says nothing, and one
               that works says something untrue.
             */}
-            <button
-              type="button"
-              className="composer-style"
-              aria-pressed={styleOn}
-              disabled={starting || stylePending || props.busy || props.working.length > 0}
-              aria-label={styleOn ? t('conversation.styleOff') : t('conversation.styleOn')}
-              onClick={() => {
-                const next = !styleOn
-                setStylePending(true)
-                window.chorus
-                  .setAnswerStyle({ conversationId: props.conversationId, on: next })
-                  /*
-                   * Trust the answer, not the request. The runtime owns whether a
-                   * room ends up styled — it can refuse, and a respawn can fail —
-                   * so a click may legitimately come back as the state it started
-                   * in, and the control must show what happened rather than what
-                   * was asked for.
-                   */
-                  .then((result) => {
-                    setStyleOn(result.styleOn)
-                  })
-                  .catch(() => undefined)
-                  .finally(() => {
-                    setStylePending(false)
-                  })
-              }}
-            >
-              {styleOn ? t('conversation.styleBadgeOn') : t('conversation.styleBadgeOff')}
-            </button>
-            {participants.map((agent) => (
-              <button
-                key={agent}
-                type="button"
-                className={`composer-trigger composer-mention voice--${agent}`}
-                aria-label={t('conversation.mentionAgent', { agent })}
-                title={t('conversation.mentionAgent', { agent })}
-                onClick={() => {
-                  insertAtCaret(`@${agent} `)
-                }}
-              >
-                <span className="voice-dot" aria-hidden="true" />
-                {/* The `@` is part of the label, not decoration: the button
-                    inserts a mention, and showing what it types is what makes
-                    that legible without a tooltip.
-
-                    Classed because it is what truncates when the row runs out
-                    of width — `text-overflow` belongs to the box holding the
-                    text, and the button is a flex container, so putting it on
-                    the button would clip without drawing an ellipsis. The dot
-                    beside it is `flex: none` and survives. The name a truncated
-                    label no longer gives is still on `aria-label` and on the
-                    title. */}
-                <span className="composer-mention-name" aria-hidden="true">
-                  @{agent}
-                </span>
-              </button>
-            ))}
-            {/*
-             * What will ride along with the message — restored, with a new
-             * reason, and now on the row it describes.
-             *
-             * The pill was deleted in Phase 9 as "a read-only pill restating what
-             * is already on screen two inches to the left". That was true when a
-             * coordinate was all that travelled. It is not true now: the embedded
-             * editor sends the selected **text**, so this names what leaves the
-             * machine rather than what is visible on it — and the editor can be
-             * switched off in this pane, in which case nothing is visible at all.
-             *
-             * Deliberately not a switch. The Included chip is still gone and
-             * context is still always sent; this reports, and reporting is the
-             * thing that was lost.
-             *
-             * **Last, after the controls.** It is the only thing here that is a
-             * statement rather than a button, so it reads as the row's result
-             * rather than as a fifth thing to press — and it is the one item that
-             * comes and goes, which at the end costs no movement to the four that
-             * do not. It had a row of its own above the box until the paperclip
-             * and the `+` left it; one line holding one italic path was chrome
-             * spending a line on what fits in a corner of this one.
-             */}
-            {ideAttached && props.ide.file !== null && (
-              <span
-                className="composer-ide-pill"
-                title={t('ide.attachedTitle', {
-                  path: props.ide.file.relativePath,
-                  lines: lineLabel(props.ide.file),
-                })}
-              >
-                {/*
-                  The name, not the path. A composer row is narrow and a nested
-                  path spends all of it on directories that are the same for every
-                  file in the project — `apps/desktop/src/renderer/src/Composer.tsx`
-                  truncates to the part that identifies nothing. The full path is
-                  on the title, which is where a person goes when the name is
-                  ambiguous.
-                */}
-                <span className="path">{basename(props.ide.file.relativePath)}</span>
-                <span className="composer-ide-lines">:{lineLabel(props.ide.file)}</span>
-              </span>
-            )}
             {/*
               What this session may do, from where the message is written.
 
@@ -1766,84 +1739,80 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(
             every time. Glyphs rather than words, because a label would crowd
             the text being written; the names live on `aria-label`.
           */}
-            {props.busy && (
-              <select
-                className="composer-live-mode"
-                aria-label={t('live.mode')}
-                title={t('live.modeHelp')}
-                value={messageMode}
-                onChange={(event) => {
-                  const value = event.target.value
-                  if (value === 'auto' || value === 'ask' || value === 'guide')
-                    setMessageMode(value)
-                }}
-              >
-                <option value="auto">{t('live.auto')}</option>
-                <option value="ask">{t('live.ask')}</option>
-                <option value="guide">{t('live.guide')}</option>
-              </select>
-            )}
-            {props.busy && (
-              <button
-                type="button"
-                className="send send--stop"
-                aria-label={t('conversation.stopAll', { agents: props.working.join(', ') })}
-                title={t('conversation.stopAll', { agents: props.working.join(', ') })}
-                onClick={() => {
-                  window.chorus.interrupt({ conversationId }).catch(onError)
-                }}
-              >
+            <button
+              type={showStop ? 'button' : 'submit'}
+              className={showStop ? 'send send--stop' : 'send'}
+              /*
+               * Marked while a turn runs, because the two states did the same
+               * thing and looked identical.
+               *
+               * Sending mid-turn steers — the agent keeps working and takes
+               * the message in — and that stays, deliberately; `specs.mjs`
+               * pins it. What was wrong is that the button then read exactly
+               * like the idle one, so a reply still arriving looked finished.
+               * Reported as "the send button becomes ready while the response
+               * is still coming", alongside a `busy` that was false for every
+               * turn after the first and made it literally true.
+               */
+              data-steering={
+                !preparing && workBusy && !showStop && messageMode === 'work' ? 'true' : undefined
+              }
+              aria-busy={preparing}
+              aria-label={
+                preparing
+                  ? t(preparationLabel)
+                  : showStop
+                    ? t('conversation.stopAll', { agents: props.working.join(', ') })
+                    : messageMode === 'discussion'
+                      ? t('live.sendDiscussion')
+                      : workBusy
+                        ? t('live.sendGuide')
+                        : t('conversation.send')
+              }
+              /* Titled in both states. It carried one only while an agent was
+                 working, so the app's primary action was the one button with
+                 nothing to say for itself on hover. */
+              title={
+                preparing
+                  ? t(preparationLabel)
+                  : showStop
+                    ? t('conversation.stopAll', { agents: props.working.join(', ') })
+                    : messageMode === 'discussion'
+                      ? t('live.sendDiscussion')
+                      : workBusy
+                        ? t('live.sendGuide')
+                        : t('conversation.send')
+              }
+              disabled={!showStop && (preparing || !hasDraft || participants.length === 0)}
+              onClick={
+                showStop
+                  ? () => {
+                      window.chorus.interrupt({ conversationId }).catch(onError)
+                    }
+                  : undefined
+              }
+            >
+              {preparing ? (
+                <span className="composer-spinner" aria-hidden="true" />
+              ) : showStop ? (
                 <span className="send-square" aria-hidden="true" />
-              </button>
-            )}
-            {(!props.busy || hasDraft) && (
-              <button
-                type="submit"
-                className="send"
-                /*
-                 * Marked while a turn runs, because the two states did the same
-                 * thing and looked identical.
-                 *
-                 * Sending mid-turn steers — the agent keeps working and takes
-                 * the message in — and that stays, deliberately; `specs.mjs`
-                 * pins it. What was wrong is that the button then read exactly
-                 * like the idle one, so a reply still arriving looked finished.
-                 * Reported as "the send button becomes ready while the response
-                 * is still coming", alongside a `busy` that was false for every
-                 * turn after the first and made it literally true.
-                 */
-                data-steering={props.busy ? 'true' : undefined}
-                aria-label={
-                  props.busy
-                    ? t(
-                        messageMode === 'ask'
-                          ? 'live.sendAsk'
-                          : messageMode === 'guide'
-                            ? 'live.sendGuide'
-                            : 'live.sendAuto'
-                      )
-                    : t('conversation.send')
-                }
-                /* Titled in both states. It carried one only while an agent was
-                   working, so the app's primary action was the one button with
-                   nothing to say for itself on hover. */
-                title={
-                  props.busy
-                    ? t(
-                        messageMode === 'ask'
-                          ? 'live.sendAsk'
-                          : messageMode === 'guide'
-                            ? 'live.sendGuide'
-                            : 'live.sendAuto'
-                      )
-                    : t('conversation.send')
-                }
-                disabled={starting || !hasDraft || participants.length === 0}
-              >
+              ) : (
                 <span aria-hidden="true">↑</span>
-              </button>
-            )}
+              )}
+            </button>
           </div>
+          {!preparing && (team || pair !== null) ? (
+            <div className="composer-collaboration" role="status">
+              {team
+                ? t('conversation.teamPreview')
+                : pair !== null
+                  ? t('conversation.collaborationPreview', {
+                      leader: t(`actor.${pair.leader}`),
+                      partner: t(`actor.${pair.partner}`),
+                    })
+                  : null}
+            </div>
+          ) : null}
         </div>
       </form>
     )

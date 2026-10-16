@@ -24,9 +24,16 @@ const OPTS: SessionOpts = {
 }
 
 /** A query whose messages this test pushes by hand, so turns are deterministic. */
-function adapterFed(): { adapter: ClaudeAdapter; feed: (message: unknown) => void } {
+function adapterFed(): {
+  adapter: ClaudeAdapter
+  feed: (message: unknown) => void
+  end: () => void
+} {
   const messages = new AsyncQueue<unknown>()
   return {
+    end: () => {
+      messages.close()
+    },
     feed: (message: unknown) => {
       messages.push(message)
     },
@@ -100,6 +107,20 @@ const settle = async (): Promise<void> => {
 }
 
 describe('turn boundaries', () => {
+  it.each(['close', 'end'] as const)(
+    'rejects delivery after %s without opening a turn',
+    async (action) => {
+      const { adapter, end } = adapterFed()
+      const session = await adapter.start(OPTS)
+      const seen = collector(session.events)
+      if (action === 'close') await session.close()
+      else end()
+      await settle()
+      await expect(session.send({ text: 'This must fail.' })).rejects.toThrow(/ended agent session/)
+      expect(seen).toEqual([])
+    }
+  )
+
   it('starts a turn on every send, not once per session', async () => {
     const { adapter, feed } = adapterFed()
     const session = await adapter.start(OPTS)

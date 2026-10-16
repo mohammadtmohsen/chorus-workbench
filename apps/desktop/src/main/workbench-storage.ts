@@ -60,7 +60,7 @@ export const STORAGE_SCOPE_MAX_BYTES = 5_000_000
 
 type StorageFile = Record<string, Record<string, string>>
 
-type StorageStore = {
+interface StorageStore {
   readonly userData: string
   items: StorageFile | null
   loading: Promise<StorageFile> | null
@@ -136,7 +136,10 @@ async function readAll(userData: string): Promise<StorageFile> {
 }
 
 /** What this scope last stored, as the JSON text the client will parse, or null. */
-export async function readWorkbenchStorage(userData: string, scope: string): Promise<string | null> {
+export async function readWorkbenchStorage(
+  userData: string,
+  scope: string
+): Promise<string | null> {
   const store = storeFor(userData)
   await store.queue
   try {

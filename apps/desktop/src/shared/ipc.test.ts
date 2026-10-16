@@ -57,6 +57,22 @@ describe('starting a conversation in two steps', () => {
     expect(outcome.safeParse({ status: 'starting' }).success).toBe(false)
   })
 
+  it.each(['conversation:begin', 'conversation:start'] as const)(
+    'bounds and trims the Forward task in %s',
+    (channel) => {
+      const schema = IPC_CONTRACT[channel].request
+      const request = { projectId: 'p1', continueFrom: 'parent', objective: '  Fix API retries  ' }
+      expect(schema.parse(request)).toMatchObject({
+        objective: 'Fix API retries',
+        continueFrom: 'parent',
+      })
+      expect(schema.safeParse({ ...request, objective: 'x'.repeat(2000) }).success).toBe(true)
+      expect(schema.safeParse({ ...request, objective: 'x'.repeat(2001) }).success).toBe(false)
+      expect(schema.safeParse({ ...request, objective: '' }).success).toBe(false)
+      expect(schema.safeParse({ ...request, objective: '   ' }).success).toBe(false)
+    }
+  )
+
   it('lists a starting room as starting, and one without the field as ready', () => {
     const active = IPC_CONTRACT['conversation:active'].response
     const open = { ...started, unread: 0 }

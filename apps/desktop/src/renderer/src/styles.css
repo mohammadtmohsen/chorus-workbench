@@ -3300,6 +3300,26 @@ body {
   stroke-linejoin: round;
 }
 
+.md-diagram {
+  padding: calc(var(--step) * 9) calc(var(--step) * 3) calc(var(--step) * 3);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--sunken);
+  overflow-x: auto;
+}
+
+.md-diagram img {
+  display: block;
+  max-width: none;
+  height: auto;
+}
+
+.md-diagram-failed {
+  margin: var(--step) 0 0;
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
 .md-inline-code {
   color: var(--tok-string);
   padding: 1px 5px;
@@ -3992,6 +4012,38 @@ body {
   overflow-wrap: anywhere;
 }
 
+.session-readiness[data-preparing='true'] {
+  position: sticky;
+  top: calc(var(--score-top) * -1);
+  z-index: 3;
+  background: var(--sunken);
+}
+
+.session-readiness-line {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: calc(var(--step) * 1.5);
+  margin: 0;
+  color: var(--text-primary);
+}
+
+.session-readiness-hint {
+  margin: var(--step) 0 0;
+  color: var(--text-muted);
+}
+
+.composer-spinner {
+  display: inline-block;
+  flex: none;
+  width: 12px;
+  height: 12px;
+  border: 1.5px solid currentColor;
+  border-right-color: transparent;
+  border-radius: 50%;
+  animation: send-spin 900ms linear infinite;
+}
+
 /*
  * One line to start, four at most, and then it scrolls.
  *
@@ -4025,54 +4077,6 @@ body {
   max-height: calc(4lh + var(--step) * 2);
 }
 
-/* Stop and Send sit together while a turn is running. */
-/*
- * Wraps rather than overflows, and that is a narrow-column fix.
- *
- * Nine triggers and the send button at `flex: none` fit a pane-width composer
- * and do not fit a conversation column, which can be a third of one once a
- * project's column is split. Nothing shrank and nothing wrapped, so the row
- * simply ran past its own box — the send button ended up outside the composer
- * and over the transcript's border, which is the stray blue circle that showed
- * up in the bottom right. Clipping it would have hidden the overflow rather than
- * removed it; wrapping keeps every control reachable and inside.
- */
-/*
- * One line, always — the file truncates rather than the row growing.
- *
- * It wrapped, and wrapping was itself a fix: a tool row too wide for a narrow
- * column used to push the send button outside the composer, where
- * `.conversation-body`'s clip cut it in half. Wrapping meant nothing escaped.
- *
- * What made wrapping affordable was that every item was small and fixed. The
- * file pill is neither — it is a path, so it is as wide as somebody's directory
- * names — and with it on this row a second line appeared and disappeared as the
- * selection changed, moving the send button under the pointer.
- *
- * So the row does not wrap, and the escape it used to prevent is prevented a
- * different way: **the two icons and the send button are `flex: none`, and the
- * three text items give in a fixed order.** The file pill goes first (shrink
- * 100), then the two mention names (shrink 1) — flexbox freezes an item at its
- * floor and redistributes the rest, so the weights express a priority rather
- * than a ratio. What can never be squeezed is two 28px icons and the send
- * button: about 100px, plus whatever the names are down to.
- */
-.composer-tools {
-  display: flex;
-  flex-wrap: nowrap;
-  align-items: center;
-  /*
-   * Closer together, because the items are the row's content and the space
-   * between them was reading as separation between unrelated things. Not to
-   * zero: `@claude` and `@codex` are two buttons and have to look like two.
-   */
-  gap: calc(var(--step) * 1.5);
-  flex: none;
-  min-width: 0;
-  padding-top: var(--step);
-  border-top: 1px solid var(--border-default);
-}
-
 /*
  * The two mention triggers, as the characters they insert.
  *
@@ -4095,21 +4099,55 @@ body {
   cursor: pointer;
 }
 
-.composer-live-mode {
+.composer-options-row {
+  display: flex;
+  align-items: center;
   flex: none;
-  max-width: 78px;
-  height: 26px;
-  padding: 0 4px;
+  gap: calc(var(--step) * 1.5);
+  min-width: 0;
+  padding-top: var(--step);
+  border-top: 1px solid var(--border-default);
+}
+
+.composer-options-actions {
+  display: flex;
+  align-items: center;
+  flex: none;
+  gap: calc(var(--step) * 1.5);
+  margin-left: auto;
+}
+
+.composer-live-modes {
+  display: inline-flex;
+  flex: none;
+  gap: 2px;
+  padding: 2px;
   border: 1px solid var(--border-default);
-  border-radius: 6px;
-  background: var(--bg-control);
+  border-radius: 7px;
+  background: var(--bg-canvas);
+}
+
+.composer-live-mode {
+  flex: 1;
+  height: 22px;
+  padding: 0 8px;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  background: transparent;
   color: var(--text-muted);
   font: 12px var(--ui-font);
+  white-space: nowrap;
   cursor: pointer;
 }
 
-.send--stop + .send {
-  margin-left: 0;
+.composer-live-mode:hover:not(:disabled) {
+  color: var(--text-primary);
+}
+
+.composer-live-mode[aria-pressed='true'] {
+  border-color: var(--border-default);
+  background: var(--bg-control);
+  color: var(--text-primary);
 }
 
 .entry-live-label {
@@ -4191,18 +4229,6 @@ body {
   outline: none;
 }
 
-/*
- * The row's own actions sit left; Send sits right.
- *
- * The cast used to fill the gap between them — first as a reading, then as two
- * chips that opened the session menu. Both are gone: who answers is one of the
- * things the settings control decides, for both agents at once, and a row that
- * asked the question twice was a row with two answers to keep in step.
- */
-.composer-tools .send {
-  margin-left: auto;
-}
-
 .hint {
   margin-right: auto;
   font-family: var(--mono);
@@ -4217,6 +4243,185 @@ body {
  * a single place you type, and the focus ring lands on the container rather than
  * on the textarea inside it.
  */
+.task-progress {
+  display: flex;
+  flex-direction: column;
+  gap: calc(var(--step) * 1.5);
+  padding: calc(var(--step) * 2) calc(var(--step) * 2.5);
+  border: 1px solid var(--line);
+  border-radius: calc(var(--radius) * 2);
+  background: var(--sunken);
+  color: var(--muted);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.task-progress-head,
+.task-progress-clocks,
+.task-progress-step,
+.task-progress-steps {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: calc(var(--step) * 1.5) calc(var(--step) * 3);
+}
+
+.task-progress-state {
+  color: var(--bone);
+  font-weight: 600;
+}
+
+.task-progress--waiting .task-progress-state,
+.task-progress--paused .task-progress-state {
+  color: var(--accent-text);
+}
+
+.task-progress--failed .task-progress-state,
+.task-progress-forecast--over {
+  color: var(--alert);
+}
+
+.task-progress-forecast {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--step) calc(var(--step) * 2);
+  color: var(--bone);
+}
+
+.task-progress-forecast--held,
+.task-progress-forecast--none {
+  color: var(--muted);
+}
+
+.task-progress-badge,
+.task-progress-held {
+  padding: 0 calc(var(--step) * 2);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  color: var(--muted);
+}
+
+.task-progress-close {
+  margin-left: auto;
+  padding: var(--step) calc(var(--step) * 3);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: transparent;
+  color: var(--muted);
+  font: inherit;
+  cursor: pointer;
+}
+
+.task-progress-close:hover:not(:disabled) {
+  color: var(--bone);
+  border-color: color-mix(in srgb, var(--bone) 26%, var(--line));
+}
+
+.task-progress-close:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 1px;
+}
+
+.task-progress-close:disabled {
+  cursor: default;
+  opacity: 0.6;
+}
+
+.task-progress-close ~ .task-progress-bind {
+  margin-left: 0;
+}
+
+.task-progress-agent {
+  color: var(--voice, var(--bone));
+  font-weight: 600;
+}
+
+.task-progress-title {
+  min-width: 0;
+  color: var(--bone);
+  overflow-wrap: anywhere;
+}
+
+.task-progress-bar {
+  flex: 1 1 120px;
+  max-width: 240px;
+  height: 4px;
+  border: 0;
+  border-radius: 2px;
+  background: color-mix(in srgb, var(--bone) 12%, transparent);
+  appearance: none;
+}
+
+.task-progress-bar::-webkit-progress-bar {
+  border-radius: 2px;
+  background: color-mix(in srgb, var(--bone) 12%, transparent);
+}
+
+.task-progress-bar::-webkit-progress-value {
+  border-radius: 2px;
+  background: var(--muted);
+}
+
+.task-progress-note {
+  margin: 0;
+}
+
+.task-progress-live {
+  display: flex;
+  flex-direction: column;
+  gap: var(--step);
+}
+
+.task-progress-live-caption {
+  font-weight: 600;
+}
+
+.task-progress-live-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--step);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.task-progress-live-row,
+.task-progress-handoff {
+  display: flex;
+  align-items: baseline;
+  gap: calc(var(--step) * 2);
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+}
+
+.task-progress-live-row > *,
+.task-progress-handoff > * {
+  flex-shrink: 0;
+}
+
+.task-progress-live-row > .task-progress-now,
+.task-progress-live-row > .task-progress-detail {
+  flex-shrink: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.task-progress-now {
+  color: var(--bone);
+}
+
+.task-progress-blocked {
+  color: var(--accent-text);
+}
+
+.task-progress-outcome--failed,
+.task-progress-outcome--unavailable {
+  color: var(--alert);
+}
+
 /*
  * Tightened, so the box reads as one control rather than three stacked things.
  *
@@ -4454,7 +4659,6 @@ body {
   background: color-mix(in srgb, var(--alert) 28%, transparent);
 }
 
-/* Drawn rather than typed: the ■ glyph sits off-centre in most faces. */
 .send-square {
   width: 9px;
   height: 9px;
@@ -4514,6 +4718,7 @@ body {
  * that has to go. The colour states stay and still say busy.
  */
 @media (prefers-reduced-motion: reduce) {
+  .composer-spinner,
   .send[data-steering='true']::after,
   .send--stop::after {
     animation: none;
@@ -7063,25 +7268,6 @@ input::placeholder {
  * in my own language", and an invented one would need a tooltip to explain it —
  * which is the thing the row deliberately does not have.
  */
-.composer-style {
-  display: inline-flex;
-  align-items: center;
-  flex: none;
-  height: 28px;
-  padding: 0 8px;
-  border: 1px solid var(--border-default);
-  border-radius: 8px;
-  background: var(--bg-surface);
-  color: var(--text-secondary);
-  font-size: 11px;
-  cursor: pointer;
-}
-
-.composer-style[aria-pressed='true'] {
-  color: var(--text-primary);
-  border-color: var(--border-strong);
-}
-
 /* Mid-turn, and while the respawn is in flight. Both mean "not now". */
 .composer-style:disabled {
   opacity: 0.45;
@@ -7406,13 +7592,6 @@ input::placeholder {
 .traffic-row-button:focus-visible {
   outline: 1px solid var(--focus-ring);
   outline-offset: -1px;
-}
-
-.traffic-note {
-  display: flex;
-  min-width: 0;
-  gap: var(--step);
-  overflow: hidden;
 }
 
 /*
@@ -7823,9 +8002,7 @@ input::placeholder {
    * The endpoint takes the larger share because it is the column people read;
    * the detail takes the rest and gives it up first.
    */
-  grid-template-columns:
-    max-content minmax(0, 3fr)
-    max-content max-content minmax(0, 1fr);
+  grid-template-columns: max-content max-content minmax(0, 1fr);
   column-gap: var(--step);
   row-gap: calc(var(--step) * 2);
   min-width: 0;
@@ -7896,8 +8073,7 @@ input::placeholder {
 }
 
 .traffic-method,
-.traffic-status,
-.traffic-outcome {
+.traffic-status {
   color: var(--text-muted);
   white-space: nowrap;
 }
@@ -7976,15 +8152,6 @@ input::placeholder {
   color: var(--tok-removed);
 }
 
-.traffic-outcome[data-outcome='refused'],
-.traffic-outcome[data-outcome='backend'] {
-  color: var(--tok-removed);
-}
-
-.traffic-outcome[data-outcome='unreadable'] {
-  color: var(--tok-number);
-}
-
 .traffic-pending {
   display: inline-block;
   width: 9px;
@@ -8037,6 +8204,19 @@ input::placeholder {
   overflow: hidden;
   color: var(--text-secondary);
   text-overflow: ellipsis;
+}
+
+.traffic-endpoint-tooltip {
+  position: fixed;
+  z-index: 90;
+  box-sizing: border-box;
+  width: max-content;
+  max-width: none;
+  overflow: visible;
+  background: var(--bg-chrome);
+  text-overflow: clip;
+  white-space: nowrap;
+  user-select: text;
 }
 
 /*
@@ -8116,29 +8296,6 @@ input::placeholder {
   min-width: 0;
   color: var(--text-secondary);
   overflow-wrap: anywhere;
-}
-
-.traffic-code,
-.traffic-next {
-  min-width: 0;
-  overflow: hidden;
-  color: var(--text-primary);
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-/*
- * Sized and truncated like the code beside it, and coloured differently on
- * purpose: `ECONNREFUSED` in the same ink as `APP_SESSION_REVOKED` would read as
- * one kind of fact. It is not — one was said by the backend, the other happened
- * instead of the backend saying anything.
- */
-.traffic-transport {
-  min-width: 0;
-  overflow: hidden;
-  color: var(--text-secondary);
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 
 .traffic-source-row {
@@ -10854,11 +11011,13 @@ input::placeholder {
   /* Mirrors TRANSCRIPT_MIN_WIDTH in `shared/workspace-layout.ts`; they must move
      together, or the stored-width clamp and the drag clamp disagree. */
   --transcript-min: 320px;
+  position: relative;
   display: flex;
   flex: 1;
   flex-direction: column;
   min-width: 0;
   min-height: 0;
+  overflow: hidden;
 }
 
 .pane-split[data-orientation='side'] {
@@ -13506,9 +13665,8 @@ input::placeholder {
    * it a flex item refuses, and the send button would be pushed out of the
    * composer again — see `.conversation-body`'s clip.
    */
-  flex: 0 100 auto;
+  flex: 1 100 auto;
   min-width: 0;
-  max-width: 40ch;
   overflow: hidden;
   /*
    * Italic and in the accent, so it reads as a note about the message rather
@@ -14065,6 +14223,7 @@ input::placeholder {
   display: flex;
   flex: 1 1 auto;
   align-items: center;
+  gap: var(--step);
   min-width: 0;
   overflow: clip;
 }
@@ -14076,7 +14235,7 @@ input::placeholder {
   min-width: 0;
   height: 32px;
   overflow: clip;
-  border: 1px solid transparent;
+  border: 1px solid var(--border-strong);
   border-radius: 8px;
   color: var(--text-secondary);
 }
@@ -14303,4 +14462,194 @@ svg.web-tab-icon {
   height: 100%;
   color: var(--text-muted);
   font: 14px var(--ui-font);
+}
+
+.conversation-note {
+  position: absolute;
+  z-index: 4;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  border: 1px solid var(--border-strong);
+  border-radius: 10px;
+  background: var(--bg-surface);
+  box-shadow: 0 8px 28px rgb(0 0 0 / 35%);
+  color: var(--text-primary);
+  font: var(--note-font);
+  overflow: hidden;
+}
+
+.conversation-note[hidden] {
+  display: none;
+}
+
+.conversation-note[data-moving='true'] {
+  user-select: none;
+}
+
+.conversation-note-head {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: calc(var(--step) * 2);
+  padding: calc(var(--step) * 2) calc(var(--step) * 2) calc(var(--step) * 2) calc(var(--step) * 4);
+  border-bottom: 1px solid var(--border-default);
+  background: var(--bg-chrome);
+  cursor: grab;
+  touch-action: none;
+  user-select: none;
+}
+
+.conversation-note[data-moving='true'] .conversation-note-head {
+  cursor: grabbing;
+}
+
+.conversation-note-title {
+  flex: none;
+  color: var(--text-secondary);
+  font-weight: 600;
+}
+
+.conversation-note-status {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text-muted);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.conversation-note[data-status='failed'] .conversation-note-status,
+.conversation-note[data-status='saveFailed'] .conversation-note-status,
+.conversation-note[data-status='journalReadFailed'] .conversation-note-status,
+.conversation-note[data-status='journalFailed'] .conversation-note-status {
+  color: var(--danger);
+}
+
+.conversation-note-hide {
+  display: grid;
+  flex: none;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+}
+
+.conversation-note-hide:hover,
+.conversation-note-hide:focus-visible {
+  border-color: var(--border-default);
+  background: var(--bg-control);
+  color: var(--text-primary);
+  outline: none;
+}
+
+.conversation-note-hide svg {
+  width: 14px;
+  height: 14px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.6;
+  stroke-linecap: round;
+}
+
+.conversation-note-conflict {
+  flex: none;
+  padding: calc(var(--step) * 2) calc(var(--step) * 4);
+  border-bottom: 1px solid var(--border-default);
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+
+.conversation-note-conflict p {
+  margin: 0 0 calc(var(--step) * 2);
+}
+
+.conversation-note-actions {
+  display: flex;
+  flex: none;
+  flex-wrap: wrap;
+  gap: calc(var(--step) * 2);
+  padding: 0 calc(var(--step) * 4) calc(var(--step) * 2);
+}
+
+.conversation-note-conflict .conversation-note-actions {
+  padding: 0;
+}
+
+.conversation-note-actions button {
+  padding: var(--step) calc(var(--step) * 3);
+  border: 1px solid var(--border-default);
+  border-radius: 6px;
+  background: var(--bg-control);
+  color: var(--text-primary);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.conversation-note-actions button:hover,
+.conversation-note-actions button:focus-visible {
+  border-color: var(--border-strong);
+  outline: none;
+}
+
+.conversation-note-content {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+.conversation-note-body {
+  flex: 1 0 48px;
+  min-height: 48px;
+  padding: calc(var(--step) * 3) calc(var(--step) * 4);
+  border: 0;
+  background: transparent;
+  color: var(--text-primary);
+  font: inherit;
+  line-height: 1.45;
+  resize: none;
+  outline: none;
+}
+
+.conversation-note-body::placeholder {
+  color: var(--text-placeholder);
+}
+
+.conversation-note-grip {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  width: 14px;
+  height: 14px;
+  cursor: nwse-resize;
+  touch-action: none;
+  background: linear-gradient(
+    135deg,
+    transparent 50%,
+    var(--border-strong) 50%,
+    var(--border-strong) 58%,
+    transparent 58%,
+    transparent 70%,
+    var(--border-strong) 70%,
+    var(--border-strong) 78%,
+    transparent 78%
+  );
+}
+
+.composer-note[aria-pressed='true'] {
+  color: var(--text-primary);
+}
+
+.composer-note[data-attention='true'] {
+  color: var(--danger);
 }

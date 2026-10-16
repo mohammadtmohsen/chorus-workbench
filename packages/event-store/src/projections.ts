@@ -251,10 +251,24 @@ export function applyToProjections(db: Database, event: StoredEvent): void {
       })
       break
 
+    case 'handoff.outcome':
+      // What became of a handoff is read back off the log with the live state;
+      // no query asks the handoffs table for it.
+      break
+
+    case 'assignment.bound':
+      // The binding is read back off the log by event id, with its corrections;
+      // a table would hold only the latest and lose that history.
+      break
+
     // Streamed detail that the transcript reads back off the log directly.
     // Giving each of these a table would add write cost for no query we make.
     // `file.change.completed` is here for that reason and no other: its only
     // reader folds it into a card while replaying the log it replays anyway.
+    case 'reply.status':
+      // Chat request state is read from the log and must not update Work sessions.
+      break
+
     case 'turn.started':
     case 'turn.completed':
     case 'agent.reasoning.delta':
@@ -309,6 +323,14 @@ export function applyToProjections(db: Database, event: StoredEvent): void {
       // this file" answerable — but nothing asks it. The review panel answers
       // the file-level question from git, which stays right when an agent's edit
       // is later reverted by hand. If that changes, this is where it changes.
+      break
+
+    case 'task.opened':
+    case 'task.revised':
+    case 'task.closed':
+    case 'usage.blocked':
+      // No table: `taskRecords` reads one task's events straight off the log by
+      // type and seq, and `taskOutcomes` reads closed tasks through the type index.
       break
 
     case 'file.edited.byUser':

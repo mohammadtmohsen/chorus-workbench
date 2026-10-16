@@ -453,7 +453,10 @@ export class ProjectRunner {
       await this.abandon(entry, run, recordingBefore, started, 'cancelled')
       return
     }
-    if (prepared.captureTraffic && (started === null || !started.capturing || started.port === null)) {
+    if (
+      prepared.captureTraffic &&
+      (started === null || !started.capturing || started.port === null)
+    ) {
       await this.abandon(entry, run, recordingBefore, started, 'capture-failed')
       return
     }
@@ -475,12 +478,18 @@ export class ProjectRunner {
     this.publish(entry, { kind: 'running', token: run.token, active: run.active, pgid: pid })
   }
 
-  private spawn(run: Run, prepared: Prepared, redirect: WorkbenchTerminalEnv | null): number | null {
+  private spawn(
+    run: Run,
+    prepared: Prepared,
+    redirect: WorkbenchTerminalEnv | null
+  ): number | null {
     try {
       const result = this.deps.terminals.launch(runRef(run.projectId), {
         cwd: prepared.cwd,
         env:
-          redirect === null ? this.deps.env() : { ...this.deps.env(), [redirect.name]: redirect.value },
+          redirect === null
+            ? this.deps.env()
+            : { ...this.deps.env(), [redirect.name]: redirect.value },
         file: prepared.shell,
         args: ['-l', '-i', '-c', scriptOf(redirect, run.active.command)],
         generation: run.token,

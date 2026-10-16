@@ -1,4 +1,5 @@
 export * from './app-note.js'
+export * from './conversation-note.js'
 export * from './kept-note.js'
 export * from './events.js'
 export * from './migrations.js'

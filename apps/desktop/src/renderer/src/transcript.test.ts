@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import type { TranscriptEvent } from '../../shared/ipc.js'
 import {
   answersThinking,
+  applyTranscriptState,
   EMPTY_VIEW,
   finalAnswerKey,
   groupedWith,
@@ -31,6 +32,97 @@ function event(
 }
 
 describe('reduceEvents', () => {
+  it('keeps Chat pending through a system notice and an independent Work completion', () => {
+    const status = { requestId: 'chat-1', sourceId: 'question-1', agentId: 'codex' }
+    let view = reduceEvents(EMPTY_VIEW, [
+      event('turn.started', { turnRef: 'work-1' }),
+      event('reply.status', { ...status, phase: 'waiting' }),
+      event(
+        'notice.raised',
+        { source: 'system', level: 'info', text: 'Asking codex', detail: null },
+        'system'
+      ),
+      event('turn.completed', { turnRef: 'work-1', status: 'completed' }),
+    ])
+    expect(view.busy).toBe(true)
+    expect(view.working).toEqual([])
+    expect(view.replies['chat-1']?.phase).toBe('waiting')
+    view = reduceEvents(view, [
+      event('reply.status', { ...status, phase: 'replying' }),
+      event('agent.message.completed', {
+        itemRef: 'discussion:chat-1:reply',
+        text: 'Here is the answer.',
+        mode: 'discussion',
+      }),
+      event('reply.status', { ...status, phase: 'done' }),
+    ])
+    expect(view.busy).toBe(false)
+    expect(view.replies).toEqual({})
+    expect(view.messages.at(-1)?.text).toBe('Here is the answer.')
+  })
+
+  it.each(['done', 'error', 'cancelled'])(
+    'settles only the matching Chat request on %s',
+    (phase) => {
+      let view = reduceEvents(EMPTY_VIEW, [
+        event('turn.started', { turnRef: 'work-1' }),
+        event('reply.status', {
+          requestId: 'chat-1',
+          sourceId: 'u1',
+          agentId: 'codex',
+          phase: 'thinking',
+        }),
+        event('reply.status', {
+          requestId: 'chat-2',
+          sourceId: 'u2',
+          agentId: 'codex',
+          phase: 'waiting',
+        }),
+        event('reply.status', { requestId: 'chat-1', sourceId: 'u1', agentId: 'codex', phase }),
+      ])
+      expect(view.working).toEqual(['codex'])
+      expect(Object.keys(view.replies)).toEqual(['chat-2'])
+      view = reduceEvents(view, [
+        event('reply.status', {
+          requestId: 'chat-2',
+          sourceId: 'u2',
+          agentId: 'codex',
+          phase: 'done',
+        }),
+      ])
+      expect(view.busy).toBe(true)
+    }
+  )
+
+  it('replaces a historical Chat wait with the current request snapshot', () => {
+    const view = reduceEvents(EMPTY_VIEW, [
+      event('reply.status', {
+        requestId: 'old-chat',
+        sourceId: 'old-user',
+        agentId: 'codex',
+        phase: 'thinking',
+      }),
+    ])
+    const state = { approvals: [], questions: [], working: [], usageByActor: {} }
+    expect(applyTranscriptState(view, { ...state, replies: [] }).busy).toBe(false)
+    const active = event(
+      'reply.status',
+      { requestId: 'active-chat', sourceId: 'current-user', agentId: 'claude', phase: 'waiting' },
+      'claude'
+    )
+    const restored = applyTranscriptState(view, { ...state, replies: [active] })
+    expect(restored.busy).toBe(true)
+    expect(Object.keys(restored.replies)).toEqual(['active-chat'])
+    const newer = event('reply.status', {
+      requestId: 'newer-chat',
+      sourceId: 'another-user',
+      agentId: 'codex',
+      phase: 'thinking',
+    })
+    const concurrent = applyTranscriptState(view, { ...state, replies: [newer, active] })
+    expect(Object.keys(concurrent.replies)).toEqual(['active-chat', 'newer-chat'])
+  })
+
   it('stitches deltas into one growing message', () => {
     const view = reduceEvents(EMPTY_VIEW, [
       event('agent.message.delta', { itemRef: 'm1', text: 'Hel' }),
@@ -309,6 +401,48 @@ describe('reduceEvents', () => {
       text: 'lint · PreToolUse',
       detail: 'no semicolons',
     })
+  })
+
+  it('keeps one translated startup capability notice across history and live updates', () => {
+    const fields = {
+      level: 'info',
+      source: 'system',
+      code: 'projectToolsUnconfirmed',
+      text: '',
+      detail: null,
+    }
+    const older = [event('notice.raised', fields)]
+    const latest = reduceEvents(EMPTY_VIEW, [
+      event('notice.raised', fields),
+      event('notice.raised', fields),
+    ])
+    const full = prependEvents(latest, older)
+    const live = reduceEvents(full, [event('notice.raised', fields)])
+    expect(live.messages).toHaveLength(1)
+    expect(live.messages[0]).toMatchObject({
+      actor: 'codex',
+      noticeCode: 'projectToolsUnconfirmed',
+      noticeSource: 'system',
+    })
+    expect(full.firstSeq).toBe(older[0]?.seq)
+  })
+
+  it('retains repeated capability warnings and fresh diagnostic details', () => {
+    const fields = { source: 'system', text: '', detail: null }
+    const notice = { ...fields, level: 'info', code: 'projectToolsUnconfirmed' }
+    const warning = { ...fields, level: 'warn', code: 'projectToolsUnavailable' }
+    const view = reduceEvents(EMPTY_VIEW, [
+      event('notice.raised', notice),
+      event('notice.raised', notice),
+      event('notice.raised', warning),
+      event('notice.raised', warning),
+      event('notice.raised', { ...notice, detail: 'First diagnostic' }),
+      event('notice.raised', { ...notice, detail: 'New diagnostic' }),
+    ])
+    expect(view.messages).toHaveLength(5)
+    expect(view.messages.filter((message) => message.level === 'warn')).toHaveLength(2)
+    expect(view.messages.at(-1)?.detail).toBe('New diagnostic')
+    expect(view.messages.every((message) => message.noticeCode !== undefined)).toBe(true)
   })
 
   describe('a run of talkative hooks', () => {
@@ -1264,6 +1398,60 @@ describe('finalAnswerKey', () => {
   })
 })
 
+describe('reply identity across history pages', () => {
+  it('keeps a completed reply once and preserves another reply with identical text', () => {
+    const prefix = event('agent.message.delta', { itemRef: 'm1', text: 'Hello ' })
+    const command = event('command.started', { itemRef: 'cmd1', command: ['ls'] })
+    const latest = reduceEvents(EMPTY_VIEW, [
+      event('agent.message.completed', { itemRef: 'm1', text: 'Hello world' }),
+      event('agent.message.completed', { itemRef: 'm2', text: 'Hello world' }),
+    ])
+    const full = prependEvents(latest, [prefix, command])
+    expect(
+      full.messages.filter((message) => message.kind === 'message').map((message) => message.text)
+    ).toEqual(['Hello world', 'Hello world'])
+    expect(full.messages.map((message) => message.key)).toEqual(['m1', command.id, 'm2'])
+    expect(full.messages[0]?.at).toBe(prefix.createdAt)
+    expect(full.messages[0]?.status).toBe('complete')
+  })
+
+  it('joins streamed fragments once when a history page overlaps or is read again', () => {
+    const prefix = event('agent.message.delta', { itemRef: 'm1', text: 'Hello ' })
+    const tail = event('agent.message.delta', { itemRef: 'm1', text: 'world' })
+    const latest = reduceEvents(EMPTY_VIEW, [
+      tail,
+      event('reply.status', {
+        requestId: 'chat-1',
+        sourceId: 'question-1',
+        agentId: 'claude',
+        phase: 'thinking',
+      }),
+    ])
+    const full = prependEvents(latest, [prefix, tail])
+    expect(full.messages).toHaveLength(1)
+    expect(full.messages[0]).toMatchObject({ text: 'Hello world', status: 'streaming' })
+    expect(full.messages[0]?.at).toBe(prefix.createdAt)
+    expect(full.busy).toBe(true)
+    expect(full.replies).toEqual(latest.replies)
+    expect(full.lastSeq).toBe(latest.lastSeq)
+    expect(prependEvents(full, [prefix, tail])).toBe(full)
+  })
+
+  it('keeps an earlier completion authoritative over a late delta', () => {
+    const completed = event('agent.message.completed', { itemRef: 'm1', text: 'Done' })
+    const latest = reduceEvents(EMPTY_VIEW, [
+      event('agent.message.delta', { itemRef: 'm1', text: 'late fragment' }),
+    ])
+    const full = prependEvents(latest, [completed])
+    expect(full.messages).toHaveLength(1)
+    expect(full.messages[0]).toMatchObject({
+      eventId: completed.id,
+      text: 'Done',
+      status: 'complete',
+    })
+  })
+})
+
 describe('progress ticks logged before the adapter stopped writing them', () => {
   const tick = (actor: TranscriptEvent['actor'], fields: Record<string, unknown> = {}) =>
     event(
@@ -1339,9 +1527,7 @@ describe('progress ticks logged before the adapter stopped writing them', () => 
       run('claude', 'c5'),
     ])
     expect(shape(view)).toEqual([
-      'claude:1',
-      'entry:commands_changed',
-      'claude:1',
+      'claude:2',
       'entry:done reading',
       'claude:1',
       'codex:1',

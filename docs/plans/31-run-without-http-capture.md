@@ -2,14 +2,14 @@
 
 ## Status
 
-| Unit | Result |
-| --- | --- |
-| Scope | Run the project's saved command without requiring Forward to or a variable |
-| Evidence | Renderer setup and runner validation both require Traffic settings; the root dev script already starts Chorus |
-| Implementation | Written; renderer requirements, runner capture branch, optional field copy and recording ownership updated |
-| Review | Changes reviewed against `/private/tmp/run-optional-capture-6r2z7jmg`; unrelated workspace edits preserved |
-| Verification | Runner and renderer regressions written; desktop build, local packaging, signing and installation passed; tests, separate typechecks and live behavior unrun |
-| Installation | 2026-10-11: Signed arm64 build installed at `/Applications/Chorus.app`; current session kept running |
+| Unit           | Result                                                                                                                                                       |
+| -------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Scope          | Run the project's saved command without requiring Forward to or a variable                                                                                   |
+| Evidence       | Renderer setup and runner validation both require Traffic settings; the root dev script already starts Chorus                                                |
+| Implementation | Written; renderer requirements, runner capture branch, optional field copy and recording ownership updated                                                   |
+| Review         | Changes reviewed against `/private/tmp/run-optional-capture-6r2z7jmg`; unrelated workspace edits preserved                                                   |
+| Verification   | Runner and renderer regressions written; desktop build, local packaging, signing and installation passed; tests, separate typechecks and live behavior unrun |
+| Installation   | 2026-10-11: Signed arm64 build installed at `/Applications/Chorus.app`; current session kept running                                                         |
 
 The requested build and installation used `pnpm exec turbo run build --filter=@chorus/desktop`, then `node build/package-local.mjs` and `env CHORUS_INSTALL_KEEP_RUNNING=1 CHORUS_INSTALL_DIR=/Applications node build/install-local.mjs` from `apps/desktop`. All commands exited successfully. The installer verified the installed signature and retained the running bundle at `/Applications/Chorus.app.replaced-1791724520534`. Quit and reopen Chorus to load the new build.
 

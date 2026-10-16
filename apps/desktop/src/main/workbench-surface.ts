@@ -91,6 +91,7 @@ import { isShellSender } from './shell-windows.js'
 import {
   acquireWorkbenchRuntime,
   releaseWorkbenchRuntime,
+  workbenchHostLog,
   type WorkbenchRuntime,
 } from './workbench-host.js'
 import {
@@ -1008,11 +1009,17 @@ export function deliverUrl(url: string): boolean {
   return true
 }
 
+function warnFailure(message: string, error: unknown): void {
+  workbenchHostLog().warn(message, {
+    error: error instanceof Error ? error.message : String(error),
+  })
+}
+
 /** Every surface this shell owns, torn down without asking it — and every grant. */
 function releaseOwner(owner: WebContents): void {
   for (const id of [...(byOwner.get(owner) ?? [])]) {
     void destroySurface(id).catch((error: unknown) => {
-      console.error('Workbench surface could not close', error)
+      warnFailure('Workbench surface could not close', error)
     })
   }
   /* The overlay flag is keyed by the document, and this one is gone. */
@@ -1250,7 +1257,7 @@ function expireHandoff(viewId: string): void {
     return
   }
   void destroySurface(viewId).catch((error: unknown) => {
-    console.error('Workbench surface could not close', error)
+    warnFailure('Workbench surface could not close', error)
   })
 }
 
@@ -1343,7 +1350,7 @@ function destroySurface(viewId: string): Promise<void> {
 
   const closing = flushSurfaceStorage(surface.view.webContents)
     .catch((error: unknown) => {
-      console.error('Workbench storage could not be flushed before closing', error)
+      warnFailure('Workbench storage could not be flushed before closing', error)
     })
     .then(() => {
       byContents.delete(surface.view.webContents)
@@ -1373,7 +1380,8 @@ function destroySurface(viewId: string): Promise<void> {
         other.host === surface.host && other.projectRoot === surface.projectRoot
       const stillOpen = [...byId.values()].some(sameProject)
       const stillClosing = [...closingSurfaces.values()].some((other) => sameProject(other.surface))
-      if (!stillOpen && !stillClosing) releaseRuntime({ host: surface.host, root: surface.projectRoot })
+      if (!stillOpen && !stillClosing)
+        releaseRuntime({ host: surface.host, root: surface.projectRoot })
     })
   closingSurfaces.set(viewId, { surface, promise: closing })
   return closing
@@ -1533,16 +1541,19 @@ export function registerWorkbenchHandlers(
   resolvePlace?: (projectId: string) => WorkbenchPlace
 ): void {
   resolveProjectPlace = resolvePlace ?? null
-  ipcMain.on(WORKBENCH_STORAGE_FLUSH_RESULT_CHANNEL, (event, requestId: unknown, error: unknown) => {
-    if (typeof requestId !== 'string') return
-    const request = storageFlushRequests.get(requestId)
-    if (request === undefined || request.contents !== event.sender) return
-    request.finish(
-      error === null
-        ? undefined
-        : new Error(typeof error === 'string' ? error : 'Invalid workbench storage flush result')
-    )
-  })
+  ipcMain.on(
+    WORKBENCH_STORAGE_FLUSH_RESULT_CHANNEL,
+    (event, requestId: unknown, error: unknown) => {
+      if (typeof requestId !== 'string') return
+      const request = storageFlushRequests.get(requestId)
+      if (request?.contents !== event.sender) return
+      request.finish(
+        error === null
+          ? undefined
+          : new Error(typeof error === 'string' ? error : 'Invalid workbench storage flush result')
+      )
+    }
+  )
   for (const channel of WORKBENCH_SHELL_CHANNELS) {
     ipcMain.handle(channel, async (event, rawRequest: unknown) => {
       /*

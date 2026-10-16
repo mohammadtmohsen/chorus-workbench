@@ -5,11 +5,14 @@ import {
   forkSession,
   query,
   renameSession,
+  type HookInput,
   type Options,
   type PermissionResult,
   type Query,
 } from '@anthropic-ai/claude-agent-sdk'
 import { editorMcpServer } from './editor-tool.js'
+import { NOTE_TOOL_IDS, READ_NOTE_TOOL, noteMcpServer } from './note-tool.js'
+import { REPORT_PROGRESS_TOOL, progressMcpServer } from './progress-tool.js'
 import { PROJECT_TOOL_IDS, projectMcpServer } from './project-tool.js'
 import { READ_TRANSCRIPT_TOOL, transcriptMcpServer } from './transcript-tool.js'
 import type {
@@ -28,6 +31,7 @@ import type {
   ForkOpts,
   HealthStatus,
   SessionOpts,
+  TranscriptToolState,
   UserInputResponse,
 } from '@chorus/agent-protocol'
 import {
@@ -78,7 +82,7 @@ interface VersionProbeEntry {
  */
 
 /*
- * Three of these described the SDK's abilities rather than the adapter's, which
+ * Two of these described the SDK's abilities rather than the adapter's, which
  * made them claims Chorus could not honour:
  *
  *  - `fork`: true since the phase that implemented `AgentAdapter.fork` — a real
@@ -86,8 +90,6 @@ interface VersionProbeEntry {
  *    running CLI to leave the original session's context and stored transcript
  *    untouched. It was false while `conversation:restart` was the closest thing
  *    Chorus had, and restarting makes a *new* conversation, which is not a fork.
- *  - `planStream`: `plan.updated` is emitted only by the Codex adapter. Nothing
- *    in this package produces one.
  *  - `modelSwitchMidSession`: false again, and this one has been both. It was
  *    true while a card carried a per-conversation picker; that picker is gone —
  *    the model is chosen once, in settings, and reaches a session as
@@ -103,7 +105,7 @@ export const CLAUDE_CAPABILITIES: AgentCapabilities = {
   steer: true,
   fork: true,
   reasoningStream: true,
-  planStream: false,
+  planStream: true,
   // Claude has no aggregate turn diff; the workspace service derives one (§4.2).
   aggregateDiff: false,
   modelSwitchMidSession: false,
@@ -291,11 +293,13 @@ export class ClaudeSession implements AgentSession {
   private seq = 0
   private resolvedSessionRef: string
   private closed = false
+  private streamEnded = false
   /**
    * Claude reports a user-initiated stop as `error_during_execution` with no
    * distinct status (S3b), so only we know the difference.
    */
   private interruptRequested = false
+  transcriptTool?: TranscriptToolState
   /** Id of the message currently streaming, from its `message_start`. */
   private streamMessageRef: string | null = null
   /** `tool_use` ids that were Bash calls, so their results read as commands. */
@@ -363,6 +367,9 @@ export class ClaudeSession implements AgentSession {
   }
 
   send(input: AgentInput): Promise<void> {
+    if (this.closed || this.streamEnded) {
+      return Promise.reject(new Error('Cannot send to an ended agent session'))
+    }
     /*
      * The turn starts here, and only if one is not already open — see
      * `turnOpen`. Emitted before the push so the transcript says an agent is
@@ -832,6 +839,7 @@ export class ClaudeSession implements AgentSession {
       })
     }
     // The stream ending is how the supervisor detects a dead session.
+    this.streamEnded = true
     this.queue.close()
   }
 
@@ -1399,13 +1407,33 @@ export class ClaudeAdapter implements AgentAdapter {
      * plugins, so adding one tool of ours would silently disconnect all of
      * theirs. Same reasoning as `settingSources` being omitted below.
      */
-    const editorServer = editorMcpServer(
-      this.editorEdit,
-      opts.editorPlace ?? { host: '', root: opts.cwd }
-    )
+    const readOnly = opts.toolPolicy === 'readOnly'
+    const editorServer = readOnly
+      ? {}
+      : editorMcpServer(this.editorEdit, opts.editorPlace ?? { host: '', root: opts.cwd })
     const transcriptServer = transcriptMcpServer(opts.transcript)
     const projectServer = projectMcpServer(opts.project)
-    const mcpServers = { ...editorServer, ...transcriptServer, ...projectServer }
+    const progressServer =
+      readOnly || fork !== undefined ? undefined : progressMcpServer(opts.progress)
+    const noteServer = noteMcpServer(
+      opts.note === undefined || (!readOnly && (fork === undefined || fork.persist === true))
+        ? opts.note
+        : { read: opts.note.read }
+    )
+    const mcpServers = {
+      ...editorServer,
+      ...transcriptServer,
+      ...projectServer,
+      ...progressServer,
+      ...noteServer,
+    }
+    const readableTool = (name: string): boolean =>
+      name === 'Read' ||
+      name === 'Glob' ||
+      name === 'Grep' ||
+      (opts.transcript !== undefined && name === READ_TRANSCRIPT_TOOL) ||
+      (projectServer !== undefined && PROJECT_TOOL_IDS.has(name)) ||
+      (noteServer !== undefined && name === READ_NOTE_TOOL)
 
     const options: Options = {
       cwd: opts.cwd,
@@ -1456,6 +1484,29 @@ export class ClaudeAdapter implements AgentAdapter {
        * already shown in full above it.
        */
       hooks: {
+        ...(readOnly
+          ? {
+              PreToolUse: [
+                {
+                  hooks: [
+                    (input: HookInput) =>
+                      Promise.resolve(
+                        input.hook_event_name === 'PreToolUse' && readableTool(input.tool_name)
+                          ? {}
+                          : {
+                              hookSpecificOutput: {
+                                hookEventName: 'PreToolUse' as const,
+                                permissionDecision: 'deny' as const,
+                                permissionDecisionReason:
+                                  'Discussion sessions only allow read-only inspection. No files, including plan files, may be changed.',
+                              },
+                            }
+                      ),
+                  ],
+                },
+              ],
+            }
+          : {}),
         PostCompact: [
           {
             hooks: [
@@ -1552,10 +1603,31 @@ export class ClaudeAdapter implements AgentAdapter {
        * see `ForkOpts.inherits`.
        */
       ...(fork?.inherits === 'nothing' ? { settingSources: [] } : {}),
+      ...(readOnly
+        ? {
+            tools: ['Read', 'Glob', 'Grep'],
+            settingSources: [],
+            strictMcpConfig: true,
+            ...(resume === undefined ? { persistSession: false } : {}),
+          }
+        : {}),
       canUseTool: (toolName, input, options) => {
+        if (readOnly) {
+          return Promise.resolve<PermissionResult>(
+            readableTool(toolName)
+              ? { behavior: 'allow', updatedInput: input }
+              : {
+                  behavior: 'deny',
+                  message:
+                    'Discussion sessions only allow read-only inspection. No files, including plan files, may be changed.',
+                }
+          )
+        }
         if (
           toolName === READ_TRANSCRIPT_TOOL ||
-          (projectServer !== undefined && PROJECT_TOOL_IDS.has(toolName))
+          (projectServer !== undefined && PROJECT_TOOL_IDS.has(toolName)) ||
+          (progressServer !== undefined && toolName === REPORT_PROGRESS_TOOL) ||
+          (noteServer !== undefined && NOTE_TOOL_IDS.has(toolName))
         ) {
           return Promise.resolve<PermissionResult>({ behavior: 'allow', updatedInput: input })
         }
@@ -1587,6 +1659,7 @@ export class ClaudeAdapter implements AgentAdapter {
       this.id,
       this.models
     )
+    if (transcriptServer !== undefined) session.transcriptTool = 'registered'
     holder.session = session
 
     // Not awaited: the caller wants a session, not a quota. It fills the

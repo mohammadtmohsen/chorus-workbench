@@ -141,7 +141,7 @@ describe('the workbench preload', () => {
     expect(ROW_SCROLL_REQUEST_CHANNEL).toBe(WORKBENCH_ROW_SCROLL_REQUEST_CHANNEL)
   })
 
-  it('exposes exactly thirty methods, and no thirty-first', () => {
+  it('exposes exactly thirty-one methods, and no thirty-second', () => {
     // The list, not the count: a method named here is a capability a document
     // running extension code is handed, so which ones they are is the assertion.
     expect(Object.keys(exposed ?? {})).toEqual([
@@ -179,6 +179,7 @@ describe('the workbench preload', () => {
       'readStorage',
       'applyStorageDelta',
       'onStorageChanged',
+      'onStorageFlushRequest',
       /*
        * The credential trio, and the three names most worth arguing about in
        * this list. They exist because `BrowserSecretStorageService` hardcodes

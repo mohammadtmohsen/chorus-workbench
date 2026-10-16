@@ -10,21 +10,46 @@ import type {
   ForkOpts,
   HealthStatus,
   ModelChoice,
+  NoteAccess,
+  ProgressReporter,
   ProjectReader,
   SandboxPolicy,
   SessionOpts,
+  TranscriptReader,
+  TranscriptToolState,
   UserInputResponse,
 } from '@chorus/agent-protocol'
 import {
+  NOTE_NAMESPACE_DESCRIPTION,
+  NOTE_TOOL_DESCRIPTIONS,
+  NOTE_TOOL_INPUT_SCHEMAS,
+  NOTE_TOOL_NAMESPACE,
+  noteToolNames,
+  readOnlyNote,
+  runNoteTool,
+  PROGRESS_NAMESPACE_DESCRIPTION,
+  PROGRESS_TOOL_DESCRIPTION,
+  PROGRESS_TOOL_INPUT_SCHEMA,
+  PROGRESS_TOOL_NAME,
+  PROGRESS_TOOL_NAMESPACE,
   PROJECT_NAMESPACE_DESCRIPTION,
   PROJECT_TOOL_DESCRIPTIONS,
   PROJECT_TOOL_INPUT_SCHEMAS,
   PROJECT_TOOL_NAMES,
   PROJECT_TOOL_NAMESPACE,
+  TRANSCRIPT_NAMESPACE_DESCRIPTION,
+  TRANSCRIPT_TOOL_DESCRIPTION,
+  TRANSCRIPT_TOOL_INPUT_SCHEMA,
+  TRANSCRIPT_TOOL_NAME,
+  TRANSCRIPT_TOOL_NAMESPACE,
+  runProgressTool,
   runProjectTool,
+  runTranscriptTool,
 } from '@chorus/agent-protocol'
 import type { AgentId, ApprovalId, UserInputId } from '@chorus/shared'
 import type { DynamicToolCallResponse } from './generated/v2/DynamicToolCallResponse.js'
+import type { ConfigReadResponse } from './generated/v2/ConfigReadResponse.js'
+import type { JsonValue } from './generated/serde_json/JsonValue.js'
 import {
   mapApprovalRequest,
   mapNotification,
@@ -33,6 +58,7 @@ import {
   opensTurn,
   toCodexDecision,
   toCodexUserInputResponse,
+  usageBlockOf,
   type ThreadItem,
 } from './mapping.js'
 import { JsonRpcClient, RpcError } from './rpc.js'
@@ -128,19 +154,88 @@ const TOOLS_GATED = 'thread/start.dynamicTools requires experimentalApi capabili
 
 const unknownField = (field: string): string => `Invalid request: unknown field \`${field}\``
 
-const PROJECT_DYNAMIC_TOOLS = [
-  {
-    type: 'namespace',
-    name: PROJECT_TOOL_NAMESPACE,
-    description: PROJECT_NAMESPACE_DESCRIPTION,
-    tools: PROJECT_TOOL_NAMES.map((name) => ({
+const PROJECT_DYNAMIC_TOOLS = {
+  type: 'namespace',
+  name: PROJECT_TOOL_NAMESPACE,
+  description: PROJECT_NAMESPACE_DESCRIPTION,
+  tools: PROJECT_TOOL_NAMES.map((name) => ({
+    type: 'function',
+    name,
+    description: PROJECT_TOOL_DESCRIPTIONS[name],
+    inputSchema: PROJECT_TOOL_INPUT_SCHEMAS[name],
+  })),
+} as const
+
+const TRANSCRIPT_DYNAMIC_TOOLS = {
+  type: 'namespace',
+  name: TRANSCRIPT_TOOL_NAMESPACE,
+  description: TRANSCRIPT_NAMESPACE_DESCRIPTION,
+  tools: [
+    {
       type: 'function',
-      name,
-      description: PROJECT_TOOL_DESCRIPTIONS[name],
-      inputSchema: PROJECT_TOOL_INPUT_SCHEMAS[name],
-    })),
-  },
-] as const
+      name: TRANSCRIPT_TOOL_NAME,
+      description: TRANSCRIPT_TOOL_DESCRIPTION,
+      inputSchema: TRANSCRIPT_TOOL_INPUT_SCHEMA,
+    },
+  ],
+} as const
+
+const PROGRESS_DYNAMIC_TOOLS = {
+  type: 'namespace',
+  name: PROGRESS_TOOL_NAMESPACE,
+  description: PROGRESS_NAMESPACE_DESCRIPTION,
+  tools: [
+    {
+      type: 'function',
+      name: PROGRESS_TOOL_NAME,
+      description: PROGRESS_TOOL_DESCRIPTION,
+      inputSchema: PROGRESS_TOOL_INPUT_SCHEMA,
+    },
+  ],
+} as const
+
+const progressFor = (opts: SessionOpts): ProgressReporter | undefined =>
+  opts.toolPolicy === 'readOnly' ? undefined : opts.progress
+
+const noteFor = (opts: SessionOpts, writable = true): NoteAccess | undefined => {
+  if (opts.note === undefined) return undefined
+  return opts.toolPolicy === 'readOnly' || !writable ? readOnlyNote(opts.note) : opts.note
+}
+
+const noteDynamicTools = (access: NoteAccess) => ({
+  type: 'namespace' as const,
+  name: NOTE_TOOL_NAMESPACE,
+  description: NOTE_NAMESPACE_DESCRIPTION,
+  tools: noteToolNames(access).map((name) => ({
+    type: 'function' as const,
+    name,
+    description: NOTE_TOOL_DESCRIPTIONS[name],
+    inputSchema: NOTE_TOOL_INPUT_SCHEMAS[name],
+  })),
+})
+
+const dynamicToolsFor = (
+  opts: SessionOpts
+): (
+  | typeof PROJECT_DYNAMIC_TOOLS
+  | typeof TRANSCRIPT_DYNAMIC_TOOLS
+  | typeof PROGRESS_DYNAMIC_TOOLS
+  | ReturnType<typeof noteDynamicTools>
+)[] => {
+  const note = noteFor(opts)
+  return [
+    ...(opts.project === undefined ? [] : [PROJECT_DYNAMIC_TOOLS]),
+    ...(opts.transcript === undefined ? [] : [TRANSCRIPT_DYNAMIC_TOOLS]),
+    ...(progressFor(opts) === undefined ? [] : [PROGRESS_DYNAMIC_TOOLS]),
+    ...(note === undefined ? [] : [noteDynamicTools(note)]),
+  ]
+}
+
+const wantsTools = (opts: SessionOpts): boolean =>
+  opts.project !== undefined ||
+  opts.transcript !== undefined ||
+  progressFor(opts) !== undefined ||
+  opts.note !== undefined
 
 function refusedCapability(error: unknown): boolean {
   if (!(error instanceof RpcError) || error.code !== INVALID_REQUEST) return false
@@ -236,13 +331,18 @@ export class CodexSession implements AgentSession {
    * silently revert to the model's default on the second turn.
    */
   private effort: string | null = null
+  transcriptTool?: TranscriptToolState
 
   constructor(
     readonly sessionRef: string,
     private readonly rpc: JsonRpcClient,
     private readonly approvalTtlMs: number,
     private readonly now: () => number,
-    private readonly project?: ProjectReader
+    private readonly project?: ProjectReader,
+    private readonly readOnly = false,
+    private readonly transcript?: TranscriptReader,
+    private readonly progress?: ProgressReporter,
+    private readonly note?: NoteAccess
   ) {
     this.rpc.onNotification((method, params) => {
       this.ingest(method, params)
@@ -267,7 +367,7 @@ export class CodexSession implements AgentSession {
       }
       if (epoch !== this.inputEpoch) await this.interruptCurrentTurn()
     })
-    this.inputQueue = sent.catch(() => {})
+    this.inputQueue = sent.catch(() => undefined)
     return sent
   }
 
@@ -315,6 +415,12 @@ export class CodexSession implements AgentSession {
        * buys length rather than insight, and every token of it is billed.
        */
       summary: 'auto',
+      ...(this.readOnly
+        ? {
+            approvalPolicy: 'untrusted',
+            sandboxPolicy: { type: 'readOnly', networkAccess: false },
+          }
+        : {}),
       // Per turn, not per session — see `effort`.
       ...(this.effort === null ? {} : { effort: this.effort }),
     })) as { turn?: { id?: string } }
@@ -529,7 +635,20 @@ export class CodexSession implements AgentSession {
         })
       }
     }
+    const blocked = usageBlockOf(method, params)
+    const block = (): void => {
+      if (blocked === null) return
+      this.emit({
+        agentId: 'codex' satisfies AgentId,
+        seq: this.seq + 1,
+        at: this.now(),
+        type: 'usage.blocked',
+        resetsAt: blocked.resetsAt,
+      })
+    }
+    if (event.type === 'turn.completed') block()
     this.emit(event)
+    if (event.type !== 'turn.completed') block()
   }
 
   announce(code: ProjectToolsNotice): void {
@@ -552,6 +671,18 @@ export class CodexSession implements AgentSession {
       return toolReply('This tool call names a different thread.', false)
     }
     const tool = call['tool']
+    if (call['namespace'] === TRANSCRIPT_TOOL_NAMESPACE && tool === TRANSCRIPT_TOOL_NAME) {
+      const result = runTranscriptTool(this.transcript, call['arguments'])
+      return toolReply(result.text, result.ok)
+    }
+    if (call['namespace'] === PROGRESS_TOOL_NAMESPACE && tool === PROGRESS_TOOL_NAME) {
+      const result = await runProgressTool(this.progress, call['arguments'])
+      return toolReply(result.text, result.ok)
+    }
+    if (call['namespace'] === NOTE_TOOL_NAMESPACE && typeof tool === 'string') {
+      const result = runNoteTool(this.note, tool, call['arguments'])
+      return toolReply(result.text, result.ok)
+    }
     if (call['namespace'] !== PROJECT_TOOL_NAMESPACE || typeof tool !== 'string') {
       return toolReply('Unknown tool.', false)
     }
@@ -745,20 +876,24 @@ export class CodexAdapter implements AgentAdapter {
 
   async start(opts: SessionOpts): Promise<AgentSession> {
     const { rpc, experimental } = await this.connect(opts)
+    const restricted = await this.owned(opts, rpc, () => this.readOnlyConfig(opts, rpc))
     const params = {
       cwd: opts.cwd,
-      approvalPolicy: 'on-request',
+      approvalPolicy: opts.toolPolicy === 'readOnly' ? 'untrusted' : 'on-request',
       sandbox: toSandboxMode(opts.sandbox),
       ...(opts.model === undefined ? {} : { model: opts.model }),
       ...developerInstructions(opts),
+      ...restricted,
+      ...(opts.toolPolicy === 'readOnly' ? { ephemeral: true } : {}),
     }
     const open = async (body: object): Promise<{ thread: { id: string } }> =>
       (await rpc.request('thread/start', body)) as { thread: { id: string } }
+    const dynamicTools = dynamicToolsFor(opts)
     const { started, registered } = await this.owned(opts, rpc, async () => {
       if (!experimental) return { started: await open(params), registered: false }
       try {
         return {
-          started: await open({ ...params, dynamicTools: PROJECT_DYNAMIC_TOOLS }),
+          started: await open({ ...params, dynamicTools }),
           registered: true,
         }
       } catch (error) {
@@ -772,8 +907,15 @@ export class CodexAdapter implements AgentAdapter {
       rpc,
       this.approvalTtlMs,
       this.now,
-      opts.project
+      opts.project,
+      opts.toolPolicy === 'readOnly',
+      opts.transcript,
+      progressFor(opts),
+      noteFor(opts)
     )
+    if (opts.transcript !== undefined) {
+      session.transcriptTool = registered ? 'registered' : 'unavailable'
+    }
     if (opts.project !== undefined && !registered) session.announce('projectToolsUnavailable')
     // Not awaited: the header can fill a moment late, but a session must not
     // wait on an account lookup to open.
@@ -783,16 +925,31 @@ export class CodexAdapter implements AgentAdapter {
 
   async resume(sessionRef: string, opts: SessionOpts): Promise<AgentSession> {
     const { rpc, experimental } = await this.connect(opts)
+    const restricted = await this.owned(opts, rpc, () => this.readOnlyConfig(opts, rpc))
     await this.owned(opts, rpc, () =>
       rpc.request('thread/resume', {
         threadId: sessionRef,
         cwd: opts.cwd,
-        approvalPolicy: 'on-request',
+        approvalPolicy: opts.toolPolicy === 'readOnly' ? 'untrusted' : 'on-request',
         sandbox: toSandboxMode(opts.sandbox),
         ...developerInstructions(opts),
+        ...restricted,
       })
     )
-    const session = new CodexSession(sessionRef, rpc, this.approvalTtlMs, this.now, opts.project)
+    const session = new CodexSession(
+      sessionRef,
+      rpc,
+      this.approvalTtlMs,
+      this.now,
+      opts.project,
+      opts.toolPolicy === 'readOnly',
+      opts.transcript,
+      progressFor(opts),
+      noteFor(opts)
+    )
+    if (opts.transcript !== undefined) {
+      session.transcriptTool = experimental ? 'unconfirmed' : 'unavailable'
+    }
     if (opts.project !== undefined) {
       session.announce(experimental ? 'projectToolsUnconfirmed' : 'projectToolsUnavailable')
     }
@@ -826,6 +983,7 @@ export class CodexAdapter implements AgentAdapter {
       throw new Error('codex cannot fork without the user configuration')
     }
     const { rpc, experimental } = await this.connect(opts)
+    const restricted = await this.owned(opts, rpc, () => this.readOnlyConfig(opts, rpc))
     const forked = (await this.owned(opts, rpc, () =>
       rpc.request('thread/fork', {
         threadId: sessionRef,
@@ -837,10 +995,11 @@ export class CodexAdapter implements AgentAdapter {
          */
         ephemeral: opts.persist !== true,
         cwd: opts.cwd,
-        approvalPolicy: 'on-request',
+        approvalPolicy: opts.toolPolicy === 'readOnly' ? 'untrusted' : 'on-request',
         sandbox: toSandboxMode(opts.sandbox),
         ...(opts.model === undefined ? {} : { model: opts.model }),
         ...developerInstructions(opts),
+        ...restricted,
       })
     )) as { thread: { id: string } }
 
@@ -849,8 +1008,15 @@ export class CodexAdapter implements AgentAdapter {
       rpc,
       this.approvalTtlMs,
       this.now,
-      opts.project
+      opts.project,
+      opts.toolPolicy === 'readOnly',
+      opts.transcript,
+      opts.persist === true ? progressFor(opts) : undefined,
+      noteFor(opts, opts.persist === true)
     )
+    if (opts.transcript !== undefined) {
+      session.transcriptTool = experimental ? 'unconfirmed' : 'unavailable'
+    }
     if (opts.project !== undefined) {
       session.announce(experimental ? 'projectToolsUnconfirmed' : 'projectToolsUnavailable')
     }
@@ -917,10 +1083,76 @@ export class CodexAdapter implements AgentAdapter {
     return result
   }
 
+  private async readOnlyConfig(
+    opts: SessionOpts,
+    rpc: JsonRpcClient
+  ): Promise<{ config?: Record<string, JsonValue> }> {
+    if (opts.toolPolicy !== 'readOnly') return {}
+    if (opts.sandbox.mode !== 'readOnly') {
+      throw new Error('Discussion sessions require a read-only sandbox')
+    }
+    const result = (await rpc.request('config/read', {
+      cwd: opts.cwd,
+      includeLayers: false,
+    })) as ConfigReadResponse
+    const inspected: unknown = result.config
+    if (inspected === null || typeof inspected !== 'object') {
+      throw new Error('Could not inspect the discussion session configuration')
+    }
+    const config: Record<string, JsonValue> = {
+      'features.apps': false,
+      'features.plugins': false,
+      'features.multi_agent': false,
+      'features.hooks': false,
+      'features.codex_hooks': false,
+      'features.memories': false,
+      'features.browser_use': false,
+      'features.browser_use_external': false,
+      'computer_use.default_app_access': 'deny',
+      'computer_use.windows.always_allowed_app_ids': [],
+    }
+    const servers = result.config['mcp_servers']
+    if (servers !== undefined && servers !== null) {
+      if (typeof servers !== 'object' || Array.isArray(servers)) {
+        throw new Error('Could not inspect the discussion session MCP servers')
+      }
+      for (const name of Object.keys(servers)) {
+        config[`mcp_servers.${JSON.stringify(name)}.enabled`] = false
+      }
+    }
+    const computer = result.config['computer_use']
+    if (computer !== null && typeof computer === 'object' && !Array.isArray(computer)) {
+      for (const [platform, rulesKey] of [
+        ['macos', 'bundle_ids'],
+        ['windows', 'aumids'],
+      ] as const) {
+        const rules = computer[platform]
+        if (rules === null || typeof rules !== 'object' || Array.isArray(rules)) continue
+        const apps = rules[rulesKey]
+        if (apps === null || typeof apps !== 'object' || Array.isArray(apps)) continue
+        for (const name of Object.keys(apps)) {
+          config[`computer_use.${platform}.${rulesKey}.${JSON.stringify(name)}`] = 'deny'
+        }
+      }
+      const windows = computer['windows']
+      if (windows !== null && typeof windows === 'object' && !Array.isArray(windows)) {
+        const executables = windows['exes']
+        if (Array.isArray(executables)) {
+          config['computer_use.windows.exes'] = executables.flatMap((entry) =>
+            entry !== null && typeof entry === 'object' && !Array.isArray(entry)
+              ? [{ ...entry, access: 'deny' }]
+              : []
+          )
+        }
+      }
+    }
+    return { config }
+  }
+
   private async connect(
     opts: SessionOpts
   ): Promise<{ readonly rpc: JsonRpcClient; readonly experimental: boolean }> {
-    if (opts.project === undefined) return { rpc: await this.handshake(), experimental: false }
+    if (!wantsTools(opts)) return { rpc: await this.handshake(), experimental: false }
     const rpc = await this.spawnClient()
     try {
       await this.initialize(rpc, EXPERIMENTAL_CAPABILITIES)
@@ -939,7 +1171,7 @@ export class CodexAdapter implements AgentAdapter {
     rpc: JsonRpcClient,
     open: () => Promise<T>
   ): Promise<T> {
-    if (opts.project === undefined) return open()
+    if (!wantsTools(opts) && opts.toolPolicy !== 'readOnly') return open()
     try {
       return await open()
     } catch (error) {

@@ -30,6 +30,7 @@ import type { ChorusEventType } from '@chorus/event-store'
  * derive from. The map is where exhaustiveness has to live instead.
  */
 export const TRANSCRIPT_DISPOSITION: Record<ChorusEventType, 'render' | 'ignore'> = {
+  'reply.status': 'render',
   'agent.message.completed': 'render',
   'agent.message.delta': 'render',
   'agent.reasoning.delta': 'render',
@@ -48,11 +49,13 @@ export const TRANSCRIPT_DISPOSITION: Record<ChorusEventType, 'render' | 'ignore'
   'file.change.completed': 'render',
   'file.edited.byUser': 'render',
   'handoff.created': 'render',
+  'handoff.outcome': 'render',
+  'assignment.bound': 'render',
   'notice.raised': 'render',
   'policy.changed': 'render',
   'project.changed': 'render',
   'session.ended': 'render',
-  'session.started': 'render',
+  'session.started': 'ignore',
   'tool.completed': 'render',
   'tool.progress': 'render',
   'tool.started': 'render',
@@ -86,6 +89,11 @@ export const TRANSCRIPT_DISPOSITION: Record<ChorusEventType, 'render' | 'ignore'
   'conversation.created': 'ignore',
   'conversation.renamed': 'ignore',
   'repo.changed.byUser': 'ignore',
+  // The status strip draws these from `TranscriptState.task`, which a page cannot cut.
+  'task.opened': 'ignore',
+  'task.revised': 'ignore',
+  'task.closed': 'ignore',
+  'usage.blocked': 'ignore',
 }
 
 /**

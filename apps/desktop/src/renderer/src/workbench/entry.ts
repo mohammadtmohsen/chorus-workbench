@@ -130,11 +130,12 @@ async function saveWorkbenchLayout(logs: ILogService): Promise<void> {
   }
 
   const savedWidth = Number(storage.get(SIDE_BAR_SIZE_KEY, StorageScope.PROFILE))
-  let sideBarLayout =
-    parseSideBarLayout(storage.get(SHARED_SIDE_BAR_LAYOUT_KEY, StorageScope.PROFILE)) ?? {
-      width: Number.isFinite(savedWidth) && savedWidth > 0 ? savedWidth : SIDE_BAR_DEFAULT_WIDTH,
-      hidden: !layout.isVisible(Parts.SIDEBAR_PART),
-    }
+  let sideBarLayout = parseSideBarLayout(
+    storage.get(SHARED_SIDE_BAR_LAYOUT_KEY, StorageScope.PROFILE)
+  ) ?? {
+    width: Number.isFinite(savedWidth) && savedWidth > 0 ? savedWidth : SIDE_BAR_DEFAULT_WIDTH,
+    hidden: !layout.isVisible(Parts.SIDEBAR_PART),
+  }
   let observedWidth = layout.getSize(Parts.SIDEBAR_PART).width
   let containerWidth = layout.mainContainerDimension.width
   let applyingSideBarLayout = false
@@ -180,9 +181,15 @@ async function saveWorkbenchLayout(logs: ILogService): Promise<void> {
   })
   const changes = new DisposableStore()
   changes.add(
-    storage.onDidChangeValue(StorageScope.PROFILE, SHARED_SIDE_BAR_LAYOUT_KEY, changes)((event) => {
+    storage.onDidChangeValue(
+      StorageScope.PROFILE,
+      SHARED_SIDE_BAR_LAYOUT_KEY,
+      changes
+    )((event) => {
       if (!event.external) return
-      const shared = parseSideBarLayout(storage.get(SHARED_SIDE_BAR_LAYOUT_KEY, StorageScope.PROFILE))
+      const shared = parseSideBarLayout(
+        storage.get(SHARED_SIDE_BAR_LAYOUT_KEY, StorageScope.PROFILE)
+      )
       if (shared === undefined) return
       sideBarLayout = shared
       applySideBarLayout()

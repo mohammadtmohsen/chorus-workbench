@@ -120,7 +120,7 @@ declare const getComputedStyle: (element: PageInput | PageElement) => {
   readonly direction: string
   readonly writingMode: string
 }
-declare const Element: { new (): PageElement }
+declare const Element: new () => PageElement
 declare const HTMLInputElement: { new (): PageInput; readonly prototype: PageInput }
 declare const HTMLFormElement: { new (): PageForm; readonly prototype: PageForm }
 
@@ -498,18 +498,21 @@ function paintSwipeBubble(
   zoom: number,
   progress: number
 ): void {
-  const offset = `${(-36 + 60 * progress) / zoom}px`
+  const offset = `${String((-36 + 60 * progress) / zoom)}px`
   swipeStyle(current.bubble, {
-    width: `${36 / zoom}px`,
-    height: `${36 / zoom}px`,
+    width: `${String(36 / zoom)}px`,
+    height: `${String(36 / zoom)}px`,
     left: direction === 'back' ? offset : 'auto',
     right: direction === 'forward' ? offset : 'auto',
     opacity: String(0.4 + 0.6 * progress),
     background: progress >= 1 ? '#1a73e8' : '#ffffff',
-    border: `${1 / zoom}px solid ${progress >= 1 ? '#1a73e8' : '#dadce0'}`,
-    'box-shadow': `0 ${2 / zoom}px ${8 / zoom}px rgba(0, 0, 0, 0.2)`,
+    border: `${String(1 / zoom)}px solid ${progress >= 1 ? '#1a73e8' : '#dadce0'}`,
+    'box-shadow': `0 ${String(2 / zoom)}px ${String(8 / zoom)}px rgba(0, 0, 0, 0.2)`,
   })
-  swipeStyle(current.icon, { width: `${20 / zoom}px`, height: `${20 / zoom}px` })
+  swipeStyle(current.icon, {
+    width: `${String(20 / zoom)}px`,
+    height: `${String(20 / zoom)}px`,
+  })
   current.arrow.setAttribute('stroke', progress >= 1 ? '#ffffff' : '#5f6368')
 }
 
@@ -557,10 +560,13 @@ function scheduleSwipeTick(): void {
       : state.sequence === null
         ? SWIPE_FALLBACK_MS
         : SWIPE_LOST_MS
-  swipeTimer = setTimeout(() => {
-    swipeTimer = null
-    advanceSwipe({ kind: 'tick', time: performance.now() })
-  }, Math.max(1, Math.ceil(state.last + delay - performance.now())))
+  swipeTimer = setTimeout(
+    () => {
+      swipeTimer = null
+      advanceSwipe({ kind: 'tick', time: performance.now() })
+    },
+    Math.max(1, Math.ceil(state.last + delay - performance.now()))
+  )
 }
 
 function flushSwipeChecks(): void {

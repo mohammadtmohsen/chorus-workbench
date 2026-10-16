@@ -2,11 +2,11 @@
 
 ## Status
 
-| Unit | Result |
-| --- | --- |
-| Scope | Draggable request/response divider with one global value that survives reopening |
-| Implementation | Written and source reviewed; runtime behavior unverified |
-| Verification | Not run; tests and build have not been requested |
+| Unit           | Result                                                                           |
+| -------------- | -------------------------------------------------------------------------------- |
+| Scope          | Draggable request/response divider with one global value that survives reopening |
+| Implementation | Written and source reviewed; runtime behavior unverified                         |
+| Verification   | Not run; tests and build have not been requested                                 |
 
 ## Current / Issue
 

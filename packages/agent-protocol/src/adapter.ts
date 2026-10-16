@@ -1,6 +1,8 @@
 import type { AgentId, ApprovalId, UserInputId } from '@chorus/shared'
 import type { ApprovalDecision } from './approval.js'
 import type { EditorPlace } from './editor-edit.js'
+import type { NoteAccess } from './note-tools.js'
+import type { ProgressReporter } from './progress-tools.js'
 import type { ProjectReader } from './project-tools.js'
 import type { UserInputResponse } from './user-input.js'
 import type { AgentEvent } from './events.js'
@@ -120,6 +122,7 @@ export interface SessionOpts {
   readonly cwd: string
   readonly model?: string
   readonly sandbox: SandboxPolicy
+  readonly toolPolicy?: 'readOnly'
   /**
    * A standing instruction, added to whatever system prompt the provider already
    * has — never replacing it.
@@ -144,14 +147,25 @@ export interface SessionOpts {
   readonly transcript?: TranscriptReader
   readonly editorPlace?: EditorPlace
   readonly project?: ProjectReader
+  readonly progress?: ProgressReporter
+  readonly note?: NoteAccess
 }
+
+export type TranscriptScope = 'snapshot' | 'updates' | 'forwarded'
 
 export interface TranscriptRequest {
   readonly skip: number
   readonly count: number
+  readonly conversationId?: string
+  readonly query?: string
+  readonly eventId?: string
+  readonly offset?: number
+  readonly scope?: TranscriptScope
 }
 
-export type TranscriptReader = (request: TranscriptRequest) => string
+export type TranscriptReader = (request: TranscriptRequest, maxTotalBytes?: number) => string
+
+export type TranscriptToolState = 'registered' | 'unconfirmed' | 'unavailable'
 
 /**
  * A copy of a session, taken to be asked something and then thrown away.
@@ -213,6 +227,9 @@ export interface ForkOpts extends SessionOpts {
 
 export interface AgentInput {
   readonly text: string
+  readonly recoveryText?: string
+  readonly recoveryBeforeSeq?: number
+  readonly prepare?: (session: AgentSession) => string
   readonly attachments?: readonly { readonly path: string }[]
 }
 
@@ -224,6 +241,7 @@ export type HealthStatus =
 export interface AgentSession {
   /** Provider-native id — a Codex threadId or a Claude sessionId. */
   readonly sessionRef: string
+  readonly transcriptTool?: TranscriptToolState
   /** Starts a turn, or steers the in-flight one when the agent supports it. */
   send(input: AgentInput): Promise<void>
   interrupt(): Promise<void>

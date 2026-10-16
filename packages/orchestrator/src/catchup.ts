@@ -1,6 +1,15 @@
 import type { StoredEvent } from '@chorus/event-store'
 import type { AgentId } from '@chorus/shared'
 import { callRule } from './mentions.js'
+import {
+  clipToBytes,
+  CONTEXT_DEFERRED_PREFIX,
+  collectLines,
+  fitBytes,
+  trimMiddle,
+  utf8Bytes,
+  type TranscriptLine,
+} from './transcript-lines.js'
 
 /**
  * Lets an agent read what it missed while somebody else was talking.
@@ -34,29 +43,25 @@ import { callRule } from './mentions.js'
  */
 
 /** Big enough for a real exchange, small enough not to dominate a turn. */
-const MAX_TOTAL_CHARS = 12_000
+const MAX_TOTAL_BYTES = 12_000
 const MAX_MESSAGE_CHARS = 1_500
+const DISCUSSION_MESSAGE_CHARS = 6_000
 /** Activity is supporting detail, so it may not crowd out what was said. */
 const ACTIVITY_SHARE = 0.4
-const MAX_COMMAND_CHARS = 160
-const MAX_OUTPUT_CHARS = 400
 const HISTORY_MESSAGE_CHARS = 10_000
 
 export interface CatchupInput {
-  /** The agent about to be addressed. Its own events are already its context. */
   readonly recipient: AgentId
   /** Everything in the conversation the recipient has not seen, in `seq` order. */
   readonly events: readonly StoredEvent[]
   /** Who else is in the room, for the line that explains the format. */
   readonly participants: readonly AgentId[]
   readonly maxTotalChars?: number
+  readonly maxTotalBytes?: number
   readonly maxMessageChars?: number
-}
-
-interface Line {
-  readonly seq: number
-  readonly kind: 'speech' | 'activity'
-  readonly text: string
+  readonly includeOwnDiscussion?: boolean
+  readonly includeOwnMessages?: boolean
+  readonly retrieval?: boolean
 }
 
 /**
@@ -83,112 +88,71 @@ function callRuleLine(participants: readonly AgentId[]): string | null {
   return participants.length > 1 ? `[Chorus] ${callRule(participants)}` : null
 }
 
-/** One earlier room in the chain, with the name it goes by now. */
-export interface CarryoverSource {
-  readonly title: string
-  readonly events: readonly StoredEvent[]
-}
-
-/**
- * The whole of a chain of earlier conversations, for agents that were in none
- * of them.
- *
- * A new conversation is a new provider session, so nothing carries by itself:
- * start a second room to go on with the same work and both agents arrive blank,
- * which is the thing that makes "continue where we left off" impossible without
- * pasting. This composes what the earlier rooms contained so the new one can
- * start from them.
- *
- * **A list, and the reason is that carrying does not compound on its own.** A
- * carried transcript is delivered to the agents and never written into the
- * receiving room's own log, so reading only the immediate source gives the
- * second hop and loses everything before it: continue, continue again, and the
- * third room holds only the second room's words. The caller walks the recorded
- * chain back to its start and hands over every room it found, oldest first.
- *
- * **Blocked per room rather than merged into one stream.** Sorting the lot by
- * `seq` would read as a single history, and it would be a wrong one — an
- * earlier room stays open and can be spoken in *after* the room that continued
- * it, so a global sort interleaves two conversations that were never one.
- *
- * **Unbudgeted, where `composeCatchup` is capped, and that is the difference
- * between the two.** Catch-up fills a gap in a context the agent otherwise
- * holds, so shedding the middle of it loses detail. Here the transcript *is*
- * the context, and trimming it to 12,000 characters would mean "continue from
- * these conversations" silently dropping the part being continued from. The
- * cost is real and grows with the chain: every hop adds a whole room to the
- * first message the person sends.
- *
- * **No recipient, deliberately.** `collect` skips events the recipient wrote,
- * because replaying an agent's own words back to it pays twice — see
- * `Participant.seedContext` for the same trap in the other direction. A fresh
- * session wrote none of this, so everything counts, including what the agent
- * of the same name said in the earlier rooms.
- */
-export function composeCarryover(sources: readonly CarryoverSource[]): string | null {
-  // A room that said nothing is dropped rather than rendered as an empty block.
-  // Restart produces exactly that — a room holding only its own creation — and
-  // heading a block with it would announce a history that is not there.
-  const blocks = sources
-    .map((source) => ({
-      title: source.title,
-      lines: collect(source.events, null, Number.MAX_SAFE_INTEGER),
-    }))
-    .filter((block) => block.lines.length > 0)
-
-  if (blocks.length === 0) return null
-
-  const many = blocks.length > 1
-  return [
-    `[Chorus] You are continuing ${many ? 'a series of earlier conversations' : 'an earlier conversation'} in a new room. ` +
-      'You have no memory of ' +
-      `${many ? 'any of them' : 'it'} — everything below is what was said and done ` +
-      `${many ? 'in each, oldest first' : 'there, in order'}, including anything attributed ` +
-      'to you. Treat it as the history you are carrying on from. Lines starting ' +
-      'with · are actions that were taken, not requests to you now.',
-    '',
-    ...blocks.flatMap((block, index) => [
-      // Numbered as well as named, because rooms default to their folder's name
-      // and a chain of them would otherwise be several identical headings.
-      `--- earlier conversation ${String(index + 1)} of ${String(blocks.length)}: ${block.title} ---`,
-      ...block.lines.map((line) => line.text),
-      `--- end earlier conversation ${String(index + 1)} ---`,
-      '',
-    ]),
-  ]
-    .join('\n')
-    .trimEnd()
-}
-
 /** The catch-up block alone, or `null` when the recipient is already current. */
 export function composeCatchup(input: CatchupInput): string | null {
-  const budget = input.maxTotalChars ?? MAX_TOTAL_CHARS
-  const lines = collect(input.events, input.recipient, input.maxMessageChars ?? MAX_MESSAGE_CHARS)
-  if (lines.length === 0) return null
+  const ceiling = Math.max(input.maxTotalBytes ?? input.maxTotalChars ?? MAX_TOTAL_BYTES, 0)
+  const collected = collectLines(
+    input.events,
+    input.includeOwnMessages === true ? null : input.recipient,
+    input.includeOwnDiscussion === true
+  )
+  if (collected.length === 0) return null
 
-  const { kept, dropped } = fitToBudget(lines, budget)
+  const lines = collected.map((line) => {
+    const cap =
+      input.maxMessageChars ?? (line.discussion ? DISCUSSION_MESSAGE_CHARS : MAX_MESSAGE_CHARS)
+    const text = trimMiddle(line.text, cap)
+    const reference = `[#${String(line.seq)} ${line.eventId}] `
+    return {
+      ...line,
+      text:
+        text === line.text || input.retrieval === false
+          ? `${reference}${text}`
+          : `${reference}${text}\n(full record: read_transcript eventId ${line.eventId})`,
+    }
+  })
+  const conversations = [...new Set(collected.map((line) => line.conversationId))]
   const others = input.participants.filter((id) => id !== input.recipient)
-
-  return [
+  const head = [
     `[Chorus] You are "${input.recipient}" in a shared conversation with the user` +
       `${others.length === 0 ? '' : ` and ${others.join(' and ')}`}. ` +
       'Everyone reads one transcript, but each of you is only addressed by name. ' +
       'Here is what happened while you were not addressed — context only, ' +
-      'already handled by whoever it was addressed to. Lines starting with · are ' +
-      'actions another agent took, not requests to you.',
+      'already handled by whoever it was addressed to. Each entry is marked [#seq event-id]' +
+      `${conversations.length === 1 ? ` from conversation ${String(conversations[0])}` : ''}; ` +
+      'entries whose text starts with · are actions another agent took, not requests to you.',
     '',
     '--- transcript ---',
-    ...(dropped === 0 ? [] : [`(${String(dropped)} earlier entries omitted)`]),
+  ]
+  const foot = '--- end transcript ---'
+  const omitted = (count: number): string => `(${String(count)} earlier entries omitted)`
+  const fixed =
+    utf8Bytes(head.join('\n')) + 1 + utf8Bytes(foot) + utf8Bytes(omitted(lines.length)) + 1
+  if (fixed > ceiling) {
+    return (
+      CONTEXT_DEFERRED_PREFIX +
+      `[Chorus] ${String(lines.length)} entries were added to this shared conversation while you were not addressed, ` +
+      (input.retrieval === false
+        ? 'and there is no room to show them in this session; say so rather than guessing about them.'
+        : 'and there is no room to include them here. Read them with read_transcript before relying on what happened.')
+    )
+  }
+
+  const { kept, dropped } = fitToBudget(lines, ceiling - fixed)
+  const text = [
+    ...head,
+    ...(dropped === 0 ? [] : [omitted(dropped)]),
     ...kept.map((line) => line.text),
-    '--- end transcript ---',
+    foot,
   ].join('\n')
+  return utf8Bytes(text) <= ceiling ? text : clipToBytes(text, ceiling)
 }
 
 export function composeHistory(
   events: readonly StoredEvent[],
   request: { readonly skip: number; readonly count: number }
 ): string {
-  const lines = collect(events, null, HISTORY_MESSAGE_CHARS)
+  const lines = collectLines(events, null)
   const end = Math.max(lines.length - request.skip, 0)
   const start = Math.max(end - request.count, 0)
   if (start === end) {
@@ -197,307 +161,8 @@ export function composeHistory(
   return [
     `Entries ${String(start + 1)} to ${String(end)} of ${String(lines.length)}, oldest first.`,
     '',
-    ...lines.slice(start, end).map((line) => line.text),
+    ...lines.slice(start, end).map((line) => trimMiddle(line.text, HISTORY_MESSAGE_CHARS)),
   ].join('\n')
-}
-
-/** Tracks a command from `started` to `completed`, which is where it renders. */
-interface RunningCommand {
-  readonly seq: number
-  readonly actor: string
-  readonly command: string
-  output: string
-}
-
-function collect(
-  events: readonly StoredEvent[],
-  recipient: AgentId | null,
-  maxMessage: number
-): Line[] {
-  const lines: Line[] = []
-  const running = new Map<string, RunningCommand>()
-
-  for (const event of events) {
-    // The recipient's own events are already in its context; replaying them
-    // would pay twice for the same words. `null` means there is no such context
-    // to double up — a carry-over into a session that has never run.
-    if (recipient !== null && event.actor === recipient) continue
-    const payload = event.payload
-    const who = event.actor
-
-    switch (payload.type) {
-      case 'user.message':
-        lines.push({
-          seq: event.seq,
-          kind: 'speech',
-          text: `user: ${trim(payload.text, maxMessage)}`,
-        })
-        break
-
-      case 'agent.message.completed':
-        if (who !== 'system') {
-          lines.push({
-            seq: event.seq,
-            kind: 'speech',
-            text: `${who}: ${trim(payload.text, maxMessage)}`,
-          })
-        }
-        break
-
-      case 'command.started':
-        running.set(payload.itemRef, {
-          seq: event.seq,
-          actor: who,
-          command: trim(payload.command.join(' '), MAX_COMMAND_CHARS),
-          output: '',
-        })
-        break
-
-      case 'command.output': {
-        const found = running.get(payload.itemRef)
-        // Only the tail is kept: a build log's interesting part is the end, and
-        // holding the whole thing to throw it away is pointless.
-        if (found !== undefined) {
-          found.output = (found.output + payload.chunk).slice(-MAX_OUTPUT_CHARS)
-        }
-        break
-      }
-
-      case 'command.completed': {
-        const found = running.get(payload.itemRef)
-        if (found === undefined) break
-        running.delete(payload.itemRef)
-        lines.push({
-          seq: event.seq,
-          kind: 'activity',
-          text: renderCommand(found, payload.exitCode),
-        })
-        break
-      }
-
-      /*
-       * A proposal is not a change.
-       *
-       * This case used to be the one that reported files, and it fires when the
-       * operation *starts* — so a patch the user declined, or one that failed to
-       * apply, was replayed to the other agent as a file that had changed.
-       * `file.change.completed` carries the outcome, and it is what gets told.
-       */
-      case 'file.change.proposed':
-        break
-
-      case 'file.change.completed':
-        // Only what landed. A declined patch is a file the other agent will find
-        // exactly as it left it, and saying otherwise sends it looking for work
-        // that was never done.
-        if (payload.outcome === 'applied') {
-          lines.push({
-            seq: event.seq,
-            kind: 'activity',
-            text: `· ${who} changed ${describeFiles(payload.files.map((f) => f.path))}`,
-          })
-        }
-        break
-
-      /*
-       * The whole reason `file.edited.byUser` is a log event rather than a
-       * push.
-       *
-       * An agent that read this file at the start of a turn is composing a
-       * patch against a version that no longer exists. Without this line it
-       * overwrites the person's fix and neither party learns why — and the
-       * agent cannot discover it, because nothing else in the transcript says
-       * a file moved under it.
-       *
-       * **Speech, not activity.** Activity is dropped first when the budget
-       * binds, and "the file you are editing is not the file you read" is not
-       * supporting detail — it changes what the agent should do next. This is
-       * the only non-agent activity promoted to speech, and that is the
-       * argument for it.
-       */
-      case 'file.edited.byUser':
-        lines.push({
-          seq: event.seq,
-          kind: 'speech',
-          text: `user: I edited ${payload.path} myself (+${String(payload.added)} −${String(payload.removed)}). Re-read it before changing it.`,
-        })
-        break
-
-      /*
-       * Source control the person drove themselves.
-       *
-       * **`discarded` is the one that matters**, and it is why this is speech
-       * rather than activity: an agent that just wrote those files is holding a
-       * picture of a tree that no longer exists, and would otherwise go looking
-       * for its own work and find the file as it was before it started.
-       *
-       * `staged` and `unstaged` are dropped. They move nothing on disk, an
-       * agent has no use for the index, and replaying every click of a
-       * checkbox would spend the catch-up budget on bookkeeping — which is
-       * exactly what the budget rule exists to prevent.
-       */
-      case 'repo.changed.byUser': {
-        if (payload.action === 'staged' || payload.action === 'unstaged') break
-        const what =
-          payload.action === 'discarded'
-            ? `discarded my changes to ${describeFiles(payload.paths)} — anything you wrote there is gone, re-read before continuing`
-            : payload.action === 'committed'
-              ? `committed${payload.detail === null ? '' : `: ${trim(payload.detail, 120)}`}`
-              : `pushed${payload.detail === null ? '' : ` ${payload.detail}`}`
-        lines.push({ seq: event.seq, kind: 'speech', text: `user: I ${what}` })
-        break
-      }
-
-      /*
-       * Worth replaying: an agent asked to do something now works under rules
-       * that changed while it was not being addressed, and "you may run
-       * commands without asking" is a fact about the room, not about one turn.
-       */
-      /*
-       * Where the project is counts as a fact about the room. An agent asked to
-       * "check the tests" needs to know the answer moved.
-       */
-      case 'project.changed':
-        lines.push({
-          seq: event.seq,
-          kind: 'activity',
-          text: `· the user set the project directory to ${payload.cwd}`,
-        })
-        break
-
-      /*
-       * An approval the agent itself abandoned. It is Chorus bookkeeping about a
-       * card, and the other agent has nothing to do differently for it — the
-       * work it described never happened and was never reported as happening.
-       */
-      case 'approval.withdrawn':
-        break
-
-      /* A name the user chose for the room is theirs, not context for a turn. */
-      case 'conversation.renamed':
-        break
-
-      /*
-       * Whose room this is does not change what the other agent needs to know.
-       *
-       * Promotion changes how Chorus files a conversation, not what was said in
-       * it — the transcript either side of it is unchanged, and an agent told
-       * "this used to be an aside" could act on none of it.
-       */
-      case 'aside.promoted':
-        break
-
-      case 'policy.changed':
-        lines.push({
-          seq: event.seq,
-          kind: 'activity',
-          text: `· the user changed permissions to "${payload.profileId}"`,
-        })
-        break
-
-      case 'error.raised':
-        // A restart notice is recoverable and is noise to everyone else; a
-        // failure that stuck is why the other agent went quiet.
-        if (!payload.recoverable) {
-          lines.push({
-            seq: event.seq,
-            kind: 'activity',
-            text: `· ${who} hit an error: ${trim(payload.message, 300)}`,
-          })
-        }
-        break
-
-      /*
-       * Listed rather than defaulted, so a new event type has to be considered
-       * here instead of silently vanishing from the shared conversation.
-       *
-       * Deltas are superseded by the completed message. Reasoning is the agent's
-       * private working, and it is enormous. `diff.updated` is the cumulative
-       * diff, already covered one change at a time. The rest is Chorus's own
-       * bookkeeping, or — for a handoff — context the recipient was handed in
-       * full at the time.
-       *
-       * `notice.raised` is Chorus telling the *user* what the harness did — a
-       * hook that ran, a retry, a rule that denied a tool. The other agent runs
-       * under its own harness, so replaying ours would spend a strictly
-       * budgeted catch-up on something it cannot act on. What a denial *caused*
-       * still reaches it: the command that never ran is simply absent, and a
-       * turn that gave up says so through `error.raised`.
-       *
-       * `tool.*` is left out for the reason the adapter gives for not reporting
-       * non-Bash results in full: every other tool's result is the agent's own
-       * working, and the agent narrates what it found. Twenty file reads would
-       * spend the budget on the search rather than on what it turned up.
-       * Commands stay in because a shell command changes the machine.
-       */
-      case 'conversation.created':
-      case 'session.started':
-      case 'session.ended':
-      case 'turn.started':
-      case 'turn.completed':
-      case 'agent.message.delta':
-      case 'agent.reasoning.delta':
-      case 'diff.updated':
-      case 'approval.requested':
-      case 'approval.decided':
-      case 'userinput.requested':
-      case 'userinput.answered':
-      case 'handoff.created':
-      case 'usage.updated':
-      case 'notice.raised':
-      case 'tool.started':
-      case 'tool.progress':
-      case 'tool.completed':
-      case 'context.compacted':
-        /*
-         * `context.compacted` is here for a related reason: it records that an
-         * agent lost its own history, which says nothing about what the
-         * conversation contains, and a handoff summary is about the latter.
-         *
-         * Questions are left out of a handoff summary for the same reason
-         * approvals are: this is what the *user* was asked and answered, not
-         * what the conversation said. Carrying them would also mean deciding
-         * what to do with a secret answer, and the safest thing to do with one
-         * is not move it across an agent boundary at all.
-         *
-         * `tool.completed`'s patch stays out for a different reason: the other
-         * agent shares the working tree and can read the file or run git itself.
-         * Replaying our rendering of a change it can observe directly would cost
-         * tokens on every catch-up to tell it something already true on disk —
-         * and would be wrong the moment the edit is amended after the fact.
-         */
-        break
-    }
-  }
-
-  // A command with no `completed` was interrupted or the session ended under it.
-  // Silence would read as "never ran", which is the wrong thing to believe.
-  for (const found of running.values()) {
-    lines.push({
-      seq: found.seq,
-      kind: 'activity',
-      text: `· ${found.actor} ran \`${found.command}\` (no result recorded)`,
-    })
-  }
-
-  return lines.sort((a, b) => a.seq - b.seq)
-}
-
-function renderCommand(found: RunningCommand, exitCode: number | null): string {
-  const head = `· ${found.actor} ran \`${found.command}\``
-  if (exitCode === null) return `${head} (no exit code)`
-  if (exitCode === 0) return `${head} → ok`
-
-  const tail = found.output.trim()
-  return tail === ''
-    ? `${head} → failed (exit ${String(exitCode)})`
-    : `${head} → failed (exit ${String(exitCode)})\n  output: ${tail.replaceAll('\n', '\n  ')}`
-}
-
-/** Three names is a list; ten is a wall, and the count is what matters by then. */
-function describeFiles(paths: readonly string[]): string {
-  if (paths.length <= 3) return paths.join(', ')
-  return `${paths.slice(0, 3).join(', ')} and ${String(paths.length - 3)} more`
 }
 
 /**
@@ -506,13 +171,16 @@ function describeFiles(paths: readonly string[]): string {
  * Oldest-first is the right thing to drop within each kind: the tail is what the
  * next message actually follows on from.
  */
-function fitToBudget(lines: readonly Line[], budget: number): { kept: Line[]; dropped: number } {
-  const cost = (line: Line): number => line.text.length + 1
+function fitToBudget(
+  lines: readonly TranscriptLine[],
+  budget: number
+): { kept: TranscriptLine[]; dropped: number } {
+  const cost = (line: TranscriptLine): number => utf8Bytes(line.text) + 1
   const activityBudget = Math.floor(budget * ACTIVITY_SHARE)
 
   // Pass one: cap activity on its own, so a chatty tool loop cannot evict the
   // conversation it was supporting.
-  const trimmed: Line[] = []
+  const trimmed: TranscriptLine[] = []
   let activityUsed = 0
   for (let i = lines.length - 1; i >= 0; i--) {
     const line = lines[i]
@@ -525,24 +193,19 @@ function fitToBudget(lines: readonly Line[], budget: number): { kept: Line[]; dr
   }
 
   // Pass two: the overall budget, newest first, whatever the kind.
-  const kept: Line[] = []
+  const kept: TranscriptLine[] = []
   let used = 0
   for (let i = trimmed.length - 1; i >= 0; i--) {
     const line = trimmed[i]
     if (line === undefined) continue
-    if (used + cost(line) > budget && kept.length > 0) break
+    if (used + cost(line) > budget) {
+      if (kept.length === 0 && budget > 1)
+        kept.unshift({ ...line, text: fitBytes(line.text, budget - 1) })
+      break
+    }
     used += cost(line)
     kept.unshift(line)
   }
 
   return { kept, dropped: lines.length - kept.length }
-}
-
-function trim(text: string, limit: number): string {
-  const trimmed = text.trim()
-  if (trimmed.length <= limit) return trimmed
-  // Both ends: the opening says what it is about, the close usually carries the
-  // conclusion or the question.
-  const half = Math.floor((limit - 20) / 2)
-  return `${trimmed.slice(0, half)}\n… [trimmed] …\n${trimmed.slice(-half)}`
 }

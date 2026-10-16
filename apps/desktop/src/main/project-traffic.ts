@@ -565,7 +565,9 @@ export class ProjectTrafficRegistry {
       clearInterval(this.addressRefresh)
       this.addressRefresh = null
     } else if (needed && this.addressRefresh === null) {
-      this.addressRefresh = setInterval(() => this.refreshAddresses(), ADDRESS_REFRESH_MS)
+      this.addressRefresh = setInterval(() => {
+        this.refreshAddresses()
+      }, ADDRESS_REFRESH_MS)
       this.addressRefresh.unref()
     }
   }

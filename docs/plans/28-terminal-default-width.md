@@ -4,9 +4,9 @@
 
 | Unit           | Result                                                     |
 | -------------- | ---------------------------------------------------------- |
-| Scope          | Set Terminal's default width to 500px for its stacked rows  |
+| Scope          | Set Terminal's default width to 500px for its stacked rows |
 | Implementation | Written and diff reviewed; runtime behavior unverified     |
-| Verification   | Not run; the user has not requested tests                   |
+| Verification   | Not run; the user has not requested tests                  |
 
 ## Current / Issue
 

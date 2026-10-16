@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it } from 'vitest'
 import { redactPayload } from '@chorus/shared'
-import { ChorusEventPayload } from './events.js'
+import { ChorusEventPayload, type StoredEvent } from './events.js'
 import { currentVersion, MIGRATIONS } from './migrations.js'
 import { openSqlite, type SqliteHandle } from './sqlite.js'
 import { EventStore } from './store.js'
@@ -900,5 +900,132 @@ describe('pendingDecisionIds', () => {
       pendingApprovalIds: [],
       pendingQuestionIds: [],
     })
+  })
+})
+
+describe('notification order', () => {
+  const say = (text: string) => ({
+    conversationId: CONV,
+    actor: 'user' as const,
+    payload: { type: 'user.message' as const, text },
+  })
+  const texts = (events: readonly StoredEvent[]): string[] =>
+    events.flatMap((event) => (event.payload.type === 'user.message' ? [event.payload.text] : []))
+  const saw = (events: readonly StoredEvent[], text: string): boolean =>
+    texts(events).includes(text)
+  const flat = (batches: readonly (readonly number[])[]): number[] => batches.flat()
+  const increasing = (seqs: readonly number[]): boolean =>
+    seqs.every((seq, index) => index === 0 || seq > (seqs[index - 1] ?? 0))
+
+  it('delivers a batch to every listener before one a listener appended while handling it', () => {
+    const order: string[] = []
+    const later: number[][] = []
+    const last: number[][] = []
+    store.subscribe((events) => {
+      order.push(...texts(events).map((text) => `first:${text}`))
+      if (saw(events, 'turn ended')) store.append(say('task closed'))
+    })
+    store.subscribe((events) => {
+      order.push(...texts(events).map((text) => `later:${text}`))
+      later.push(events.map((event) => event.seq))
+    })
+    store.subscribe((events) => {
+      last.push(events.map((event) => event.seq))
+    })
+
+    const outer = store.append(say('turn ended'))
+
+    expect(order).toEqual([
+      'first:turn ended',
+      'later:turn ended',
+      'first:task closed',
+      'later:task closed',
+    ])
+    expect(later).toEqual([[outer?.seq], [(outer?.seq ?? 0) + 1]])
+    expect(last).toEqual(later)
+    expect(increasing(flat(later))).toBe(true)
+  })
+
+  it('returns the nested event to its writer at once, before its own listeners run', () => {
+    let nested: number | undefined
+    let deliveredOnReturn: number[] = []
+    const delivered: number[] = []
+    store.subscribe((events) => {
+      if (saw(events, 'turn ended')) {
+        nested = store.append(say('task closed'))?.seq
+        deliveredOnReturn = [...delivered]
+      }
+    })
+    store.subscribe((events) => {
+      delivered.push(...events.map((event) => event.seq))
+    })
+    store.append(say('turn ended'))
+    expect(nested).toBeDefined()
+    expect(deliveredOnReturn).not.toContain(nested)
+    expect(delivered.at(-1)).toBe(nested)
+  })
+
+  it('keeps an appendMany batch whole, and delivers a nested append after it', () => {
+    const later: string[][] = []
+    store.subscribe((events) => {
+      if (saw(events, 'two')) store.append(say('three'))
+    })
+    store.subscribe((events) => {
+      later.push(texts(events))
+    })
+    store.appendMany([say('one'), say('two')])
+    expect(later).toEqual([['one', 'two'], ['three']])
+  })
+
+  it('delivers a nested appendMany as one batch, after the batch that caused it', () => {
+    const later: string[][] = []
+    const seqs: number[][] = []
+    store.subscribe((events) => {
+      if (saw(events, 'turn ended')) store.appendMany([say('revised'), say('task closed')])
+    })
+    store.subscribe((events) => {
+      later.push(texts(events))
+      seqs.push(events.map((event) => event.seq))
+    })
+    store.append(say('turn ended'))
+    expect(later).toEqual([['turn ended'], ['revised', 'task closed']])
+    expect(increasing(flat(seqs))).toBe(true)
+  })
+
+  it('keeps order through a chain of nested appends', () => {
+    const later: string[] = []
+    store.subscribe((events) => {
+      if (saw(events, 'a')) store.append(say('b'))
+      if (saw(events, 'b')) store.append(say('c'))
+    })
+    store.subscribe((events) => {
+      later.push(...texts(events))
+    })
+    store.append(say('a'))
+    expect(later).toEqual(['a', 'b', 'c'])
+  })
+
+  it('isolates a throwing listener, and still notifies on the next append', () => {
+    const later: string[][] = []
+    store.subscribe((events) => {
+      if (saw(events, 'turn ended')) store.append(say('task closed'))
+      throw new Error('a bad subscriber')
+    })
+    store.subscribe((events) => {
+      later.push(texts(events))
+    })
+    expect(store.append(say('turn ended'))).not.toBeNull()
+    expect(later).toEqual([['turn ended'], ['task closed']])
+    store.append(say('after'))
+    expect(later).toEqual([['turn ended'], ['task closed'], ['after']])
+  })
+
+  it('notifies nobody for an empty appendMany', () => {
+    const later: number[][] = []
+    store.subscribe((events) => {
+      later.push(events.map((event) => event.seq))
+    })
+    expect(store.appendMany([])).toEqual([])
+    expect(later).toEqual([])
   })
 })

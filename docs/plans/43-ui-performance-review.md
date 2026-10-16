@@ -2,14 +2,14 @@
 
 ## Status
 
-| Unit | Result |
-| --- | --- |
-| Scope | Recent Traffic, browser tab, notification, and shared editor layout changes, including their existing dependencies |
-| Review | Nine source-supported findings recorded on 2026-10-14 |
-| Implementation | All nine fixes written after the user authorized “fix all” |
-| Source review | Scoped reviews and corrective re-reviews complete for Traffic, settings, tabs, notifications, and storage integration |
-| Build and install | `CHORUS_INSTALL_KEEP_RUNNING=1 pnpm app:install` completed; signed arm64 app installed at `/Applications/Chorus.app` |
-| Verification | Runtime behavior and performance magnitude unverified; no tests, separate typecheck, or app launch ran |
+| Unit              | Result                                                                                                                |
+| ----------------- | --------------------------------------------------------------------------------------------------------------------- |
+| Scope             | Recent Traffic, browser tab, notification, and shared editor layout changes, including their existing dependencies    |
+| Review            | Nine source-supported findings recorded on 2026-10-14                                                                 |
+| Implementation    | All nine fixes written after the user authorized “fix all”                                                            |
+| Source review     | Scoped reviews and corrective re-reviews complete for Traffic, settings, tabs, notifications, and storage integration |
+| Build and install | `CHORUS_INSTALL_KEEP_RUNNING=1 pnpm app:install` completed; signed arm64 app installed at `/Applications/Chorus.app`  |
+| Verification      | Runtime behavior and performance magnitude unverified; no tests, separate typecheck, or app launch ran                |
 
 This is a focused review of the recent UI work, not an audit of the entire desktop app. P1 means fix before installing the changes. P2 means a correctness or interaction issue worth fixing next. P3 means a performance enhancement whose practical impact needs measurement.
 
@@ -97,28 +97,28 @@ Consider a cached authoritative store and a serialized asynchronous writer or wo
 
 ## Code Changes
 
-| Area | Proposed files and boundaries |
-| --- | --- |
-| Settings | `shared/ipc.ts`: separate optional patch validators from default-bearing read validators; preserve existing normalization, per-agent partial maps, and write-only secret fields. `main/ipc.ts`: keep the merge operating on supplied keys only. |
-| Traffic | `TrafficRequestInspector.tsx`: cancel and guard per-side loading; coalesce resize frames and skip unchanged fractions. `TrafficBody.tsx`: independent memoized body content and tree controls per pane. Preserve automatic latest-request selection. |
-| Editor persistence | `renderer/src/workbench/storage.ts`: retain revision-tagged deltas until acknowledgement, retry transient errors, and roll back rejected revisions without replacing newer Code-OSS cache values. Explicit flush request/result channels in `shared/workbench-ipc.ts`, `preload/workbench.ts`, `renderer/src/workbench/entry.ts`, and `main/workbench-surface.ts` drain storage before removing surface authorization. |
-| Notifications | `useToastWindow.ts`, `ToastStack.tsx`, and `main/toast-windows.ts`: separate window lifetime from visibility and add selective native hit handling. Preserve focus, theme mirroring, and parent-window routing. |
-| Browser tabs | `styles.css` and `workspace/WebTabStrip.tsx`: adapt narrow-tab contents and reachable close controls. Preserve equal widths, keyboard selection, and drag ordering. |
-| Storage performance | `main/workbench-storage.ts`: cache committed state, share initial reads, and serialize asynchronous atomic writes. `main/workbench-surface.ts` awaits persistence before broadcasting. `main/index.ts` awaits closing surfaces and queued disk writes before allowing quit. |
+| Area                | Proposed files and boundaries                                                                                                                                                                                                                                                                                                                                                                                          |
+| ------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Settings            | `shared/ipc.ts`: separate optional patch validators from default-bearing read validators; preserve existing normalization, per-agent partial maps, and write-only secret fields. `main/ipc.ts`: keep the merge operating on supplied keys only.                                                                                                                                                                        |
+| Traffic             | `TrafficRequestInspector.tsx`: cancel and guard per-side loading; coalesce resize frames and skip unchanged fractions. `TrafficBody.tsx`: independent memoized body content and tree controls per pane. Preserve automatic latest-request selection.                                                                                                                                                                   |
+| Editor persistence  | `renderer/src/workbench/storage.ts`: retain revision-tagged deltas until acknowledgement, retry transient errors, and roll back rejected revisions without replacing newer Code-OSS cache values. Explicit flush request/result channels in `shared/workbench-ipc.ts`, `preload/workbench.ts`, `renderer/src/workbench/entry.ts`, and `main/workbench-surface.ts` drain storage before removing surface authorization. |
+| Notifications       | `useToastWindow.ts`, `ToastStack.tsx`, and `main/toast-windows.ts`: separate window lifetime from visibility and add selective native hit handling. Preserve focus, theme mirroring, and parent-window routing.                                                                                                                                                                                                        |
+| Browser tabs        | `styles.css` and `workspace/WebTabStrip.tsx`: adapt narrow-tab contents and reachable close controls. Preserve equal widths, keyboard selection, and drag ordering.                                                                                                                                                                                                                                                    |
+| Storage performance | `main/workbench-storage.ts`: cache committed state, share initial reads, and serialize asynchronous atomic writes. `main/workbench-surface.ts` awaits persistence before broadcasting. `main/index.ts` awaits closing surfaces and queued disk writes before allowing quit.                                                                                                                                            |
 
 ## Implementation record
 
-| Finding | Change written |
-| --- | --- |
-| 1 — Settings patches | Explicit optional validators without read defaults; normalization, per-agent maps, and secret fields retained |
-| 2 — JSON interaction | Each `TrafficBody` owns its own tree ref, collapse state, focus state, and keyboard entry point |
-| 3 — Body reads | One in-flight loop per side and generation; cleanup invalidates reads and every page checks cancellation; encoded fallback stays within the same loop |
-| 4 — Divider rendering | Memoized body component with stable byte/descriptor props; formatting, tree, rows, and form fields cached; pointer updates coalesced and final position flushed on release or cleanup |
-| 5 — Persistence failures | Retained outbox with bounded backoff; newer revisions survive older acknowledgements; invalid batches do not block later writes; Code-OSS writers are closed before the final drain; failed database close retains its retry path; explicit surface-close drain retries before revoking authorization |
-| 6 — Notification hit regions | Rounded-card and scrollbar regions; macOS mouse forwarding outside those regions; Windows/Linux native window shapes; scroll, card mutations, and card resizes refresh regions |
-| 7 — Notification lifetime | Lazy first creation, then stable host and portal across visibility changes; saved input focus and selection restored when appropriate; listeners and observers released on teardown |
-| 8 — Compact tabs | Content-independent strip width, compact icons, a separate active-tab close control, stable accessible names, and keyboard closing; equal widths and no scrolling retained |
-| 9 — Storage I/O | Committed snapshot cache and serialized asynchronous writes; updates broadcast after commit; main quit waits for the write queue |
+| Finding                      | Change written                                                                                                                                                                                                                                                                                        |
+| ---------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 1 — Settings patches         | Explicit optional validators without read defaults; normalization, per-agent maps, and secret fields retained                                                                                                                                                                                         |
+| 2 — JSON interaction         | Each `TrafficBody` owns its own tree ref, collapse state, focus state, and keyboard entry point                                                                                                                                                                                                       |
+| 3 — Body reads               | One in-flight loop per side and generation; cleanup invalidates reads and every page checks cancellation; encoded fallback stays within the same loop                                                                                                                                                 |
+| 4 — Divider rendering        | Memoized body component with stable byte/descriptor props; formatting, tree, rows, and form fields cached; pointer updates coalesced and final position flushed on release or cleanup                                                                                                                 |
+| 5 — Persistence failures     | Retained outbox with bounded backoff; newer revisions survive older acknowledgements; invalid batches do not block later writes; Code-OSS writers are closed before the final drain; failed database close retains its retry path; explicit surface-close drain retries before revoking authorization |
+| 6 — Notification hit regions | Rounded-card and scrollbar regions; macOS mouse forwarding outside those regions; Windows/Linux native window shapes; scroll, card mutations, and card resizes refresh regions                                                                                                                        |
+| 7 — Notification lifetime    | Lazy first creation, then stable host and portal across visibility changes; saved input focus and selection restored when appropriate; listeners and observers released on teardown                                                                                                                   |
+| 8 — Compact tabs             | Content-independent strip width, compact icons, a separate active-tab close control, stable accessible names, and keyboard closing; equal widths and no scrolling retained                                                                                                                            |
+| 9 — Storage I/O              | Committed snapshot cache and serialized asynchronous writes; updates broadcast after commit; main quit waits for the write queue                                                                                                                                                                      |
 
 The source review corrected compact-mode sizing feedback and tab accessible names. It also corrected invalid-write rollback races, froze upstream storage writers during final draining, retained failed close outboxes, wired Chromium teardown explicitly, added a main-process quit barrier, and refreshed notification hit regions beneath a capped stack. Notification focus replies use snapshot identity so a stale reply cannot apply an obsolete selection. These were source reviews, not runtime tests.
 

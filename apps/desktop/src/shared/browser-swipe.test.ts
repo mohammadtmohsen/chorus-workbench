@@ -257,9 +257,7 @@ describe('web tab swipe settling and cancellation', () => {
     const ended = swipeReduce(started, { kind: 'end', sequence: 1, time: 2 }).state
     const tail = move(ended, 3, { deltaX: -200 })
     expect(tail.kind).toBe('settling')
-    expect(swipeReduce(tail, { kind: 'tick', time: 3 + SWIPE_SETTLE_MS - 1 }).state).toEqual(
-      tail
-    )
+    expect(swipeReduce(tail, { kind: 'tick', time: 3 + SWIPE_SETTLE_MS - 1 }).state).toEqual(tail)
     const quiet = swipeReduce(tail, { kind: 'tick', time: 3 + SWIPE_SETTLE_MS }).state
     expect(quiet.kind).toBe('idle')
     expect(move(quiet, 4 + SWIPE_SETTLE_MS).gesture).toBe(started.gesture + 1)

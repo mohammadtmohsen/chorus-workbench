@@ -66,13 +66,19 @@ export const statusClassOf = (row: HttpRow): string => {
  * A line that is not an absolute URL — the 400 a proxy request without a target
  * produces — comes back as it is, because there is no origin to remove.
  */
-export const pathOf = (url: string): string => {
+export const pathOf = (url: string, hiddenPathPrefix = ''): string => {
+  let path: string
   try {
     const parsed = new URL(url)
-    return `${parsed.pathname}${parsed.search}`
+    path = `${parsed.pathname}${parsed.search}`
   } catch {
-    return url
+    path = url
   }
+  const prefix = hiddenPathPrefix.trim().replace(/\/+$/, '')
+  if (!prefix.startsWith('/') || /[?#]/.test(prefix)) return path
+  const rest = path.slice(prefix.length)
+  if (path === prefix || path.startsWith(`${prefix}?`)) return `/${rest}`
+  return path.startsWith(`${prefix}/`) ? rest : path
 }
 
 export const filterRows = (

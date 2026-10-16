@@ -20,6 +20,11 @@ import {
   IdeContextPush,
   CONTEXT_PUSH_CHANNEL,
   ContextUsagePush,
+  CONVERSATION_NOTE_JOURNAL_CHANNEL,
+  CONVERSATION_NOTE_PUSH_CHANNEL,
+  ConversationNoteJournalRequest,
+  ConversationNoteJournalResponse,
+  ConversationNotePush,
   TasksPush,
   TASKS_PUSH_CHANNEL,
   TerminalPush,
@@ -100,6 +105,18 @@ function invoke<C extends IpcChannel>(channel: C) {
       throw new Error(`Malformed response on "${channel}": ${parsed.error.message}`)
     }
     return parsed.data as IpcResponse<C>
+  }
+}
+
+function noteJournal(request: unknown): ConversationNoteJournalResponse {
+  const outgoing = ConversationNoteJournalRequest.safeParse(request)
+  if (!outgoing.success) return { ok: false, error: 'Invalid note journal request' }
+  try {
+    const raw: unknown = ipcRenderer.sendSync(CONVERSATION_NOTE_JOURNAL_CHANNEL, outgoing.data)
+    const parsed = ConversationNoteJournalResponse.safeParse(raw)
+    return parsed.success ? parsed.data : { ok: false, error: 'Malformed note journal response' }
+  } catch {
+    return { ok: false, error: 'The note journal could not be reached' }
   }
 }
 
@@ -230,6 +247,9 @@ const api: ChorusApi = {
   completeFiles: invoke('files:complete'),
   listCommands: invoke('conversation:commands'),
   transcript: invoke('conversation:transcript'),
+  taskState: invoke('task:state'),
+  closeTask: invoke('task:close'),
+  bindAssignment: invoke('task:bindAssignment'),
   listConversations: () => invoke('conversation:list')({}),
   knownModels: () => invoke('agents:models')({}),
   mcpServers: () => invoke('agents:mcp')({}),
@@ -323,6 +343,11 @@ const api: ChorusApi = {
   relocateProject: invoke('project:relocate'),
   setProjectProfile: invoke('project:setProfile'),
   setProjectNotes: invoke('project:setNotes'),
+  getConversationNote: invoke('conversation:getNote'),
+  setConversationNoteText: invoke('conversation:setNoteText'),
+  setConversationNoteView: invoke('conversation:setNoteView'),
+  readConversationNoteJournal: (request) => noteJournal({ ...request, op: 'read' }),
+  compareConversationNoteJournal: (request) => noteJournal({ ...request, op: 'compare' }),
   getAppNote: invoke('app:getNote'),
   setAppNote: invoke('app:setNote'),
   listKeptNotes: invoke('app:listKeptNotes'),
@@ -410,6 +435,16 @@ const api: ChorusApi = {
     ipcRenderer.on(TASKS_PUSH_CHANNEL, wrapped)
     return () => {
       ipcRenderer.removeListener(TASKS_PUSH_CHANNEL, wrapped)
+    }
+  },
+  onConversationNote: (listener) => {
+    const wrapped = (_event: unknown, payload: unknown): void => {
+      const parsed = ConversationNotePush.safeParse(payload)
+      if (parsed.success) listener(parsed.data)
+    }
+    ipcRenderer.on(CONVERSATION_NOTE_PUSH_CHANNEL, wrapped)
+    return () => {
+      ipcRenderer.removeListener(CONVERSATION_NOTE_PUSH_CHANNEL, wrapped)
     }
   },
   onActivity: (listener) => {

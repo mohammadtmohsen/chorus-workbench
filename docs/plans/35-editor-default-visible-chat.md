@@ -2,15 +2,15 @@
 
 ## Status
 
-| Unit | Result |
-| --- | --- |
-| Scope | Default and double-click reset reserve the first chat's full 500px width |
-| Evidence | The screenshot shows the chat clipped at the window edge; the default uses the entire window while the pane begins after the project rail |
-| Cause | The reserved 500px includes space outside the pane and the 9px editor divider |
-| Implementation | Written: default and reset use the measured pane and reserve the full chat plus divider; manual widths remain relative to the window |
-| Review | Product and regression diffs reviewed against `/private/tmp/editor-default-chat-v6mw2x4w`; existing workspace changes preserved |
-| Verification | Desktop build, local packaging, signing and installation passed; regression tests, separate typechecks and live UI checks unrun |
-| Installation | 2026-10-11: signed arm64 app installed at `/Applications/Chorus.app`; current session kept running |
+| Unit           | Result                                                                                                                                    |
+| -------------- | ----------------------------------------------------------------------------------------------------------------------------------------- |
+| Scope          | Default and double-click reset reserve the first chat's full 500px width                                                                  |
+| Evidence       | The screenshot shows the chat clipped at the window edge; the default uses the entire window while the pane begins after the project rail |
+| Cause          | The reserved 500px includes space outside the pane and the 9px editor divider                                                             |
+| Implementation | Written: default and reset use the measured pane and reserve the full chat plus divider; manual widths remain relative to the window      |
+| Review         | Product and regression diffs reviewed against `/private/tmp/editor-default-chat-v6mw2x4w`; existing workspace changes preserved           |
+| Verification   | Desktop build, local packaging, signing and installation passed; regression tests, separate typechecks and live UI checks unrun           |
+| Installation   | 2026-10-11: signed arm64 app installed at `/Applications/Chorus.app`; current session kept running                                        |
 
 Built with `pnpm exec turbo run build --filter=@chorus/desktop`. From `apps/desktop`, packaged with `node build/package-local.mjs` and installed with `env CHORUS_INSTALL_KEEP_RUNNING=1 CHORUS_INSTALL_DIR=/Applications node build/install-local.mjs`. Installation signature verification passed. The previous bundle remains at `/Applications/Chorus.app.replaced-1791727944843`. Quit and reopen Chorus to load the update.
 

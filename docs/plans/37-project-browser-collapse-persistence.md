@@ -2,11 +2,11 @@
 
 ## Status
 
-| Unit | Result |
-| --- | --- |
-| Scope | Requested by the user on 2026-10-14: persist each project browser's collapsed state |
-| Implementation | Written and reviewed against copies of the six files from before this change |
-| Verification | Source paths reviewed; tests, build, install, and runtime behavior unverified |
+| Unit           | Result                                                                              |
+| -------------- | ----------------------------------------------------------------------------------- |
+| Scope          | Requested by the user on 2026-10-14: persist each project browser's collapsed state |
+| Implementation | Written and reviewed against copies of the six files from before this change        |
+| Verification   | Source paths reviewed; tests, build, install, and runtime behavior unverified       |
 
 ## Current / Issue
 

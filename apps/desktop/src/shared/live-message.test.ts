@@ -30,6 +30,31 @@ describe('live message routing', () => {
     expect(liveMessageAction('/ask Why this approach?', 'auto', false)).toBe('ask')
   })
 
+  it.each([true, false])('keeps Discussion read-only when working is %s', (working) => {
+    for (const text of [
+      'Implement the feature.',
+      'Write the plan to docs/plans/feature.md.',
+      '/guide Change every file.',
+      '/team Implement this together.',
+      'Go ahead.',
+    ]) {
+      expect(liveMessageAction(text, 'discussion', working)).toBe('discussion')
+    }
+  })
+
+  it('uses Work explicitly while retaining explicit Stop controls', () => {
+    expect(liveMessageAction('Why this approach?', 'work')).toBe('guide')
+    expect(liveMessageAction('Stop.', 'discussion')).toBe('stop')
+    expect(liveMessageAction('/stop', 'discussion')).toBe('stop')
+    expect(liveMessageAction('Stop the task and discuss this approach.', 'discussion')).toBe(
+      'stopAndDiscuss'
+    )
+    expect(liveMessageText('Stop the task and discuss this approach.')).toBe('this approach.')
+    expect(liveMessageAction('Why would we stop the task and discuss it?', 'discussion')).toBe(
+      'discussion'
+    )
+  })
+
   it('does not treat context or a quoted command as a Stop instruction', () => {
     expect(liveMessageAction('> stop')).toBe('guide')
     expect(liveMessageAction('```\nstop\n```')).toBe('guide')

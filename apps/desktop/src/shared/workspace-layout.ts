@@ -47,7 +47,7 @@ export const EDITOR_WIDTH = { defaultOffset: 500, min: 500, maxFraction: 1 } as 
 
 export const BOX_WIDTH = { default: 500, min: 500 } as const
 
-export const TRAFFIC_WIDTH = { default: 500, min: 500 } as const
+export const TRAFFIC_WIDTH = { default: 700, min: 500 } as const
 
 export const PROJECT_TERMINAL_WIDTH = { default: 500, min: 480, run: 480, slot: 320 } as const
 
@@ -175,6 +175,7 @@ export const TrafficPanelState = z.object({
   width: z.number(),
   widthCustomized: z.boolean().optional(),
   collapsed: z.boolean().optional(),
+  hiddenPathPrefix: z.string().optional(),
 })
 export type TrafficPanelState = z.infer<typeof TrafficPanelState>
 

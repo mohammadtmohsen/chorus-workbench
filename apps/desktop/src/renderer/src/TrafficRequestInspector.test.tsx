@@ -63,6 +63,8 @@ const detailOf = (key: TrafficDetail['key']): TrafficDetail => ({
 })
 
 const bridge = (): Partial<Chorus> => ({
+  onSettings: () => () => undefined,
+  readSettings: () => Promise.reject(new Error('settings are not part of this test')),
   readTrafficDetail: (request) => {
     detailReads += 1
     const key = {
@@ -151,6 +153,6 @@ describe('a request selected before it answered', () => {
     await flush()
 
     expect(responseText(container)).toContain('traffic.waitingForResponse')
-    expect(container.querySelector('.traffic-head .traffic-pending')).not.toBeNull()
+    expect(container.querySelector('.traffic-head')).toBeNull()
   })
 })

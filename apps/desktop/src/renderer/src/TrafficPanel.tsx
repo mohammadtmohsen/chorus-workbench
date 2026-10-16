@@ -24,15 +24,9 @@ import {
   type TrafficPush,
   type TrafficState,
 } from '../../shared/traffic-ipc.js'
+import { TrafficEndpoint } from './TrafficEndpoint.js'
 import { TrafficRequestInspector } from './TrafficRequestInspector.js'
-import {
-  filterRows,
-  isPending,
-  outcomeOf,
-  pathOf,
-  statusClassOf,
-  type TrafficOutcome,
-} from './traffic-filter.js'
+import { filterRows, isPending, pathOf, statusClassOf } from './traffic-filter.js'
 import {
   applySnapshot,
   EMPTY_TRAFFIC,
@@ -41,6 +35,7 @@ import {
   type TrafficAttachment,
   type TrafficStream,
 } from './traffic-stream.js'
+import { useTrafficPanel, useWorkspaceActions } from './workspace/hooks.js'
 
 export interface TrafficTerminalOption {
   readonly ref: TerminalRefShape
@@ -189,6 +184,8 @@ export function TrafficPanel(props: {
 }): React.JSX.Element {
   const { t } = useTranslation()
   const { projectId } = props
+  const hiddenPathPrefix = useTrafficPanel(projectId).hiddenPathPrefix ?? ''
+  const { setTrafficHiddenPathPrefix } = useWorkspaceActions()
   const collapsed = props.collapsed === true
   /*
    * One base for the setup fields' ids. Two panels can be mounted at once — a
@@ -247,6 +244,7 @@ export function TrafficPanel(props: {
   const [callLimit, setCallLimit] = useState(DEFAULT_CALL_LIMIT)
 
   const rowsList = useRef<HTMLUListElement>(null)
+  const captureSetup = useRef<HTMLDetailsElement>(null)
   const filtered = filterRows(stream.rows, search)
   const shown = filtered.slice(-callLimit)
   const newestSeq = shown.at(-1)?.seq ?? null
@@ -855,6 +853,7 @@ export function TrafficPanel(props: {
   const runCommand = (): void => {
     if (wantedChoice.current !== null) return
     if (needsSetup) {
+      if (captureSetup.current !== null) captureSetup.current.open = true
       if (!setupOpen) openSetup()
       props.runHost?.reveal()
       return
@@ -892,15 +891,6 @@ export function TrafficPanel(props: {
         setFailure('action')
       })
   }, [])
-
-  const OUTCOME_LABELS: Record<TrafficOutcome, string> = {
-    read: 'traffic.outcomeRead',
-    refused: 'traffic.outcomeRefused',
-    backend: 'traffic.outcomeBackend',
-    unreadable: 'traffic.outcomeUnreadable',
-    aborted: 'traffic.outcomeAborted',
-    pending: 'traffic.outcomePending',
-  }
 
   /*
    * **The arrows move the selection as well as the focus.**
@@ -952,12 +942,6 @@ export function TrafficPanel(props: {
   const refusedField =
     failure === 'invalid-host' ? 'host' : failure === 'capturing' ? refusedAt : null
 
-  const outcomeBadge = (row: Extract<TrafficRowShape, { source: 'http' }>): React.JSX.Element => (
-    <span className="traffic-outcome" data-outcome={outcomeOf(row)}>
-      {t(OUTCOME_LABELS[outcomeOf(row)])}
-    </span>
-  )
-
   const bodyOf = (row: TrafficRowShape): React.JSX.Element => {
     if (row.source === 'logcat') {
       return (
@@ -980,9 +964,6 @@ export function TrafficPanel(props: {
         <span className="traffic-method" data-method={row.m.toUpperCase()}>
           {row.m}
         </span>
-        <span className="traffic-url" title={row.u}>
-          {pathOf(row.u)}
-        </span>
         <span className="traffic-status">
           {isPending(row) ? (
             <span className="traffic-pending" role="img" aria-label={t('traffic.pending')} />
@@ -990,12 +971,7 @@ export function TrafficPanel(props: {
             (row.status ?? '—')
           )}
         </span>
-        {outcomeBadge(row)}
-        <span className="traffic-note">
-          {row.transport !== null && <span className="traffic-transport">{row.transport}</span>}
-          {row.code !== null && <span className="traffic-code">{row.code}</span>}
-          {row.nextAction !== null && <span className="traffic-next">{row.nextAction}</span>}
-        </span>
+        <TrafficEndpoint label={pathOf(row.u, hiddenPathPrefix)} />
       </>
     )
   }
@@ -1163,7 +1139,7 @@ export function TrafficPanel(props: {
             ? t('traffic.notListening')
             : t('traffic.listeningOn', { host: capture.address })}
         </span>
-        {runControls}
+        {managedRun === null && runControls}
       </header>
       {runToggle !== null && runHostElement !== null && createPortal(runToggle, runHostElement)}
 
@@ -1178,150 +1154,6 @@ export function TrafficPanel(props: {
       )}
 
       {cleanupShown && <p className="traffic-stopped">{t('run.cleanupPending')}</p>}
-
-      {managedRun !== null && setupOpen && (
-        <section className="run-setup" id={setupId} aria-label={t('run.setupTitle')}>
-          <p className="traffic-field-name">{t('run.scripts')}</p>
-          {detected !== null && detected.scripts.length === 0 && (
-            <p className="traffic-field-hint">{t('run.noScripts')}</p>
-          )}
-          <ul className="run-choices">
-            {choices.map((choice) => (
-              <li key={choice.id} className="run-choice" data-run-choice={choice.id}>
-                <label className="run-choice-pick">
-                  <input
-                    type="radio"
-                    name={`${fields}-run-choice`}
-                    checked={chosenCommand === choice.id}
-                    disabled={!choice.fits}
-                    onChange={() => {
-                      applyChoice(choice)
-                    }}
-                  />
-                  {choice.label}
-                </label>
-                <code className="run-command">{choice.command}</code>
-                {!choice.fits && (
-                  <span className="traffic-field-hint">{t('run.scriptTooLong')}</span>
-                )}
-              </li>
-            ))}
-          </ul>
-          <div className="traffic-source-row">
-            <div className="traffic-field" data-run-field="custom-label">
-              <label className="traffic-field-name" htmlFor={`${fields}-run-label`}>
-                {t('run.customLabel')}
-              </label>
-              <input
-                id={`${fields}-run-label`}
-                className="traffic-origin"
-                type="text"
-                spellCheck={false}
-                value={customLabel}
-                onChange={(event) => {
-                  setCustomLabel(event.target.value)
-                }}
-              />
-            </div>
-            <div className="traffic-field" data-run-field="custom-command">
-              <label className="traffic-field-name" htmlFor={`${fields}-run-command`}>
-                {t('run.customCommand')}
-              </label>
-              <input
-                id={`${fields}-run-command`}
-                className="traffic-origin"
-                type="text"
-                spellCheck={false}
-                value={customCommand}
-                onChange={(event) => {
-                  setCustomCommand(event.target.value)
-                }}
-                onKeyDown={(event) => {
-                  if (event.key === 'Enter') addCustom()
-                }}
-              />
-            </div>
-            <button
-              type="button"
-              className="traffic-action"
-              data-run-action="add"
-              onClick={addCustom}
-            >
-              {t('run.add')}
-            </button>
-          </div>
-          <p className="traffic-field-hint">{t('run.captureHint')}</p>
-          {capture.origin === null && (
-            <div className="traffic-field" data-run-field="origin">
-              <label className="traffic-field-name" htmlFor={`${fields}-run-origin`}>
-                {t('run.origin')}
-              </label>
-              <input
-                id={`${fields}-run-origin`}
-                className="traffic-origin"
-                type="text"
-                spellCheck={false}
-                placeholder={t('traffic.originPlaceholder')}
-                value={originDraft}
-                onChange={(event) => {
-                  setOriginDraft(event.target.value)
-                }}
-                onBlur={commitSetupOrigin}
-                onKeyDown={(event) => {
-                  if (event.key === 'Enter') commitSetupOrigin()
-                }}
-              />
-            </div>
-          )}
-          {capture.envVar === null && (
-            <div className="traffic-field" data-run-field="variable">
-              <label className="traffic-field-name" htmlFor={`${fields}-run-variable`}>
-                {t('run.variable')}
-              </label>
-              <input
-                id={`${fields}-run-variable`}
-                className="traffic-origin"
-                type="text"
-                spellCheck={false}
-                placeholder={t('traffic.envVarPlaceholder')}
-                value={envVarDraft}
-                onChange={(event) => {
-                  variableEdited.current = true
-                  setEnvVarDraft(event.target.value)
-                }}
-                onBlur={() => {
-                  commitSetupVariable(envVarDraft)
-                }}
-                onKeyDown={(event) => {
-                  if (event.key === 'Enter') commitSetupVariable(envVarDraft)
-                }}
-              />
-              {detected !== null && detected.variables.length > 1 && (
-                <span className="run-variables">
-                  <span className="traffic-field-hint">{t('run.variableChoices')}</span>
-                  {detected.variables.map((name) => (
-                    <button
-                      key={name}
-                      type="button"
-                      className="traffic-tab"
-                      data-run-variable={name}
-                      onClick={() => {
-                        variableEdited.current = true
-                        setEnvVarDraft(name)
-                        commitSetupVariable(name)
-                      }}
-                    >
-                      {name}
-                    </button>
-                  ))}
-                </span>
-              )}
-            </div>
-          )}
-          {capture.capturing && <p className="traffic-field-hint">{t('run.whileRecording')}</p>}
-          {setupError !== null && <p className="traffic-stopped">{t(setupError)}</p>}
-        </section>
-      )}
 
       {legacy !== null && !legacy.completed && (
         <div className="traffic-legacy">
@@ -1356,8 +1188,152 @@ export function TrafficPanel(props: {
         </div>
       )}
 
-      <details className="traffic-setup">
+      <details className="traffic-setup" ref={captureSetup}>
         <summary className="traffic-setup-summary">{t('traffic.setup')}</summary>
+        {managedRun !== null && <div className="traffic-source-row">{runControls}</div>}
+        {managedRun !== null && setupOpen && (
+          <section className="run-setup" id={setupId} aria-label={t('run.setupTitle')}>
+            <p className="traffic-field-name">{t('run.scripts')}</p>
+            {detected !== null && detected.scripts.length === 0 && (
+              <p className="traffic-field-hint">{t('run.noScripts')}</p>
+            )}
+            <ul className="run-choices">
+              {choices.map((choice) => (
+                <li key={choice.id} className="run-choice" data-run-choice={choice.id}>
+                  <label className="run-choice-pick">
+                    <input
+                      type="radio"
+                      name={`${fields}-run-choice`}
+                      checked={chosenCommand === choice.id}
+                      disabled={!choice.fits}
+                      onChange={() => {
+                        applyChoice(choice)
+                      }}
+                    />
+                    {choice.label}
+                  </label>
+                  <code className="run-command">{choice.command}</code>
+                  {!choice.fits && (
+                    <span className="traffic-field-hint">{t('run.scriptTooLong')}</span>
+                  )}
+                </li>
+              ))}
+            </ul>
+            <div className="traffic-source-row">
+              <div className="traffic-field" data-run-field="custom-label">
+                <label className="traffic-field-name" htmlFor={`${fields}-run-label`}>
+                  {t('run.customLabel')}
+                </label>
+                <input
+                  id={`${fields}-run-label`}
+                  className="traffic-origin"
+                  type="text"
+                  spellCheck={false}
+                  value={customLabel}
+                  onChange={(event) => {
+                    setCustomLabel(event.target.value)
+                  }}
+                />
+              </div>
+              <div className="traffic-field" data-run-field="custom-command">
+                <label className="traffic-field-name" htmlFor={`${fields}-run-command`}>
+                  {t('run.customCommand')}
+                </label>
+                <input
+                  id={`${fields}-run-command`}
+                  className="traffic-origin"
+                  type="text"
+                  spellCheck={false}
+                  value={customCommand}
+                  onChange={(event) => {
+                    setCustomCommand(event.target.value)
+                  }}
+                  onKeyDown={(event) => {
+                    if (event.key === 'Enter') addCustom()
+                  }}
+                />
+              </div>
+              <button
+                type="button"
+                className="traffic-action"
+                data-run-action="add"
+                onClick={addCustom}
+              >
+                {t('run.add')}
+              </button>
+            </div>
+            <p className="traffic-field-hint">{t('run.captureHint')}</p>
+            {capture.origin === null && (
+              <div className="traffic-field" data-run-field="origin">
+                <label className="traffic-field-name" htmlFor={`${fields}-run-origin`}>
+                  {t('run.origin')}
+                </label>
+                <input
+                  id={`${fields}-run-origin`}
+                  className="traffic-origin"
+                  type="text"
+                  spellCheck={false}
+                  placeholder={t('traffic.originPlaceholder')}
+                  value={originDraft}
+                  onChange={(event) => {
+                    setOriginDraft(event.target.value)
+                  }}
+                  onBlur={commitSetupOrigin}
+                  onKeyDown={(event) => {
+                    if (event.key === 'Enter') commitSetupOrigin()
+                  }}
+                />
+              </div>
+            )}
+            {capture.envVar === null && (
+              <div className="traffic-field" data-run-field="variable">
+                <label className="traffic-field-name" htmlFor={`${fields}-run-variable`}>
+                  {t('run.variable')}
+                </label>
+                <input
+                  id={`${fields}-run-variable`}
+                  className="traffic-origin"
+                  type="text"
+                  spellCheck={false}
+                  placeholder={t('traffic.envVarPlaceholder')}
+                  value={envVarDraft}
+                  onChange={(event) => {
+                    variableEdited.current = true
+                    setEnvVarDraft(event.target.value)
+                  }}
+                  onBlur={() => {
+                    commitSetupVariable(envVarDraft)
+                  }}
+                  onKeyDown={(event) => {
+                    if (event.key === 'Enter') commitSetupVariable(envVarDraft)
+                  }}
+                />
+                {detected !== null && detected.variables.length > 1 && (
+                  <span className="run-variables">
+                    <span className="traffic-field-hint">{t('run.variableChoices')}</span>
+                    {detected.variables.map((name) => (
+                      <button
+                        key={name}
+                        type="button"
+                        className="traffic-tab"
+                        data-run-variable={name}
+                        onClick={() => {
+                          variableEdited.current = true
+                          setEnvVarDraft(name)
+                          commitSetupVariable(name)
+                        }}
+                      >
+                        {name}
+                      </button>
+                    ))}
+                  </span>
+                )}
+              </div>
+            )}
+            {capture.capturing && <p className="traffic-field-hint">{t('run.whileRecording')}</p>}
+            {setupError !== null && <p className="traffic-stopped">{t(setupError)}</p>}
+          </section>
+        )}
         {capture.address !== null && capture.forwardedDevices > 0 && (
           <div className="traffic-source-row">
             <span className="traffic-forwarded">
@@ -1381,7 +1357,9 @@ export function TrafficPanel(props: {
                 aria-invalid={refusedField === 'host'}
                 value={hostDraft}
                 disabled={capture.access !== 'lan' || hostSaving || stream.projectId !== projectId}
-                onChange={(event) => setHostDraft(event.target.value)}
+                onChange={(event) => {
+                  setHostDraft(event.target.value)
+                }}
                 onKeyDown={(event) => {
                   if (event.key === 'Enter') commitHost(hostDraft.trim() || null)
                 }}
@@ -1390,7 +1368,9 @@ export function TrafficPanel(props: {
                 type="button"
                 className="traffic-action"
                 disabled={capture.access !== 'lan' || hostSaving || stream.projectId !== projectId}
-                onClick={() => commitHost(hostDraft.trim() || null)}
+                onClick={() => {
+                  commitHost(hostDraft.trim() || null)
+                }}
               >
                 {t('traffic.applyHost')}
               </button>
@@ -1398,7 +1378,9 @@ export function TrafficPanel(props: {
                 type="button"
                 className="traffic-action"
                 disabled={capture.access !== 'lan' || hostSaving || stream.projectId !== projectId}
-                onClick={() => commitHost(null)}
+                onClick={() => {
+                  commitHost(null)
+                }}
               >
                 {t('traffic.detectHost')}
               </button>
@@ -1421,7 +1403,9 @@ export function TrafficPanel(props: {
                   <button
                     type="button"
                     className="traffic-action"
-                    onClick={() => act(window.chorus.restartRun({ projectId }))}
+                    onClick={() => {
+                      act(window.chorus.restartRun({ projectId }))
+                    }}
                   >
                     {t('traffic.restartDev')}
                   </button>
@@ -1488,6 +1472,29 @@ export function TrafficPanel(props: {
               {refusedField === 'origin' && failure !== null
                 ? failureText(failure)
                 : t('traffic.originHint')}
+            </span>
+          </div>
+        </div>
+
+        <div className="traffic-source-row">
+          <div className="traffic-field" data-traffic-field="hiddenPathPrefix">
+            <label className="traffic-field-name" htmlFor={`${fields}-hidden-path-prefix`}>
+              {t('traffic.hiddenPathPrefix')}
+            </label>
+            <input
+              id={`${fields}-hidden-path-prefix`}
+              className="traffic-origin"
+              type="text"
+              spellCheck={false}
+              aria-describedby={`${fields}-hidden-path-prefix-hint`}
+              placeholder={t('traffic.hiddenPathPrefixPlaceholder')}
+              value={hiddenPathPrefix}
+              onChange={(event) => {
+                setTrafficHiddenPathPrefix(projectId, event.target.value)
+              }}
+            />
+            <span className="traffic-field-hint" id={`${fields}-hidden-path-prefix-hint`}>
+              {t('traffic.hiddenPathPrefixHint')}
             </span>
           </div>
         </div>
@@ -1748,10 +1755,8 @@ export function TrafficPanel(props: {
               */}
                 <li className="traffic-head-row">
                   <span className="traffic-head-cell">{t('traffic.columnMethod')}</span>
-                  <span className="traffic-head-cell">{t('traffic.columnEndpoint')}</span>
                   <span className="traffic-head-cell">{t('traffic.columnStatus')}</span>
-                  <span className="traffic-head-cell">{t('traffic.columnOutcome')}</span>
-                  <span className="traffic-head-cell">{t('traffic.columnDetail')}</span>
+                  <span className="traffic-head-cell">{t('traffic.columnEndpoint')}</span>
                 </li>
                 {shown.map((row) => (
                   <li

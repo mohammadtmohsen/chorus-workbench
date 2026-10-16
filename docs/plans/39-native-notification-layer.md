@@ -2,13 +2,13 @@
 
 ## Status
 
-| Step | Status |
-| --- | --- |
-| Scope | Notifications stay above the editor and browser; both remain interactive, confirmed by the user |
-| Investigation | ToastStack, native-view ownership, overlay handling, navigation guards and Electron child-window APIs read |
-| Implementation | Written and source-reviewed; existing working-tree changes preserved |
-| Mouse input | Written and source-reviewed: native pointer tracking and drag retention |
-| Verification | Local build and installation passed; tests, typechecks and live input checks unrun |
+| Step           | Status                                                                                                     |
+| -------------- | ---------------------------------------------------------------------------------------------------------- |
+| Scope          | Notifications stay above the editor and browser; both remain interactive, confirmed by the user            |
+| Investigation  | ToastStack, native-view ownership, overlay handling, navigation guards and Electron child-window APIs read |
+| Implementation | Written and source-reviewed; existing working-tree changes preserved                                       |
+| Mouse input    | Written and source-reviewed: native pointer tracking and drag retention                                    |
+| Verification   | Local build and installation passed; tests, typechecks and live input checks unrun                         |
 
 ## Current / Issue
 
@@ -73,7 +73,9 @@ Expose the existing overlay counter's active state through the existing signal p
 Keep the existing notification JSX and handlers. Render a hidden position anchor in the shell and portal the existing cards into the child host:
 
 ```tsx
-{host === null ? cards : createPortal(cards, host)}
+{
+  host === null ? cards : createPortal(cards, host)
+}
 ```
 
 ## Verification

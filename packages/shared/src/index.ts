@@ -1,4 +1,5 @@
 export * from './async-queue.js'
+export * from './conversation-note.js'
 export * from './ids.js'
 export * from './logger.js'
 export * from './redact.js'

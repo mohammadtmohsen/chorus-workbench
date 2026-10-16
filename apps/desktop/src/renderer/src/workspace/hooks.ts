@@ -25,6 +25,7 @@ import {
 import { CLOSED_TRAFFIC, DEFAULT_PROJECT_TERMINAL, leafPaneIds, tabLocation } from './layout.js'
 import {
   useWorkspaceStore,
+  pulseWorking,
   type SessionPulse,
   type WorkspaceActions,
   type WorkspaceStore,
@@ -74,6 +75,7 @@ function selectActions(state: WorkspaceStore): WorkspaceActions {
     replaceConversation,
     setEditorWidthFraction,
     setTrafficWidth,
+    setTrafficHiddenPathPrefix,
     setProjectTerminalWidth,
     setTrafficCollapsed,
     setProjectTerminalCollapsed,
@@ -140,6 +142,7 @@ function selectActions(state: WorkspaceStore): WorkspaceActions {
     replaceConversation,
     setEditorWidthFraction,
     setTrafficWidth,
+    setTrafficHiddenPathPrefix,
     setProjectTerminalWidth,
     setTrafficCollapsed,
     setProjectTerminalCollapsed,
@@ -290,9 +293,7 @@ export function useEditorWidthFraction(projectId: string | null): number | undef
 }
 
 export function useRowScrollOffset(projectId: string | null): number {
-  return useWorkspaceStore((state) =>
-    projectId === null ? 0 : (state.rowScroll[projectId] ?? 0)
-  )
+  return useWorkspaceStore((state) => (projectId === null ? 0 : (state.rowScroll[projectId] ?? 0)))
 }
 
 export function useProjectTerminalPane(projectId: string | null): ProjectTerminalPaneState {
@@ -506,7 +507,7 @@ export function useBackgroundAgents(conversationId: string): string {
  */
 export function useWorkingSessionCount(): number {
   return useWorkspaceStore(
-    (state) => Object.values(state.pulses).filter((pulse) => pulse.working.length > 0).length
+    (state) => Object.values(state.pulses).filter((pulse) => pulseWorking(pulse).length > 0).length
   )
 }
 
@@ -532,7 +533,7 @@ export function useSessionRowState(conversationId: string): SessionRowState {
         approvals: pulse?.approvalIds.length ?? 0,
         questions: pulse?.questionIds.length ?? 0,
         working: withBackgroundWork(
-          (pulse?.working ?? []).filter(isAgentId),
+          pulseWorking(pulse).filter(isAgentId),
           pulse?.tasksByActor ?? {}
         ).join(','),
         unread: pulse?.unread ?? 0,
@@ -585,7 +586,7 @@ export function useProjectRowState(conversationIds: readonly string[]): SessionR
         questions += pulse.questionIds.length
         unread += pulse.unread
         failed = failed || pulse.failed
-        const agents = withBackgroundWork(pulse.working.filter(isAgentId), pulse.tasksByActor)
+        const agents = withBackgroundWork(pulseWorking(pulse).filter(isAgentId), pulse.tasksByActor)
         for (const agentId of agents) working.add(agentId)
       }
       return { approvals, questions, unread, failed, working: [...working].sort().join(',') }

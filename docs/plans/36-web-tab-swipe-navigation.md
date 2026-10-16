@@ -2,29 +2,29 @@
 
 ## Status
 
-| Unit           | Result                                                                                                                                                                                                                                                                                                                                                                                                         |
-| -------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Questions      | Answered by the user on 2026-10-13: web tabs only, Chrome's arrow bubble, Chrome's direction and edge rule, macOS and Windows, plan first, unit tests written but not run                                                                                                                                                                                                                                      |
-| Research       | Claude read `main/browser-surface.ts` (records, `act`, `observe`, `listen`, `pushState`, `showing`), `preload/browser.ts` (the row-wheel path), `shared/browser-ipc.ts`, `main/workbench-surface.ts` (`applyParticipant`), the preload build config and Electron 43.2's typings                                                                                                                                 |
-| Plan challenge | Codex returned 8 findings from source (Electron v43.2.0, Chromium 150.0.7871.129, DOM/CSS specs). Claude checked the load-bearing ones: the gesture types in `electron.d.ts`, the overlay hiding views through `setVisible` (`workbench-surface.ts:567`), and the shared-chunk rule (`electron.vite.config.ts:216`). All 8 are folded in below. The first draft's 140 ms idle gap and its plain fixed-position bubble are replaced |
-| User approval  | Approved 2026-10-13                                                                                                                                                                                                                                                                                                                                                                                            |
-| U1 gesture     | Written by Codex. Claude reviewed both files and traced every test assertion against the reducer. Deviation accepted: `idle` and `settling` keep `gesture`, so ids stay monotonic without an outside counter and a late `consumed` can never match a later gesture. Correction sent: `overscroll-behavior-x` should block only on the root or a box that actually overflows sideways, to be confirmed against Chromium's scroll chain first |
+| Unit           | Result                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
+| -------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Questions      | Answered by the user on 2026-10-13: web tabs only, Chrome's arrow bubble, Chrome's direction and edge rule, macOS and Windows, plan first, unit tests written but not run                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
+| Research       | Claude read `main/browser-surface.ts` (records, `act`, `observe`, `listen`, `pushState`, `showing`), `preload/browser.ts` (the row-wheel path), `shared/browser-ipc.ts`, `main/workbench-surface.ts` (`applyParticipant`), the preload build config and Electron 43.2's typings                                                                                                                                                                                                                                                                                                                                                                                                                 |
+| Plan challenge | Codex returned 8 findings from source (Electron v43.2.0, Chromium 150.0.7871.129, DOM/CSS specs). Claude checked the load-bearing ones: the gesture types in `electron.d.ts`, the overlay hiding views through `setVisible` (`workbench-surface.ts:567`), and the shared-chunk rule (`electron.vite.config.ts:216`). All 8 are folded in below. The first draft's 140 ms idle gap and its plain fixed-position bubble are replaced                                                                                                                                                                                                                                                              |
+| User approval  | Approved 2026-10-13                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| U1 gesture     | Written by Codex. Claude reviewed both files and traced every test assertion against the reducer. Deviation accepted: `idle` and `settling` keep `gesture`, so ids stay monotonic without an outside counter and a late `consumed` can never match a later gesture. Correction sent: `overscroll-behavior-x` should block only on the root or a box that actually overflows sideways, to be confirmed against Chromium's scroll chain first                                                                                                                                                                                                                                                     |
 | U2 wiring      | Written by Codex. Claude reviewed all four diffs against `/tmp/swipe-baseline-JTt17n`; the row-wheel path is unchanged and the preload imports IPC as types only. Deviations accepted: a hidden page drops its gesture and ignores sequence messages, and pending cancel checks are flushed before `end` and `tick`. Corrections sent: skip a detached main frame before every new `mainFrame.send`, because Electron 43.2 throws on a disposed frame (`web_frame_main.cc:207`) and `render-process-gone` reaches `swipeState` through `pushState`. Also measure the scroll path only for a horizontal wheel whose direction history allows, so a vertical scroll never forces style and layout |
-| Corrections    | Codex fixed the detached-frame guard (both send paths, with a crash regression test whose fake `send` throws when detached) and the path-measurement gate. The `overscroll-behavior-x` correction was withdrawn. Chromium 150 creates a scroll node for a container that blocks propagation even without overflow (`paint_property_tree_builder.cc:538`, `paint_layer_scrollable_area.cc:1391-1405`, `input_handler.cc:2350-2382`), so the reducer was already right. Claude checked the citations and re-reviewed the hunks. Main and the IPC contract are purely additive against the baseline, and `browser-swipe.ts` is imported only by the browser preload and its test |
-| Verification   | Not run. Nothing runs until the user asks                                                                                                                                                                                                                                                                                                                                                                      |
+| Corrections    | Codex fixed the detached-frame guard (both send paths, with a crash regression test whose fake `send` throws when detached) and the path-measurement gate. The `overscroll-behavior-x` correction was withdrawn. Chromium 150 creates a scroll node for a container that blocks propagation even without overflow (`paint_property_tree_builder.cc:538`, `paint_layer_scrollable_area.cc:1391-1405`, `input_handler.cc:2350-2382`), so the reducer was already right. Claude checked the citations and re-reviewed the hunks. Main and the IPC contract are purely additive against the baseline, and `browser-swipe.ts` is imported only by the browser preload and its test                   |
+| Verification   | Not run. Nothing runs until the user asks                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
 
 Roles: Claude leads and reviews. Codex implements U1 and U2. Claude reviews every file and the integrated diff.
 
 ## Decisions taken with the user
 
-| Question  | Answer                                                                                                                                      |
-| --------- | ------------------------------------------------------------------------------------------------------------------------------------------- |
+| Question  | Answer                                                                                                                                       |
+| --------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
 | Surface   | Web tabs only (plan 22). The project browser keeps sending horizontal swipes to the project row (plan 18)                                    |
-| Feedback  | Chrome's arrow bubble. It slides in from the edge with the fingers and navigates only if the gesture ends past the threshold                |
+| Feedback  | Chrome's arrow bubble. It slides in from the edge with the fingers and navigates only if the gesture ends past the threshold                 |
 | Direction | Chrome's: overscrolling past the left edge goes back, past the right edge goes forward. With natural scrolling, fingers moving right go back |
 | Edges     | Navigate only when nothing under the pointer can scroll further that way. Wide content still scrolls                                         |
-| Platforms | macOS and Windows                                                                                                                           |
-| Tests     | Written with the code, not run                                                                                                              |
+| Platforms | macOS and Windows                                                                                                                            |
+| Tests     | Written with the code, not run                                                                                                               |
 
 ## Current / Issue
 
@@ -124,7 +124,12 @@ export interface SwipeWheel {
 }
 
 export type SwipeInput =
-  | { readonly kind: 'wheel'; readonly time: number; readonly wheel: SwipeWheel; readonly history: SwipeHistory }
+  | {
+      readonly kind: 'wheel'
+      readonly time: number
+      readonly wheel: SwipeWheel
+      readonly history: SwipeHistory
+    }
   | { readonly kind: 'begin'; readonly time: number; readonly sequence: number }
   | { readonly kind: 'end'; readonly time: number; readonly sequence: number }
   | { readonly kind: 'consumed'; readonly time: number; readonly gesture: number }
@@ -132,7 +137,10 @@ export type SwipeInput =
   | { readonly kind: 'tick'; readonly time: number }
 
 export type SwipeState =
-  | { readonly kind: 'idle'; readonly begin: { readonly sequence: number; readonly time: number } | null }
+  | {
+      readonly kind: 'idle'
+      readonly begin: { readonly sequence: number; readonly time: number } | null
+    }
   | {
       readonly kind: 'tracking'
       readonly gesture: number
@@ -142,7 +150,12 @@ export type SwipeState =
       readonly distance: number
       readonly last: number
     }
-  | { readonly kind: 'ignored'; readonly gesture: number; readonly sequence: number | null; readonly last: number }
+  | {
+      readonly kind: 'ignored'
+      readonly gesture: number
+      readonly sequence: number | null
+      readonly last: number
+    }
   | { readonly kind: 'settling'; readonly last: number }
 
 export interface SwipeStep {
@@ -291,18 +304,18 @@ The project browser's row wheel; vertical scrolling; pinch and Ctrl/⌘ wheel zo
 
 ## Acceptance
 
-| Criterion                                                                                                    | Check                        |
-| ------------------------------------------------------------------------------------------------------------ | ---------------------------- |
+| Criterion                                                                                                     | Check                        |
+| ------------------------------------------------------------------------------------------------------------- | ---------------------------- |
 | Swipe toward back at the left edge, with history: the bubble follows, and ending past the threshold goes back | Hand test, macOS and Windows |
-| Same for forward at the right edge                                                                           | Hand test                    |
-| End short of the threshold, or reverse: no navigation, the bubble leaves                                     | Hand test + unit             |
-| Pausing with fingers down past the threshold does not navigate until the gesture ends                        | Hand test + unit             |
-| No history that way: no bubble                                                                               | Hand test + unit             |
-| Horizontally scrollable content scrolls, and a gesture that started scrolling never navigates                | Hand test + unit             |
-| `overscroll-behavior-x: none`, or a page cancelling the wheel: no navigation                                 | Unit                         |
-| The bubble shows above an open `<dialog>`                                                                    | Hand test                    |
-| Vertical scroll, pinch zoom and Shift+wheel unchanged                                                        | Hand test                    |
-| Project browser: horizontal swipe still scrolls the row, no bubble                                           | Hand test + unit             |
+| Same for forward at the right edge                                                                            | Hand test                    |
+| End short of the threshold, or reverse: no navigation, the bubble leaves                                      | Hand test + unit             |
+| Pausing with fingers down past the threshold does not navigate until the gesture ends                         | Hand test + unit             |
+| No history that way: no bubble                                                                                | Hand test + unit             |
+| Horizontally scrollable content scrolls, and a gesture that started scrolling never navigates                 | Hand test + unit             |
+| `overscroll-behavior-x: none`, or a page cancelling the wheel: no navigation                                  | Unit                         |
+| The bubble shows above an open `<dialog>`                                                                     | Hand test                    |
+| Vertical scroll, pinch zoom and Shift+wheel unchanged                                                         | Hand test                    |
+| Project browser: horizontal swipe still scrolls the row, no bubble                                            | Hand test + unit             |
 
 ## Final Flow
 

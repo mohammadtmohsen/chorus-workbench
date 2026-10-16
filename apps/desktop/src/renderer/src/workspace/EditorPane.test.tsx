@@ -182,14 +182,23 @@ describe('the editor resize control', () => {
     try {
       const commit = vi.fn()
       const view = render(
-        <EditorPane {...props([session('source'), session('replacement')])} onCommitLayout={commit} />
+        <EditorPane
+          {...props([session('source'), session('replacement')])}
+          onCommitLayout={commit}
+        />
       )
       const divider = view.container.querySelector<HTMLElement>('[data-editor-resize]')
       const editor = view.container.querySelector<HTMLElement>('.workspace-pane-workbench')
       const row = view.container.querySelector<HTMLElement>('.conversation-scroller')
       const firstChat = view.container.querySelector<HTMLElement>('.conversation-slot')
       const typed = chat(view.container, 'source')
-      if (divider === null || editor === null || row === null || firstChat === null || typed === null) {
+      if (
+        divider === null ||
+        editor === null ||
+        row === null ||
+        firstChat === null ||
+        typed === null
+      ) {
         throw new Error('the editor and first chat are not drawn')
       }
       const firstChatRight = (): number =>
@@ -232,7 +241,10 @@ describe('the editor resize control', () => {
     try {
       const commit = vi.fn()
       const view = render(
-        <EditorPane {...props([session('source'), session('replacement')])} onCommitLayout={commit} />
+        <EditorPane
+          {...props([session('source'), session('replacement')])}
+          onCommitLayout={commit}
+        />
       )
       const divider = view.container.querySelector<HTMLElement>('[data-editor-resize]')
       const row = view.container.querySelector<HTMLElement>('.conversation-scroller')

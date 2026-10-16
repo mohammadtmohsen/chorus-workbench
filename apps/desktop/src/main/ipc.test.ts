@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { BrowserWindow } from 'electron'
+import { IPC_CONTRACT } from '../shared/ipc.js'
 import type { ChorusRuntime } from './runtime.js'
 
 const showOpenDialog = vi.fn()
@@ -30,7 +31,7 @@ vi.mock('electron', () => ({
   app: { getVersion: () => '0.0.0', getPath: () => '/tmp/chorus-test' },
   BrowserWindow: { getFocusedWindow: () => null, getAllWindows: () => [] },
   dialog: { showOpenDialog },
-  ipcMain: { handle: vi.fn() },
+  ipcMain: { handle: vi.fn(), on: vi.fn() },
   Notification: FakeNotification,
   shell: { openPath: vi.fn(), showItemInFolder: vi.fn() },
   // `settings:write` applies the appearance as it writes, because
@@ -52,7 +53,7 @@ vi.mock('electron', () => ({
 
 vi.mock('./detached-windows.js', () => ({ raise: vi.fn(), detachedWindowOf: vi.fn() }))
 
-const { buildHandlers } = await import('./ipc.js')
+const { answerConversationNoteJournal, buildHandlers } = await import('./ipc.js')
 const { detachedWindowOf, raise } = await import('./detached-windows.js')
 
 /**
@@ -209,6 +210,11 @@ describe('conversation:start', () => {
       expect.objectContaining({ profileId: 'trusted' })
     )
   })
+
+  it('passes the selected source and task to the runtime', async () => {
+    const request = { projectId: 'p1', continueFrom: 'c0', objective: 'Fix API retries' }
+    expect(await startWith(request)).toHaveBeenCalledWith(request)
+  })
 })
 
 describe('conversation:begin and conversation:awaitStart', () => {
@@ -230,10 +236,19 @@ describe('conversation:begin and conversation:awaitStart', () => {
   it('begins inside the project it was given, with no directory and no cast', async () => {
     const beginConversation = vi.fn((_options: Record<string, unknown>) => begun)
     const begin = handler({ beginConversation }, 'conversation:begin')
-    const answer = await begin({ projectId: 'p1', agents: ['claude'], continueFrom: 'c0' })
+    const answer = await begin({
+      projectId: 'p1',
+      agents: ['claude'],
+      continueFrom: 'c0',
+      objective: 'Fix API retries',
+    })
 
     expect(answer).toEqual(begun)
-    expect(beginConversation).toHaveBeenCalledWith({ projectId: 'p1', continueFrom: 'c0' })
+    expect(beginConversation).toHaveBeenCalledWith({
+      projectId: 'p1',
+      continueFrom: 'c0',
+      objective: 'Fix API retries',
+    })
     expect(Object.keys(beginConversation.mock.calls[0]?.[0] ?? {})).not.toContain('profileId')
   })
 
@@ -391,7 +406,7 @@ describe('conversation:transcript', () => {
     },
   ]
 
-  const EMPTY_STATE = { approvals: [], questions: [], working: [], usageByActor: {} }
+  const EMPTY_STATE = { approvals: [], questions: [], working: [], replies: [], usageByActor: {} }
 
   function runtimeFor(lastSeq: number) {
     const calls: {
@@ -497,10 +512,135 @@ describe('conversation:transcript', () => {
     expect(result.state).toBeUndefined()
   })
 
+  it('sends state with a catch-up only when a returning pane asks for its live state', async () => {
+    const request = { conversationId: 'c1', afterSeq: 3, live: true }
+    expect(IPC_CONTRACT['conversation:transcript'].request.safeParse(request).success).toBe(true)
+    const { runtime, calls } = runtimeFor(10)
+    const result = (await read(runtime, request)) as unknown as { state?: unknown }
+    expect(calls).toEqual([{ kind: 'history', conversationId: 'c1', afterSeq: 3, at: 10 }])
+    expect(result.state).toEqual(EMPTY_STATE)
+  })
+
+  it('carries the live snapshot through the state copy instead of dropping it', async () => {
+    const live = {
+      work: [{ agentId: 'claude', generation: 7, startedAt: 70, evidenceAt: 90 }],
+      chat: [
+        { requestId: 'discussion:s:codex:0', agentId: 'codex', startedAt: 80, evidenceAt: 85 },
+      ],
+      operations: [
+        {
+          agentId: 'claude',
+          requestId: null,
+          generation: 7,
+          itemRef: 'r1',
+          kind: 'tool',
+          name: 'Read',
+          detail: null,
+          startedAt: 75,
+        },
+      ],
+      handoffs: [
+        {
+          handoffId: 'h1',
+          from: 'claude',
+          to: 'codex',
+          sourceEventIds: ['e1'],
+          createdAt: null,
+          outcome: 'cancelled',
+          outcomeAt: 60,
+        },
+      ],
+    }
+    const withLive = {
+      transcriptPage: () => EVENTS,
+      transcriptState: () => ({ ...EMPTY_STATE, live }),
+      logPosition: () => 10,
+    } as unknown as ChorusRuntime
+    const result = await read(withLive, { conversationId: 'c1', limit: 400 })
+    expect((result as unknown as { state?: { live?: unknown } }).state?.live).toEqual(live)
+    expect(IPC_CONTRACT['conversation:transcript'].response.safeParse(result).success).toBe(true)
+  })
+
   it('flattens the rows the renderer draws', async () => {
     const { runtime } = runtimeFor(10)
     const result = await read(runtime, { conversationId: 'c1' })
     expect(result.events.map((e) => e.seq)).toEqual([1, 2])
+  })
+
+  it('carries the forwarded-work marking through the state copy, or omits it', async () => {
+    const assignment = { linked: true, boundTaskId: 'task-b' }
+    const { runtime } = runtimeFor(10)
+    const marked = {
+      transcriptPage: () => EVENTS,
+      transcriptState: () => ({ ...EMPTY_STATE, assignment }),
+      logPosition: () => 10,
+    } as unknown as ChorusRuntime
+    const result = (await read(marked, { conversationId: 'c1', limit: 400 })) as unknown as {
+      state?: { assignment?: unknown }
+    }
+    expect(result.state?.assignment).toEqual(assignment)
+    expect(IPC_CONTRACT['conversation:transcript'].response.safeParse(result).success).toBe(true)
+
+    const plain = (await read(runtime, { conversationId: 'c1', limit: 400 })) as unknown as {
+      state?: object
+    }
+    expect(plain.state).not.toHaveProperty('assignment')
+    expect(IPC_CONTRACT['conversation:transcript'].response.safeParse(plain).success).toBe(true)
+  })
+})
+
+describe('task:bindAssignment', () => {
+  const outcomes = {
+    bound: {
+      outcome: 'bound',
+      taskId: 't1',
+      previousTaskId: null,
+      ref: { seq: 1, eventId: 'e', at: 1 },
+    },
+    unchanged: { outcome: 'unchanged', taskId: 't1', ref: { seq: 1, eventId: 'e', at: 1 } },
+    refused: { outcome: 'refused', reason: 'not-latest' },
+  } as const
+
+  const bind = async (outcome: keyof typeof outcomes) => {
+    const asked: [string, string][] = []
+    const runtime = {
+      bindAssignment: (conversationId: string, taskId: string) => {
+        asked.push([conversationId, taskId])
+        return outcomes[outcome]
+      },
+    } as unknown as ChorusRuntime
+    const handler = buildHandlers(runtime, () => null)['task:bindAssignment'] as (
+      r: unknown
+    ) => Promise<unknown>
+    const result = await handler({ conversationId: 'child-1', taskId: 'task-b' })
+    return { asked, result }
+  }
+
+  it('asks the runtime for exactly the task shown, and reports a recorded mark', async () => {
+    for (const outcome of ['bound', 'unchanged'] as const) {
+      const { asked, result } = await bind(outcome)
+      expect(asked).toEqual([['child-1', 'task-b']])
+      expect(result).toEqual({ bound: true })
+      expect(IPC_CONTRACT['task:bindAssignment'].response.safeParse(result).success).toBe(true)
+    }
+  })
+
+  it('reports a refusal as not bound', async () => {
+    const { result } = await bind('refused')
+    expect(result).toEqual({ bound: false })
+  })
+
+  it('refuses a missing, empty or oversized task id at the boundary', () => {
+    const schema = IPC_CONTRACT['task:bindAssignment'].request
+    expect(schema.safeParse({ conversationId: 'c1', taskId: 'task-b' }).success).toBe(true)
+    for (const request of [
+      { conversationId: 'c1' },
+      { conversationId: 'c1', taskId: '' },
+      { conversationId: 'c1', taskId: 'x'.repeat(65) },
+      { taskId: 'task-b' },
+    ]) {
+      expect(schema.safeParse(request).success, JSON.stringify(request)).toBe(false)
+    }
   })
 })
 
@@ -638,5 +778,73 @@ describe('app:notify', () => {
     click()
 
     expect(vi.mocked(raise)).toHaveBeenCalledWith(fakeMain)
+  })
+})
+
+describe('the note recovery journal', () => {
+  const journalRuntime = () => ({
+    readConversationNoteJournal: vi.fn((): string | null => 'J'),
+    compareConversationNoteJournal: vi.fn((): { matched: boolean; current: string | null } => ({
+      matched: false,
+      current: 'B',
+    })),
+  })
+
+  it('refuses a sender that is not a Chorus window, without touching the store', () => {
+    const runtime = journalRuntime()
+    const reply = answerConversationNoteJournal(runtime, false, {
+      op: 'read',
+      conversationId: 'c1',
+    })
+    expect(reply.ok).toBe(false)
+    expect(runtime.readConversationNoteJournal).not.toHaveBeenCalled()
+  })
+
+  it('refuses malformed and oversized requests', () => {
+    const runtime = journalRuntime()
+    const refused: unknown[] = [
+      undefined,
+      { op: 'read' },
+      { op: 'delete', conversationId: 'c1' },
+      { op: 'read', conversationId: 'c1', extra: true },
+      { op: 'compare', conversationId: 'c1', expected: null },
+      { op: 'compare', conversationId: 'c1', expected: null, next: 'x'.repeat(30_000) },
+      { op: 'read', conversationId: 'x'.repeat(200) },
+    ]
+    for (const request of refused) {
+      expect(answerConversationNoteJournal(runtime, true, request).ok).toBe(false)
+    }
+    expect(runtime.readConversationNoteJournal).not.toHaveBeenCalled()
+    expect(runtime.compareConversationNoteJournal).not.toHaveBeenCalled()
+  })
+
+  it('answers a read and an atomic compare with the store’s own result', () => {
+    const runtime = journalRuntime()
+    const read = answerConversationNoteJournal(runtime, true, { op: 'read', conversationId: 'c1' })
+    expect(read).toEqual({ ok: true, matched: true, current: 'J' })
+    expect(
+      answerConversationNoteJournal(runtime, true, {
+        op: 'compare',
+        conversationId: 'c1',
+        expected: 'A',
+        next: null,
+      })
+    ).toEqual({ ok: true, matched: false, current: 'B' })
+    expect(runtime.compareConversationNoteJournal).toHaveBeenCalledWith('c1', 'A', null)
+  })
+
+  it('turns a store failure into a bounded failure instead of throwing', () => {
+    const runtime = journalRuntime()
+    runtime.compareConversationNoteJournal.mockImplementation(() => {
+      throw new Error('x'.repeat(5_000))
+    })
+    const reply = answerConversationNoteJournal(runtime, true, {
+      op: 'compare',
+      conversationId: 'c1',
+      expected: null,
+      next: 'J',
+    })
+    expect(reply.ok).toBe(false)
+    if (!reply.ok) expect(reply.error.length).toBeLessThanOrEqual(512)
   })
 })

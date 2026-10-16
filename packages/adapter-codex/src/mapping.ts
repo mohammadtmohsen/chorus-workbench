@@ -125,13 +125,17 @@ export function mapNotification(n: Notification, ctx: MapContext): AgentEvent | 
       }
 
     case 'turn/plan/updated': {
-      const plan = (p['plan'] ?? p) as { steps?: ThreadItem['steps'] }
+      const listed = p['plan']
+      const steps: NonNullable<ThreadItem['steps']> = Array.isArray(listed)
+        ? (listed as NonNullable<ThreadItem['steps']>)
+        : (((listed ?? p) as { steps?: ThreadItem['steps'] }).steps ?? [])
       return {
         ...base,
         type: 'plan.updated',
-        steps: (plan.steps ?? []).map((s) => ({
+        steps: steps.map((s) => ({
           text: s.text ?? s.step ?? '',
           done: s.completed === true || s.status === 'completed',
+          active: s.status === 'inProgress' || s.status === 'in_progress',
         })),
       }
     }
@@ -547,6 +551,17 @@ export function mergeRateLimits(
  * absent, not as garbage.
  */
 /** A plain object, or an empty one — a sparse update may omit anything. */
+export function usageBlockOf(method: string, params: unknown): { readonly resetsAt: null } | null {
+  const p = record(params)
+  const error =
+    method === 'error' && p['willRetry'] !== true
+      ? record(p['error'])
+      : method === 'turn/completed'
+        ? record(record(p['turn'])['error'])
+        : record(null)
+  return error['codexErrorInfo'] === 'usageLimitExceeded' ? { resetsAt: null } : null
+}
+
 function record(value: unknown): Record<string, unknown> {
   return typeof value === 'object' && value !== null ? (value as Record<string, unknown>) : {}
 }

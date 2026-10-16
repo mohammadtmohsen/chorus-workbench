@@ -2,11 +2,12 @@
 
 ## Status
 
-| Unit           | Result                                                |
-| -------------- | ----------------------------------------------------- |
-| Scope          | Make the pictured Capture setup section scrollable    |
-| Implementation | Written and diff reviewed; runtime behavior unverified |
-| Verification   | Build and installation passed; tests and live UI unverified |
+| Unit           | Result                                                                          |
+| -------------- | ------------------------------------------------------------------------------- |
+| Scope          | Make the pictured Capture setup section scrollable                              |
+| Implementation | Written and diff reviewed; runtime behavior unverified                          |
+| Verification   | Local build and installation passed; tests and live UI unverified               |
+| Run controls   | Written and diff reviewed: status, Edit command and editor inside Capture setup |
 
 ## Current / Issue
 
@@ -15,6 +16,8 @@ Capture setup is an unbounded `<details className="traffic-setup">` inside the f
 ## Proposed
 
 Use the existing command setup form's sizing pattern. Let Capture setup shrink, cap it at half the panel's height, and scroll overflowing content vertically. The section retains its native disclosure control and existing field labels. The header, request list and detail views keep their existing layout.
+
+Run status, Edit command and the command editor belong inside Capture setup. Closing the section hides them together. Run opens Capture setup when a command still needs configuration. The terminal's Run/Stop control and the capture-only header action retain their current behavior.
 
 ## Code Changes
 
@@ -45,3 +48,5 @@ The stylesheet diff was reviewed against `/private/tmp/traffic-setup-scroll-j2b6
 On 2026-10-11, the user requested build and installation. `pnpm exec turbo run build --filter=@chorus/desktop` succeeded. `node build/package-local.mjs` packaged the arm64 app with the `Chorus Local Dev` signature. The installer copied it to `/Applications/Chorus.app` and completed its code-signature verification. Both commands exited 0.
 
 Installation used `CHORUS_INSTALL_KEEP_RUNNING=1`, retaining the current session and moving its old bundle to `/Applications/Chorus.app.replaced-1791721277776`. Quit and reopen `/Applications/Chorus.app` to use the new build. Tests, standalone typecheck gates and live UI verification were not run.
+
+On 2026-10-15, the run status, Edit command control and command editor were moved into Capture setup. The dependency build, signed arm64 packaging and installation of this revision passed. The current session was kept running. A relaunch loads the update; tests and live UI checks remain unrun.

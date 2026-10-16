@@ -332,13 +332,16 @@ const api: ChorusWorkbenchApi = {
       void Promise.resolve()
         .then(handler)
         .then(
-          () => ipcRenderer.send(STORAGE_FLUSH_RESULT_CHANNEL, requestId, null),
-          (error: unknown) =>
+          () => {
+            ipcRenderer.send(STORAGE_FLUSH_RESULT_CHANNEL, requestId, null)
+          },
+          (error: unknown) => {
             ipcRenderer.send(
               STORAGE_FLUSH_RESULT_CHANNEL,
               requestId,
               error instanceof Error ? error.message : String(error)
             )
+          }
         )
     })
   },

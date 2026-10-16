@@ -17,10 +17,10 @@ function connected(): {
   reply: (method: string, result: unknown) => void
   notify: (method: string, params: unknown) => void
 } {
-  let receive: (line: string) => void = () => {}
+  let receive: (line: string) => void = () => undefined
   let closed: Transport['onClose'] extends (handler: infer Handler) => void
     ? Handler
-    : never = () => {}
+    : never = () => undefined
   const sent: Request[] = []
   const transport: Transport = {
     send: (line) => {
@@ -32,7 +32,7 @@ function connected(): {
     onClose: (handler) => {
       closed = handler
     },
-    onStderr: () => {},
+    onStderr: () => undefined,
     close: () => {
       closed({ code: 0, signal: null })
     },
@@ -63,10 +63,14 @@ describe('Codex live steering', () => {
     const wire = connected()
     const first = wire.session.send({ text: 'Build the feature.' })
     const correction = wire.session.send({ text: 'Keep the change small.' })
-    await vi.waitFor(() => expect(wire.sent).toHaveLength(1))
+    await vi.waitFor(() => {
+      expect(wire.sent).toHaveLength(1)
+    })
     wire.reply('turn/start', { turn: { id: 'turn-1' } })
     await first
-    await vi.waitFor(() => expect(wire.sent).toHaveLength(2))
+    await vi.waitFor(() => {
+      expect(wire.sent).toHaveLength(2)
+    })
     expect(wire.sent[1]).toMatchObject({
       method: 'turn/steer',
       params: {
@@ -82,7 +86,9 @@ describe('Codex live steering', () => {
   it('starts a fresh turn after completion instead of steering a stale id', async () => {
     const wire = connected()
     const first = wire.session.send({ text: 'First task.' })
-    await vi.waitFor(() => expect(wire.sent).toHaveLength(1))
+    await vi.waitFor(() => {
+      expect(wire.sent).toHaveLength(1)
+    })
     wire.reply('turn/start', { turn: { id: 'turn-1' } })
     await first
     wire.notify('turn/completed', {
@@ -90,7 +96,9 @@ describe('Codex live steering', () => {
       turn: { id: 'turn-1', status: 'completed' },
     })
     const next = wire.session.send({ text: 'Next task.' })
-    await vi.waitFor(() => expect(wire.sent).toHaveLength(2))
+    await vi.waitFor(() => {
+      expect(wire.sent).toHaveLength(2)
+    })
     expect(wire.sent[1]?.method).toBe('turn/start')
     wire.reply('turn/start', { turn: { id: 'turn-2' } })
     await next
@@ -100,10 +108,14 @@ describe('Codex live steering', () => {
     const wire = connected()
     const first = wire.session.send({ text: 'Build the feature.' })
     const correction = wire.session.send({ text: 'Then change the UI.' })
-    await vi.waitFor(() => expect(wire.sent).toHaveLength(1))
+    await vi.waitFor(() => {
+      expect(wire.sent).toHaveLength(1)
+    })
     const stop = wire.session.interrupt()
     wire.reply('turn/start', { turn: { id: 'turn-1' } })
-    await vi.waitFor(() => expect(wire.sent).toHaveLength(2))
+    await vi.waitFor(() => {
+      expect(wire.sent).toHaveLength(2)
+    })
     expect(wire.sent[1]).toMatchObject({
       method: 'turn/interrupt',
       params: { threadId: 'main-thread', turnId: 'turn-1' },

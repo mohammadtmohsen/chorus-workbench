@@ -174,6 +174,7 @@ const answerStart = async (conversationId: string, outcome: Outcome) => {
 }
 
 beforeEach(() => {
+  localStorage.clear()
   begins.length = 0
   awaits.clear()
   reads.length = 0
@@ -304,20 +305,107 @@ describe('opening a chat', () => {
 
   it('carries a forwarded chat and leaves its source open', async () => {
     const source: SessionInfo = begun('s1')
+    localStorage.setItem('chorus:message-mode:s1', 'discussion')
     const h = harness({ kind: 'main' }, [source])
-    h.startIn('p1', { continueFrom: 's1' })
+    h.startIn('p1', { continueFrom: 's1', objective: 'Fix API retries', sourceEventIds: ['e7'] })
 
     expect(chorus.beginConversation).toHaveBeenCalledWith({
       projectId: 'p1',
       profileId: 'read-only',
       continueFrom: 's1',
+      objective: 'Fix API retries',
+      sourceEventIds: ['e7'],
     })
     await answerBegin(0, 'c1')
+    expect(h.session('c1')).not.toHaveProperty('initialDraft')
+    expect(localStorage.getItem('chorus:message-mode:c1')).toBe('discussion')
     expect(store.adoptConversation).toHaveBeenCalledWith('p1', 'c1')
     await answerStart('c1', ready('c1', ['claude']))
     expect(h.finishEnd).not.toHaveBeenCalled()
     expect(store.replaceConversation).not.toHaveBeenCalled()
     expect(h.session('s1')).toBe(source)
+  })
+})
+
+describe('Forward startup feedback', () => {
+  it('reports failure to the dialog, preserves the source and allows retry', async () => {
+    const source = begun('s1')
+    const h = harness({ kind: 'main' }, [source])
+    const onSettled = vi.fn()
+    const options = { continueFrom: 's1', objective: 'Fix API retries', onSettled }
+    h.startIn('p1', options)
+    await answerBegin(0, 'c1')
+    expect(onSettled).not.toHaveBeenCalled()
+    await answerStart('c1', { status: 'failed', message: 'Provider unavailable' })
+    expect(onSettled).toHaveBeenLastCalledWith(new Error('Provider unavailable'))
+    expect(h.reportError).not.toHaveBeenCalled()
+    expect(h.session('c1')).toBeUndefined()
+    expect(h.session('s1')).toBe(source)
+
+    h.startIn('p1', options)
+    await answerBegin(1, 'c2')
+    await answerStart('c2', ready('c2', ['codex']))
+    expect(onSettled).toHaveBeenLastCalledWith(null)
+    expect(onSettled).toHaveBeenCalledTimes(2)
+    expect(h.finishEnd).not.toHaveBeenCalled()
+  })
+
+  it('keeps a successful child when closing the dialog aborts its old signal', async () => {
+    const h = harness({ kind: 'main' }, [begun('s1')])
+    const controller = new AbortController()
+    const onSettled = vi.fn(() => {
+      controller.abort()
+    })
+    h.startIn('p1', {
+      continueFrom: 's1',
+      objective: 'Fix API retries',
+      signal: controller.signal,
+      onSettled,
+    })
+    await answerBegin(0, 'c1')
+    await answerStart('c1', ready('c1', ['codex']))
+    expect(onSettled).toHaveBeenCalledWith(null)
+    expect(h.finishEnd).not.toHaveBeenCalled()
+    expect(h.session('c1')?.starting).toBe(false)
+  })
+
+  it('closes a cancelled child whose begin reply has not arrived', async () => {
+    const h = harness({ kind: 'main' }, [begun('s1')])
+    const controller = new AbortController()
+    h.startIn('p1', {
+      continueFrom: 's1',
+      objective: 'Fix API retries',
+      signal: controller.signal,
+      onSettled: vi.fn(),
+    })
+    act(() => {
+      controller.abort()
+    })
+    await answerBegin(0, 'c1')
+    expect(h.finishEnd).toHaveBeenCalledWith('c1')
+    expect(chorus.awaitStart).not.toHaveBeenCalled()
+    expect(store.adoptConversation).not.toHaveBeenCalled()
+    expect(h.session('c1')).toBeUndefined()
+    expect(h.session('s1')).toBeDefined()
+  })
+
+  it('closes a pending child immediately and ignores late readiness after cancellation', async () => {
+    const h = harness({ kind: 'main' }, [begun('s1')])
+    const controller = new AbortController()
+    h.startIn('p1', {
+      continueFrom: 's1',
+      objective: 'Fix API retries',
+      signal: controller.signal,
+      onSettled: vi.fn(),
+    })
+    await answerBegin(0, 'c1')
+    act(() => {
+      controller.abort()
+    })
+    expect(h.finishEnd).toHaveBeenCalledWith('c1')
+    await answerStart('c1', ready('c1', ['codex']))
+    expect(h.session('c1')).toBeUndefined()
+    expect(h.session('s1')).toBeDefined()
   })
 })
 
@@ -336,9 +424,11 @@ describe('restarting a chat', () => {
   it('keeps the source in its box while booting, then swaps into that same box', async () => {
     const h = harness({ kind: 'main' }, [begun('s1')])
     h.startIn('p1', { replacing: 's1' })
+    expect(h.session('s1')?.restarting).toBe(true)
     await answerBegin(0, 'c1')
 
     expect(h.session('s1')).toBeDefined()
+    expect(h.session('s1')?.restarting).toBe(true)
     expect(h.session('c1')?.starting).toBe(true)
     expect(store.openProject).not.toHaveBeenCalled()
     expect(store.adoptConversation).not.toHaveBeenCalled()
@@ -391,6 +481,7 @@ describe('restarting a chat', () => {
 
     expect(h.finishEnd).not.toHaveBeenCalled()
     expect(h.session('s1')).toBeDefined()
+    expect(h.session('s1')?.restarting).toBe(false)
     expect(h.session('c1')).toBeUndefined()
     expect(store.replaceConversation).not.toHaveBeenCalled()
     expect(store.adoptConversation).not.toHaveBeenCalled()
@@ -407,6 +498,7 @@ describe('restarting a chat', () => {
     expect(h.finishEnd).toHaveBeenCalledWith('c1')
     expect(h.session('c1')).toBeUndefined()
     expect(h.session('s1')).toBeDefined()
+    expect(h.session('s1')?.restarting).toBe(false)
     expect(h.reportError).toHaveBeenCalledWith(new Error('the window lost main'))
     expect(h.view.result.current.starting).toBe(false)
 
@@ -691,7 +783,7 @@ describe('what other windows and late answers say', () => {
     reads.at(-1)?.resolve(snapshot)
     await settle()
     expect(h.session('c1')?.starting).toBe(true)
-    expect(h.session('s1')).toBe(source)
+    expect(h.session('s1')).toEqual({ ...source, restarting: true })
     expect(store.adoptConversation).not.toHaveBeenCalled()
 
     await answerStart('c1', ready('c1', ['claude']))

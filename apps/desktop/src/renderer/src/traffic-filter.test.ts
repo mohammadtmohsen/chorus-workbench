@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { TrafficRowShape } from '../../shared/ipc.js'
-import { filterRows, followsRows, outcomeOf, PAGE, pageOf } from './traffic-filter.js'
+import { filterRows, followsRows, outcomeOf, PAGE, pageOf, pathOf } from './traffic-filter.js'
 
 type HttpRow = Extract<TrafficRowShape, { source: 'http' }>
 type LogRow = Extract<TrafficRowShape, { source: 'log' }>
@@ -38,6 +38,42 @@ describe('outcomeOf', () => {
     expect(outcomeOf(row(5))).toBe('read')
     expect(outcomeOf(row(6, { status: null, parsed: false }))).toBe('pending')
     expect(outcomeOf(row(7, { status: null, aborted: true }))).toBe('aborted')
+  })
+})
+
+describe('pathOf', () => {
+  const prefix = '/api/v1/provider-online'
+
+  it('hides a leading path prefix and keeps the query for absolute and relative URLs', () => {
+    const path = `${prefix}/contexts/POS-1/visits?page=2`
+    expect(pathOf(`https://example.com${path}`, prefix)).toBe('/contexts/POS-1/visits?page=2')
+    expect(pathOf(path, prefix)).toBe('/contexts/POS-1/visits?page=2')
+    expect(pathOf(`https://example.com${path}`)).toBe(path)
+  })
+
+  it('shows the root when the prefix matches the entire path', () => {
+    expect(pathOf(`https://example.com${prefix}`, prefix)).toBe('/')
+    expect(pathOf(`${prefix}?page=2`, prefix)).toBe('/?page=2')
+    expect(pathOf(`${prefix}/?page=2`, prefix)).toBe('/?page=2')
+  })
+
+  it('keeps different paths, partial segment matches and later occurrences intact', () => {
+    expect(pathOf(`${prefix}-admin/me`, prefix)).toBe(`${prefix}-admin/me`)
+    expect(pathOf(`/other${prefix}/me`, prefix)).toBe(`/other${prefix}/me`)
+    expect(pathOf('/api/mobile/v1/me', prefix)).toBe('/api/mobile/v1/me')
+  })
+
+  it('tolerates surrounding whitespace and trailing slashes', () => {
+    expect(pathOf(`${prefix}/me`, `  ${prefix}/  `)).toBe('/me')
+  })
+
+  it('keeps the complete path for blank, root or invalid path prefixes', () => {
+    const path = `${prefix}/me?next=/api/v1`
+    expect(pathOf(path, '   ')).toBe(path)
+    expect(pathOf(path, '/')).toBe(path)
+    expect(pathOf(path, 'api/v1')).toBe(path)
+    expect(pathOf(path, `${prefix}/me?next=`)).toBe(path)
+    expect(pathOf(path, `${prefix}/me#fragment`)).toBe(path)
   })
 })
 

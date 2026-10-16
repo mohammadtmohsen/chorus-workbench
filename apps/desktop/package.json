@@ -135,6 +135,7 @@
     "@xterm/xterm": "6.1.0-beta.302",
     "better-sqlite3": "^13.0.2",
     "i18next": "^26.3.6",
+    "mermaid": "12.2.0",
     "monaco-editor": "^0.56.0",
     "node-pty": "^1.1.0",
     "react-i18next": "^17.0.11",

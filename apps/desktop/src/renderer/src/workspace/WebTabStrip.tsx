@@ -8,6 +8,10 @@ import { useWorkspaceStore } from './store.js'
 import { railSlotAt } from './useTabDrag.js'
 import { runWebCommand, useWebPageStates } from './web-pages.js'
 
+function nonEmpty(text: string | null | undefined): string | undefined {
+  return text === null || text === undefined || text === '' ? undefined : text
+}
+
 function pageHost(url: string | null | undefined): string {
   if (url == null || url === 'about:blank') return ''
   try {
@@ -214,7 +218,8 @@ export function WebTabStrip(): React.JSX.Element {
     }
   }, [webTabs.tabs.length])
   const activePage = webTabs.activeId === null ? undefined : pages[webTabs.activeId]
-  const activeTitle = activePage?.title || pageHost(activePage?.url) || t('webTabs.newTab')
+  const activeTitle =
+    nonEmpty(activePage?.title) ?? nonEmpty(pageHost(activePage?.url)) ?? t('webTabs.newTab')
   const close = (id: string): void => {
     useWorkspaceStore.getState().closeWebTab(id)
   }

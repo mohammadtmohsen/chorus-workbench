@@ -967,8 +967,7 @@ export function clampTrafficWidth(width: number): number {
 export function normalizeTrafficPanel(panel: TrafficPanelState): TrafficPanelState {
   return {
     ...panel,
-    width:
-      panel.widthCustomized === true ? clampTrafficWidth(panel.width) : TRAFFIC_WIDTH.default,
+    width: panel.widthCustomized === true ? clampTrafficWidth(panel.width) : TRAFFIC_WIDTH.default,
   }
 }
 

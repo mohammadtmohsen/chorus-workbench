@@ -52,6 +52,7 @@ function server(
 ): {
   adapter: CodexAdapter
   sent: () => Record<string, unknown>[]
+  notify: (method: string, params: unknown) => void
 } {
   const sent: Record<string, unknown>[] = []
   let onLine: ((line: string) => void) | null = null
@@ -104,6 +105,9 @@ function server(
   return {
     adapter: new CodexAdapter({ now: () => 1_000, createTransport: () => transport }),
     sent: () => sent,
+    notify: (method, params) => {
+      onLine?.(JSON.stringify({ method, params }))
+    },
   }
 }
 
@@ -214,10 +218,11 @@ describe('setEffort', () => {
   it('carries to every later turn, not just the next one', async () => {
     // The failure this exists to stop: effort lives on `turn/start`, so a session
     // that applied it once would silently revert to the model's default.
-    const { adapter, sent } = server()
+    const { adapter, sent, notify } = server()
     const session = await adapter.start(OPTS)
     await session.setEffort?.('low')
     await session.send({ text: 'one' })
+    notify('turn/completed', { threadId: 'thr_1', turn: { id: 'turn_1', status: 'completed' } })
     await session.send({ text: 'two' })
     expect(turns(sent()).map((t) => t['effort'])).toEqual(['low', 'low'])
   })

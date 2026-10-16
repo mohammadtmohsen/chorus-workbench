@@ -176,18 +176,29 @@ describe('interrupt', () => {
     const s = session()
     s.emit({ type: 'turn.started', turnRef: 't1' })
     await service.interrupt()
+    s.emit({
+      type: 'error',
+      message: '[ede_diagnostic] result_type=user last_content_type=n/a stop_reason=null',
+      recoverable: false,
+    })
     s.emit({ type: 'turn.completed', turnRef: 't1', status: 'failed' })
     s.end()
     await service.drain()
 
     const completed = store.read(CONV, { types: ['turn.completed'] })[0]
     expect(completed?.payload).toMatchObject({ status: 'interrupted', userInitiated: true })
+    expect(store.read(CONV, { types: ['error.raised'] })).toEqual([])
     expect(s.interruptRequested).toBe(true)
   })
 
   it('leaves a genuine failure reported as failed', async () => {
     const s = session()
     s.emit({ type: 'turn.started', turnRef: 't1' })
+    s.emit({
+      type: 'error',
+      message: '[ede_diagnostic] result_type=user last_content_type=n/a stop_reason=null',
+      recoverable: false,
+    })
     s.emit({ type: 'turn.completed', turnRef: 't1', status: 'failed' })
     s.end()
     await service.drain()
@@ -196,6 +207,7 @@ describe('interrupt', () => {
       status: 'failed',
       userInitiated: false,
     })
+    expect(store.read(CONV, { types: ['error.raised'] })).toHaveLength(1)
   })
 })
 

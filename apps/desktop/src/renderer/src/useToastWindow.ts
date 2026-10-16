@@ -2,7 +2,7 @@ import { useEffect, useLayoutEffect, useRef, useState, type RefObject } from 're
 import { TOAST_WINDOW_NAME } from '../../shared/toast-window-ipc.js'
 import type { WorkbenchRect } from '../../shared/workbench-ipc.js'
 
-type ToastLayer = {
+interface ToastLayer {
   host: HTMLDivElement | null
   anchor: RefObject<HTMLDivElement | null>
   stack: RefObject<HTMLDivElement | null>
@@ -24,7 +24,12 @@ function cardRegions(cards: HTMLElement, popup: Window): WorkbenchRect[] {
     const right = Math.min(viewport.width, Math.ceil(x + width))
     const bottom = Math.min(viewport.height, Math.ceil(y + height))
     if (right > left && bottom > top) {
-      regions.push({ x: left, y: top, width: Math.floor(right - left), height: Math.floor(bottom - top) })
+      regions.push({
+        x: left,
+        y: top,
+        width: Math.floor(right - left),
+        height: Math.floor(bottom - top),
+      })
     }
   }
   for (const card of cards.querySelectorAll<HTMLElement>('.toast')) {
@@ -96,7 +101,7 @@ export function useToastWindow(active: boolean, onClosed: () => void): ToastLaye
 
     rememberFocus.current = (): void => {
       const element = childDocument.activeElement as HTMLElement | null
-      if (element === null || !element.closest('.toast')) return
+      if (!element?.closest('.toast')) return
       const input = element.matches('input, textarea')
         ? (element as HTMLInputElement | HTMLTextAreaElement)
         : null
@@ -173,7 +178,11 @@ export function useToastWindow(active: boolean, onClosed: () => void): ToastLaye
           const saved = restoring
           if (!saved.element.isConnected) return
           saved.element.focus({ preventScroll: true })
-          if (saved.start !== null && saved.end !== null && saved.element.matches('input, textarea')) {
+          if (
+            saved.start !== null &&
+            saved.end !== null &&
+            saved.element.matches('input, textarea')
+          ) {
             const input = saved.element as HTMLInputElement | HTMLTextAreaElement
             input.setSelectionRange(saved.start, saved.end, saved.direction ?? undefined)
           }
@@ -203,21 +212,21 @@ export function useToastWindow(active: boolean, onClosed: () => void): ToastLaye
         stylesReady = true
         place()
       }
-      const styles = Array.from(document.head.querySelectorAll('style, link[rel="stylesheet"]')).map(
-        (source) => {
-          const clone = source.cloneNode(true)
-          if (source instanceof HTMLLinkElement && clone instanceof HTMLLinkElement) {
-            clone.href = source.href
-            clone.disabled = source.disabled
-            if (!clone.disabled) {
-              pending += 1
-              clone.addEventListener('load', loaded, { once: true })
-              clone.addEventListener('error', loaded, { once: true })
-            }
+      const styles = Array.from(
+        document.head.querySelectorAll('style, link[rel="stylesheet"]')
+      ).map((source) => {
+        const clone = source.cloneNode(true)
+        if (source instanceof HTMLLinkElement && clone instanceof HTMLLinkElement) {
+          clone.href = source.href
+          clone.disabled = source.disabled
+          if (!clone.disabled) {
+            pending += 1
+            clone.addEventListener('load', loaded, { once: true })
+            clone.addEventListener('error', loaded, { once: true })
           }
-          return clone
         }
-      )
+        return clone
+      })
       stylesReady = pending === 0
       childDocument.head.replaceChildren(...styles)
       childDocument.title = document.title

@@ -5,8 +5,8 @@
 | Unit           | Result                                                               |
 | -------------- | -------------------------------------------------------------------- |
 | Scope          | Separate Traffic and Terminal columns with independent shrink arrows |
-| Implementation | Written and diff reviewed; runtime behavior unverified                |
-| Verification   | Not run; the user has not requested tests                             |
+| Implementation | Written and diff reviewed; runtime behavior unverified               |
+| Verification   | Not run; the user has not requested tests                            |
 
 ## Current / Issue
 

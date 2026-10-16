@@ -6,11 +6,15 @@ import {
   MIN_TRAFFIC_REQUEST_FRACTION,
   type TrafficRowShape,
 } from '../../shared/ipc.js'
-import { BODY_PAGE, type TrafficDetail, type TrafficDetailResult } from '../../shared/traffic-ipc.js'
+import {
+  BODY_PAGE,
+  type TrafficDetail,
+  type TrafficDetailResult,
+} from '../../shared/traffic-ipc.js'
 import { maskHeaders } from '../../shared/traffic-mask.js'
 import { bytesFromBase64, curlCommand, textOf } from './traffic-body.js'
 import { TrafficBody } from './TrafficBody.js'
-import { isPending, statusClassOf } from './traffic-filter.js'
+import { isPending } from './traffic-filter.js'
 import { createSignal, useSignal } from './workspace/signal.js'
 
 const bodyLayout = createSignal({ fraction: DEFAULT_TRAFFIC_REQUEST_FRACTION, failed: false })
@@ -42,7 +46,10 @@ function startBodyLayout(): void {
 
 function changeBodyFraction(fraction: number): void {
   if (!Number.isFinite(fraction)) return
-  const next = Math.max(MIN_TRAFFIC_REQUEST_FRACTION, Math.min(MAX_TRAFFIC_REQUEST_FRACTION, fraction))
+  const next = Math.max(
+    MIN_TRAFFIC_REQUEST_FRACTION,
+    Math.min(MAX_TRAFFIC_REQUEST_FRACTION, fraction)
+  )
   if (next === bodyLayout.get().fraction) return
   bodyLayoutRevision += 1
   bodyLayout.set({
@@ -150,14 +157,14 @@ export function TrafficRequestInspector(props: {
 
   const moveResize = (event: React.PointerEvent<HTMLDivElement>): void => {
     const active = resizing.current
-    if (active === null || active.pointerId !== event.pointerId) return
+    if (active?.pointerId !== event.pointerId) return
     queuedFraction.current = active.fraction + (event.clientX - active.startX) / active.width
     resizeFrame.current ??= requestAnimationFrame(flushResize)
   }
 
   const finishResize = (event: React.PointerEvent<HTMLDivElement>): void => {
     const active = resizing.current
-    if (active === null || active.pointerId !== event.pointerId) return
+    if (active?.pointerId !== event.pointerId) return
     flushResize()
     resizing.current = null
     setDragging(false)
@@ -355,21 +362,6 @@ export function TrafficRequestInspector(props: {
     detail?.responseBody.state === 'pending' ||
     detail?.responseBody.state === 'streaming'
 
-  /*
-   * **No early return, because the header no longer needs the detail.**
-   *
-   * It used to: everything above the panes was read from `detail`, so a row
-   * whose read had not landed yet rendered "Loading" and nothing else. That is
-   * fine when a row is chosen by a click and nobody is watching, and wrong now
-   * that the arrow keys move the selection — passing through six rows would
-   * flash six identical Loading panes with no way to tell which row you were on.
-   *
-   * The header is drawn from `row`, which the panel already has synchronously
-   * and which says the same thing: `record` sets the snapshot's status and the
-   * request line from the same values the detail carries. So the identity of
-   * the request changes on the keystroke, and only the panes wait.
-   */
-
   const requestCurl = useMemo(
     () =>
       detail === null
@@ -399,50 +391,6 @@ export function TrafficRequestInspector(props: {
 
   return (
     <section className="traffic-inspector" aria-label={t('traffic.detailTitle')}>
-      {/*
-        The same attributes a row carries, on the same class names, because the
-        colours are keyed on the attributes rather than the classes. Without
-        them every rule that tints a method, reddens a failed endpoint or colours
-        a status simply did not match here — the header was grey whatever the row
-        said, which is a header describing a call it does not look like.
-
-        `data-class` goes on the header rather than on the status cell, for the
-        reason it goes on the row button rather than on the cell there: it is one
-        fact about the whole line, and the endpoint reads it too.
-      */}
-      <header className="traffic-head" data-class={statusClassOf(row)}>
-        {/*
-          **One string, edge to edge, rather than three cells in a row.**
-
-          A flex row put the verb and the status in a column of their own beside
-          a wrapping endpoint, which left the rest of that column empty — the gap
-          under `GET 200` in the screenshot. As one run of inline text they flow
-          as a single paragraph: the endpoint's continuation lines start at the
-          header's left edge like any wrapped sentence, and nothing is left
-          blank.
-
-          The `{' '}` between them is not decoration. JSX drops whitespace that
-          contains a newline between two elements, so without it the three run
-          together as `GET200http://…`.
-
-          `data-class` stays on the header and all three parts keep reading it;
-          inline text is still a descendant.
-        */}
-        <span className="traffic-method" data-method={row.m.toUpperCase()}>
-          {row.m}
-        </span>{' '}
-        <span className="traffic-status">
-          {pending ? (
-            <span className="traffic-pending" role="img" aria-label={t('traffic.pending')} />
-          ) : (
-            (row.status ?? '—')
-          )}
-        </span>{' '}
-        <span className="traffic-url" title={row.u}>
-          {row.u}
-        </span>
-      </header>
-
       {layout.failed && (
         <p className="traffic-stopped" role="alert">
           {t('traffic.paneSizesSaveFailed')}
@@ -458,7 +406,7 @@ export function TrafficRequestInspector(props: {
           className="traffic-panes"
           ref={panesRef}
           style={{
-            gridTemplateColumns: `minmax(0, ${requestFraction}fr) 9px minmax(0, ${1 - requestFraction}fr)`,
+            gridTemplateColumns: `minmax(0, ${String(requestFraction)}fr) 9px minmax(0, ${String(1 - requestFraction)}fr)`,
             gap: 0,
             userSelect: dragging ? 'none' : undefined,
           }}

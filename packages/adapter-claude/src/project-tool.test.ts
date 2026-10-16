@@ -1,14 +1,62 @@
 import type { Options, PermissionResult, Query } from '@anthropic-ai/claude-agent-sdk'
-import type { ProjectReader, SessionOpts } from '@chorus/agent-protocol'
+import type { ProjectReader, SessionOpts, TranscriptRequest } from '@chorus/agent-protocol'
 import { AsyncQueue } from '@chorus/shared'
 import { describe, expect, it } from 'vitest'
 import { ClaudeAdapter } from './claude-adapter.js'
 import { PROJECT_TOOL_IDS, projectTools } from './project-tool.js'
+import { READ_TRANSCRIPT_TOOL, transcriptTools } from './transcript-tool.js'
 
 const BASE: SessionOpts = {
   cwd: process.cwd(),
   sandbox: { mode: 'readOnly', writableRoots: [], networkAccess: false },
 }
+
+describe('Discussion tool restrictions', () => {
+  it('isolates inherited tools while allowing file inspection', async () => {
+    const options = await optionsFor({ ...BASE, toolPolicy: 'readOnly' })
+    expect(options.tools).toEqual(['Read', 'Glob', 'Grep'])
+    expect(options.settingSources).toEqual([])
+    expect(options.strictMcpConfig).toBe(true)
+    for (const name of ['Read', 'Glob', 'Grep']) {
+      expect(await ask(options, name)).toMatchObject({ behavior: 'allow' })
+    }
+    for (const name of [
+      'Edit',
+      'Write',
+      'NotebookEdit',
+      'Bash',
+      'Agent',
+      'Task',
+      'ExitPlanMode',
+      'mcp__external__write',
+    ]) {
+      expect(await ask(options, name), name).toMatchObject({ behavior: 'deny' })
+    }
+  })
+
+  it('blocks a plan-file write even when provider permissions would bypass the callback', async () => {
+    const options = await optionsFor({ ...BASE, toolPolicy: 'readOnly' })
+    const hook = options.hooks?.PreToolUse?.[0]?.hooks[0]
+    if (hook === undefined) throw new Error('Missing read-only tool hook')
+    const result = await hook(
+      {
+        hook_event_name: 'PreToolUse',
+        session_id: 'discussion',
+        transcript_path: '/tmp/discussion.jsonl',
+        cwd: process.cwd(),
+        permission_mode: 'bypassPermissions',
+        tool_name: 'Write',
+        tool_use_id: 'write-plan',
+        tool_input: { file_path: 'docs/plans/feature.md', content: 'Plan' },
+      },
+      'write-plan',
+      { signal: new AbortController().signal }
+    )
+    expect(result).toMatchObject({
+      hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'deny' },
+    })
+  })
+})
 
 interface Asked {
   readonly terminal: number[]
@@ -175,5 +223,75 @@ describe('the tool handlers', () => {
     const result = await handler(asked, 'read_terminal')({ lines: 401 }, undefined)
     expect(result.isError).toBe(true)
     expect(asked.terminal).toEqual([])
+  })
+})
+
+describe('the chorus_transcript server', () => {
+  const quietAdapter = (): ClaudeAdapter =>
+    new ClaudeAdapter({
+      createQuery: () => {
+        const messages = new AsyncQueue<unknown>()
+        return {
+          [Symbol.asyncIterator]: () => messages[Symbol.asyncIterator](),
+          interrupt: () => Promise.resolve(undefined),
+          setModel: () => Promise.resolve(),
+          close: () => {
+            messages.close()
+          },
+        } as unknown as Query
+      },
+    })
+
+  const readHandler = (asked: TranscriptRequest[]) => {
+    const found = transcriptTools((request) => {
+      asked.push(request)
+      return 'records'
+    }).find((each) => each.name === 'read_transcript')
+    if (found === undefined) throw new Error('no read_transcript')
+    return found.handler as (
+      args: unknown,
+      extra: unknown
+    ) => Promise<{ content: { type: string; text: string }[]; isError?: boolean }>
+  }
+
+  it('reads with every field of the request', async () => {
+    const asked: TranscriptRequest[] = []
+    const request = {
+      skip: 2,
+      count: 5,
+      conversationId: 'conv-1',
+      query: 'retry',
+      eventId: 'evt-9',
+      offset: 10,
+      scope: 'snapshot' as const,
+    }
+    expect(await readHandler(asked)(request, {})).toEqual({
+      content: [{ type: 'text', text: 'records' }],
+    })
+    expect(asked).toEqual([request])
+  })
+
+  it('reports invalid arguments as an error without reading', async () => {
+    const asked: TranscriptRequest[] = []
+    const result = await readHandler(asked)({ count: 99 }, {})
+    expect(result.isError).toBe(true)
+    expect(result.content[0]?.text).toMatch(/^Invalid arguments: /)
+    expect(asked).toEqual([])
+  })
+
+  it('allows the read without asking', async () => {
+    const options = await optionsFor({ ...BASE, transcript: () => 'history' })
+    expect(await settledWithin(ask(options, READ_TRANSCRIPT_TOOL))).toEqual({
+      behavior: 'allow',
+      updatedInput: { lines: 5 },
+    })
+  })
+
+  it('marks a session registered only when it was given a reader', async () => {
+    const adapter = quietAdapter()
+    expect((await adapter.start({ ...BASE, transcript: () => 'history' })).transcriptTool).toBe(
+      'registered'
+    )
+    expect((await adapter.start(BASE)).transcriptTool).toBeUndefined()
   })
 })

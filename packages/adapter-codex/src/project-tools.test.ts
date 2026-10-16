@@ -3,10 +3,13 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
   NO_PROJECT_READER,
+  NO_TRANSCRIPT_READER,
   type AgentEvent,
   type AgentSession,
   type ProjectReader,
   type SessionOpts,
+  type TranscriptReader,
+  type TranscriptRequest,
 } from '@chorus/agent-protocol'
 import { describe, expect, it, vi } from 'vitest'
 import { CodexAdapter } from './codex-adapter.js'
@@ -18,6 +21,69 @@ const BASE: SessionOpts = {
   cwd: CWD,
   sandbox: { mode: 'readOnly', writableRoots: [], networkAccess: false },
 }
+
+describe('Discussion session restrictions', () => {
+  it('disables inherited external tools and applies a read-only sandbox to every turn', async () => {
+    const { adapter, connections } = fakeCodex((method) =>
+      method === 'config/read'
+        ? {
+            result: {
+              config: {
+                mcp_servers: { external: {}, 'named.with.dots': {} },
+                computer_use: {
+                  macos: { bundle_ids: { 'com.apple.Terminal': 'allow' } },
+                  windows: { aumids: { Editor: 'allow' } },
+                },
+              },
+            },
+          }
+        : null
+    )
+    const session = await adapter.start({ ...BASE, toolPolicy: 'readOnly' })
+    const start = requests(connections[0], 'thread/start')[0]
+    expect(start).toMatchObject({
+      sandbox: 'read-only',
+      approvalPolicy: 'untrusted',
+      ephemeral: true,
+      config: {
+        'features.apps': false,
+        'features.plugins': false,
+        'features.multi_agent': false,
+        'features.hooks': false,
+        'features.browser_use': false,
+        'mcp_servers."external".enabled': false,
+        'mcp_servers."named.with.dots".enabled': false,
+        'computer_use.default_app_access': 'deny',
+        'computer_use.macos.bundle_ids."com.apple.Terminal"': 'deny',
+        'computer_use.windows.aumids."Editor"': 'deny',
+      },
+    })
+    await session.send({ text: 'Explain the current implementation.' })
+    await session.send({ text: 'Write docs/plans/feature.md.' })
+    const turns = requests(connections[0], 'turn/start')
+    expect(turns).toHaveLength(2)
+    for (const turn of turns) {
+      expect(turn).toMatchObject({
+        sandboxPolicy: { type: 'readOnly', networkAccess: false },
+        approvalPolicy: 'untrusted',
+      })
+    }
+    await session.close()
+  })
+
+  it('refuses to open a discussion when inherited tool configuration cannot be inspected', async () => {
+    const { adapter, connections } = fakeCodex((method) =>
+      method === 'config/read'
+        ? { error: { code: -32000, message: 'Configuration unavailable' } }
+        : null
+    )
+    await expect(adapter.start({ ...BASE, toolPolicy: 'readOnly' })).rejects.toThrow(
+      'Configuration unavailable'
+    )
+    expect(requests(connections[0], 'thread/start')).toHaveLength(0)
+    expect(connections[0]?.closed).toBe(true)
+  })
+})
 
 type Message = Record<string, unknown>
 
@@ -507,5 +573,182 @@ describe('dynamicToolCall items', () => {
         status: 'error',
       })
     }
+  })
+})
+
+describe('the chorus_transcript tool', () => {
+  const history =
+    (asked: TranscriptRequest[]): TranscriptReader =>
+    (request) => {
+      asked.push(request)
+      return `history ${String(request.skip)}`
+    }
+
+  const answered = async (
+    opts: SessionOpts,
+    params: Message
+  ): Promise<{ contentItems: { text: string }[]; success: boolean }> => {
+    const { adapter, connections } = fakeCodex()
+    await adapter.start(opts)
+    const connection = connections[0]
+    if (connection === undefined) throw new Error('no connection')
+    connection.push({ id: 9_101, method: 'item/tool/call', params })
+    const reply = await vi.waitFor(() => {
+      const found = connection.sent.find(
+        (message) => message['id'] === 9_101 && message['method'] === undefined
+      )
+      if (found === undefined) throw new Error('not answered yet')
+      return found
+    })
+    return reply['result'] as { contentItems: { text: string }[]; success: boolean }
+  }
+
+  const transcriptCall = {
+    threadId: 'thr_new',
+    turnId: 'turn_1',
+    callId: 'call_1',
+    namespace: 'chorus_transcript',
+    tool: 'read_transcript',
+  }
+
+  it('registers the namespace beside the project tools and reports it registered', async () => {
+    const { adapter, connections } = fakeCodex()
+    const session = await adapter.start({
+      ...BASE,
+      project: readerOf(fresh()),
+      transcript: history([]),
+    })
+    const tools = requests(connections[0], 'thread/start')[0]?.['dynamicTools'] as Message[]
+    expect(tools.map((tool) => tool['name'])).toEqual(['chorus_project', 'chorus_transcript'])
+    expect((tools[1]?.['tools'] as Message[]).map((tool) => [tool['type'], tool['name']])).toEqual([
+      ['function', 'read_transcript'],
+    ])
+    expect(session.transcriptTool).toBe('registered')
+    expect(await noticesOf(session)).toEqual([])
+  })
+
+  it('opts into the experimental API for a transcript reader alone', async () => {
+    const { adapter, connections } = fakeCodex()
+    const session = await adapter.start({ ...BASE, transcript: history([]) })
+    expect(requests(connections[0], 'initialize')[0]?.['capabilities']).toEqual({
+      experimentalApi: true,
+      requestAttestation: false,
+    })
+    const tools = requests(connections[0], 'thread/start')[0]?.['dynamicTools'] as Message[]
+    expect(tools.map((tool) => tool['name'])).toEqual(['chorus_transcript'])
+    expect(session.transcriptTool).toBe('registered')
+    expect(await noticesOf(session)).toEqual([])
+  })
+
+  it('says the tool is unavailable when the provider refuses dynamic tools', async () => {
+    for (const message of [TOOLS_GATED, UNKNOWN_TOOLS]) {
+      const { adapter, connections } = fakeCodex((method, _params, attempt) =>
+        method === 'thread/start' && attempt === 1 ? refusal(message) : null
+      )
+      const session = await adapter.start({ ...BASE, transcript: history([]) })
+      const starts = requests(connections[0], 'thread/start')
+      expect(starts, message).toHaveLength(2)
+      expect(starts[1]).not.toHaveProperty('dynamicTools')
+      expect(session.transcriptTool).toBe('unavailable')
+      expect(await noticesOf(session)).toEqual([])
+    }
+  })
+
+  it('says unavailable after the initialize fallback, and unconfirmed on resume and fork', async () => {
+    const refused = fakeCodex((method, _params, attempt) =>
+      method === 'initialize' && attempt === 1 ? refusal(UNKNOWN_CAPABILITY) : null
+    )
+    const fallback = await refused.adapter.start({ ...BASE, transcript: history([]) })
+    expect(requests(refused.connections[1], 'thread/start')[0]).not.toHaveProperty('dynamicTools')
+    expect(fallback.transcriptTool).toBe('unavailable')
+
+    const { adapter } = fakeCodex()
+    const resumed = await adapter.resume('thr_saved', { ...BASE, transcript: history([]) })
+    expect(resumed.transcriptTool).toBe('unconfirmed')
+    const forked = await adapter.fork('thr_saved', {
+      ...BASE,
+      transcript: history([]),
+      inherits: 'config',
+    })
+    expect(forked.transcriptTool).toBe('unconfirmed')
+  })
+
+  it('leaves the state unset for a session with no reader', async () => {
+    const { adapter } = fakeCodex()
+    expect((await adapter.start(BASE)).transcriptTool).toBeUndefined()
+  })
+
+  it('answers through the reader with every field it parsed', async () => {
+    const asked: TranscriptRequest[] = []
+    const result = await answered(
+      { ...BASE, transcript: history(asked) },
+      {
+        ...transcriptCall,
+        arguments: {
+          query: 'retry',
+          eventId: 'evt-1',
+          offset: 4_096,
+          scope: 'updates',
+          conversationId: 'conv-1',
+        },
+      }
+    )
+    expect(result).toEqual({
+      contentItems: [{ type: 'inputText', text: 'history 0' }],
+      success: true,
+    })
+    expect(asked).toEqual([
+      {
+        skip: 0,
+        count: 20,
+        conversationId: 'conv-1',
+        query: 'retry',
+        eventId: 'evt-1',
+        offset: 4_096,
+        scope: 'updates',
+      },
+    ])
+  })
+
+  it('refuses invalid arguments without reading', async () => {
+    for (const args of [{ count: 0 }, { scope: 'everything' }, { pattern: '.*' }]) {
+      const asked: TranscriptRequest[] = []
+      const result = await answered(
+        { ...BASE, transcript: history(asked) },
+        { ...transcriptCall, arguments: args }
+      )
+      expect(result.success, JSON.stringify(args)).toBe(false)
+      expect(result.contentItems[0]?.text).toMatch(/^Invalid arguments: /)
+      expect(asked).toEqual([])
+    }
+  })
+
+  it('fails a transcript call on a session with no transcript reader', async () => {
+    const result = await answered(
+      { ...BASE, project: readerOf(fresh()) },
+      { ...transcriptCall, arguments: {} }
+    )
+    expect(result).toEqual({
+      contentItems: [{ type: 'inputText', text: NO_TRANSCRIPT_READER }],
+      success: false,
+    })
+  })
+
+  it('still routes project calls on a session that has both readers', async () => {
+    const read = fresh()
+    const result = await answered(
+      { ...BASE, project: readerOf(read), transcript: history([]) },
+      {
+        ...transcriptCall,
+        namespace: 'chorus_project',
+        tool: 'read_terminal',
+        arguments: { lines: 3 },
+      }
+    )
+    expect(result).toEqual({
+      contentItems: [{ type: 'inputText', text: 'last 3 lines' }],
+      success: true,
+    })
+    expect(read.terminal).toEqual([3])
   })
 })

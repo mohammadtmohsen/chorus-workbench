@@ -9,6 +9,7 @@ import type {
   HealthStatus,
   ModelChoice,
   SessionOpts,
+  TranscriptToolState,
   UserInputResponse,
 } from '@chorus/agent-protocol'
 import type { AgentId, ApprovalId, UserInputId } from '@chorus/shared'
@@ -73,6 +74,7 @@ const DEFAULT_CAPABILITIES: AgentCapabilities = {
 
 export class FakeAgentSession implements AgentSession {
   readonly sent: AgentInput[] = []
+  transcriptTool: TranscriptToolState
   readonly decisions: { id: ApprovalId; decision: ApprovalDecision }[] = []
   /** Mirrors the real requirement: we must know if *we* asked to stop (S3b). */
   interruptRequested = false
@@ -102,7 +104,9 @@ export class FakeAgentSession implements AgentSession {
     private readonly agentId: AgentId,
     private readonly models?: readonly ModelChoice[] | Error | undefined,
     readonly startedWith?: SessionOpts
-  ) {}
+  ) {
+    this.transcriptTool = startedWith?.transcript === undefined ? 'unavailable' : 'registered'
+  }
 
   send(input: AgentInput): Promise<void> {
     this.sent.push(input)

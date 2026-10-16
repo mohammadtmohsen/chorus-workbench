@@ -95,6 +95,7 @@ interface SdkMessageLike {
   total_cost_usd?: number
   errors?: string[]
   rate_limit_info?: {
+    status?: string
     /** The flat shape the SDK really sends. */
     rateLimitType?: string
     utilization?: number
@@ -157,7 +158,10 @@ export function mapSdkMessage(msg: SdkMessageLike, ctx: MapContext): AgentEvent[
     case 'result':
       return mapResult(msg, ctx)
 
+    case 'commands_changed':
+    case 'dev_intent':
     case 'tool_progress':
+    case 'vcs_state_changed':
       return []
 
     default:
@@ -248,6 +252,9 @@ const QUIET_SUBTYPES: ReadonlySet<string> = new Set([
   'session_state_changed',
   'control_request_progress',
   'compact_boundary',
+  'commands_changed',
+  'dev_intent',
+  'vcs_state_changed',
   /*
    * `task_updated` is a patch keyed on `task_id` alone — it carries no
    * `tool_use_id`, so there is nothing to correlate it with when the task began
@@ -727,9 +734,40 @@ function mapAssistant(
        */
       ...(described?.path === undefined ? {} : { path: described.path }),
     })
+
+    const nested = typeof msg.parent_tool_use_id === 'string' && msg.parent_tool_use_id !== ''
+    if (block.name === TODO_TOOL && !nested) {
+      const steps = todoSteps(block.input?.['todos'])
+      if (steps !== undefined) {
+        events.push({ ...base, seq: ctx.seq + events.length, type: 'plan.updated', steps })
+      }
+    }
   }
 
   return events
+}
+
+const TODO_TOOL = 'TodoWrite'
+
+function todoSteps(
+  value: unknown
+): { readonly text: string; readonly done: boolean; readonly active: boolean }[] | undefined {
+  if (!Array.isArray(value)) return undefined
+  return value.flatMap((row: unknown) => {
+    if (typeof row !== 'object' || row === null) return []
+    const entry = row as Record<string, unknown>
+    const text = [entry['content'], entry['activeForm']].find(
+      (candidate): candidate is string => typeof candidate === 'string' && candidate.trim() !== ''
+    )
+    if (text === undefined) return []
+    return [
+      {
+        text: text.trim(),
+        done: entry['status'] === 'completed',
+        active: entry['status'] === 'in_progress',
+      },
+    ]
+  })
 }
 
 /** How long a one-line subject may be before it stops being one. */
@@ -1100,7 +1138,17 @@ export function trackBashTools(msg: SdkMessageLike, current: ReadonlySet<string>
  */
 function mapRateLimits(msg: SdkMessageLike, base: Omit<AgentEvent, 'type'>): AgentEvent[] {
   const windows = usageWindows(msg.rate_limit_info)
-  return windows.length === 0 ? [] : [{ ...base, type: 'limits', windows }]
+  const limits: AgentEvent[] = windows.length === 0 ? [] : [{ ...base, type: 'limits', windows }]
+  if (msg.rate_limit_info?.status !== 'rejected') return limits
+  return [
+    ...limits,
+    {
+      ...base,
+      seq: base.seq + limits.length,
+      type: 'usage.blocked',
+      resetsAt: toEpochMs(msg.rate_limit_info.resetsAt),
+    },
+  ]
 }
 
 /**

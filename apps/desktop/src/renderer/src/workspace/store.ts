@@ -65,6 +65,7 @@ export interface SessionPulse {
   readonly lastSeq: number
   readonly unread: number
   readonly working: readonly TranscriptEvent['actor'][]
+  readonly replies?: Readonly<Record<string, TranscriptEvent['actor']>>
   readonly approvalIds: readonly string[]
   readonly questionIds: readonly string[]
   /*
@@ -156,6 +157,7 @@ const EMPTY_PULSE: SessionPulse = {
   lastSeq: 0,
   unread: 0,
   working: [],
+  replies: {},
   approvalIds: [],
   questionIds: [],
   usageByActor: {},
@@ -335,6 +337,7 @@ export interface WorkspaceActions {
   replaceConversation: (projectId: string, previousId: string, nextId: string) => boolean
   setEditorWidthFraction: (projectId: string, fraction: number) => void
   setTrafficWidth: (projectId: string, width: number) => void
+  setTrafficHiddenPathPrefix: (projectId: string, hiddenPathPrefix: string) => void
   setProjectTerminalWidth: (projectId: string, width: number) => void
   setTrafficCollapsed: (projectId: string, collapsed: boolean) => void
   setProjectTerminalCollapsed: (projectId: string, collapsed: boolean) => void
@@ -519,11 +522,28 @@ export function reducePulse(
 ): SessionPulse {
   if (event.seq <= pulse.lastSeq) return pulse
   let working = [...pulse.working]
+  let replies = { ...pulse.replies }
   let approvalIds = [...pulse.approvalIds]
   let questionIds = [...pulse.questionIds]
   let unread = visible ? 0 : pulse.unread
 
   let failed = pulse.failed
+  if (event.type === 'reply.status') {
+    const requestId = pulseKey(event, 'requestId')
+    const phase = pulseKey(event, 'phase')
+    if (phase === 'waiting' || phase === 'thinking' || phase === 'replying') {
+      replies[requestId] = event.actor
+      if (phase === 'waiting') failed = false
+    } else {
+      replies = Object.fromEntries(Object.entries(replies).filter(([id]) => id !== requestId))
+      if (phase === 'error') failed = true
+    }
+  }
+  const sessionAgent =
+    event.type === 'session.started' || event.type === 'session.ended'
+      ? pulseKey(event, 'agentId')
+      : null
+  if (sessionAgent !== null) working = working.filter((actor) => actor !== sessionAgent)
   if (event.type === 'turn.started') {
     if (!working.includes(event.actor)) working.push(event.actor)
     failed = false
@@ -590,22 +610,33 @@ export function reducePulse(
   if (!visible && countsAsUnread(event.type)) {
     unread += 1
   }
+  const quieted =
+    event.type === 'turn.started' || event.type === 'turn.completed' ? event.actor : sessionAgent
+  const activityByActor =
+    quieted === null || (pulse.activityByActor[quieted] ?? null) === null
+      ? pulse.activityByActor
+      : { ...pulse.activityByActor, [quieted]: null }
   return {
     lastSeq: event.seq,
     unread,
     working,
+    replies,
     approvalIds,
     questionIds,
     usageByActor,
     tokens,
     costUsd,
+    activityByActor,
     // Carried through untouched: no event reports it, so folding the log must
     // not be able to erase what the context channel pushed.
     contextByActor: pulse.contextByActor,
     tasksByActor: pulse.tasksByActor,
-    activityByActor: pulse.activityByActor,
     failed,
   }
+}
+
+export function pulseWorking(pulse: SessionPulse | undefined): TranscriptEvent['actor'][] {
+  return [...new Set([...(pulse?.working ?? []), ...Object.values(pulse?.replies ?? {})])]
 }
 
 export const useWorkspaceStore = create<WorkspaceStore>()(
@@ -1053,6 +1084,18 @@ export const useWorkspaceStore = create<WorkspaceStore>()(
             trafficPanels: {
               ...state.trafficPanels,
               [projectId]: { ...current, width: nextWidth, widthCustomized: true },
+            },
+          }
+        })
+      },
+      setTrafficHiddenPathPrefix: (projectId, hiddenPathPrefix) => {
+        set((state) => {
+          const current = state.trafficPanels[projectId] ?? CLOSED_TRAFFIC
+          if ((current.hiddenPathPrefix ?? '') === hiddenPathPrefix) return state
+          return {
+            trafficPanels: {
+              ...state.trafficPanels,
+              [projectId]: { ...current, hiddenPathPrefix },
             },
           }
         })

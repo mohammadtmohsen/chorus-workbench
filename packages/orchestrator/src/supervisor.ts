@@ -11,6 +11,7 @@ import type {
   ApprovalDecision,
   ForkOpts,
   SessionOpts,
+  TranscriptToolState,
   UserInputResponse,
 } from '@chorus/agent-protocol'
 import { AsyncQueue, type ApprovalId, type UserInputId } from '@chorus/shared'
@@ -62,6 +63,12 @@ export const DEFAULT_SUPERVISOR_POLICY: SupervisorPolicy = {
 export interface SupervisedSessionDeps {
   readonly scheduler?: Scheduler
   readonly random?: () => number
+  readonly recover?: () => {
+    readonly opts: SessionOpts
+    readonly context:
+      string | ((input: string, session: AgentSession, beforeSeq?: number) => string)
+  }
+  readonly onRecovery?: (state: 'starting' | 'ready') => void
 }
 
 export interface SupervisorStats {
@@ -74,7 +81,15 @@ export class SupervisedSession implements AgentSession {
   private readonly policy: SupervisorPolicy
   private readonly scheduler: Scheduler
   private readonly random: () => number
+  private readonly recover: SupervisedSessionDeps['recover']
+  private readonly onRecovery: SupervisedSessionDeps['onRecovery']
   private readonly restartTimes: number[] = []
+  private readonly pendingInputs: AgentInput[] = []
+  private restarting: Promise<void> | null = null
+  private freshRecoveryAttempted = false
+  private turnRef: string | null = null
+  private recoveryContext:
+    string | ((input: string, session: AgentSession, beforeSeq?: number) => string) | undefined
 
   private current: AgentSession
   /** The model the user picked, so a restart does not quietly undo it. */
@@ -101,6 +116,8 @@ export class SupervisedSession implements AgentSession {
     this.policy = policy
     this.scheduler = deps.scheduler ?? realScheduler
     this.random = deps.random ?? Math.random
+    this.recover = deps.recover
+    this.onRecovery = deps.onRecovery
     this.pump = this.consume(first)
   }
 
@@ -186,6 +203,10 @@ export class SupervisedSession implements AgentSession {
     return this.current.sessionRef
   }
 
+  get transcriptTool(): TranscriptToolState {
+    return this.current.transcriptTool ?? 'unavailable'
+  }
+
   get events(): AsyncIterable<AgentEvent> {
     return this.queue
   }
@@ -194,12 +215,53 @@ export class SupervisedSession implements AgentSession {
     return { restarts: this.restartTimes.length, givenUp: this.givenUp }
   }
 
-  send(input: AgentInput): Promise<void> {
-    return this.current.send(input)
+  async send(input: AgentInput): Promise<void> {
+    const previous = this.current
+    await this.restarting
+    if (this.unavailable()) {
+      throw new Error(this.fatal ?? 'Session is closed')
+    }
+    this.pendingInputs.push(input)
+    const target = this.current
+    const recoveryContext = this.recoveryContext
+    try {
+      const text =
+        input.prepare?.(this.current) ??
+        (previous !== this.current ? (input.recoveryText ?? input.text) : input.text)
+      const delivered =
+        recoveryContext === undefined
+          ? this.providerInput(input, text)
+          : this.recoveredInput(input, recoveryContext)
+      this.recoveryContext = undefined
+      await target.send(delivered)
+    } catch (error) {
+      if (
+        target === this.current &&
+        this.recoveryContext === undefined &&
+        recoveryContext !== undefined
+      ) {
+        this.recoveryContext = recoveryContext
+      }
+      if (
+        this.recover !== undefined &&
+        !this.freshRecoveryAttempted &&
+        missingSession(error instanceof Error ? error.message : String(error)) &&
+        !this.isClosing()
+      ) {
+        await this.replace(() => this.recoverMissingSession(this.current))
+        if (this.givenUp) throw new Error(this.fatal ?? String(error), { cause: error })
+        return
+      }
+      const index = this.pendingInputs.indexOf(input)
+      if (index !== -1) this.pendingInputs.splice(index, 1)
+      throw error
+    }
   }
 
-  interrupt(): Promise<void> {
-    return this.current.interrupt()
+  async interrupt(): Promise<void> {
+    this.pendingInputs.length = 0
+    if (this.restarting !== null) return
+    if (!this.closing && !this.givenUp) await this.current.interrupt()
   }
 
   respondToApproval(id: ApprovalId, decision: ApprovalDecision): Promise<void> {
@@ -269,6 +331,8 @@ export class SupervisedSession implements AgentSession {
   async close(): Promise<void> {
     // Set first: this is what distinguishes a clean shutdown from a crash.
     this.closing = true
+    this.pendingInputs.length = 0
+    await this.restarting
     await this.current.close()
     await this.pump
     this.queue.close()
@@ -280,6 +344,23 @@ export class SupervisedSession implements AgentSession {
    */
   private async consume(session: AgentSession): Promise<void> {
     for await (const event of session.events) {
+      if (
+        event.type === 'error' &&
+        !event.recoverable &&
+        this.recover !== undefined &&
+        !this.freshRecoveryAttempted &&
+        missingSession(event.message) &&
+        !this.closing
+      ) {
+        await this.replace(() => this.recoverMissingSession(session))
+        return
+      }
+      if (event.type === 'turn.started') this.turnRef = event.turnRef
+      if (event.type === 'turn.completed') {
+        this.turnRef = null
+        this.pendingInputs.length = 0
+        if (event.status === 'completed') this.freshRecoveryAttempted = false
+      }
       /*
        * An adapter that reports `recoverable: false` is telling us retrying
        * cannot help — a missing working directory, a binary that will not
@@ -293,10 +374,120 @@ export class SupervisedSession implements AgentSession {
 
     if (this.fatal !== null) {
       this.givenUp = true
+      this.finishFailedTurn()
       this.queue.close()
       return
     }
-    await this.handleCrash()
+    await this.replace(() => this.handleCrash())
+  }
+
+  private async replace(work: () => Promise<void>): Promise<void> {
+    const restarting = work()
+    this.restarting = restarting
+    try {
+      await restarting
+    } finally {
+      if (this.restarting === restarting) this.restarting = null
+    }
+  }
+
+  private unavailable(): boolean {
+    return this.closing || this.givenUp || this.fatal !== null
+  }
+
+  private isClosing(): boolean {
+    return this.closing
+  }
+
+  private async recoverMissingSession(previous: AgentSession): Promise<void> {
+    const recover = this.recover
+    if (recover === undefined) return
+    this.freshRecoveryAttempted = true
+    this.finishFailedTurn()
+    this.onRecovery?.('starting')
+    let fresh: AgentSession | undefined
+    try {
+      await previous.close()
+      if (this.isClosing()) return
+      const restored = recover()
+      this.recoveryContext = restored.context
+      fresh = await this.adapter.start(restored.opts)
+      if (this.isClosing()) {
+        await fresh.close()
+        return
+      }
+      this.current = fresh
+      await this.applyPreferences(fresh)
+      if (this.isClosing()) return
+      this.fatal = null
+      this.pump = this.consume(fresh)
+      if (this.pendingInputs.length > 0) {
+        const boundaries = this.pendingInputs.flatMap((input) =>
+          input.recoveryBeforeSeq === undefined ? [] : [input.recoveryBeforeSeq]
+        )
+        const attachments = this.pendingInputs.flatMap((input) => input.attachments ?? [])
+        await fresh.send(
+          this.recoveredInput(
+            {
+              text: this.pendingInputs
+                .map((input) => input.recoveryText ?? input.text)
+                .join('\n\n'),
+              ...(boundaries.length === 0 ? {} : { recoveryBeforeSeq: Math.min(...boundaries) }),
+              ...(attachments.length === 0 ? {} : { attachments }),
+            },
+            restored.context
+          )
+        )
+        this.recoveryContext = undefined
+      }
+      this.onRecovery?.('ready')
+    } catch (error) {
+      this.givenUp = true
+      this.fatal = error instanceof Error ? error.message : String(error)
+      await fresh?.close().catch(() => undefined)
+      this.finishFailedTurn()
+      this.emitError(this.fatal, false)
+      this.queue.close()
+    }
+  }
+
+  private recoveredInput(
+    input: AgentInput,
+    context: string | ((input: string, session: AgentSession, beforeSeq?: number) => string)
+  ): AgentInput {
+    const body = input.recoveryText ?? input.text
+    const seed =
+      typeof context === 'string'
+        ? context
+        : input.recoveryBeforeSeq === undefined
+          ? context(body, this.current)
+          : context(body, this.current, input.recoveryBeforeSeq)
+    return this.providerInput(input, [seed, body].filter((text) => text !== '').join('\n\n'))
+  }
+
+  private providerInput(input: AgentInput, text: string): AgentInput {
+    return { text, ...(input.attachments === undefined ? {} : { attachments: input.attachments }) }
+  }
+
+  private async applyPreferences(session: AgentSession): Promise<void> {
+    if (this.chosenModel !== undefined) await session.setModel?.(this.chosenModel)
+    if (this.chosenEffort !== undefined) await session.setEffort?.(this.chosenEffort)
+    if (this.chosenPermissionMode !== undefined) {
+      await session.setPermissionMode?.(this.chosenPermissionMode)
+    }
+  }
+
+  private finishFailedTurn(): void {
+    if (this.turnRef === null) return
+    this.queue.push({
+      agentId: this.adapter.id,
+      seq: ++this.seq,
+      at: this.scheduler.now(),
+      type: 'turn.completed',
+      turnRef: this.turnRef,
+      status: 'failed',
+    })
+    this.turnRef = null
   }
 
   private async handleCrash(): Promise<void> {
@@ -305,6 +496,7 @@ export class SupervisedSession implements AgentSession {
 
     if (this.restartTimes.length >= this.policy.maxRestarts) {
       this.givenUp = true
+      this.finishFailedTurn()
       this.emitError(
         `agent ${this.adapter.id} crashed ${String(this.restartTimes.length + 1)} times in ` +
           `${String(Math.round(this.policy.windowMs / 1000))}s; giving up`,
@@ -329,16 +521,22 @@ export class SupervisedSession implements AgentSession {
       this.current = resumed
       // The replacement starts on the provider's default, so a choice made
       // before the crash has to be made again on its behalf.
-      if (this.chosenModel !== undefined) await resumed.setModel?.(this.chosenModel)
-      if (this.chosenEffort !== undefined) await resumed.setEffort?.(this.chosenEffort)
-      if (this.chosenPermissionMode !== undefined) {
-        await resumed.setPermissionMode?.(this.chosenPermissionMode)
-      }
+      await this.applyPreferences(resumed)
       this.pump = this.consume(resumed)
     } catch (error) {
+      if (
+        this.recover !== undefined &&
+        !this.freshRecoveryAttempted &&
+        missingSession(error instanceof Error ? error.message : String(error)) &&
+        !this.isClosing()
+      ) {
+        await this.recoverMissingSession(this.current)
+        return
+      }
       // A failed resume is not recoverable by trying harder — the thread may be
       // gone. Surface it rather than looping.
       this.givenUp = true
+      this.finishFailedTurn()
       this.emitError(
         `could not resume ${this.adapter.id}: ${error instanceof Error ? error.message : String(error)}`,
         false
@@ -373,6 +571,12 @@ export class SupervisedSession implements AgentSession {
       recoverable,
     })
   }
+}
+
+function missingSession(message: string): boolean {
+  return /No conversation found with session ID:|no rollout found for thread id\b|^(?:thread|session) (?:not found|does not exist)(?:[: .]|$)/i.test(
+    message
+  )
 }
 
 /**
@@ -412,7 +616,10 @@ async function verdictOf(
       pending = iterator.next()
       const next = await Promise.race([pending, expired])
       if (next === 'expired') break
-      if (next.done === true) break
+      if (next.done === true) {
+        failed = 'Session closed while resuming'
+        break
+      }
       pending = null
       buffered.push(next.value)
       if (next.value.type === 'error' && !next.value.recoverable) {

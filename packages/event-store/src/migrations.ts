@@ -697,6 +697,26 @@ export const MIGRATIONS: readonly Migration[] = [
       ALTER TABLE projects ADD COLUMN run_commands TEXT;
     `,
   },
+  {
+    version: 21,
+    name: 'a-chat-keeps-one-note',
+    up: `
+      CREATE TABLE conversation_note (
+        conversation_id TEXT    PRIMARY KEY,
+        body            TEXT    NOT NULL DEFAULT '',
+        revision        INTEGER NOT NULL DEFAULT 0 CHECK (revision >= 0),
+        version         INTEGER NOT NULL DEFAULT 0 CHECK (version >= 0),
+        visible         INTEGER NOT NULL DEFAULT 0 CHECK (visible IN (0, 1)),
+        x               REAL    CHECK (x IS NULL OR (x >= 0 AND x <= 1)),
+        y               REAL    CHECK (y IS NULL OR (y >= 0 AND y <= 1)),
+        width           REAL    CHECK (width IS NULL OR (width >= 0 AND width <= 1)),
+        height          REAL    CHECK (height IS NULL OR (height >= 0 AND height <= 1)),
+        updated_by      TEXT,
+        updated_at      INTEGER NOT NULL DEFAULT 0,
+        journal         TEXT
+      );
+    `,
+  },
 ]
 
 export interface MigrationResult {

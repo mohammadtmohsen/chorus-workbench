@@ -2,11 +2,11 @@
 
 ## Status
 
-| Unit | Result |
-| --- | --- |
-| Scope | Keep the newest visible request selected and in view as calls arrive |
-| Implementation | Written and source reviewed; runtime behavior unverified |
-| Verification | Not run; the user has not requested tests or a build |
+| Unit           | Result                                                               |
+| -------------- | -------------------------------------------------------------------- |
+| Scope          | Keep the newest visible request selected and in view as calls arrive |
+| Implementation | Written and source reviewed; runtime behavior unverified             |
+| Verification   | Not run; the user has not requested tests or a build                 |
 
 ## Current / Issue
 

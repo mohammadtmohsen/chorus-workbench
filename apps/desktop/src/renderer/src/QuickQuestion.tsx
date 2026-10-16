@@ -588,7 +588,7 @@ export function QuickQuestion(props: {
               turn kept its rule on the left, against the text's own margin.
             */
             <div key={turn.key} className="quick-turn" data-actor={turn.actor} dir="auto">
-              <MarkdownView source={turn.text} />
+              <MarkdownView source={turn.text} live={turn.streaming} />
             </div>
           ))}
           {state.failed !== null && <p className="notice notice--bad">{state.failed}</p>}

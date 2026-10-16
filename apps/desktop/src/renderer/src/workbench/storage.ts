@@ -33,7 +33,7 @@ export async function flushWorkbenchStorage(): Promise<void> {
   for (;;) {
     const results = await Promise.allSettled([...databases].map((database) => database.flush()))
     const failure = results.find((result) => result.status === 'rejected')
-    if (failure === undefined || failure.status !== 'rejected') return
+    if (failure === undefined) return
     const remaining = deadline - Date.now()
     if (remaining <= 0) {
       const error: unknown = failure.reason
@@ -184,6 +184,10 @@ export class ChorusStorageDatabase implements IStorageDatabase {
     return this.loading
   }
 
+  private isShut(): boolean {
+    return this.closed || this.closing
+  }
+
   private async loadSnapshot(): Promise<void> {
     const raw = await window.chorusWorkbench.readStorage(this.scope)
     if (raw !== null) {
@@ -224,9 +228,9 @@ export class ChorusStorageDatabase implements IStorageDatabase {
    * longer say "and delete everything I have not heard about" by accident.
    */
   async updateItems(request: IUpdateRequest): Promise<void> {
-    if (this.closed || this.closing) throw new Error('Workbench storage is closed')
+    if (this.isShut()) throw new Error('Workbench storage is closed')
     await this.load()
-    if (this.closed || this.closing) throw new Error('Workbench storage is closed')
+    if (this.isShut()) throw new Error('Workbench storage is closed')
 
     for (const [key, value] of request.insert ?? new Map<string, string>()) {
       if (this.items.get(key) === value) continue
@@ -283,8 +287,7 @@ export class ChorusStorageDatabase implements IStorageDatabase {
             if (this.unsaved.get(key)?.revision !== change.revision) continue
             this.unsaved.delete(key)
             const value = this.committed.get(key)
-            const canRestoreClient =
-              this.clientItems?.get(key) === (change.value === null ? undefined : change.value)
+            const canRestoreClient = this.clientItems?.get(key) === (change.value ?? undefined)
             if (value === undefined) {
               this.items.delete(key)
               if (canRestoreClient) deleted.add(key)
@@ -297,10 +300,13 @@ export class ChorusStorageDatabase implements IStorageDatabase {
         }
         this.sending = null
         if (!this.closed && this.unsaved.size > 0 && this.retryTimer === null) {
-          this.retryTimer = setTimeout(() => {
-            this.retryTimer = null
-            void this.flushPending().catch(() => undefined)
-          }, invalid ? 0 : this.retryDelay)
+          this.retryTimer = setTimeout(
+            () => {
+              this.retryTimer = null
+              void this.flushPending().catch(() => undefined)
+            },
+            invalid ? 0 : this.retryDelay
+          )
           if (!invalid) this.retryDelay = Math.min(this.retryDelay * 2, 30_000)
         }
         throw error
@@ -363,7 +369,7 @@ const PROJECT_PANEL_KEYS: ReadonlySet<string> = new Set([
 const TERMINAL_BUFFER_STATE_KEY = 'terminal.integrated.bufferState'
 const TERMINAL_ISSUED_ENV_KEY = 'chorus.terminal.issuedEnv'
 
-export type SideBarLayout = {
+export interface SideBarLayout {
   width: number
   hidden: boolean
 }

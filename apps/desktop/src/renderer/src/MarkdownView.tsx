@@ -2,6 +2,8 @@ import { CodeRun } from './CodeRun.js'
 import { createContext, memo, useContext, useEffect, useMemo, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { shortenCodeSpan } from './shorten.js'
+import { MermaidDiagram } from './MermaidDiagram.js'
+import { isMermaidLanguage } from './mermaid.js'
 import {
   isFileHref,
   parseMarkdown,
@@ -49,15 +51,19 @@ const ShortenCode = createContext(false)
  */
 const OpenFile = createContext<((path: string) => void) | undefined>(undefined)
 
+const Live = createContext(false)
+
 export function MarkdownView({
   source,
   shortenCode = false,
   onOpenFile,
+  live = false,
 }: {
   source: string
   shortenCode?: boolean
   /** Opens a project file in the editor. Main resolves and refuses outside cwd. */
   onOpenFile?: ((path: string) => void) | undefined
+  live?: boolean
 }): React.JSX.Element {
   /*
    * Split first, then memoise each block on its own text.
@@ -72,9 +78,11 @@ export function MarkdownView({
   return (
     <ShortenCode.Provider value={shortenCode}>
       <OpenFile.Provider value={onOpenFile}>
-        {blocks.map((raw, i) => (
-          <MemoBlock key={i} source={raw} />
-        ))}
+        <Live.Provider value={live}>
+          {blocks.map((raw, i) => (
+            <MemoBlock key={i} source={raw} />
+          ))}
+        </Live.Provider>
       </OpenFile.Provider>
     </ShortenCode.Provider>
   )
@@ -93,6 +101,7 @@ const MemoBlock = memo(function MemoBlock({ source }: { source: string }): React
 })
 
 function BlockView({ block }: { block: Block }): React.JSX.Element {
+  const live = useContext(Live)
   switch (block.kind) {
     case 'paragraph':
       /*
@@ -132,7 +141,22 @@ function BlockView({ block }: { block: Block }): React.JSX.Element {
       )
     }
 
-    case 'code':
+    case 'code': {
+      /*
+       * Code never flips, whatever the prose around it does.
+       *
+       * `dir="ltr"` explicitly rather than by inheritance: a fenced block
+       * inside a right-to-left answer would otherwise take that direction and
+       * move its punctuation — `);` to the left of the line, a leading `-` in
+       * a diff to the right — which is code that no longer says what it says.
+       */
+      const code = (
+        <pre className="md-code" dir="ltr">
+          <code>
+            <CodeRun code={block.text} language={block.language} />
+          </code>
+        </pre>
+      )
       return (
         /*
          * The wrapper exists so the corner controls are not inside the scroller.
@@ -148,21 +172,16 @@ function BlockView({ block }: { block: Block }): React.JSX.Element {
             {block.language !== null && <span className="md-lang">{block.language}</span>}
             <CopyCode text={block.text} />
           </div>
-          {/*
-           * Code never flips, whatever the prose around it does.
-           *
-           * `dir="ltr"` explicitly rather than by inheritance: a fenced block
-           * inside a right-to-left answer would otherwise take that direction and
-           * move its punctuation — `);` to the left of the line, a leading `-` in
-           * a diff to the right — which is code that no longer says what it says.
-           */}
-          <pre className="md-code" dir="ltr">
-            <code>
-              <CodeRun code={block.text} language={block.language} />
-            </code>
-          </pre>
+          {isMermaidLanguage(block.language) ? (
+            <MermaidDiagram source={block.text} settled={!live}>
+              {code}
+            </MermaidDiagram>
+          ) : (
+            code
+          )}
         </div>
       )
+    }
 
     case 'list': {
       const items = block.items.map((item, i) => (

@@ -127,8 +127,21 @@ describe('SessionHost', () => {
     rerender(<SessionHost {...props} paneId="pane-2" startIn={second} session={other} />)
     latest().onRestart()
     expect(second).toHaveBeenLastCalledWith('p2', { replacing: 'c2' })
-    latest().onContinue()
-    expect(second).toHaveBeenLastCalledWith('p2', { continueFrom: 'c2' })
+    latest().onForward({ text: 'Fix the API retries', sourceEventIds: ['e1', 'e2'] })
+    expect(second).toHaveBeenLastCalledWith('p2', {
+      continueFrom: 'c2',
+      objective: 'Fix the API retries',
+      sourceEventIds: ['e1', 'e2'],
+    })
     expect(first).not.toHaveBeenCalled()
+  })
+
+  it('cuts a long selection to the 2,000 units the start accepts without splitting a character', () => {
+    const startIn = vi.fn()
+    render(<SessionHost {...base()} startIn={startIn} />)
+    latest().onForward({ text: `  ${'a'.repeat(1_999)}🚀tail  `, sourceEventIds: [] })
+    const objective = (startIn.mock.calls.at(-1)?.[1] as { objective: string }).objective
+    expect(objective).toBe('a'.repeat(1_999))
+    expect(objective.length).toBeLessThanOrEqual(2_000)
   })
 })

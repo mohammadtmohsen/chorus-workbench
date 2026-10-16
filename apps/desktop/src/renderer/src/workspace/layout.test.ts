@@ -1187,9 +1187,9 @@ describe('run terminal pane width', () => {
 })
 
 describe('traffic panel', () => {
-  it('opens at 500px by default', () => {
-    expect(CLOSED_TRAFFIC).toEqual({ open: false, width: 500 })
-    expect(clampTrafficWidth(Number.NaN)).toBe(500)
+  it('opens at 700px by default', () => {
+    expect(CLOSED_TRAFFIC).toEqual({ open: false, width: 700 })
+    expect(clampTrafficWidth(Number.NaN)).toBe(700)
   })
 
   it('clamps a stored width up to the floor', () => {
@@ -1204,7 +1204,7 @@ describe('traffic panel', () => {
     })
   })
 
-  it('resets older widths to 500 while keeping conversations and collapsed state', () => {
+  it('resets older widths to 700 while keeping conversations and collapsed state', () => {
     const saved = WorkspaceSnapshot.parse({
       layout: { kind: 'leaf', paneId: 'pane-1' },
       panes: { 'pane-1': { id: 'pane-1', tabs: ['p1', 'p2'], activeTabId: 'p1' } },
@@ -1216,8 +1216,8 @@ describe('traffic panel', () => {
     })
     const repaired = normalizeWorkspace(saved)
     expect(repaired.trafficPanels).toEqual({
-      p1: { open: true, width: 500 },
-      p2: { open: false, width: 500, collapsed: true },
+      p1: { open: true, width: 700 },
+      p2: { open: false, width: 700, collapsed: true },
     })
     expect(repaired.panes['pane-1']?.tabs).toEqual(['p1', 'p2'])
   })
@@ -1258,7 +1258,7 @@ describe('traffic panel', () => {
     const returned = mergeSlice(EMPTY_WORKSPACE, 'p1', {
       trafficPanel: { open: true, width: 800, collapsed: true },
     })
-    expect(returned.trafficPanels['p1']).toEqual({ open: true, width: 500, collapsed: true })
+    expect(returned.trafficPanels['p1']).toEqual({ open: true, width: 700, collapsed: true })
   })
 })
 

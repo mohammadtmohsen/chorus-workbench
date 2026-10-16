@@ -14,9 +14,17 @@ import {
   WorkspaceSnapshot,
   type TerminalPanelState,
 } from '../../../shared/workspace-layout.js'
-import { columnWidths, EMPTY_WORKSPACE, onScreenConversations } from './layout.js'
+import {
+  columnWidths,
+  detachedSnapshot,
+  EMPTY_WORKSPACE,
+  mergeSlice,
+  onScreenConversations,
+  sliceOf,
+} from './layout.js'
 import {
   reducePulse,
+  pulseWorking,
   sameWorkspaceSnapshot,
   useWorkspaceStore,
   workspaceSnapshot,
@@ -52,6 +60,28 @@ function event(type: string, payload: Record<string, unknown> = {}): TranscriptE
 }
 
 describe('reducePulse', () => {
+  it('keeps Work and Chat activity independent for the same agent', () => {
+    let pulse = reducePulse(PULSE, event('turn.started', { turnRef: 'work-1' }), true)
+    pulse = reducePulse(
+      pulse,
+      { ...event('reply.status', { requestId: 'chat-1', phase: 'thinking' }), seq: 2 },
+      true
+    )
+    pulse = reducePulse(
+      pulse,
+      { ...event('turn.completed', { turnRef: 'work-1', status: 'completed' }), seq: 3 },
+      true
+    )
+    expect(pulse.working).toEqual([])
+    expect(pulseWorking(pulse)).toEqual(['claude'])
+    pulse = reducePulse(
+      pulse,
+      { ...event('reply.status', { requestId: 'chat-1', phase: 'done' }), seq: 4 },
+      true
+    )
+    expect(pulseWorking(pulse)).toEqual([])
+  })
+
   /*
    * The one real hazard in carrying context fill on the pulse.
    *
@@ -146,6 +176,54 @@ describe('reducePulse', () => {
       true
     )
     expect(stopped.failed).toBe(true)
+  })
+
+  it('ends an agent’s work at either session boundary, leaving others and Chat alone', () => {
+    let pulse = reducePulse(PULSE, event('turn.started', { turnRef: 'w' }), true)
+    pulse = reducePulse(
+      pulse,
+      { ...event('turn.started', { turnRef: 'x' }), actor: 'codex', seq: 2 },
+      true
+    )
+    pulse = reducePulse(
+      pulse,
+      { ...event('reply.status', { requestId: 'chat-1', phase: 'thinking' }), seq: 3 },
+      true
+    )
+    pulse = reducePulse(
+      pulse,
+      { ...event('session.started', { agentId: 'claude' }), actor: 'system', seq: 4 },
+      true
+    )
+    expect(pulse.working).toEqual(['codex'])
+    expect(pulseWorking(pulse)).toEqual(['codex', 'claude'])
+    pulse = reducePulse(
+      pulse,
+      {
+        ...event('session.ended', { agentId: 'codex', reason: 'replaced' }),
+        actor: 'system',
+        seq: 5,
+      },
+      true
+    )
+    expect(pulse.working).toEqual([])
+  })
+
+  it('drops a provider word at its own agent’s lifecycle boundaries only', () => {
+    const speaking: SessionPulse = {
+      ...PULSE,
+      activityByActor: { claude: 'thinking', codex: 'compacting' },
+    }
+    const ended = reducePulse(speaking, event('turn.completed', { status: 'completed' }), true)
+    expect(ended.activityByActor).toEqual({ claude: null, codex: 'compacting' })
+    const replaced = reducePulse(
+      speaking,
+      { ...event('session.started', { agentId: 'codex' }), actor: 'system' },
+      true
+    )
+    expect(replaced.activityByActor).toEqual({ claude: 'thinking', codex: null })
+    const unrelated = reducePulse(speaking, event('agent.message.completed', { text: 'hi' }), true)
+    expect(unrelated.activityByActor).toBe(speaking.activityByActor)
   })
 })
 
@@ -671,8 +749,8 @@ describe('project widths', () => {
     store.setTrafficCollapsed('p1', true)
     store.setTrafficCollapsed('p1', false)
     const initial = useWorkspaceStore.getState().trafficPanels['p1']
-    expect(initial).toEqual({ open: false, width: 500, collapsed: false })
-    store.setTrafficWidth('p1', 500)
+    expect(initial).toEqual({ open: false, width: 700, collapsed: false })
+    store.setTrafficWidth('p1', 700)
     expect(useWorkspaceStore.getState().trafficPanels['p1']).toBe(initial)
 
     store.setTrafficWidth('p1', 800)
@@ -692,7 +770,7 @@ describe('project widths', () => {
     store.hydrate(reset, [], ['p1'])
     expect(useWorkspaceStore.getState().trafficPanels['p1']).toEqual({
       open: false,
-      width: 500,
+      width: 700,
       widthCustomized: false,
       collapsed: false,
     })
@@ -725,6 +803,49 @@ describe('project widths', () => {
       widthCustomized: false,
     })
     expect(workspaceSnapshot(state).projectTerminals).toEqual(state.projectTerminals)
+  })
+})
+
+describe('Traffic path prefixes', () => {
+  it('saves each project prefix through serialization and hydration', () => {
+    useWorkspaceStore.setState({ ...EMPTY_WORKSPACE })
+    const store = useWorkspaceStore.getState()
+    store.setTrafficHiddenPathPrefix('p1', '/api/v1/provider-online')
+    store.setTrafficHiddenPathPrefix('p2', '/api/mobile/v1')
+    const saved = WorkspaceSnapshot.parse(
+      JSON.parse(JSON.stringify(workspaceSnapshot(useWorkspaceStore.getState())))
+    )
+
+    useWorkspaceStore.setState({ ...EMPTY_WORKSPACE })
+    store.hydrate(saved, [], ['p1', 'p2'])
+    expect(useWorkspaceStore.getState().trafficPanels['p1']?.hiddenPathPrefix).toBe(
+      '/api/v1/provider-online'
+    )
+    expect(useWorkspaceStore.getState().trafficPanels['p2']?.hiddenPathPrefix).toBe(
+      '/api/mobile/v1'
+    )
+
+    store.resetProjectWidths('p1')
+    store.setTrafficCollapsed('p1', true)
+    expect(useWorkspaceStore.getState().trafficPanels['p1']?.hiddenPathPrefix).toBe(
+      '/api/v1/provider-online'
+    )
+    store.setTrafficHiddenPathPrefix('p1', '')
+    expect(useWorkspaceStore.getState().trafficPanels['p1']?.hiddenPathPrefix).toBe('')
+    expect(useWorkspaceStore.getState().trafficPanels['p2']?.hiddenPathPrefix).toBe(
+      '/api/mobile/v1'
+    )
+  })
+
+  it('carries the prefix through a detached project and back', () => {
+    useWorkspaceStore.setState({ ...EMPTY_WORKSPACE })
+    useWorkspaceStore.getState().setTrafficHiddenPathPrefix('p1', '/api/v1')
+    const saved = WorkspaceSnapshot.parse(workspaceSnapshot(useWorkspaceStore.getState()))
+    const slice = sliceOf(saved, 'p1')
+    const detached = detachedSnapshot('p1', slice)
+    expect(detached.trafficPanels['p1']?.hiddenPathPrefix).toBe('/api/v1')
+    const returned = mergeSlice(EMPTY_WORKSPACE, 'p1', sliceOf(detached, 'p1'))
+    expect(returned.trafficPanels['p1']?.hiddenPathPrefix).toBe('/api/v1')
   })
 })
 

@@ -1,4 +1,9 @@
-import { remoteProjectHost, type TranscriptState } from '@chorus/event-store'
+import {
+  remoteProjectHost,
+  type LiveState,
+  type StoredEvent,
+  type TranscriptState,
+} from '@chorus/event-store'
 import { writeFileSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import { buildDiagnostics, type AgentId } from '@chorus/shared'
@@ -21,6 +26,10 @@ import {
   EVENTS_PUSH_CHANNEL,
   IDE_PUSH_CHANNEL,
   CONTEXT_PUSH_CHANNEL,
+  CONVERSATION_NOTE_JOURNAL_CHANNEL,
+  CONVERSATION_NOTE_PUSH_CHANNEL,
+  ConversationNoteJournalRequest,
+  ConversationNoteJournalResponse,
   TASKS_PUSH_CHANNEL,
   TERMINAL_PUSH_CHANNEL,
   LIMITS_PUSH_CHANNEL,
@@ -30,6 +39,8 @@ import {
   type IpcChannel,
   type IpcRequest,
   type IpcResponse,
+  type LiveStateWire,
+  type TranscriptAssignment,
   type TranscriptEvent,
   type SettingsWithSecrets,
 } from '../shared/ipc.js'
@@ -47,6 +58,7 @@ import {
   remoteProjectRoot,
   type CanonicalRoot,
 } from '@chorus/workspace'
+import type { TaskBundle } from '../shared/task-progress.js'
 import type { IdeBridge } from './ide-bridge.js'
 import { SshRemoteHost } from './remote-host.js'
 import { focusedShellWindow, isShellSender, shellWindows } from './shell-windows.js'
@@ -375,15 +387,13 @@ export function buildHandlers(
       return check
     },
 
-    'conversation:start': (request: {
-      projectId: string
-      profileId?: string
-      continueFrom?: string
-    }) =>
+    'conversation:start': (request: IpcRequest<'conversation:start'>) =>
       runtime.startConversation({
         projectId: request.projectId,
         ...(request.profileId === undefined ? {} : { profileId: request.profileId }),
         ...(request.continueFrom === undefined ? {} : { continueFrom: request.continueFrom }),
+        ...(request.objective === undefined ? {} : { objective: request.objective }),
+        ...(request.sourceEventIds === undefined ? {} : { sourceEventIds: request.sourceEventIds }),
       }),
 
     'conversation:begin': (request: IpcRequest<'conversation:begin'>) =>
@@ -392,6 +402,10 @@ export function buildHandlers(
           projectId: request.projectId,
           ...(request.profileId === undefined ? {} : { profileId: request.profileId }),
           ...(request.continueFrom === undefined ? {} : { continueFrom: request.continueFrom }),
+          ...(request.objective === undefined ? {} : { objective: request.objective }),
+          ...(request.sourceEventIds === undefined
+            ? {}
+            : { sourceEventIds: request.sourceEventIds }),
         })
       ),
 
@@ -601,6 +615,19 @@ export function buildHandlers(
     'project:setNotes': (request: { projectId: string; notes: string }) =>
       Promise.resolve(runtime.setProjectNotes(request.projectId, request.notes)),
 
+    'conversation:getNote': (request: IpcRequest<'conversation:getNote'>) =>
+      Promise.resolve(runtime.getConversationNote(request.conversationId)),
+
+    'conversation:setNoteText': (request: IpcRequest<'conversation:setNoteText'>) =>
+      Promise.resolve(
+        runtime.setConversationNoteText(request.conversationId, request.text, request.baseRevision)
+      ),
+
+    'conversation:setNoteView': (request: IpcRequest<'conversation:setNoteView'>) => {
+      const { conversationId, ...view } = request
+      return Promise.resolve(runtime.setConversationNoteView(conversationId, view))
+    },
+
     'app:getNote': () => Promise.resolve(runtime.getAppNote()),
 
     'app:setNote': (request: { notes: string }) =>
@@ -667,6 +694,7 @@ export function buildHandlers(
       afterSeq?: number
       beforeSeq?: number
       limit?: number
+      live?: boolean
     }) => {
       /*
        * Taken before the read, and that ordering is the correctness story.
@@ -698,12 +726,31 @@ export function buildHandlers(
        * live approval card with a snapshot taken a moment earlier.
        */
       const state =
-        request.afterSeq === undefined
+        request.afterSeq === undefined || request.live === true
           ? { state: toTranscriptState(runtime.transcriptState(request.conversationId)) }
           : {}
 
       return Promise.resolve({ events: events.map(toTranscript), throughSeq, ...state })
     },
+
+    'task:state': (request: { conversationId: string }) => {
+      const throughSeq = runtime.logPosition()
+      return Promise.resolve({ task: runtime.taskState(request.conversationId), throughSeq })
+    },
+
+    'task:close': (request: {
+      conversationId: string
+      taskId: string
+      reason: 'completed' | 'abandoned'
+    }) =>
+      Promise.resolve({
+        closed: runtime.closeTask(request.conversationId, request.taskId, request.reason),
+      }),
+
+    'task:bindAssignment': (request: { conversationId: string; taskId: string }) =>
+      Promise.resolve({
+        bound: runtime.bindAssignment(request.conversationId, request.taskId).outcome !== 'refused',
+      }),
 
     'approval:decide': async (request: {
       conversationId: string
@@ -1144,10 +1191,22 @@ export function buildHandlers(
  * store's type keeps the immutability where it is useful — inside main, where
  * the same object is handed to more than one caller.
  */
-function toTranscriptState(state: TranscriptState): {
+function toTranscriptState(
+  state: Omit<TranscriptState, 'assignment'> & {
+    assignment?: TranscriptState['assignment']
+    replies?: readonly StoredEvent[]
+    task?: TaskBundle | null
+    live?: LiveState
+  }
+): {
   approvals: TranscriptState['approvals'][number][]
   questions: TranscriptState['questions'][number][]
   working: string[]
+  workingSince?: Record<string, number>
+  replies: TranscriptEvent[]
+  task?: TaskBundle | null
+  live?: LiveStateWire
+  assignment?: TranscriptAssignment
   usageByActor: Record<
     string,
     { inputTokens: number; outputTokens: number; costUsd: number | null }
@@ -1157,7 +1216,31 @@ function toTranscriptState(state: TranscriptState): {
     approvals: [...state.approvals],
     questions: [...state.questions],
     working: [...state.working],
+    ...(state.workingSince === undefined ? {} : { workingSince: { ...state.workingSince } }),
+    replies: (state.replies ?? []).map(toTranscript),
+    ...(state.task === undefined ? {} : { task: state.task }),
+    ...(state.live === undefined ? {} : { live: toLiveState(state.live) }),
+    ...(state.assignment === undefined
+      ? {}
+      : {
+          assignment: {
+            linked: state.assignment.linked,
+            boundTaskId: state.assignment.boundTaskId,
+          },
+        }),
     usageByActor: { ...state.usageByActor },
+  }
+}
+
+function toLiveState(live: LiveState): LiveStateWire {
+  return {
+    work: live.work.map((lane) => ({ ...lane })),
+    chat: live.chat.map((lane) => ({ ...lane })),
+    operations: live.operations.map((operation) => ({ ...operation })),
+    handoffs: live.handoffs.map((handoff) => ({
+      ...handoff,
+      sourceEventIds: [...handoff.sourceEventIds],
+    })),
   }
 }
 
@@ -1214,6 +1297,42 @@ export function registerIpcHandlers(
       return parsedResponse.data
     })
   }
+
+  ipcMain.on(CONVERSATION_NOTE_JOURNAL_CHANNEL, (event, rawRequest: unknown) => {
+    let reply: ConversationNoteJournalResponse
+    try {
+      reply = answerConversationNoteJournal(runtime, isShellSender(event), rawRequest)
+    } catch {
+      reply = { ok: false, error: 'The note journal could not be answered' }
+    }
+    event.returnValue = reply
+  })
+}
+
+export function answerConversationNoteJournal(
+  runtime: Pick<ChorusRuntime, 'readConversationNoteJournal' | 'compareConversationNoteJournal'>,
+  trusted: boolean,
+  rawRequest: unknown
+): ConversationNoteJournalResponse {
+  if (!trusted) return { ok: false, error: 'The note journal is only available to Chorus windows' }
+  const parsed = ConversationNoteJournalRequest.safeParse(rawRequest)
+  if (!parsed.success) return { ok: false, error: 'Invalid note journal request' }
+  const request = parsed.data
+  try {
+    const answer =
+      request.op === 'read'
+        ? { matched: true, current: runtime.readConversationNoteJournal(request.conversationId) }
+        : runtime.compareConversationNoteJournal(
+            request.conversationId,
+            request.expected,
+            request.next
+          )
+    const reply = ConversationNoteJournalResponse.safeParse({ ok: true, ...answer })
+    return reply.success ? reply.data : { ok: false, error: 'Invalid note journal response' }
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+    return { ok: false, error: message.slice(0, 512) }
+  }
 }
 
 /**
@@ -1245,6 +1364,14 @@ export function forwardTasksToRenderer(runtime: ChorusRuntime): void {
   runtime.onTasksReported((push) => {
     for (const window of shellWindows()) {
       if (!window.isDestroyed()) window.webContents.send(TASKS_PUSH_CHANNEL, push)
+    }
+  })
+}
+
+export function forwardConversationNotesToRenderer(runtime: ChorusRuntime): () => void {
+  return runtime.onNoteChanged((push) => {
+    for (const window of shellWindows()) {
+      if (!window.isDestroyed()) window.webContents.send(CONVERSATION_NOTE_PUSH_CHANNEL, push)
     }
   })
 }

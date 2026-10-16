@@ -1,16 +1,14 @@
 import { memo, useCallback, type ComponentProps } from 'react'
-import { Session } from './Session.js'
+import { Session, type ForwardSelection } from './Session.js'
+import type { StartOptions } from './useConversationStarts.js'
 import { useWorkspaceStore } from './workspace/store.js'
 
 export type SessionHostProps = Omit<
   ComponentProps<typeof Session>,
-  'onActivate' | 'onRestart' | 'onContinue'
+  'onActivate' | 'onRestart' | 'onForward'
 > & {
   readonly paneId: string
-  readonly startIn: (
-    projectId: string,
-    options: { replacing?: string; continueFrom?: string }
-  ) => void
+  readonly startIn: (projectId: string, options: StartOptions) => void
 }
 
 export const SessionHost = memo(function SessionHost({
@@ -36,10 +34,20 @@ export const SessionHost = memo(function SessionHost({
    * conversation and through the same call — which is why the two
    * pass different named fields rather than the same positional one.
    */
-  const onContinue = useCallback(() => {
-    startIn(projectId, { continueFrom: conversationId })
-  }, [startIn, projectId, conversationId])
-  return (
-    <Session {...props} onActivate={onActivate} onRestart={onRestart} onContinue={onContinue} />
+  const onForward = useCallback(
+    (selection: ForwardSelection) => {
+      let objective = ''
+      for (const point of selection.text.trim()) {
+        if (objective.length + point.length > 2000) break
+        objective += point
+      }
+      startIn(projectId, {
+        continueFrom: conversationId,
+        objective,
+        sourceEventIds: selection.sourceEventIds,
+      })
+    },
+    [startIn, projectId, conversationId]
   )
+  return <Session {...props} onActivate={onActivate} onRestart={onRestart} onForward={onForward} />
 })

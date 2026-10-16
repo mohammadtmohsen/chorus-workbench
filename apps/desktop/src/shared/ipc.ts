@@ -1,5 +1,11 @@
-import { ActorSchema, AgentIdSchema, agentRecord } from '@chorus/shared'
+import {
+  ActorSchema,
+  AgentIdSchema,
+  agentRecord,
+  CONVERSATION_NOTE_MAX_LENGTH,
+} from '@chorus/shared'
 import { z } from 'zod'
+import { TaskBundleShape } from './task-progress.js'
 import { NOTE_SIZE, WorkspaceSnapshot } from './workspace-layout.js'
 import type { WorkbenchShellApi } from './workbench-ipc.js'
 import type { DetachedWindowApi } from './detached-window-ipc.js'
@@ -504,7 +510,61 @@ export const DEFAULT_TRAFFIC_PORT = 30_100
  * way in, and a shape imported from the store would make those two checks agree
  * with each other for the wrong reason.
  */
+export const LiveStateShape = z.object({
+  work: z.array(
+    z.object({
+      agentId: z.string(),
+      generation: z.number().int(),
+      startedAt: z.number().int(),
+      evidenceAt: z.number().int(),
+    })
+  ),
+  chat: z.array(
+    z.object({
+      requestId: z.string(),
+      agentId: z.string(),
+      startedAt: z.number().int(),
+      evidenceAt: z.number().int(),
+    })
+  ),
+  operations: z.array(
+    z.object({
+      agentId: z.string(),
+      requestId: z.string().nullable(),
+      generation: z.number().int(),
+      itemRef: z.string(),
+      kind: z.enum(['tool', 'command']),
+      name: z.string(),
+      detail: z.string().nullable(),
+      startedAt: z.number().int(),
+    })
+  ),
+  handoffs: z.array(
+    z.object({
+      handoffId: z.string(),
+      from: z.string(),
+      to: z.string(),
+      sourceEventIds: z.array(z.string()),
+      createdAt: z.number().int().nullable(),
+      outcome: z.enum(['submitted', 'failed', 'cancelled', 'unavailable']).nullable(),
+      outcomeAt: z.number().int().nullable(),
+    })
+  ),
+})
+export type LiveStateWire = z.infer<typeof LiveStateShape>
+
+export const TranscriptAssignmentShape = z.object({
+  linked: z.boolean(),
+  boundTaskId: z.string().nullable(),
+})
+
+export type TranscriptAssignment = z.infer<typeof TranscriptAssignmentShape>
+
 const TranscriptStateShape = z.object({
+  replies: z.array(TranscriptEvent).optional(),
+  live: LiveStateShape.optional(),
+  task: TaskBundleShape.nullable().optional(),
+  assignment: TranscriptAssignmentShape.optional(),
   approvals: z.array(
     z.object({
       approvalId: z.string(),
@@ -512,6 +572,8 @@ const TranscriptStateShape = z.object({
       kind: z.string(),
       request: z.unknown(),
       expiresAt: z.number().int(),
+      mode: z.literal('discussion').optional(),
+      requestId: z.string().min(1).optional(),
     })
   ),
   questions: z.array(
@@ -521,9 +583,12 @@ const TranscriptStateShape = z.object({
       agentId: z.string(),
       request: z.unknown(),
       expiresAt: z.number().int(),
+      mode: z.literal('discussion').optional(),
+      requestId: z.string().min(1).optional(),
     })
   ),
   working: z.array(z.string()),
+  workingSince: z.record(z.string(), z.number()).optional(),
   usageByActor: z.record(
     z.string(),
     z.object({
@@ -658,6 +723,8 @@ const StartConversationRequest = z.object({
    * through this channel too and simply does not name a source.
    */
   continueFrom: z.string().optional(),
+  objective: z.string().trim().min(1).max(2000).optional(),
+  sourceEventIds: z.array(z.string().min(1).max(128)).max(20).optional(),
 })
 
 const StartedConversationShape = z.object({
@@ -670,6 +737,24 @@ const StartedConversationShape = z.object({
   /** Defaults to the folder's name; the user can rename it. */
   title: z.string(),
 })
+
+const NoteFraction = z.number().min(0).max(1)
+
+export const ConversationNoteShape = z
+  .object({
+    body: z.string(),
+    revision: z.number().int().min(0),
+    version: z.number().int().min(0),
+    visible: z.boolean(),
+    x: NoteFraction.nullable(),
+    y: NoteFraction.nullable(),
+    width: NoteFraction.nullable(),
+    height: NoteFraction.nullable(),
+    updatedBy: z.string().nullable(),
+    updatedAt: z.number(),
+  })
+  .strict()
+export type ConversationNoteShape = z.infer<typeof ConversationNoteShape>
 
 export const IPC_CONTRACT = {
   'app:getInfo': { request: z.void(), response: AppInfo },
@@ -725,7 +810,7 @@ export const IPC_CONTRACT = {
        * could name any intent can only choose between the ones main knows.
        */
       intent: z.enum(['go', 'collaborate']).optional(),
-      mode: z.enum(['auto', 'ask', 'guide']).optional(),
+      mode: z.enum(['auto', 'ask', 'guide', 'discussion', 'work']).optional(),
     }),
     /** Which agents the mention router picked, so the UI can show it. */
     response: z.object({ targets: z.array(AgentIdSchema) }),
@@ -733,6 +818,35 @@ export const IPC_CONTRACT = {
   'conversation:interrupt': {
     request: z.object({ conversationId: z.string() }),
     response: z.object({ ok: z.literal(true) }),
+  },
+  'conversation:getNote': {
+    request: z.object({ conversationId: z.string().min(1) }).strict(),
+    response: ConversationNoteShape,
+  },
+  'conversation:setNoteText': {
+    request: z
+      .object({
+        conversationId: z.string().min(1),
+        text: z.string().max(CONVERSATION_NOTE_MAX_LENGTH),
+        baseRevision: z.number().int().min(0),
+      })
+      .strict(),
+    response: z
+      .object({ status: z.enum(['saved', 'conflict']), note: ConversationNoteShape })
+      .strict(),
+  },
+  'conversation:setNoteView': {
+    request: z
+      .object({
+        conversationId: z.string().min(1),
+        visible: z.boolean().optional(),
+        x: NoteFraction.optional(),
+        y: NoteFraction.optional(),
+        width: NoteFraction.optional(),
+        height: NoteFraction.optional(),
+      })
+      .strict(),
+    response: ConversationNoteShape,
   },
   /**
    * Replays from the log rather than from provider history — Codex discards
@@ -1589,6 +1703,7 @@ export const IPC_CONTRACT = {
        */
       beforeSeq: z.number().int().optional(),
       limit: z.number().int().positive().optional(),
+      live: z.boolean().optional(),
     }),
     response: z.object({
       events: z.array(TranscriptEvent),
@@ -1604,6 +1719,25 @@ export const IPC_CONTRACT = {
        */
       state: TranscriptStateShape.optional(),
     }),
+  },
+  'task:state': {
+    request: z.object({ conversationId: z.string() }),
+    response: z.object({ task: TaskBundleShape.nullable(), throughSeq: z.number().int() }),
+  },
+  'task:close': {
+    request: z.object({
+      conversationId: z.string(),
+      taskId: z.string().min(1).max(64),
+      reason: z.enum(['completed', 'abandoned']),
+    }),
+    response: z.object({ closed: z.boolean() }),
+  },
+  'task:bindAssignment': {
+    request: z.object({
+      conversationId: z.string(),
+      taskId: z.string().min(1).max(64),
+    }),
+    response: z.object({ bound: z.boolean() }),
   },
   'approval:decide': {
     request: ApprovalChoice,
@@ -2253,6 +2387,39 @@ export type AttentionEvent =
   | z.infer<typeof QuestionAttention>
   | z.infer<typeof IdleAttention>
 
+export const CONVERSATION_NOTE_PUSH_CHANNEL = 'conversation:note'
+
+export const ConversationNotePush = z
+  .object({ conversationId: z.string(), note: ConversationNoteShape.nullable() })
+  .strict()
+export type ConversationNotePush = z.infer<typeof ConversationNotePush>
+
+export const CONVERSATION_NOTE_JOURNAL_CHANNEL = 'conversation:noteJournal'
+
+export const CONVERSATION_NOTE_JOURNAL_MAX_LENGTH = CONVERSATION_NOTE_MAX_LENGTH * 6 + 1_024
+
+const NoteJournalConversation = z.string().min(1).max(128)
+const NoteJournalRaw = z.string().max(CONVERSATION_NOTE_JOURNAL_MAX_LENGTH).nullable()
+
+export const ConversationNoteJournalRequest = z.discriminatedUnion('op', [
+  z.object({ op: z.literal('read'), conversationId: NoteJournalConversation }).strict(),
+  z
+    .object({
+      op: z.literal('compare'),
+      conversationId: NoteJournalConversation,
+      expected: NoteJournalRaw,
+      next: NoteJournalRaw,
+    })
+    .strict(),
+])
+export type ConversationNoteJournalRequest = z.infer<typeof ConversationNoteJournalRequest>
+
+export const ConversationNoteJournalResponse = z.discriminatedUnion('ok', [
+  z.object({ ok: z.literal(true), matched: z.boolean(), current: NoteJournalRaw }).strict(),
+  z.object({ ok: z.literal(false), error: z.string().max(512) }).strict(),
+])
+export type ConversationNoteJournalResponse = z.infer<typeof ConversationNoteJournalResponse>
+
 export const REVEAL_PUSH_CHANNEL = 'conversation:revealed'
 
 export const RevealPush = IPC_CONTRACT['conversation:reveal'].request
@@ -2418,6 +2585,23 @@ export interface ChorusApi
   readonly setProjectNotes: (
     request: IpcRequest<'project:setNotes'>
   ) => Promise<IpcResponse<'project:setNotes'>>
+  readonly getConversationNote: (
+    request: IpcRequest<'conversation:getNote'>
+  ) => Promise<IpcResponse<'conversation:getNote'>>
+  readonly setConversationNoteText: (
+    request: IpcRequest<'conversation:setNoteText'>
+  ) => Promise<IpcResponse<'conversation:setNoteText'>>
+  readonly setConversationNoteView: (
+    request: IpcRequest<'conversation:setNoteView'>
+  ) => Promise<IpcResponse<'conversation:setNoteView'>>
+  readonly readConversationNoteJournal: (request: {
+    readonly conversationId: string
+  }) => ConversationNoteJournalResponse
+  readonly compareConversationNoteJournal: (request: {
+    readonly conversationId: string
+    readonly expected: string | null
+    readonly next: string | null
+  }) => ConversationNoteJournalResponse
   readonly getAppNote: (request: IpcRequest<'app:getNote'>) => Promise<IpcResponse<'app:getNote'>>
   readonly setAppNote: (request: IpcRequest<'app:setNote'>) => Promise<IpcResponse<'app:setNote'>>
   readonly listKeptNotes: (
@@ -2456,6 +2640,7 @@ export interface ChorusApi
   readonly onLimits: (listener: (limits: LimitsPush) => void) => () => void
   readonly onContextUsage: (listener: (usage: ContextUsagePush) => void) => () => void
   readonly onTasks: (listener: (tasks: TasksPush) => void) => () => void
+  readonly onConversationNote: (listener: (push: ConversationNotePush) => void) => () => void
   readonly onActivity: (listener: (activity: ActivityPush) => void) => () => void
   readonly onAttention: (listener: (attention: AttentionPush) => void) => () => void
   readonly onRevealConversation: (listener: (reveal: RevealPush) => void) => () => void
@@ -2520,6 +2705,11 @@ export interface ChorusApi
   readonly transcript: (
     request: IpcRequest<'conversation:transcript'>
   ) => Promise<IpcResponse<'conversation:transcript'>>
+  readonly taskState: (request: IpcRequest<'task:state'>) => Promise<IpcResponse<'task:state'>>
+  readonly closeTask: (request: IpcRequest<'task:close'>) => Promise<IpcResponse<'task:close'>>
+  readonly bindAssignment: (
+    request: IpcRequest<'task:bindAssignment'>
+  ) => Promise<IpcResponse<'task:bindAssignment'>>
   readonly decideApproval: (request: ApprovalChoice) => Promise<{ ok: true }>
   readonly answerQuestion: (request: QuestionAnswer) => Promise<{ ok: true }>
   readonly profiles: () => Promise<IpcResponse<'policy:profiles'>>

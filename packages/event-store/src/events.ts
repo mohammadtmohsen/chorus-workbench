@@ -22,7 +22,74 @@ const actor = ActorSchema
  */
 const itemRef = z.string().min(1)
 
+export const TASK_STEP_STATUSES = ['pending', 'active', 'done', 'skipped'] as const
+
+export const TaskStepPayload = z.object({
+  id: z.string().min(1),
+  label: z.string().optional(),
+  parentId: z.string().optional(),
+  title: z.string(),
+  status: z.enum(TASK_STEP_STATUSES),
+  estimateMinutes: z.number().positive().optional(),
+  dependsOn: z.array(z.string()).optional(),
+})
+export type TaskStepPayload = z.infer<typeof TaskStepPayload>
+
+export const TaskOutcomePayload = z.object({
+  startedAt: z.number().int(),
+  elapsedMs: z.number().nonnegative(),
+  workingMs: z.number().nonnegative(),
+  lanes: z.array(
+    z.object({
+      agentId: AgentIdSchema,
+      model: z.string().nullable(),
+      firstForecastMinutes: z.number().nonnegative().nullable(),
+      finalForecastMinutes: z.number().nonnegative().nullable(),
+      workingMs: z.number().nonnegative(),
+      samples: z.array(
+        z.object({
+          estimateMinutes: z.number().positive(),
+          actualMinutes: z.number().nonnegative(),
+        })
+      ),
+    })
+  ),
+})
+export type TaskOutcomePayload = z.infer<typeof TaskOutcomePayload>
+
 export const ChorusEventPayload = z.discriminatedUnion('type', [
+  z.object({
+    type: z.literal('task.opened'),
+    taskId: z.string().min(1),
+    originEventId: z.string().min(1),
+    startedAt: z.number().int(),
+  }),
+  z.object({
+    type: z.literal('task.revised'),
+    taskId: z.string().min(1),
+    agentId: AgentIdSchema,
+    revision: z.number().int().positive(),
+    source: z.enum(['chorus', 'native']),
+    steps: z.array(TaskStepPayload),
+    reason: z.string().optional(),
+    parallel: z.boolean().optional(),
+    awaitingUser: z.boolean().optional(),
+    complete: z.boolean().optional(),
+  }),
+  z.object({
+    type: z.literal('task.closed'),
+    taskId: z.string().min(1),
+    reason: z.enum(['completed', 'superseded', 'abandoned']),
+    outcome: TaskOutcomePayload.optional(),
+  }),
+  z.object({
+    type: z.literal('reply.status'),
+    requestId: z.string().min(1),
+    sourceId: z.string().min(1),
+    agentId: AgentIdSchema,
+    phase: z.enum(['waiting', 'thinking', 'replying', 'done', 'error', 'cancelled']),
+    from: AgentIdSchema.optional(),
+  }),
   z.object({
     type: z.literal('conversation.created'),
     projectId: z.string(),
@@ -43,6 +110,13 @@ export const ChorusEventPayload = z.discriminatedUnion('type', [
      * conversation starts fresh, which is what all of them did until now.
      */
     continuedFrom: z.string().optional(),
+    forward: z
+      .object({
+        throughSeq: z.number().int().nonnegative(),
+        objective: z.string().trim().min(1).max(2000),
+        sourceEventIds: z.array(z.string()).max(20),
+      })
+      .optional(),
     /**
      * An aside: a conversation held in a fork of another conversation's agent,
      * about one passage of one reply.
@@ -121,7 +195,12 @@ export const ChorusEventPayload = z.discriminatedUnion('type', [
     reason: z.enum(['closed', 'crashed', 'replaced', 'shutdown']),
   }),
 
-  z.object({ type: z.literal('user.message'), text: z.string(), live: z.boolean().optional() }),
+  z.object({
+    type: z.literal('user.message'),
+    text: z.string(),
+    live: z.boolean().optional(),
+    mode: z.enum(['discussion', 'work']).optional(),
+  }),
 
   /**
    * The person edited a file themselves, in Chorus.
@@ -182,8 +261,18 @@ export const ChorusEventPayload = z.discriminatedUnion('type', [
     userInitiated: z.boolean().default(false),
   }),
 
-  z.object({ type: z.literal('agent.message.delta'), itemRef, text: z.string() }),
-  z.object({ type: z.literal('agent.message.completed'), itemRef, text: z.string() }),
+  z.object({
+    type: z.literal('agent.message.delta'),
+    itemRef,
+    text: z.string(),
+    mode: z.literal('discussion').optional(),
+  }),
+  z.object({
+    type: z.literal('agent.message.completed'),
+    itemRef,
+    text: z.string(),
+    mode: z.literal('discussion').optional(),
+  }),
   z.object({ type: z.literal('agent.reasoning.delta'), itemRef, text: z.string() }),
 
   z.object({
@@ -253,6 +342,8 @@ export const ChorusEventPayload = z.discriminatedUnion('type', [
     kind: z.enum(['command', 'fileChange', 'permissionGrant', 'mcpToolCall', 'editorEdit']),
     request: z.unknown(),
     expiresAt: z.number().int(),
+    mode: z.literal('discussion').optional(),
+    requestId: z.string().min(1).optional(),
   }),
   z.object({
     type: z.literal('approval.decided'),
@@ -266,10 +357,12 @@ export const ChorusEventPayload = z.discriminatedUnion('type', [
     decidedBy: z.enum(['user', 'policy', 'system']),
     /** Which rule auto-decided this. Null means a human chose (plan §4.4). */
     policyRuleId: z.string().nullable(),
+    mode: z.literal('discussion').optional(),
   }),
   z.object({
     type: z.literal('approval.withdrawn'),
     approvalId: z.string(),
+    mode: z.literal('discussion').optional(),
   }),
 
   z.object({
@@ -282,6 +375,8 @@ export const ChorusEventPayload = z.discriminatedUnion('type', [
      */
     request: z.unknown(),
     expiresAt: z.number().int(),
+    mode: z.literal('discussion').optional(),
+    requestId: z.string().min(1).optional(),
   }),
   z.object({
     type: z.literal('userinput.answered'),
@@ -299,6 +394,7 @@ export const ChorusEventPayload = z.discriminatedUnion('type', [
       .array(z.object({ questionId: z.string(), values: z.array(z.string()).nullable() }))
       .nullable(),
     answeredBy: z.enum(['user', 'system']),
+    mode: z.literal('discussion').optional(),
   }),
 
   z.object({
@@ -308,6 +404,19 @@ export const ChorusEventPayload = z.discriminatedUnion('type', [
     to: AgentIdSchema,
     sourceEventIds: z.array(z.string()),
     brief: z.string(),
+  }),
+  z.object({
+    type: z.literal('handoff.outcome'),
+    handoffId: z.string(),
+    from: AgentIdSchema,
+    to: AgentIdSchema,
+    sourceEventIds: z.array(z.string()),
+    outcome: z.enum(['submitted', 'failed', 'cancelled', 'unavailable']),
+  }),
+  z.object({
+    type: z.literal('assignment.bound'),
+    taskId: z.string().min(1),
+    previousTaskId: z.string().min(1).nullable(),
   }),
 
   /**
@@ -319,6 +428,7 @@ export const ChorusEventPayload = z.discriminatedUnion('type', [
    */
   z.object({ type: z.literal('context.compacted') }),
 
+  z.object({ type: z.literal('usage.blocked'), resetsAt: z.number().int().nullable() }),
   z.object({
     type: z.literal('usage.updated'),
     inputTokens: z.number().int(),

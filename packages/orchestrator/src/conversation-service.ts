@@ -3,6 +3,7 @@ import {
   type AgentActivity,
   type AgentAdapter,
   type AgentEvent,
+  type AgentInput,
   type AgentSession,
   type ApprovalDecision,
   type ApprovalRequest,
@@ -50,7 +51,7 @@ interface DeltaMeta {
 }
 
 export interface ConversationServiceOptions {
-  readonly store: EventStore
+  readonly store: Pick<EventStore, 'append' | 'appendMany'>
   readonly conversationId: string
   readonly adapter: AgentAdapter
   readonly scheduler?: Scheduler
@@ -73,6 +74,7 @@ export interface ConversationServiceOptions {
   readonly onActivity?: (activity: AgentActivity | null) => void
   /** Told when an approved plan returned the session to ordinary permissions. */
   readonly onPlanExited?: () => void
+  readonly onPlan?: (steps: Extract<AgentEvent, { type: 'plan.updated' }>['steps']) => void
   readonly onApprovalQueued?: (request: ApprovalRequest) => void
   readonly onQuestionQueued?: (request: UserInputRequest) => void
   readonly onApprovalSettled?: (approvalId: string) => void
@@ -112,7 +114,7 @@ export interface ContextWindow {
 }
 
 export class ConversationService {
-  private readonly store: EventStore
+  private readonly store: Pick<EventStore, 'append' | 'appendMany'>
   private readonly conversationId: string
   private readonly adapter: AgentAdapter
   private readonly buffer: DeltaBuffer<DeltaMeta>
@@ -126,6 +128,7 @@ export class ConversationService {
   private readonly onTasks: ((tasks: readonly BackgroundTask[]) => void) | undefined
   private readonly onActivity: ((activity: AgentActivity | null) => void) | undefined
   private readonly onPlanExited: (() => void) | undefined
+  private readonly onPlan: ConversationServiceOptions['onPlan']
   private readonly onApprovalQueued: ((request: ApprovalRequest) => void) | undefined
   private readonly onQuestionQueued: ((request: UserInputRequest) => void) | undefined
   private readonly onApprovalSettled: ((approvalId: string) => void) | undefined
@@ -168,6 +171,7 @@ export class ConversationService {
   /** Set when *we* asked to stop, so an interrupt is not reported as a failure. */
   private interruptRequested = false
   private compactionNoticed = false
+  private blockedThisTurn = false
 
   constructor(options: ConversationServiceOptions) {
     this.store = options.store
@@ -181,6 +185,7 @@ export class ConversationService {
     this.onTasks = options.onTasks
     this.onActivity = options.onActivity
     this.onPlanExited = options.onPlanExited
+    this.onPlan = options.onPlan
     this.onApprovalQueued = options.onApprovalQueued
     this.onQuestionQueued = options.onQuestionQueued
     this.onApprovalSettled = options.onApprovalSettled
@@ -266,9 +271,23 @@ export class ConversationService {
     await this.deliver(delivered)
   }
 
+  recordTask(
+    payload: Extract<ChorusEventPayload, { type: 'task.opened' | 'task.revised' | 'task.closed' }>
+  ): void {
+    this.lifecycle(payload)
+  }
+
   /** Delivers without logging — the shared-conversation path. */
-  async deliver(text: string): Promise<void> {
-    await this.session?.send({ text })
+  async deliver(
+    text: string,
+    recoveryText?: string,
+    delivery: Pick<AgentInput, 'prepare' | 'recoveryBeforeSeq'> = {}
+  ): Promise<void> {
+    await this.session?.send({
+      text,
+      ...(recoveryText === undefined ? {} : { recoveryText }),
+      ...delivery,
+    })
   }
 
   /**
@@ -702,7 +721,14 @@ export class ConversationService {
         return
 
       case 'turn.started':
+        this.blockedThisTurn = false
         this.lifecycle({ type: 'turn.started', turnRef: event.turnRef })
+        return
+
+      case 'usage.blocked':
+        if (this.blockedThisTurn) return
+        this.blockedThisTurn = true
+        this.lifecycle({ type: 'usage.blocked', resetsAt: event.resetsAt })
         return
 
       case 'turn.completed': {
@@ -1016,10 +1042,15 @@ export class ConversationService {
         return
 
       case 'plan.updated':
-        // No durable projection yet; the plan panel lands in M4.
+        try {
+          this.onPlan?.(event.steps)
+        } catch {
+          return
+        }
         return
 
       case 'error':
+        if (this.interruptRequested && event.message.startsWith('[ede_diagnostic]')) return
         this.lifecycle({
           type: 'error.raised',
           message: event.message,

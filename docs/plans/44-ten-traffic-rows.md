@@ -2,12 +2,12 @@
 
 ## Status
 
-| Unit | Result |
-| --- | --- |
-| Scope | Traffic request-list height and its boundary with request/response details |
-| Implementation | Fixed-height list wrapper, exact header/data grid tracks, and remaining-height inspector written |
-| Build and install | `CHORUS_INSTALL_KEEP_RUNNING=1 pnpm app:install` completed; signed arm64 app installed at `/Applications/Chorus.app` |
-| Verification | Incremental source diffs reviewed against `/private/tmp/workbench-ten-traffic-rows-1791977666986`; runtime behavior unverified; no tests, separate typecheck, or app launch ran |
+| Unit              | Result                                                                                                                                                                          |
+| ----------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Scope             | Traffic request-list height and its boundary with request/response details                                                                                                      |
+| Implementation    | Fixed-height list wrapper, exact header/data grid tracks, and remaining-height inspector written                                                                                |
+| Build and install | `CHORUS_INSTALL_KEEP_RUNNING=1 pnpm app:install` completed; signed arm64 app installed at `/Applications/Chorus.app`                                                            |
+| Verification      | Incremental source diffs reviewed against `/private/tmp/workbench-ten-traffic-rows-1791977666986`; runtime behavior unverified; no tests, separate typecheck, or app launch ran |
 
 ## Current / Issue
 

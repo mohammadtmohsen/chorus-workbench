@@ -2115,6 +2115,9 @@ describe('naming a conversation', () => {
     expect(claude?.sent.at(-1)?.text).toContain('fix the parser')
     claude?.emit({ type: 'message.completed', itemRef: 'n1', text: 'Parser fix' })
     await flush()
+    expect(titles()).toEqual([])
+    claude?.emit({ type: 'turn.completed', turnRef: 't1', status: 'completed' })
+    await flush()
     expect(titles()).toEqual(['Parser fix'])
     expect(namerOf(fakes.deepseek)).toHaveLength(0)
     expect(namerOf(fakes.codex)).toHaveLength(0)
@@ -2140,6 +2143,7 @@ describe('naming a conversation', () => {
     expect(claude?.closed).toBe(true)
     expect(deepseek?.sent.at(-1)?.text).toContain('fix the parser')
     deepseek?.emit({ type: 'message.completed', itemRef: 'n1', text: 'Parser fix' })
+    deepseek?.emit({ type: 'turn.completed', turnRef: 't1', status: 'completed' })
     await flush()
     expect(titles()).toEqual(['Parser fix'])
     expect(namerOf(fakes.codex)).toHaveLength(0)
@@ -2154,6 +2158,7 @@ describe('naming a conversation', () => {
     const codex = namerOf(fakes.codex)[0]
     expect(codex?.sent.at(-1)?.text).toContain('fix the parser')
     codex?.emit({ type: 'message.completed', itemRef: 'n1', text: 'Parser fix' })
+    codex?.emit({ type: 'turn.completed', turnRef: 't1', status: 'completed' })
     await flush()
     expect(titles()).toEqual(['Parser fix'])
   })
@@ -2165,6 +2170,7 @@ describe('naming a conversation', () => {
     await flush()
     const deepseek = namerOf(fakes.deepseek)[0]
     deepseek?.emit({ type: 'message.completed', itemRef: 'n1', text: 'Parser fix' })
+    deepseek?.emit({ type: 'turn.completed', turnRef: 't1', status: 'completed' })
     await flush()
 
     await runtime.send(conversationId, '@codex and the lexer too')
@@ -2173,6 +2179,86 @@ describe('naming a conversation', () => {
     expect(namerOf(fakes.deepseek)).toHaveLength(1)
     expect(deepseek?.sent.at(-1)?.text).toMatch(/^Current title: Parser fix\n\n/)
     expect(deepseek?.sent.at(-1)?.text).toContain('the lexer too')
+  })
+
+  it('discards quota messages and falls through to Codex when both other naming turns fail', async () => {
+    await runtime.send(conversationId, '@codex fix the parser')
+    await flush()
+
+    for (const fake of [fakes.claude, fakes.deepseek]) {
+      const namer = namerOf(fake)[0]
+      expect(namer?.sent.at(-1)?.text).toContain('fix the parser')
+      namer?.emit({
+        type: 'message.completed',
+        itemRef: 'quota',
+        text: "You've hit your weekly limit · resets 9pm (Asia/Amman)",
+      })
+      await flush()
+      expect(titles()).toEqual([])
+      namer?.emit({ type: 'turn.completed', turnRef: 't1', status: 'failed' })
+      await flush()
+      expect(namer?.closed).toBe(true)
+      expect(titles()).toEqual([])
+    }
+
+    const codex = namerOf(fakes.codex)[0]
+    expect(codex?.sent.at(-1)?.text).toContain('fix the parser')
+    codex?.emit({ type: 'message.completed', itemRef: 'n1', text: 'Parser fix' })
+    codex?.emit({ type: 'turn.completed', turnRef: 't1', status: 'completed' })
+    await flush()
+    expect(titles()).toEqual(['Parser fix'])
+  })
+
+  it('tries the next namer immediately after a fatal error', async () => {
+    await runtime.send(conversationId, '@codex fix the parser')
+    await flush()
+    const claude = namerOf(fakes.claude)[0]
+    claude?.emit({ type: 'error', message: 'Weekly quota exhausted', recoverable: false })
+    await flush()
+
+    const deepseek = namerOf(fakes.deepseek)[0]
+    expect(claude?.closed).toBe(true)
+    expect(deepseek?.sent.at(-1)?.text).toContain('fix the parser')
+    deepseek?.emit({ type: 'message.completed', itemRef: 'n1', text: 'Parser fix' })
+    deepseek?.emit({ type: 'turn.completed', turnRef: 't1', status: 'completed' })
+    await flush()
+    expect(titles()).toEqual(['Parser fix'])
+  })
+
+  it('tries another namer when a successful turn contains no usable title', async () => {
+    await runtime.send(conversationId, '@codex fix the parser')
+    await flush()
+    const claude = namerOf(fakes.claude)[0]
+    claude?.emit({ type: 'message.completed', itemRef: 'n1', text: '""' })
+    claude?.emit({ type: 'turn.completed', turnRef: 't1', status: 'completed' })
+    await flush()
+
+    const deepseek = namerOf(fakes.deepseek)[0]
+    expect(claude?.closed).toBe(true)
+    expect(deepseek?.sent.at(-1)?.text).toContain('fix the parser')
+    expect(titles()).toEqual([])
+    deepseek?.emit({ type: 'message.completed', itemRef: 'n1', text: 'Parser fix' })
+    deepseek?.emit({ type: 'turn.completed', turnRef: 't1', status: 'completed' })
+    await flush()
+    expect(titles()).toEqual(['Parser fix'])
+  })
+
+  it('keeps the current title when every naming turn fails', async () => {
+    runtime.renameConversation(conversationId, 'Existing title')
+    await runtime.send(conversationId, '@codex fix the parser')
+    await flush()
+
+    for (const fake of [fakes.claude, fakes.deepseek, fakes.codex]) {
+      const namer = namerOf(fake)[0]
+      expect(namer?.sent.at(-1)?.text).toContain('fix the parser')
+      namer?.emit({ type: 'message.completed', itemRef: 'quota', text: 'Weekly quota exhausted' })
+      namer?.emit({ type: 'turn.completed', turnRef: 't1', status: 'failed' })
+      await flush()
+      expect(namer?.closed).toBe(true)
+      expect(titles()).toEqual(['Existing title'])
+    }
+
+    expect(runtime.conversationTitle(conversationId)).toBe('Existing title')
   })
 })
 

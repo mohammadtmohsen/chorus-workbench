@@ -217,6 +217,146 @@ describe('deferred restore', () => {
     expect(persisted()?.sessionRefs['claude']).toBe(fresh?.sessionRef)
   })
 
+  it('restores bounded excerpts of its own replies after a missing-thread fallback', async () => {
+    said('Keep the complete original requirements.')
+    const fullReply = `OWN_HISTORY_BEGIN\n${'Earlier implementation detail.\n'.repeat(2500)}OWN_HISTORY_END`
+    runtime.store.append({
+      conversationId: 'conv-1',
+      actor: 'claude',
+      payload: { type: 'agent.message.completed', itemRef: 'earlier-work', text: fullReply },
+    })
+    claude.refuseResumeOnStream = true
+    await restoreWith(saved())
+    await runtime.send('conv-1', '@claude Continue the earlier work.', undefined, 'work')
+    const fresh = own(claude).find((session) => session.sessionRef !== 'thread-1')
+    expect(fresh?.sent[0]?.text).toContain('OWN_HISTORY_BEGIN')
+    expect(fresh?.sent[0]?.text).toContain('OWN_HISTORY_END')
+    expect(fresh?.sent[0]?.text).not.toContain(fullReply)
+    expect(Buffer.byteLength(fresh?.sent[0]?.text ?? '', 'utf8')).toBeLessThanOrEqual(25_000)
+    expect(fresh?.sent[0]?.text).toContain('Keep the complete original requirements.')
+    expect(persisted()?.sessionRefs['claude']).toBe(fresh?.sessionRef)
+  })
+
+  it('recovers a late missing-session failure without logging the pending message twice', async () => {
+    said('Remember that launch is Friday.')
+    for (let index = 0; index < 7; index += 1) {
+      said(`Release notes evidence ${String(index)}: ${'document '.repeat(170)}`)
+    }
+    runtime.store.append({
+      conversationId: 'conv-1',
+      actor: 'claude',
+      payload: {
+        type: 'agent.message.completed',
+        itemRef: 'earlier-chat',
+        text: 'We agreed to finish release notes first.',
+        mode: 'discussion',
+      },
+    })
+    await restoreWith(saved())
+    await runtime.send('conv-1', '@claude Continue the release notes.', undefined, 'work')
+    const stale = own(claude)[0]
+    let usageReceived = false
+    runtime.onContextUsageReported(() => {
+      usageReceived = true
+    })
+    stale?.emit({
+      type: 'context.usage',
+      usedTokens: 65_000,
+      maxTokens: 66_000,
+      percentUsed: 98,
+      autoCompactThreshold: null,
+      autoCompactPercent: null,
+      autoCompactEnabled: true,
+    })
+    await until(() => usageReceived)
+    stale?.emit({ type: 'turn.started', turnRef: 'lost-turn' })
+    stale?.emit({
+      type: 'message.delta',
+      itemRef: 'lost-partial',
+      text: 'PARTIAL_OUTPUT_FROM_LOST_TURN',
+    })
+    stale?.emit({
+      type: 'error',
+      message: 'No conversation found with session ID: thread-1',
+      recoverable: false,
+    })
+    await until(() => own(claude)[1]?.sent.length === 1)
+    const fresh = own(claude)[1]
+    expect(stale?.closed).toBe(true)
+    expect(fresh?.sent[0]?.text).toContain('Remember that launch is Friday.')
+    expect(fresh?.sent[0]?.text).toContain('We agreed to finish release notes first.')
+    expect(fresh?.sent[0]?.text).toContain('Continue the release notes.')
+    const prompt = fresh?.sent[0]?.text ?? ''
+    expect(prompt.split('Continue the release notes.')).toHaveLength(2)
+    expect(prompt).not.toContain('PARTIAL_OUTPUT_FROM_LOST_TURN')
+    expect(prompt).toContain('read_transcript')
+    expect(prompt).toContain('--- this conversation:')
+    expect(prompt).not.toContain('authorize nothing now')
+    expect(Buffer.byteLength(prompt, 'utf8')).toBeGreaterThan(8_000)
+    expect(Buffer.byteLength(prompt, 'utf8')).toBeLessThanOrEqual(24_000)
+    expect(fresh?.transcriptTool).toBe('registered')
+    expect(persisted()?.sessionRefs['claude']).toBe(fresh?.sessionRef)
+    const events = runtime.store.read('conv-1')
+    expect(
+      events.filter(
+        (event) =>
+          event.payload.type === 'user.message' &&
+          event.payload.text === '@claude Continue the release notes.'
+      )
+    ).toHaveLength(1)
+    expect(
+      events.filter(
+        (event) =>
+          event.payload.type === 'notice.raised' && event.payload.text.includes('Restoring claude')
+      )
+    ).toHaveLength(1)
+    expect(
+      events.some(
+        (event) => event.payload.type === 'turn.completed' && event.payload.turnRef === 'lost-turn'
+      )
+    ).toBe(true)
+  })
+
+  it('rebuilds bounded Chat context with original history after quitting and reopening', async () => {
+    said('The same conversation survives a relaunch.')
+    const fullReply = `RELAUNCH_BEGIN\n${'Keep this implementation detail.\n'.repeat(2500)}RELAUNCH_END`
+    runtime.store.append({
+      conversationId: 'conv-1',
+      actor: 'claude',
+      payload: { type: 'agent.message.completed', itemRef: 'before-quit', text: fullReply },
+    })
+    await restoreWith(saved())
+    await quit()
+    boot(true)
+    await runtime.restoreOpenConversations()
+    await runtime.send('conv-1', '@claude Where were we?', undefined, 'discussion')
+    await until(() =>
+      claude.sessions.some(
+        (session) =>
+          session.startedWith?.instructions?.startsWith('You are in Discussion mode.') === true &&
+          session.sent.length === 1
+      )
+    )
+    const reader = claude.sessions.find(
+      (session) =>
+        session.startedWith?.instructions?.startsWith('You are in Discussion mode.') === true
+    )
+    expect(reader?.sent[0]?.text).toContain('RELAUNCH_BEGIN')
+    expect(reader?.sent[0]?.text).toContain('RELAUNCH_END')
+    expect(reader?.sent[0]?.text).not.toContain(fullReply)
+    expect(
+      reader?.startedWith?.transcript?.({ skip: 0, count: 1, query: 'RELAUNCH_BEGIN' })
+    ).toContain('RELAUNCH_BEGIN')
+    expect(reader?.sent[0]?.text).toContain('The same conversation survives a relaunch.')
+    reader?.emit({
+      type: 'message.completed',
+      itemRef: 'after-reopen',
+      text: 'The history is available.',
+    })
+    reader?.emit({ type: 'turn.completed', turnRef: 'after-reopen', status: 'completed' })
+    await flush()
+  })
+
   it('keeps the threads of agents not yet started, through a partial start and quit', async () => {
     await restoreWith(saved())
     await runtime.send('conv-1', '@claude only you')
@@ -237,7 +377,7 @@ describe('deferred restore', () => {
     expect(own(claude).map((session) => session.sessionRef)).toEqual(['thread-1'])
   })
 
-  it('carries a continued room’s context to the first agent that starts', async () => {
+  it('carries full context to the first Work agent after restoring a Chat-only continuation', async () => {
     runtime.store.append({
       conversationId: 'parent-1',
       actor: 'user',
@@ -258,9 +398,25 @@ describe('deferred restore', () => {
         continuedFrom: 'parent-1',
       },
     })
+    runtime.store.append({
+      conversationId: 'conv-1',
+      actor: 'user',
+      payload: { type: 'user.message', text: 'What did we decide?', mode: 'discussion' },
+    })
+    runtime.store.append({
+      conversationId: 'conv-1',
+      actor: 'claude',
+      payload: {
+        type: 'agent.message.completed',
+        itemRef: 'discussion:earlier-answer',
+        text: 'We agreed to finish the release notes first.',
+        mode: 'discussion',
+      },
+    })
     await restoreWith(saved())
     await runtime.send('conv-1', 'pick it up')
     expect(firstText(claude)).toContain('the launch is on Friday')
+    expect(firstText(claude)).toContain('We agreed to finish the release notes first.')
   })
 
   it('lets an aside be asked before anything is sent', async () => {

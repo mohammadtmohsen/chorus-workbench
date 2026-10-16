@@ -43,6 +43,10 @@ export interface StartOptions {
    * `+` means what it says again.
    */
   readonly continueFrom?: string
+  readonly objective?: string
+  readonly sourceEventIds?: readonly string[]
+  readonly signal?: AbortSignal
+  readonly onSettled?: (error: Error | null) => void
 }
 
 export interface ConversationStartsDeps {
@@ -76,6 +80,18 @@ function forget(restarts: Map<string, PendingRestart>, record: PendingRestart): 
 
 const sameAgents = (a: readonly string[], b: readonly string[]): boolean =>
   a.length === b.length && a.every((agent, index) => agent === b[index])
+
+function copyMessageMode(source: string | undefined, target: string): void {
+  if (source === undefined) return
+  try {
+    const mode = localStorage.getItem(`chorus:message-mode:${source}`)
+    if (mode === 'work' || mode === 'discussion') {
+      localStorage.setItem(`chorus:message-mode:${target}`, mode)
+    }
+  } catch {
+    return
+  }
+}
 
 export function advanceSession(session: SessionInfo, latest: SessionInfo): SessionInfo {
   if (latest.starting === true) return session
@@ -179,7 +195,12 @@ export function useConversationStarts(deps: ConversationStartsDeps): {
   useEffect(() => window.chorus.onConversationsChanged(reconcile), [reconcile])
 
   const settle = useCallback(
-    (conversationId: string, outcome: StartOutcome, restart: PendingRestart | undefined) => {
+    (
+      conversationId: string,
+      outcome: StartOutcome,
+      restart: PendingRestart | undefined,
+      reportFailure = true
+    ) => {
       const open = (id: string): boolean =>
         sessionsRef.current.some((session) => session.conversationId === id)
       if (outcome.status !== 'ready') {
@@ -190,7 +211,7 @@ export function useConversationStarts(deps: ConversationStartsDeps): {
           )
           useWorkspaceStore.getState().removeSession(conversationId)
         }
-        if (outcome.status === 'failed') reportError(new Error(outcome.message))
+        if (outcome.status === 'failed' && reportFailure) reportError(new Error(outcome.message))
         reconcile()
         return
       }
@@ -232,6 +253,7 @@ export function useConversationStarts(deps: ConversationStartsDeps): {
 
   const startIn = useCallback(
     (projectId: string, options: StartOptions = {}) => {
+      if (options.signal?.aborted === true) return
       const source = options.replacing
       if (
         source !== undefined &&
@@ -250,12 +272,31 @@ export function useConversationStarts(deps: ConversationStartsDeps): {
               closed: null,
               begun: Promise.resolve(),
             }
-      if (restart !== undefined) restarts.current.set(restart.source, restart)
+      if (restart !== undefined) {
+        restarts.current.set(restart.source, restart)
+        updateSessions((current) =>
+          current.map((session) =>
+            session.conversationId === restart.source ? { ...session, restarting: true } : session
+          )
+        )
+      }
       clearError()
       setInFlight((count) => count + 1)
       pendingBegins.current += 1
       const open = (id: string): boolean =>
         sessionsRef.current.some((session) => session.conversationId === id)
+      let createdId: string | undefined
+      let completed = false
+      const cancel = (): void => {
+        if (!completed && createdId !== undefined) void finishEnd(createdId).catch(reportError)
+      }
+      const finish = (error: Error | null): void => {
+        if (completed) return
+        completed = true
+        options.signal?.removeEventListener('abort', cancel)
+        options.onSettled?.(error)
+      }
+      options.signal?.addEventListener('abort', cancel, { once: true })
       const releaseHeldRead = (): void => {
         if (pendingBegins.current === 0 && heldRead.current) reconcile()
       }
@@ -264,10 +305,20 @@ export function useConversationStarts(deps: ConversationStartsDeps): {
           projectId,
           profileId,
           ...(options.continueFrom === undefined ? {} : { continueFrom: options.continueFrom }),
+          ...(options.objective === undefined ? {} : { objective: options.objective }),
+          ...(options.sourceEventIds === undefined
+            ? {}
+            : { sourceEventIds: [...options.sourceEventIds] }),
         })
         .then(
           (begun) => {
             pendingBegins.current -= 1
+            createdId = begun.conversationId
+            if (options.signal?.aborted === true) {
+              cancel()
+              releaseHeldRead()
+              return null
+            }
             if (closedIds.current.has(begun.conversationId)) {
               releaseHeldRead()
               return null
@@ -279,6 +330,7 @@ export function useConversationStarts(deps: ConversationStartsDeps): {
               return null
             }
             if (restart !== undefined) restart.replacement = begun.conversationId
+            copyMessageMode(options.continueFrom, begun.conversationId)
             if (!open(begun.conversationId)) {
               updateSessions((current) => [...current, { ...begun, starting: true }])
             }
@@ -309,18 +361,45 @@ export function useConversationStarts(deps: ConversationStartsDeps): {
       }
       begin
         .then(async (conversationId) => {
-          if (conversationId === null) return
+          if (conversationId === null) {
+            finish(new Error('forwardTask.cancelled'))
+            return
+          }
           const outcome = await window.chorus
             .awaitStart({ conversationId })
             .catch((error: unknown) => {
-              if (restart !== undefined && open(conversationId)) void finishEnd(conversationId)
+              if (
+                (restart !== undefined || options.continueFrom !== undefined) &&
+                open(conversationId)
+              ) {
+                void finishEnd(conversationId).catch(reportError)
+              }
               throw error
             })
-          settle(conversationId, outcome, restart)
+          settle(conversationId, outcome, restart, options.onSettled === undefined)
+          finish(
+            outcome.status === 'ready'
+              ? null
+              : new Error(outcome.status === 'failed' ? outcome.message : 'forwardTask.cancelled')
+          )
         })
-        .catch(reportError)
+        .catch((error: unknown) => {
+          if (options.onSettled === undefined && options.signal?.aborted !== true)
+            reportError(error)
+          finish(error instanceof Error ? error : new Error('forwardTask.failed'))
+        })
         .finally(() => {
-          if (restart !== undefined) forget(restarts.current, restart)
+          options.signal?.removeEventListener('abort', cancel)
+          if (restart !== undefined && restarts.current.get(restart.source) === restart) {
+            forget(restarts.current, restart)
+            updateSessions((current) =>
+              current.map((session) =>
+                session.conversationId === restart.source
+                  ? { ...session, restarting: false }
+                  : session
+              )
+            )
+          }
           setInFlight((count) => count - 1)
         })
     },

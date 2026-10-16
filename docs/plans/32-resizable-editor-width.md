@@ -2,14 +2,14 @@
 
 ## Status
 
-| Unit | Result |
-| --- | --- |
-| Scope | Default editor width: window width minus 500px; resize up to 100% of the window |
-| Evidence | `EditorPane` derives a fixed 80% width; its divider has `data-fixed` and no resize handlers |
-| Implementation | Written: draggable and keyboard-accessible editor divider, bounded widths, saved project fractions and updated default |
-| Review | Product and regression diffs reviewed against `/private/tmp/editor-resize-nqr0d45a`; existing unrelated edits preserved |
-| Verification | Regressions written for bounds, window resizing, reset, persistence and older snapshots; desktop build, local packaging, signing and installation passed; tests, separate typechecks and live UI unrun |
-| Installation | 2026-10-11: Signed arm64 build installed at `/Applications/Chorus.app`; current session kept running |
+| Unit           | Result                                                                                                                                                                                                 |
+| -------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Scope          | Default editor width: window width minus 500px; resize up to 100% of the window                                                                                                                        |
+| Evidence       | `EditorPane` derives a fixed 80% width; its divider has `data-fixed` and no resize handlers                                                                                                            |
+| Implementation | Written: draggable and keyboard-accessible editor divider, bounded widths, saved project fractions and updated default                                                                                 |
+| Review         | Product and regression diffs reviewed against `/private/tmp/editor-resize-nqr0d45a`; existing unrelated edits preserved                                                                                |
+| Verification   | Regressions written for bounds, window resizing, reset, persistence and older snapshots; desktop build, local packaging, signing and installation passed; tests, separate typechecks and live UI unrun |
+| Installation   | 2026-10-11: Signed arm64 build installed at `/Applications/Chorus.app`; current session kept running                                                                                                   |
 
 Build and installation commands and the retained running bundle are recorded in [plan 31](31-run-without-http-capture.md#status). Quit and reopen Chorus to load the new build.
 
@@ -51,7 +51,8 @@ export function clampEditorWidth(width: number, windowWidth: number): number {
 
 export function editorWidthIn(windowWidth: number, fraction?: number): number {
   const saved = fraction === undefined ? undefined : clampEditorWidthFraction(fraction)
-  const wanted = saved === undefined ? windowWidth - EDITOR_WIDTH.defaultOffset : windowWidth * saved
+  const wanted =
+    saved === undefined ? windowWidth - EDITOR_WIDTH.defaultOffset : windowWidth * saved
   return clampEditorWidth(wanted, windowWidth)
 }
 ```
