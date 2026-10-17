@@ -104,6 +104,7 @@ export function withinBudget(carry: SessionCarry): boolean {
 function weigh(message: TranscriptMessage, remaining: number): number {
   let chars =
     message.text.length +
+    (message.fullText?.length ?? 0) +
     (message.detail?.length ?? 0) +
     (message.patch?.length ?? 0) +
     // Small individually, but there is one per row and a long transcript is

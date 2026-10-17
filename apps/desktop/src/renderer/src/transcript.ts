@@ -164,6 +164,7 @@ export interface TranscriptMessage {
    * there was no summary: an empty card and no card are different things.
    */
   readonly summary?: readonly string[]
+  readonly fullText?: string
   /**
    * The file a tool row is about, when it is about one.
    *
@@ -888,7 +889,7 @@ function apply(view: Mutable, event: TranscriptEvent): void {
         // The prefix the agent wrote, exactly — never a rebuilt body.
         text: summary === null ? said : said.slice(0, summary.cut).trimEnd(),
         status: 'complete',
-        ...(summary === null ? {} : { summary: summary.items }),
+        ...(summary === null ? {} : { summary: summary.items, fullText: said }),
       }
       if (existing === -1) view.messages.push(message)
       else view.messages[existing] = message

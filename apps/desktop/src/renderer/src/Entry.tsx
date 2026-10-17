@@ -560,6 +560,7 @@ export const Entry = memo(function Entry({
   onExplain,
   onRecap,
   onGo,
+  onForward,
   answersThinking = false,
   final = false,
   held = false,
@@ -614,6 +615,7 @@ export const Entry = memo(function Entry({
    * `askableSource` makes about a selection.
    */
   onGo?: ((message: TranscriptMessage) => void) | undefined
+  onForward?: ((message: TranscriptMessage) => void) | undefined
   /** This reply follows the agent's own thinking, so it is worth marking as the answer. */
   answersThinking?: boolean
   /** The answer the finished turn arrived at, as opposed to the work it did. */
@@ -624,6 +626,14 @@ export const Entry = memo(function Entry({
 }): React.JSX.Element {
   const { t } = useTranslation()
   const [open, setOpen] = useState(false)
+  const forwardable =
+    onForward !== undefined &&
+    message.kind === 'message' &&
+    message.status === 'complete' &&
+    message.actor !== 'user' &&
+    message.actor !== 'system' &&
+    message.eventId !== '' &&
+    (message.fullText ?? message.text).trim() !== ''
   const taskPreview = Array.from(
     (message.noticeCode === 'contextCarried' ? (message.detail ?? '') : '')
       .trim()
@@ -1068,6 +1078,7 @@ export const Entry = memo(function Entry({
         message.status === 'complete' &&
         (onExplain !== undefined ||
           (final && onRecap !== undefined) ||
+          forwardable ||
           (final && onGo !== undefined && offersToAct(message.text))) && (
           <div className="entry-actions">
             {/*
@@ -1132,18 +1143,36 @@ export const Entry = memo(function Entry({
               persisted and would answer that no such reply exists. Without this
               the button's most obvious click would be an error.
             */}
-            {final && onRecap !== undefined && (
-              <button
-                type="button"
-                className="entry-action"
-                data-entry-action="recap"
-                inert={held}
-                onClick={(e) => {
-                  onRecap(message, e.currentTarget.getBoundingClientRect())
-                }}
-              >
-                {t('aside.recap')}
-              </button>
+            {((final && onRecap !== undefined) || forwardable) && (
+              <span className="entry-actions-end">
+                {final && onRecap !== undefined && (
+                  <button
+                    type="button"
+                    className="entry-action"
+                    data-entry-action="recap"
+                    inert={held}
+                    onClick={(e) => {
+                      onRecap(message, e.currentTarget.getBoundingClientRect())
+                    }}
+                  >
+                    {t('aside.recap')}
+                  </button>
+                )}
+                {forwardable && onForward !== undefined && (
+                  <button
+                    type="button"
+                    className="entry-action"
+                    data-entry-action="forward"
+                    title={t('conversation.forwardReplyHint')}
+                    aria-label={t('conversation.forwardReplyHint')}
+                    onClick={() => {
+                      onForward(message)
+                    }}
+                  >
+                    {t('conversation.forwardReply')}
+                  </button>
+                )}
+              </span>
             )}
             {/*
               Its own line, and a shape rather than a word.

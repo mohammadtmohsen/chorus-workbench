@@ -1214,6 +1214,27 @@ describe('summary lift', () => {
     ])
     expect(view.messages[0]?.summary).toBeUndefined()
     expect(view.messages[0]?.text).toBe('Just an answer.')
+    expect(view.messages[0]).not.toHaveProperty('fullText')
+  })
+
+  it('keeps the whole reply for forwarding when a summary is cut off', () => {
+    const said = 'Did the work.\n\n## Summary\n- one\n- two\n'
+    const view = reduceEvents(EMPTY_VIEW, [
+      event('agent.message.completed', { itemRef: 'm1', text: said }),
+    ])
+    expect(view.messages[0]).toMatchObject({
+      text: 'Did the work.',
+      summary: ['one', 'two'],
+      fullText: said,
+    })
+  })
+
+  it('keeps a summary-only reply whole, though nothing is left to display above the card', () => {
+    const said = '## Summary\n- only this\n'
+    const view = reduceEvents(EMPTY_VIEW, [
+      event('agent.message.completed', { itemRef: 'm1', text: said }),
+    ])
+    expect(view.messages[0]).toMatchObject({ text: '', summary: ['only this'], fullText: said })
   })
 
   it('does not lift an example out of a fenced block', () => {
@@ -1223,6 +1244,7 @@ describe('summary lift', () => {
     ])
     expect(view.messages[0]?.summary).toBeUndefined()
     expect(view.messages[0]?.text).toBe(said)
+    expect(view.messages[0]).not.toHaveProperty('fullText')
   })
 })
 

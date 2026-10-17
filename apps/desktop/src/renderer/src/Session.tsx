@@ -1494,6 +1494,15 @@ export function Session(props: {
     onForward({ text: passage.text, sourceEventIds: passage.sourceEventIds })
   }, [onForward, selected])
 
+  const forwardReply = useCallback(
+    (message: TranscriptMessage) => {
+      setSelected(null)
+      window.getSelection()?.removeAllRanges()
+      onForward({ text: message.fullText ?? message.text, sourceEventIds: [message.eventId] })
+    },
+    [onForward]
+  )
+
   const sendSelection = useCallback(() => {
     const passage = selected
     if (passage === null) return
@@ -1840,6 +1849,7 @@ export function Session(props: {
        * the words, and this only supplies the ability to answer.
        */
       onGo={isAgentId(message.actor) ? accept : undefined}
+      onForward={isAgentId(message.actor) ? forwardReply : undefined}
     />
   )
 

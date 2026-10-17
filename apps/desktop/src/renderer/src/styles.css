@@ -5097,10 +5097,15 @@ input::placeholder {
  * recap only reads it, so the acts share the left edge and the reading keeps the
  * right.
  */
-.entry-actions-do {
+.entry-actions-do,
+.entry-actions-end {
   display: flex;
   align-items: center;
   gap: calc(var(--step) * 2);
+}
+
+.entry-actions-end {
+  margin-left: auto;
 }
 
 /*

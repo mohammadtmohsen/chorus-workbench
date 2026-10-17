@@ -143,6 +143,8 @@
     "quoteInMessage": "Quote in message",
     "sendSelection": "Send to chat",
     "forwardSelection": "Forward to new chat",
+    "forwardReply": "Forward",
+    "forwardReplyHint": "Forward this whole reply to a new chat",
     "teamDetail": "Tell every agent how to call the others",
     "endConfirm": "An agent is working — press again to end this session",
     "cancel": "Cancel",

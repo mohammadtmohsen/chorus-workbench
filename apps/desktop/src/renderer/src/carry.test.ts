@@ -163,6 +163,33 @@ describe('what a row actually holds', () => {
     expect(withinBudget(carry)).toBe(false)
   })
 
+  it('counts the whole reply kept for forwarding beside its display body', () => {
+    const half = Math.ceil(CARRY_BUDGET_CHARS / 2) + 1
+    const body = 'a'.repeat(half)
+    const fullText = `${body}\n\n## Summary\n- b\n`
+    expect(body.length).toBeLessThan(CARRY_BUDGET_CHARS)
+    expect(fullText.length).toBeLessThan(CARRY_BUDGET_CHARS)
+    const carry = carryOfMessages([messageOf({ text: body, summary: ['b'], fullText })])
+    expect(withinBudget(carry)).toBe(false)
+    const trimmed = trimCarry(carry)
+    expect(trimmed.view).toBe(EMPTY_VIEW)
+    expect(trimmed.draft).toBe('half a thought')
+    expect(trimmed.scrollTop).toBe(120)
+    expect(trimmed.following).toBe(true)
+  })
+
+  it('keeps a reply whose kept full text is small', () => {
+    const carry = carryOfMessages([
+      messageOf({
+        text: 'Did the work.',
+        summary: ['one'],
+        fullText: 'Did the work.\n\n## Summary\n- one\n',
+      }),
+    ])
+    expect(withinBudget(carry)).toBe(true)
+    expect(trimCarry(carry)).toBe(carry)
+  })
+
   it('still keeps an ordinary transcript, so the fuller weighing is not a hair trigger', () => {
     const carry = carryOfMessages(
       Array.from({ length: 50 }, (_, i) =>

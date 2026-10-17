@@ -136,6 +136,18 @@ describe('SessionHost', () => {
     expect(first).not.toHaveBeenCalled()
   })
 
+  it('forwards a whole reply with its Summary, anchored to that reply alone', () => {
+    const startIn = vi.fn()
+    render(<SessionHost {...base()} startIn={startIn} />)
+    const reply = 'Did the work.\n\nIt holds.\n\n## Summary\n- one\n- two'
+    latest().onForward({ text: reply, sourceEventIds: ['e-reply'] })
+    expect(startIn).toHaveBeenLastCalledWith('p1', {
+      continueFrom: 'c1',
+      objective: reply,
+      sourceEventIds: ['e-reply'],
+    })
+  })
+
   it('cuts a long selection to the 2,000 units the start accepts without splitting a character', () => {
     const startIn = vi.fn()
     render(<SessionHost {...base()} startIn={startIn} />)

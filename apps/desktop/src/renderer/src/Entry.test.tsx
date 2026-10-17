@@ -41,3 +41,79 @@ describe('Forward context notices', () => {
     expect(markup).not.toMatch(/[\uD800-\uDFFF]/u)
   })
 })
+
+describe('Forward at the end of a reply', () => {
+  const reply = (over: Partial<TranscriptMessage> = {}): TranscriptMessage => ({
+    key: 'm1',
+    eventId: 'e-reply',
+    actor: 'claude',
+    kind: 'message',
+    text: 'The parser now retries three times.',
+    status: 'complete',
+    at: 1,
+    ...over,
+  })
+  const forward = (): void => undefined
+  const FORWARD = 'data-entry-action="forward"'
+
+  it('is offered on a finished reply even with no Explain or Recap', () => {
+    const markup = renderToStaticMarkup(<Entry message={reply()} onForward={forward} />)
+    expect(markup).toContain(FORWARD)
+    expect(markup).toContain('conversation.forwardReply<')
+    expect(markup).toContain('title="conversation.forwardReplyHint"')
+    expect(markup).toContain('type="button"')
+    expect(markup).toContain('entry-actions-end')
+  })
+
+  it('is offered on an older reply that is not the final one, and on a summary-only reply', () => {
+    const older = <Entry message={reply()} final={false} onForward={forward} />
+    expect(renderToStaticMarkup(older)).toContain(FORWARD)
+    const summaryOnly = reply({
+      text: '',
+      summary: ['only this'],
+      fullText: '## Summary\n- only this\n',
+    })
+    expect(renderToStaticMarkup(<Entry message={summaryOnly} onForward={forward} />)).toContain(
+      FORWARD
+    )
+  })
+
+  it('is refused on unfinished, empty, user, system and non-message rows, or with no route', () => {
+    const refused: { name: string; message: TranscriptMessage; route?: boolean }[] = [
+      { name: 'streaming', message: reply({ status: 'streaming' }) },
+      { name: 'empty', message: reply({ text: '  ' }) },
+      { name: 'user', message: reply({ actor: 'user' }) },
+      { name: 'system', message: reply({ actor: 'system' }) },
+      { name: 'reasoning', message: reply({ kind: 'reasoning' }) },
+      { name: 'tool', message: reply({ kind: 'tool' }) },
+      { name: 'no event id', message: reply({ eventId: '' }) },
+      { name: 'no route', message: reply(), route: false },
+    ]
+    for (const { name, message, route } of refused) {
+      const markup = renderToStaticMarkup(
+        <Entry message={message} {...(route === false ? {} : { onForward: forward })} />
+      )
+      expect(markup, name).not.toContain(FORWARD)
+    }
+  })
+
+  it('sits at the right end after Recap, with Explain alone on the left', () => {
+    const markup = renderToStaticMarkup(
+      <Entry
+        message={reply()}
+        final
+        onExplain={() => undefined}
+        onRecap={() => undefined}
+        onForward={forward}
+      />
+    )
+    const explain = markup.indexOf('data-entry-action="explain"')
+    const end = markup.indexOf('entry-actions-end')
+    const recap = markup.indexOf('data-entry-action="recap"')
+    const forwardAt = markup.indexOf(FORWARD)
+    expect(explain).toBeGreaterThan(-1)
+    expect(explain).toBeLessThan(end)
+    expect(end).toBeLessThan(recap)
+    expect(recap).toBeLessThan(forwardAt)
+  })
+})
