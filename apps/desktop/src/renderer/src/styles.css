@@ -14470,19 +14470,41 @@ svg.web-tab-icon {
 }
 
 .conversation-note {
+  --sticky-paper: #463b12;
+  --sticky-head: #574916;
+  --sticky-edge: #8c7524;
+  --sticky-edge-strong: #c2a23a;
+  --sticky-ink: #f7eecb;
+  --sticky-ink-soft: #dccd92;
+  --sticky-ink-faint: #a6975c;
+  --sticky-control: rgb(255 255 255 / 8%);
   position: absolute;
   z-index: 4;
   display: flex;
   flex-direction: column;
   min-width: 0;
   min-height: 0;
-  border: 1px solid var(--border-strong);
+  border: 1px solid var(--sticky-edge);
   border-radius: 10px;
-  background: var(--bg-surface);
+  background: var(--sticky-paper);
   box-shadow: 0 8px 28px rgb(0 0 0 / 35%);
-  color: var(--text-primary);
+  color: var(--sticky-ink);
   font: var(--note-font);
   overflow: hidden;
+}
+
+@media (prefers-color-scheme: light) {
+  .conversation-note {
+    --sticky-paper: #fff4b0;
+    --sticky-head: #fde98d;
+    --sticky-edge: #e2c445;
+    --sticky-edge-strong: #b8961c;
+    --sticky-ink: #3b3000;
+    --sticky-ink-soft: #6a5812;
+    --sticky-ink-faint: #998747;
+    --sticky-control: rgb(255 255 255 / 60%);
+    box-shadow: 0 8px 24px rgb(0 0 0 / 18%);
+  }
 }
 
 .conversation-note[hidden] {
@@ -14499,8 +14521,8 @@ svg.web-tab-icon {
   align-items: center;
   gap: calc(var(--step) * 2);
   padding: calc(var(--step) * 2) calc(var(--step) * 2) calc(var(--step) * 2) calc(var(--step) * 4);
-  border-bottom: 1px solid var(--border-default);
-  background: var(--bg-chrome);
+  border-bottom: 1px solid var(--sticky-edge);
+  background: var(--sticky-head);
   cursor: grab;
   touch-action: none;
   user-select: none;
@@ -14512,7 +14534,7 @@ svg.web-tab-icon {
 
 .conversation-note-title {
   flex: none;
-  color: var(--text-secondary);
+  color: var(--sticky-ink-soft);
   font-weight: 600;
 }
 
@@ -14520,7 +14542,7 @@ svg.web-tab-icon {
   flex: 1;
   min-width: 0;
   overflow: hidden;
-  color: var(--text-muted);
+  color: var(--sticky-ink-soft);
   font-size: 12px;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -14543,15 +14565,15 @@ svg.web-tab-icon {
   border: 1px solid transparent;
   border-radius: 6px;
   background: transparent;
-  color: var(--text-muted);
+  color: var(--sticky-ink-soft);
   cursor: pointer;
 }
 
 .conversation-note-hide:hover,
 .conversation-note-hide:focus-visible {
-  border-color: var(--border-default);
-  background: var(--bg-control);
-  color: var(--text-primary);
+  border-color: var(--sticky-edge);
+  background: var(--sticky-control);
+  color: var(--sticky-ink);
   outline: none;
 }
 
@@ -14567,8 +14589,8 @@ svg.web-tab-icon {
 .conversation-note-conflict {
   flex: none;
   padding: calc(var(--step) * 2) calc(var(--step) * 4);
-  border-bottom: 1px solid var(--border-default);
-  color: var(--text-secondary);
+  border-bottom: 1px solid var(--sticky-edge);
+  color: var(--sticky-ink-soft);
   font-size: 12px;
 }
 
@@ -14590,10 +14612,10 @@ svg.web-tab-icon {
 
 .conversation-note-actions button {
   padding: var(--step) calc(var(--step) * 3);
-  border: 1px solid var(--border-default);
+  border: 1px solid var(--sticky-edge);
   border-radius: 6px;
-  background: var(--bg-control);
-  color: var(--text-primary);
+  background: var(--sticky-control);
+  color: var(--sticky-ink);
   font: inherit;
   font-size: 12px;
   cursor: pointer;
@@ -14601,7 +14623,7 @@ svg.web-tab-icon {
 
 .conversation-note-actions button:hover,
 .conversation-note-actions button:focus-visible {
-  border-color: var(--border-strong);
+  border-color: var(--sticky-edge-strong);
   outline: none;
 }
 
@@ -14619,7 +14641,7 @@ svg.web-tab-icon {
   padding: calc(var(--step) * 3) calc(var(--step) * 4);
   border: 0;
   background: transparent;
-  color: var(--text-primary);
+  color: var(--sticky-ink);
   font: inherit;
   line-height: 1.45;
   resize: none;
@@ -14627,7 +14649,7 @@ svg.web-tab-icon {
 }
 
 .conversation-note-body::placeholder {
-  color: var(--text-placeholder);
+  color: var(--sticky-ink-faint);
 }
 
 .conversation-note-grip {
@@ -14641,12 +14663,12 @@ svg.web-tab-icon {
   background: linear-gradient(
     135deg,
     transparent 50%,
-    var(--border-strong) 50%,
-    var(--border-strong) 58%,
+    var(--sticky-edge-strong) 50%,
+    var(--sticky-edge-strong) 58%,
     transparent 58%,
     transparent 70%,
-    var(--border-strong) 70%,
-    var(--border-strong) 78%,
+    var(--sticky-edge-strong) 70%,
+    var(--sticky-edge-strong) 78%,
     transparent 78%
   );
 }
