@@ -56,6 +56,7 @@ export type StripForecast =
       readonly highMs: number
       readonly rough: boolean
       readonly partial: boolean
+      readonly paced: boolean
       readonly frozen: boolean
     }
   | { readonly kind: 'over'; readonly overMs: number; readonly partial: boolean }
@@ -147,6 +148,7 @@ function forecastOf(snapshot: TaskSnapshot): StripForecast {
     highMs: forecast.highMs,
     rough: forecast.confidence === 'rough',
     partial: forecast.partial,
+    paced: forecast.paced,
     frozen: !working,
   }
 }

@@ -214,6 +214,11 @@ export function TaskProgress(props: {
             {forecast.rough && (
               <span className="task-progress-badge">{t('taskProgress.rough')}</span>
             )}
+            {forecast.paced && (
+              <span className="task-progress-badge" title={t('taskProgress.pacedHint')}>
+                {t('taskProgress.paced')}
+              </span>
+            )}
             {forecast.frozen && (
               <span className="task-progress-held">{t('taskProgress.onHold')}</span>
             )}

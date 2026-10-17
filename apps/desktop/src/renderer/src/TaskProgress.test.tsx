@@ -103,3 +103,48 @@ describe('marking the forwarded work on the strip', () => {
     }
   })
 })
+
+describe('a forecast filled from pace', () => {
+  it('says it is based on pace beside the rough marker', () => {
+    const marks: TaskMark[] = [
+      { kind: 'user', at: NOW - 60_000, seq: 1, eventId: 'e1', work: true },
+      { kind: 'turnStarted', at: NOW - 60_000, seq: 2, agentId: 'claude' },
+      {
+        kind: 'opened',
+        at: NOW - 59_000,
+        seq: 3,
+        taskId: 'task-p',
+        originEventId: 'e1',
+        startedAt: NOW - 60_000,
+      },
+      {
+        kind: 'revised',
+        at: NOW - 58_000,
+        seq: 4,
+        taskId: 'task-p',
+        agentId: 'claude',
+        revision: 1,
+        source: 'chorus',
+        steps: [
+          { id: 'a', title: 'Read', status: 'done' },
+          { id: 'b', title: 'Write', status: 'active' },
+        ],
+      },
+    ]
+    const markup = renderToStaticMarkup(
+      <TaskProgress
+        conversationId="c1"
+        task={{ marks, history: [] }}
+        assignment={{ linked: false, boundTaskId: null }}
+        syncing={false}
+        working={['claude']}
+        workingSince={{ claude: NOW - 60_000 }}
+        live={QUIET}
+        onError={() => undefined}
+      />
+    )
+    expect(markup).toContain('taskProgress.paced<')
+    expect(markup).toContain('title="taskProgress.pacedHint"')
+    expect(markup).toContain('taskProgress.rough<')
+  })
+})

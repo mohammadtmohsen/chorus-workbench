@@ -768,7 +768,7 @@ describe('the countdown', () => {
     expect(remaining(snapshot)).toBe(10)
   })
 
-  it('offers steps and no countdown for a provider plan without estimates', () => {
+  it('counts down a provider plan without estimates from the agent’s own pace', () => {
     const snapshot = reduce(
       [
         user(0),
@@ -780,9 +780,64 @@ describe('the countdown', () => {
       ],
       5
     )
-    expect(snapshot.forecast).toBeNull()
+    expect(snapshot.forecast).toMatchObject({ paced: true, partial: false, confidence: 'rough' })
+    expect(remaining(snapshot)).toBe(10)
+    expect(minutes(snapshot.forecast?.lowMs)).toBe(6)
+    expect(minutes(snapshot.forecast?.highMs)).toBe(20)
     expect(snapshot.progress).toEqual({ mainDone: 1, mainTotal: 3, leavesDone: 1, leavesTotal: 3 })
     expect(snapshot.current[0]?.step.id).toBe('2')
+  })
+})
+
+describe('the pace fallback', () => {
+  it('shows no estimate before the agent has finished a step', () => {
+    const snapshot = reduce(
+      [user(0), started(0), opened(0), revised(0, [step('a', 'active'), step('b', 'pending')])],
+      5
+    )
+    expect(snapshot.forecast).toBeNull()
+  })
+
+  it('fills only a mixed plan’s unestimated steps, and keeps calibration to estimates', () => {
+    const snapshot = reduce(
+      [
+        user(0),
+        started(0),
+        opened(0),
+        revised(0, [step('a', 'done'), step('c', 'active'), step('b', 'pending', 10)]),
+      ],
+      6
+    )
+    expect(snapshot.forecast).toMatchObject({ paced: true, partial: false })
+    expect(remaining(snapshot)).toBe(16)
+    expect(minutes(snapshot.forecast?.plannedMs)).toBe(10)
+    expect(minutes(snapshot.forecast?.firstForecastMs)).toBe(10)
+  })
+
+  it('uses each agent’s own pace and adds the agents together', () => {
+    const snapshot = reduce(
+      [
+        user(0),
+        started(0),
+        started(4, 'codex'),
+        opened(0),
+        revised(0, [step('a', 'done'), step('b', 'active')]),
+        revised(0, [step('x', 'done'), step('y', 'active'), step('z', 'pending')], {
+          agentId: 'codex',
+        }),
+      ],
+      10
+    )
+    expect(snapshot.forecast?.paced).toBe(true)
+    expect(remaining(snapshot)).toBe(22)
+  })
+
+  it('is not used when every open step has an agent estimate', () => {
+    const snapshot = reduce(
+      [user(0), started(0), opened(0), revised(0, [step('a', 'done'), step('b', 'active', 10)])],
+      4
+    )
+    expect(snapshot.forecast?.paced).toBe(false)
   })
 })
 

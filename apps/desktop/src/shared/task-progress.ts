@@ -424,6 +424,7 @@ export interface TaskForecast {
   readonly overrunMs: number
   readonly confidence: 'rough' | 'calibrated'
   readonly partial: boolean
+  readonly paced: boolean
   readonly firstForecastMs: number
   readonly plannedMs: number
 }
@@ -1150,6 +1151,17 @@ export function reduceTask(bundle: TaskBundle, now: number): TaskSnapshot | null
   let leavesDone = 0
   let leavesTotal = 0
   let partial = false
+  const paceOf = (lane: Lane): number | null => {
+    const done = lane.plan.leafOrder.filter((leaf) =>
+      finished(lane.plan.byId.get(leaf)?.status)
+    ).length
+    const worked = agentOf(lane.agentId).workingMs
+    return done > 0 && worked > 0 ? worked / done : null
+  }
+  const unestimatedOpen = (lane: Lane): number =>
+    lane.plan.leafOrder.filter(
+      (leaf) => !finished(lane.plan.byId.get(leaf)?.status) && !lane.plan.leafUnit.has(leaf)
+    ).length
   for (const lane of lanes.values()) {
     const { plan } = lane
     const factor = factors.get(lane.agentId)?.factor ?? 1
@@ -1182,7 +1194,7 @@ export function reduceTask(bundle: TaskBundle, now: number): TaskSnapshot | null
     leavesDone += plan.leafOrder.filter((leaf) => finished(plan.byId.get(leaf)?.status)).length
 
     const open = plan.leafOrder.filter((leaf) => !finished(plan.byId.get(leaf)?.status))
-    if (open.some((leaf) => !plan.leafUnit.has(leaf))) partial = true
+    if (open.some((leaf) => !plan.leafUnit.has(leaf)) && paceOf(lane) === null) partial = true
 
     const focus = open.find((leaf) => plan.byId.get(leaf)?.status === 'active') ?? open[0]
     const step = focus === undefined ? undefined : views.get(focus)
@@ -1207,9 +1219,11 @@ export function reduceTask(bundle: TaskBundle, now: number): TaskSnapshot | null
     })
   }
 
-  const estimatedLanes = [...lanes.values()].filter((lane) => lane.plan.units.size > 0)
+  const forecastLanes = [...lanes.values()].filter(
+    (lane) => lane.plan.units.size > 0 || (unestimatedOpen(lane) > 0 && paceOf(lane) !== null)
+  )
   let forecast: TaskForecast | null = null
-  if (estimatedLanes.length > 0) {
+  if (forecastLanes.length > 0) {
     let remainingMs = 0
     let lowMs = 0
     let highMs = 0
@@ -1217,8 +1231,9 @@ export function reduceTask(bundle: TaskBundle, now: number): TaskSnapshot | null
     let firstForecastMs = 0
     let plannedMs = 0
     let rough = false
+    let paced = false
     let openUnits = 0
-    for (const lane of estimatedLanes) {
+    for (const lane of forecastLanes) {
       const calibration = factors.get(lane.agentId) ?? {
         factor: 1,
         low: ROUGH_LOW,
@@ -1227,12 +1242,17 @@ export function reduceTask(bundle: TaskBundle, now: number): TaskSnapshot | null
         confidence: 'rough' as const,
       }
       if (calibration.confidence === 'rough') rough = true
-      const point = laneRemainingMs(lane, calibration.factor)
+      const pace = paceOf(lane)
+      const pacedMs = pace === null ? 0 : unestimatedOpen(lane) * pace
+      if (pacedMs > 0) paced = true
+      const estimated = laneRemainingMs(lane, calibration.factor)
       const planned = lanePlannedMs(lane)
-      const share = planned > 0 ? Math.min(1, point / (planned * calibration.factor)) : 0
-      remainingMs += point
-      lowMs += laneRemainingMs(lane, calibration.low)
-      highMs += laneRemainingMs(lane, calibration.high) * (1 + (calibration.growth - 1) * share)
+      const share = planned > 0 ? Math.min(1, estimated / (planned * calibration.factor)) : 0
+      remainingMs += estimated + pacedMs
+      lowMs += laneRemainingMs(lane, calibration.low) + pacedMs * ROUGH_LOW
+      highMs +=
+        laneRemainingMs(lane, calibration.high) * (1 + (calibration.growth - 1) * share) +
+        pacedMs * ROUGH_HIGH
       firstForecastMs += (lane.firstForecast ?? 0) * MINUTE_MS
       plannedMs += planned
       for (const unit of lane.plan.units.values()) {
@@ -1247,8 +1267,9 @@ export function reduceTask(bundle: TaskBundle, now: number): TaskSnapshot | null
       lowMs: Math.min(lowMs, remainingMs),
       highMs: Math.max(highMs, remainingMs),
       overrunMs: remainingMs === 0 && openUnits > 0 ? overrunMs : 0,
-      confidence: rough ? 'rough' : 'calibrated',
+      confidence: rough || paced ? 'rough' : 'calibrated',
       partial,
+      paced,
       firstForecastMs,
       plannedMs,
     }

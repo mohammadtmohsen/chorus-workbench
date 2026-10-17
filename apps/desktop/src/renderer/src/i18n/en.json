@@ -1178,6 +1178,8 @@
     "range": "({{low}} to {{high}})",
     "rangeHint": "A rough range from the agents' own step estimates, adjusted by similar past tasks once there are enough of them. It is not a promise of when the work will finish.",
     "rough": "Rough",
+    "paced": "Based on pace",
+    "pacedHint": "Steps without an agent estimate are estimated from each agent’s pace so far: its working time divided by the steps it has finished.",
     "onHold": "On hold",
     "over": "Over estimate by {{duration}}",
     "estimateReached": "Estimate reached",

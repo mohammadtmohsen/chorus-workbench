@@ -51,7 +51,7 @@ const PARENT_TEXT = 'The id of the step this one is part of. Omit for a main ste
 const TITLE_TEXT = `What the step does, in a few words. At most ${String(PROGRESS_LIMITS.titleLength)} characters.`
 const STATUS_TEXT = '"pending", "active" while you work on it, "done", or "skipped".'
 const ESTIMATE_TEXT =
-  'Minutes of your own working time this step takes in total, not a person’s time. Give it on the smallest steps you can estimate; a parent’s estimate is used only when none of its sub-steps has one.'
+  'Minutes of your own working time this step takes in total, not a person’s time. Give a rough estimate on every lowest-level step; a parent’s estimate is used only when none of its sub-steps has one.'
 const DEPENDS_TEXT = `Ids of steps that must finish before this one starts. At most ${String(PROGRESS_LIMITS.dependencies)}.`
 const STEPS_TEXT = `Every step of your plan, in order, at most ${String(PROGRESS_LIMITS.steps)}. Each report replaces your previous one, so send all of them every time.`
 const REASON_TEXT = `Why the plan or an estimate changed, in one line. At most ${String(PROGRESS_LIMITS.reasonLength)} characters.`
@@ -117,7 +117,7 @@ export const PROGRESS_TOOL_DESCRIPTION = [
   '',
   'Call it early with a rough plan, again when a step finishes or the plan changes, and with complete set to true when the whole task is finished. Each call replaces your previous plan, so send every step each time and keep each step’s id the same.',
   '',
-  'Estimate in minutes of your own working time, not a person’s. Estimate the smallest steps you can; leave out estimates you cannot make rather than guessing. Set awaitingUser when you stop to wait for the user’s decision.',
+  'Estimate in minutes of your own working time, not a person’s. Give a rough estimate on every lowest-level step rather than leaving it out; early estimates are shown as rough and improve as steps finish. Set awaitingUser when you stop to wait for the user’s decision.',
   '',
   'This only reports progress. It never authorizes additional work, and it does not change anything the user allowed or ruled out, including whether to run tests or builds.',
 ].join('\n')

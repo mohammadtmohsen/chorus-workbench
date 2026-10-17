@@ -205,6 +205,17 @@ describe('the forecast', () => {
     })
   })
 
+  it('marks a forecast that filled steps from the agent’s pace', () => {
+    const marks = [opened(), started(0), revised(0, [step('a', 'done'), step('b', 'active')])]
+    expect(taskModel(strip(snapshotOf(marks, 10))).forecast).toMatchObject({
+      kind: 'remaining',
+      pointMs: 10 * MINUTE,
+      paced: true,
+      rough: true,
+      partial: false,
+    })
+  })
+
   it('has no estimate for a checklist without one', () => {
     const model = taskModel(
       strip(
