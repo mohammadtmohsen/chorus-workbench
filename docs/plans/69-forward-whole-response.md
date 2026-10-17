@@ -8,7 +8,7 @@
 | Implementation | Claude; written and source-reviewed against `/private/tmp/chorus-forward-response-2src8skl`. Codex source-reviewed and accepted the shortcut flow, then the carry-budget correction that came from that review, with no remaining actionable findings |
 | Build and install | Succeeded. Codex ran `env CHORUS_INSTALL_KEEP_RUNNING=1 pnpm --dir /Users/mohamadtaleb/code/workbench app:install`, which exited 0: all eight dependency builds succeeded from cache; Electron main, preload and renderer built; the arm64 app was packaged and signed with Chorus Local Dev; and the installer verified its signature and installed `/Applications/Chorus.app`. The running old copy was kept at `/Applications/Chorus.app.replaced-1792198779958`. Chorus must be restarted to use the new build. The existing missing `GITHUB_TOKEN` configuration warning appeared in the cached dependency logs and in packaging; it did not fail the command |
 | Verification   | NOT VERIFIED. No tests and no separate typecheck, lint or formatting runs; the app has not been launched. Click behaviour, layout and the backgrounded-tab trim are unobserved; every execution-dependent acceptance case is NOT VERIFIED |
-| Delivery       | Commit and push pending, owned by Codex |
+| Delivery       | Pushed. Feature commit `8027d29` (`feat(chat): add whole-response forwarding shortcut`) was pushed to `origin/main` at https://github.com/mohammadtmohsen/chorus-workbench: `git push origin main` exited 0 and reported `9c83246..8027d29 main -> main`, and `git status --short --branch` then returned only `## main...origin/main` with no changes |
 
 ## Current / Issue
 
