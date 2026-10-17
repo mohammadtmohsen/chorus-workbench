@@ -558,7 +558,6 @@ export const Entry = memo(function Entry({
   cwd = '',
   onOpenFile,
   onExplain,
-  onRecap,
   onGo,
   onForward,
   answersThinking = false,
@@ -598,15 +597,6 @@ export const Entry = memo(function Entry({
    * Recap's is, because there is no selection to anchor the card to.
    */
   onExplain?: ((message: TranscriptMessage, from: DOMRect) => void) | undefined
-  /**
-   * Opens a recap card on this reply. Absent when the pane cannot host one.
-   *
-   * The rect is the button's own, because a recap has no selection to anchor to
-   * and `fitCard` still needs somewhere to sit. Read at the click rather than
-   * measured later: by the time a promise resolves the transcript may have
-   * scrolled.
-   */
-  onRecap?: ((message: TranscriptMessage, from: DOMRect) => void) | undefined
   /**
    * Accepts the offer this reply ended on. Absent when the pane cannot send.
    *
@@ -679,7 +669,10 @@ export const Entry = memo(function Entry({
 
   if (message.kind === 'handoff') {
     return (
-      <article className={`entry entry--${message.actor} entry--handoff`}>
+      <article
+        className={`entry entry--${message.actor} entry--handoff`}
+        data-row-key={message.key}
+      >
         <ActorAvatar actor={message.actor} streaming={false} />
         <EntryHead actor={message.actor} at={message.at} />
         <details className="handoff-card">
@@ -704,6 +697,7 @@ export const Entry = memo(function Entry({
     return (
       <article
         className={`entry entry--${message.actor} entry--changes`}
+        data-row-key={message.key}
         data-event-id={message.eventId}
         data-actor={message.actor}
         data-kind={message.kind}
@@ -717,6 +711,7 @@ export const Entry = memo(function Entry({
     return (
       <article
         className={`entry entry--${message.actor} entry--reasoning`}
+        data-row-key={message.key}
         data-grouped={grouped ? 'true' : undefined}
       >
         {/*
@@ -775,6 +770,7 @@ export const Entry = memo(function Entry({
        * missing attribute and a streaming one would otherwise be the same thing
        * to the reader, and only one of them may become askable a second later.
        */
+      data-row-key={message.key}
       data-event-id={message.eventId}
       data-actor={message.actor}
       data-kind={message.kind}
@@ -1077,7 +1073,6 @@ export const Entry = memo(function Entry({
       {message.kind === 'message' &&
         message.status === 'complete' &&
         (onExplain !== undefined ||
-          (final && onRecap !== undefined) ||
           forwardable ||
           (final && onGo !== undefined && offersToAct(message.text))) && (
           <div className="entry-actions">
@@ -1135,43 +1130,23 @@ export const Entry = memo(function Entry({
                 answered.
               */}
             </span>
-            {/*
-              Only on the last reply, and `final` is already false mid-turn
-              (`Session.tsx`'s `finalKey` is null while the view is busy). That
-              is load-bearing rather than tidy: `openAside` refuses to fork on a
-              reply still arriving, because a fork inherits the session as
-              persisted and would answer that no such reply exists. Without this
-              the button's most obvious click would be an error.
-            */}
-            {((final && onRecap !== undefined) || forwardable) && (
+            {forwardable && onForward !== undefined && (
               <span className="entry-actions-end">
-                {final && onRecap !== undefined && (
-                  <button
-                    type="button"
-                    className="entry-action"
-                    data-entry-action="recap"
-                    inert={held}
-                    onClick={(e) => {
-                      onRecap(message, e.currentTarget.getBoundingClientRect())
-                    }}
-                  >
-                    {t('aside.recap')}
-                  </button>
-                )}
-                {forwardable && onForward !== undefined && (
-                  <button
-                    type="button"
-                    className="entry-action"
-                    data-entry-action="forward"
-                    title={t('conversation.forwardReplyHint')}
-                    aria-label={t('conversation.forwardReplyHint')}
-                    onClick={() => {
-                      onForward(message)
-                    }}
-                  >
-                    {t('conversation.forwardReply')}
-                  </button>
-                )}
+                <button
+                  type="button"
+                  className="entry-action entry-action--forward"
+                  data-entry-action="forward"
+                  title={t('conversation.forwardReplyHint')}
+                  aria-label={t('conversation.forwardReplyHint')}
+                  onClick={() => {
+                    onForward(message)
+                  }}
+                >
+                  {t('conversation.forwardReply')}
+                  <svg viewBox="0 0 24 24" aria-hidden="true">
+                    <path d="M13 4H5v15h15v-8M15 4h5v5M20 4l-8 8" />
+                  </svg>
+                </button>
               </span>
             )}
             {/*

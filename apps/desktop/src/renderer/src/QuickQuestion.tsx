@@ -8,7 +8,6 @@ import {
   fitCard,
   opensWithATurn,
   promotion,
-  recapPromotion,
   type AsidePurpose,
   type AsideState,
 } from './aside.js'
@@ -485,9 +484,6 @@ export function QuickQuestion(props: {
       className={[
         'quick-question',
         ...(started ? ['quick-question--answering'] : []),
-        // A board wraps badly at an explanation's width; see the rule in
-        // `styles.css`. The `ResizeObserver` re-fits on the width change.
-        ...(props.purpose === 'recap' ? ['quick-question--recap'] : []),
       ].join(' ')}
       tabIndex={-1}
       /*
@@ -524,7 +520,7 @@ export function QuickQuestion(props: {
         Translation and a typed question still show it, because for those the
         excerpt really is a passage somebody chose.
       */}
-      {props.purpose !== 'recap' && props.purpose !== 'explanation' && (
+      {props.purpose !== 'explanation' && (
         <blockquote className="quick-excerpt">{props.excerpt}</blockquote>
       )}
 
@@ -724,7 +720,7 @@ export function QuickQuestion(props: {
           under. In both cases the button beside this one already carries the
           only new thing there is.
         */}
-        {props.purpose !== 'recap' && props.purpose !== 'explanation' && (
+        {props.purpose !== 'explanation' && (
           <button
             type="button"
             className="btn"
@@ -751,7 +747,7 @@ export function QuickQuestion(props: {
             props.onClose()
           }}
         >
-          {t(props.purpose === 'recap' ? 'aside.useRecap' : 'aside.takeForward')}
+          {t('aside.takeForward')}
         </button>
       </div>
 
@@ -806,8 +802,6 @@ export function QuickQuestion(props: {
  */
 function staged(purpose: AsidePurpose, agent: string, excerpt: string, answer: string): string {
   switch (purpose) {
-    case 'recap':
-      return recapPromotion(agent, answer)
     case 'explanation':
       return explanationPromotion(agent, answer)
     case 'question':

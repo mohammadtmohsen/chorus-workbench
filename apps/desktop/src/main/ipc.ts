@@ -1146,7 +1146,7 @@ export function buildHandlers(
       sourceEventId: string
       excerpt: string
       question?: string
-      purpose?: 'question' | 'explanation' | 'translation' | 'recap'
+      purpose?: 'question' | 'explanation' | 'translation'
     }) => runtime.openAside(request),
 
     'aside:ask': async (request: { asideId: string; question: string }) => {

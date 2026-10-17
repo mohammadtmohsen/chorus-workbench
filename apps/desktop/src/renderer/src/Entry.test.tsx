@@ -56,7 +56,7 @@ describe('Forward at the end of a reply', () => {
   const forward = (): void => undefined
   const FORWARD = 'data-entry-action="forward"'
 
-  it('is offered on a finished reply even with no Explain or Recap', () => {
+  it('is offered on a finished reply even with no Explain', () => {
     const markup = renderToStaticMarkup(<Entry message={reply()} onForward={forward} />)
     expect(markup).toContain(FORWARD)
     expect(markup).toContain('conversation.forwardReply<')
@@ -97,23 +97,15 @@ describe('Forward at the end of a reply', () => {
     }
   })
 
-  it('sits at the right end after Recap, with Explain alone on the left', () => {
+  it('sits at the right end, with Explain alone on the left', () => {
     const markup = renderToStaticMarkup(
-      <Entry
-        message={reply()}
-        final
-        onExplain={() => undefined}
-        onRecap={() => undefined}
-        onForward={forward}
-      />
+      <Entry message={reply()} final onExplain={() => undefined} onForward={forward} />
     )
     const explain = markup.indexOf('data-entry-action="explain"')
     const end = markup.indexOf('entry-actions-end')
-    const recap = markup.indexOf('data-entry-action="recap"')
     const forwardAt = markup.indexOf(FORWARD)
     expect(explain).toBeGreaterThan(-1)
     expect(explain).toBeLessThan(end)
-    expect(end).toBeLessThan(recap)
-    expect(recap).toBeLessThan(forwardAt)
+    expect(end).toBeLessThan(forwardAt)
   })
 })

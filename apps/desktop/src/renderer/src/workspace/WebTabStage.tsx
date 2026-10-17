@@ -103,11 +103,13 @@ export function WebTabStage(props: { readonly webTabId: string }): React.JSX.Ele
     const region = body.current
     if (browserId === null || region === null) return
     const bounds = region.getBoundingClientRect()
+    const left = Math.round(bounds.left)
+    const top = Math.round(bounds.top)
     const rect = {
-      x: coordinate(bounds.left),
-      y: coordinate(bounds.top),
-      width: Math.min(BROWSER_RECT_MAX, Math.max(0, bounds.width)),
-      height: Math.min(BROWSER_RECT_MAX, Math.max(0, bounds.height)),
+      x: coordinate(left),
+      y: coordinate(top),
+      width: Math.min(BROWSER_RECT_MAX, Math.max(0, Math.round(bounds.right) - left)),
+      height: Math.min(BROWSER_RECT_MAX, Math.max(0, Math.round(bounds.bottom) - top)),
     }
     if (sameRect(lastSent.current, rect)) return
     lastSent.current = rect

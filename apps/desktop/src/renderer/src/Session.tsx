@@ -15,6 +15,7 @@ import { focusedNow, fullyVisible, mayTakeCaret } from './focus.js'
 import { profileHas, profileMark, profileMarkAfterPaint } from './profile-marks.js'
 import { thinkingWord, offsetForActor, THINKING_WORD_MS, AWAITING_MAX_MS } from './thinking-word.js'
 import { QuickQuestion } from './QuickQuestion.js'
+import { readerAnchorOf, restoreReaderAnchor, type ReaderAnchor } from './reader-anchor.js'
 import { TaskProgress } from './TaskProgress.js'
 import type { LiveSource } from './task-strip.js'
 import {
@@ -151,6 +152,7 @@ export interface SessionInfo {
 const PAGE_EVENTS = 400
 
 const FLOOR_HOLD_MS = 1_000
+const NAVIGATION_EVENTS = ['wheel', 'keydown', 'pointerdown', 'touchstart'] as const
 const FLOOR_EASE_MS = 240
 
 /** Renderer state that survives closing or backgrounding a tab. */
@@ -161,29 +163,28 @@ export interface SessionCarry {
   readonly mode?: 'work' | 'discussion'
   readonly following: boolean
   /**
+   * Where the reader was, in pixels — the fallback when there is no `anchor`.
+   *
+   * History rows that are off screen are skipped and stand in at an estimated
+   * height, so a pixel offset is only exact for content that has not moved
+   * between those estimates. A carry with no anchor still restores by it.
+   */
+  readonly scrollTop: number
+  /**
    * Where the reader was, as a row and an offset into it — not a pixel offset.
    *
    * This was `scrollTop: number`, and the restore effect spent up to two seconds
    * polling for the content to grow tall enough to hold it. That was an
-   * approximation of an anchor, written because there was no anchor. With the
-   * transcript windowed it stops even approximating: rows above the viewport are
-   * estimates until something measures them, so a pixel offset names a position
-   * in a coordinate system that moves.
+   * approximation of an anchor, written because there was no anchor. With
+   * history rows skipped until they are near the viewport it stops even
+   * approximating: rows above the viewport are estimates until something
+   * renders them, so a pixel offset names a position in a coordinate system that
+   * moves.
    *
-   * `null` when there is nothing to restore — a transcript at the top, or a
-   * carry written by a build that stored a number. An old numeric carry is
-   * treated as "no anchor" rather than misread as one.
+   * `null` while following, or when nothing has been captured; `scrollTop` is
+   * then what restores.
    */
-  /**
-   * Where the reader was, in pixels.
-   *
-   * A row anchor was tried and is deferred with the virtualisation it belonged
-   * to: an anchor only means anything alongside the measured heights that
-   * convert it, and carrying those across a remount stopped a pane mounting at
-   * all. With the transcript fully mounted a pixel offset is exact again,
-   * because the content it describes is the content that will be there.
-   */
-  readonly scrollTop: number
+  readonly anchor?: ReaderAnchor | null
   /**
    * An aside card that was open when the pane went away.
    *
@@ -558,15 +559,51 @@ export function Session(props: {
   const pointerHeld = useRef(false)
   const pointerRelease = useRef(0)
 
-  const stopFollowing = useCallback((): void => {
-    following.current = false
+  const markFollowing = useCallback((value: boolean): void => {
+    following.current = value
+    score.current?.setAttribute('data-following', value ? 'true' : 'false')
   }, [])
+
+  useLayoutEffect(() => {
+    score.current?.setAttribute('data-following', following.current ? 'true' : 'false')
+  }, [])
+
+  const readerAnchor = useRef<{ anchor: ReaderAnchor; scrollTop: number } | null>(null)
+  const restoreFrom = useRef({
+    anchor: props.carry?.anchor ?? null,
+    scrollTop: props.carry?.scrollTop ?? 0,
+  })
+  const restorePending = useRef(false)
+  const anchorFrame = useRef(0)
+  const captureAnchor = useCallback((): void => {
+    if (anchorFrame.current !== 0) return
+    anchorFrame.current = requestAnimationFrame(() => {
+      anchorFrame.current = 0
+      const el = score.current
+      const content = transcript.current
+      if (el === null || content === null || following.current || restorePending.current) return
+      const anchor = readerAnchorOf(el, content)
+      if (anchor !== null) readerAnchor.current = { anchor, scrollTop: el.scrollTop }
+    })
+  }, [])
+
+  useEffect(
+    () => () => {
+      cancelAnimationFrame(anchorFrame.current)
+      anchorFrame.current = 0
+    },
+    []
+  )
+
+  const stopFollowing = useCallback((): void => {
+    markFollowing(false)
+  }, [markFollowing])
 
   const resumeFollowing = useCallback((): void => {
     if (following.current) return
-    following.current = true
+    markFollowing(true)
     settleFloor.current(false)
-  }, [])
+  }, [markFollowing])
 
   useEffect(() => {
     const release = (event: Event): void => {
@@ -713,7 +750,10 @@ export function Session(props: {
       const change = height - seen
       seen = height
       lastHeight.current = height
-      if (!following.current) return
+      if (!following.current) {
+        captureAnchor()
+        return
+      }
       if (change < 0) holdSlack(-change > el.clientHeight ? 0 : slack - change)
       else if (change > 0 && slack > 0) holdSlack(slack - change)
       el.scrollTop = el.scrollHeight
@@ -860,7 +900,7 @@ export function Session(props: {
       lastFirstSeq.current > 0 && view.firstSeq < lastFirstSeq.current && !following.current
     lastHeight.current = content.offsetHeight
     lastFirstSeq.current = view.firstSeq
-    if (prepended && grew > 0) el.scrollTop += grew
+    if (prepended && grew > 0 && el.getAttribute('data-following') !== 'false') el.scrollTop += grew
   }, [view.firstSeq])
 
   const turnKey = currentTurn?.key ?? null
@@ -881,6 +921,17 @@ export function Session(props: {
     if (!following.current) return
     el.scrollTop = el.scrollHeight
     pinnedTop.current = el.scrollTop
+  }, [turnKey])
+
+  useLayoutEffect(() => {
+    const el = score.current
+    const content = transcript.current
+    const held = readerAnchor.current
+    if (el === null || content === null || held === null) return
+    if (following.current || restorePending.current) return
+    if (restoreReaderAnchor(el, content, held.anchor)) {
+      readerAnchor.current = { anchor: held.anchor, scrollTop: el.scrollTop }
+    }
   }, [turnKey])
 
   /**
@@ -1063,75 +1114,6 @@ export function Session(props: {
       window.getSelection()?.removeAllRanges()
     },
     [selected, conversationId]
-  )
-
-  /**
-   * Opens a recap card on a finished reply. `openCard`'s sibling, not a fourth
-   * branch of it.
-   *
-   * `openCard` starts from `selected`, and a recap has no selection: it is asked
-   * from a button under the last reply, about the conversation rather than about
-   * a passage. Everything after the anchor is the same, which is why the two sit
-   * next to each other rather than one calling the other — the shared part is
-   * four lines and the different part is the first four.
-   *
-   * **The excerpt is the whole reply, and it never reaches the prompt.** Main
-   * still checks it (`containsPassage`), because that guard authenticates which
-   * agent said this and in which session — a recap needs both, since the fork it
-   * takes is of that agent's session. What a recap has no use for is the
-   * quoting, and `recapPrompt` does not do any.
-   *
-   * The anchor comes from the button's own rect, converted from viewport space
-   * to pane space the way `inPane` converts content space — by subtracting the
-   * pane's origin. `fitCard` prefers above and drops below, so a button near the
-   * foot of a long transcript gets its card over the transcript rather than over
-   * the composer.
-   */
-  const openRecap = useCallback(
-    (message: TranscriptMessage, from: DOMRect) => {
-      if (!isAgentId(message.actor)) return
-      if (message.eventId === '' || message.text === '') return
-
-      const paneEl = pane.current
-      if (paneEl === null) return
-      const paneRect = paneEl.getBoundingClientRect()
-
-      const opened = window.chorus.openAside({
-        conversationId,
-        sourceEventId: message.eventId,
-        excerpt: message.text,
-        purpose: 'recap',
-      })
-
-      setAskingAbout({
-        text: message.text,
-        anchor: {
-          space: 'pane',
-          centreX: from.left + from.width / 2 - paneRect.left,
-          top: from.top - paneRect.top,
-          height: from.height,
-        },
-        source: {
-          eventId: message.eventId,
-          actor: message.actor,
-          kind: message.kind,
-          status: message.status,
-        },
-        purpose: 'recap',
-        opening: opened.then((result) => result.asideId),
-        // Nothing to resolve — a recap names no language. Kept a promise because
-        // the card's prop is one, and a second shape for one purpose would be a
-        // branch in every consumer to save an await that never blocks.
-        language: opened.then(() => ''),
-      })
-
-      // The card replaces the quote offer, as `openCard` does. Clicking the
-      // button clears the DOM selection but not this, and the offer would
-      // otherwise float over the card it was replaced by.
-      setSelected(null)
-      window.getSelection()?.removeAllRanges()
-    },
-    [conversationId]
   )
 
   const onActivate = props.onActivate
@@ -1356,12 +1338,12 @@ export function Session(props: {
   const accept = useCallback(
     (message: TranscriptMessage) => {
       if (!isAgentId(message.actor)) return
-      following.current = true
+      markFollowing(true)
       window.chorus
         .sendMessage({ conversationId, text: `@${message.actor} Go ahead.`, intent: 'go' })
         .catch(fail(setError))
     },
-    [conversationId]
+    [conversationId, markFollowing]
   )
 
   /**
@@ -1508,7 +1490,7 @@ export function Session(props: {
     if (passage === null) return
     setSelected(null)
     window.getSelection()?.removeAllRanges()
-    following.current = true
+    markFollowing(true)
     setAwaiting(true)
     window.chorus.sendMessage({ conversationId, text: passage.text }).catch((error: unknown) => {
       setAwaiting(false)
@@ -1557,10 +1539,30 @@ export function Session(props: {
 
   useLayoutEffect(
     () => () => {
+      const el = score.current
+      const content = transcript.current
+      const top = el?.scrollTop ?? latest.current.scrollTop
+      const pending = restorePending.current
+      let held = readerAnchor.current
+      if (
+        !pending &&
+        !following.current &&
+        el !== null &&
+        content !== null &&
+        held?.scrollTop !== top
+      ) {
+        const anchor = readerAnchorOf(el, content)
+        held = anchor === null ? null : { anchor, scrollTop: top }
+      }
       props.onCarry(conversationId, {
         ...latest.current,
         following: following.current,
-        scrollTop: score.current?.scrollTop ?? latest.current.scrollTop,
+        scrollTop: pending ? restoreFrom.current.scrollTop : top,
+        anchor: following.current
+          ? null
+          : pending
+            ? restoreFrom.current.anchor
+            : (held?.anchor ?? null),
         ...box.current,
         ...(openCardRef.current === null ? {} : { card: openCardRef.current }),
       })
@@ -1626,7 +1628,8 @@ export function Session(props: {
     if (following.current) return undefined
 
     const wanted = props.carry?.scrollTop
-    if (wanted === undefined || wanted === 0) return undefined
+    const anchor = props.carry?.anchor ?? null
+    if (anchor === null && (wanted === undefined || wanted === 0)) return undefined
 
     /*
      * Waits for the range, and writes exactly once.
@@ -1650,23 +1653,57 @@ export function Session(props: {
      */
     let frame = 0
     const until = Date.now() + 2_000
+    restorePending.current = true
     const restore = (): void => {
-      if (el.scrollHeight - el.clientHeight >= wanted) {
+      frame = 0
+      const content = transcript.current
+      if (
+        anchor !== null &&
+        content !== null &&
+        el.clientHeight > 0 &&
+        restoreReaderAnchor(el, content, anchor)
+      ) {
+        restorePending.current = false
+        readerAnchor.current = { anchor, scrollTop: el.scrollTop }
+        stopFollowing()
+        return
+      }
+      const reachable = el.scrollHeight - el.clientHeight
+      if (anchor === null && wanted !== undefined && reachable >= wanted) {
         el.scrollTop = wanted
         /*
          * Stated rather than inferred. `onScroll` decides following from where
          * the view ends up, and this write is a restoration rather than the
          * reader arriving anywhere.
          */
+        restorePending.current = false
         stopFollowing()
+        captureAnchor()
         return
       }
-      if (Date.now() < until) frame = requestAnimationFrame(restore)
+      if (Date.now() < until) {
+        frame = requestAnimationFrame(restore)
+        return
+      }
+      restorePending.current = false
+      if (wanted !== undefined && wanted > 0 && reachable >= wanted) {
+        el.scrollTop = wanted
+        stopFollowing()
+        captureAnchor()
+      }
     }
+    const navigated = (): void => {
+      cancelAnimationFrame(frame)
+      frame = 0
+      restorePending.current = false
+      for (const type of NAVIGATION_EVENTS) el.removeEventListener(type, navigated)
+    }
+    for (const type of NAVIGATION_EVENTS) el.addEventListener(type, navigated, { passive: true })
     restore()
 
     return () => {
       cancelAnimationFrame(frame)
+      for (const type of NAVIGATION_EVENTS) el.removeEventListener(type, navigated)
     }
   }, [])
 
@@ -1839,12 +1876,6 @@ export function Session(props: {
          own business, and `Entry` is the only thing that knows. */
       onOpenFile={openFile}
       /*
-       * `Entry` gates this on `final`, which is already null mid-turn. Passed
-       * unconditionally for every agent message rather than filtered here, so
-       * the one rule about which reply may be recapped lives in one place.
-       */
-      onRecap={isAgentId(message.actor) ? openRecap : undefined}
-      /*
        * Whether the reply *offered* anything is `Entry`'s to decide — it reads
        * the words, and this only supplies the ability to answer.
        */
@@ -1863,6 +1894,7 @@ export function Session(props: {
       <details
         key={item.key}
         className={`activity entry--${item.actor}`}
+        data-row-key={item.key}
         open={open}
         onToggle={(event) => {
           setActivityOpen(groupKeys, event.currentTarget.open)
@@ -2263,6 +2295,7 @@ export function Session(props: {
             if (pointerHeld.current && !pinned && top < lastTop.current && gap > 1) stopFollowing()
             else if (top > lastTop.current && gap <= 1) resumeFollowing()
             lastTop.current = top
+            if (!following.current) captureAnchor()
           }}
         >
           <div className="score-content" ref={transcript}>
@@ -2581,7 +2614,7 @@ export function Session(props: {
           onError={fail(setError)}
           onSending={() => {
             // You just spoke; you want to see the answer.
-            following.current = true
+            markFollowing(true)
             setAwaiting(true)
           }}
           onSendFailed={() => {

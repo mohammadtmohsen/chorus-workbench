@@ -661,7 +661,7 @@ if (dataDir !== null) {
  * `preventDefault` because the default is to do nothing visible: without it the
  * URL is dropped and the failure looks identical to having no handler at all.
  */
-app.setAsDefaultProtocolClient('chorus')
+if (process.env['CHORUS_PROFILE_READONLY'] !== '1') app.setAsDefaultProtocolClient('chorus')
 
 app.on('open-url', (event, url) => {
   event.preventDefault()
